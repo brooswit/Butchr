@@ -1,0 +1,387 @@
+// butchr webapp — vanilla JS single-page app. Hash-routed, SSE live updates.
+"use strict";
+
+const app = document.getElementById("app");
+
+// ---------- tiny helpers ----------
+const h = (html) => html; // marker for template strings
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "html") node.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function")
+      node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) {
+    if (c == null) continue;
+    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return node;
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
+  );
+}
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function chip(status) {
+  return `<span class="chip ${esc(status)}">${esc(status)}</span>`;
+}
+
+async function api(method, path, body) {
+  const res = await fetch("/api" + path, {
+    method,
+    headers: body ? { "content-type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  return data;
+}
+
+let toastTimer = null;
+function toast(msg, isErr) {
+  const old = document.querySelector(".toast");
+  if (old) old.remove();
+  const t = el("div", { class: "toast" + (isErr ? " err" : "") }, msg);
+  document.body.appendChild(t);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
+}
+
+// ---------- router ----------
+function parseHash() {
+  const hash = location.hash.replace(/^#/, "") || "/";
+  const parts = hash.split("/").filter(Boolean);
+  if (parts.length === 0) return { name: "dashboard" };
+  if (parts[0] === "dir") return { name: "directory", id: parts[1] };
+  if (parts[0] === "task") return { name: "task", id: parts[1] };
+  return { name: "dashboard" };
+}
+
+let current = null;
+async function render() {
+  const route = parseHash();
+  current = route;
+  try {
+    if (route.name === "dashboard") await renderDashboard();
+    else if (route.name === "directory") await renderDirectory(route.id);
+    else if (route.name === "task") await renderTask(route.id);
+  } catch (e) {
+    app.innerHTML = "";
+    app.appendChild(el("div", { class: "empty" }, "error: " + e.message));
+  }
+}
+
+function mount(node) {
+  app.innerHTML = "";
+  app.appendChild(node);
+}
+
+// ---------- dashboard ----------
+async function renderDashboard() {
+  const dirs = await api("GET", "/directories");
+  const wrap = el("div");
+  wrap.appendChild(el("h1", {}, "Directories"));
+  wrap.appendChild(el("div", { class: "crumbs" }, "registered workspaces · " + dirs.length));
+
+  // add-directory form
+  const form = el("div", { class: "panel" });
+  form.innerHTML = `
+    <h2 style="margin-top:0">Register a directory</h2>
+    <div class="row" style="align-items:flex-end; gap:10px">
+      <label class="field" style="flex:2; margin:0">
+        <span class="lbl">absolute path to a git repository</span>
+        <input type="text" id="dpath" placeholder="/home/you/code/project" />
+      </label>
+      <label class="field" style="flex:1; margin:0">
+        <span class="lbl">label (optional)</span>
+        <input type="text" id="dlabel" placeholder="defaults to dir name" />
+      </label>
+      <button class="btn" id="add-dir">Register</button>
+    </div>`;
+  wrap.appendChild(form);
+
+  if (dirs.length === 0) {
+    wrap.appendChild(el("div", { class: "empty" }, "No directories yet. Register a git repo above to begin."));
+  } else {
+    const grid = el("div", { class: "grid dirs" });
+    for (const d of dirs) grid.appendChild(dirCard(d));
+    wrap.appendChild(grid);
+  }
+  mount(wrap);
+
+  document.getElementById("add-dir").addEventListener("click", async () => {
+    const path = document.getElementById("dpath").value.trim();
+    const label = document.getElementById("dlabel").value.trim();
+    if (!path) return toast("path is required", true);
+    try {
+      await api("POST", "/directories", { path, label: label || undefined });
+      toast("directory registered");
+      render();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+function dirCard(d) {
+  const c = d.counts || {};
+  const pills = ["queued", "running", "review", "merged", "rejected"]
+    .map((s) => {
+      const cls = s === "running" && c[s] ? "count-pill has-running"
+        : s === "review" && c[s] ? "count-pill has-review" : "count-pill";
+      return `<span class="${cls}">${s} <b>${c[s] || 0}</b></span>`;
+    }).join("");
+  const card = el("div", { class: "card" });
+  card.innerHTML = `
+    <div class="title">${esc(d.label || d.path)}</div>
+    <div class="path">${esc(d.path)}</div>
+    <div class="counts">${pills}</div>`;
+  card.style.cursor = "pointer";
+  card.addEventListener("click", () => (location.hash = "#/dir/" + d.id));
+  return card;
+}
+
+// ---------- directory view ----------
+async function renderDirectory(id) {
+  const [dirs, tasks] = await Promise.all([
+    api("GET", "/directories"),
+    api("GET", "/directories/" + id + "/tasks"),
+  ]);
+  const dir = dirs.find((x) => x.id === id);
+  if (!dir) return mount(el("div", { class: "empty" }, "directory not found"));
+
+  const wrap = el("div");
+  wrap.appendChild(el("div", { class: "crumbs", html: `<a href="#/">Directories</a> / ${esc(dir.label || dir.path)}` }));
+  wrap.appendChild(el("h1", {}, dir.label || dir.path));
+  wrap.appendChild(el("div", { class: "path", html: esc(dir.path) }));
+
+  // create-task form
+  const form = el("div", { class: "panel", style: "margin-top:18px" });
+  form.innerHTML = `
+    <h2 style="margin-top:0">New task</h2>
+    <label class="field">
+      <span class="lbl">prompt</span>
+      <textarea id="tprompt" placeholder="Describe the work for the agent…"></textarea>
+    </label>
+    <label class="field">
+      <span class="lbl">context files (optional, comma or newline separated, relative paths)</span>
+      <input type="text" id="tctx" placeholder="src/api/routes.ts, src/types.ts" />
+    </label>
+    <div class="row between">
+      <small class="muted">Tasks run serially in this directory. ${queueLine(tasks)}</small>
+      <button class="btn" id="add-task">Create task</button>
+    </div>`;
+  wrap.appendChild(form);
+
+  // tasks table
+  wrap.appendChild(el("h2", {}, "Tasks"));
+  if (tasks.length === 0) {
+    wrap.appendChild(el("div", { class: "empty" }, "No tasks yet."));
+  } else {
+    wrap.appendChild(tasksTable(tasks));
+  }
+
+  // danger zone
+  const dz = el("div", { class: "row", style: "margin-top:32px" });
+  const del = el("button", { class: "btn ghost" }, "Unregister directory");
+  del.addEventListener("click", async () => {
+    if (!confirm("Unregister this directory? Non-merged worktrees will be removed.")) return;
+    try {
+      await api("DELETE", "/directories/" + id);
+      toast("directory unregistered");
+      location.hash = "#/";
+    } catch (e) { toast(e.message, true); }
+  });
+  dz.appendChild(del);
+  wrap.appendChild(dz);
+
+  mount(wrap);
+
+  document.getElementById("add-task").addEventListener("click", async () => {
+    const prompt = document.getElementById("tprompt").value.trim();
+    const ctxRaw = document.getElementById("tctx").value.trim();
+    const context = ctxRaw ? ctxRaw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean) : [];
+    if (!prompt) return toast("prompt is required", true);
+    try {
+      await api("POST", "/directories/" + id + "/tasks", { prompt, context });
+      toast("task created");
+      render();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+function queueLine(tasks) {
+  const q = tasks.filter((t) => t.status === "queued").length;
+  const r = tasks.filter((t) => t.status === "running").length;
+  if (r) return `1 running, ${q} queued.`;
+  if (q) return `${q} queued.`;
+  return "Idle.";
+}
+
+function tasksTable(tasks) {
+  const table = el("table", { class: "tasks" });
+  table.innerHTML = `<thead><tr>
+    <th>id</th><th>status</th><th>prompt</th><th>created</th><th></th>
+  </tr></thead>`;
+  const tb = el("tbody");
+  for (const t of tasks) {
+    const tr = el("tr");
+    tr.innerHTML = `
+      <td class="id">${esc(t.id)}</td>
+      <td>${chip(t.status)}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
+      <td class="prompt-cell">${esc(t.prompt || t.review_note || "")}</td>
+      <td class="when">${esc(fmtTime(t.created_at))}</td>
+      <td><a href="#/task/${esc(t.id)}">${t.status === "review" ? "review →" : "open →"}</a></td>`;
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  return table;
+}
+
+// ---------- task detail / review ----------
+async function renderTask(id) {
+  const t = await api("GET", "/tasks/" + id);
+  const dirs = await api("GET", "/directories");
+  const dir = dirs.find((x) => x.id === t.directory_id);
+
+  const wrap = el("div");
+  wrap.appendChild(el("div", {
+    class: "crumbs",
+    html: `<a href="#/">Directories</a> / <a href="#/dir/${esc(t.directory_id)}">${esc(dir ? (dir.label || dir.path) : t.directory_id)}</a> / ${esc(t.id)}`,
+  }));
+  wrap.appendChild(el("div", { class: "row between" }, [
+    el("h1", { html: `<span style="font-family:var(--mono)">${esc(t.id)}</span>` }),
+    el("div", { html: chip(t.status) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }),
+  ]));
+
+  // metadata
+  const meta = el("div", { class: "panel" });
+  meta.innerHTML = `<div class="meta-grid">
+    <div class="k">status</div><div class="v">${esc(t.status)}</div>
+    <div class="k">created</div><div class="v">${esc(t.created_at || "—")}</div>
+    <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
+    <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
+    <div class="k">merged</div><div class="v">${esc(t.merged_at || "—")}</div>
+    <div class="k">context</div><div class="v">${esc((t.context || []).join(", ") || "—")}</div>
+  </div>`;
+  wrap.appendChild(meta);
+
+  // prompt
+  wrap.appendChild(el("h2", {}, "Prompt"));
+  wrap.appendChild(el("pre", { class: "block", html: esc(t.prompt || "—") }));
+
+  // review notes
+  if (t.review_notes) {
+    wrap.appendChild(el("h2", {}, "Review notes"));
+    wrap.appendChild(el("pre", { class: "block", html: esc(t.review_notes) }));
+  }
+
+  // output snapshot
+  if (t.output_snapshot) {
+    wrap.appendChild(el("h2", {}, "Agent output (snapshot)"));
+    wrap.appendChild(el("pre", { class: "block", html: esc(t.output_snapshot) }));
+  }
+
+  // diff + review controls (when in review)
+  if (t.status === "review") {
+    wrap.appendChild(el("h2", {}, "Diff vs main"));
+    const diffBox = el("pre", { class: "block diff" }, "loading diff…");
+    wrap.appendChild(diffBox);
+    api("GET", "/tasks/" + id + "/diff")
+      .then((d) => { diffBox.innerHTML = renderDiff(d.diff); })
+      .catch((e) => { diffBox.textContent = "diff error: " + e.message; });
+
+    const controls = el("div", { class: "panel", style: "margin-top:18px" });
+    controls.innerHTML = `
+      <h2 style="margin-top:0">Review</h2>
+      <label class="field">
+        <span class="lbl">rejection note (required to reject)</span>
+        <textarea id="rnote" placeholder="What needs to change? Appended to task.md; task re-runs."></textarea>
+      </label>
+      <div class="row">
+        <button class="btn success" id="approve">Approve &amp; merge</button>
+        <button class="btn danger" id="reject">Reject</button>
+        <div class="spacer"></div>
+      </div>`;
+    wrap.appendChild(controls);
+  }
+
+  mount(wrap);
+
+  if (t.status === "review") {
+    document.getElementById("approve").addEventListener("click", async (ev) => {
+      ev.target.disabled = true;
+      try {
+        await api("POST", "/tasks/" + id + "/approve");
+        toast("merged ✓");
+        render();
+      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    });
+    document.getElementById("reject").addEventListener("click", async (ev) => {
+      const note = document.getElementById("rnote").value.trim();
+      if (!note) return toast("rejection note is required", true);
+      ev.target.disabled = true;
+      try {
+        await api("POST", "/tasks/" + id + "/reject", { note });
+        toast("rejected — re-queued");
+        render();
+      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    });
+  }
+}
+
+function renderDiff(diff) {
+  if (!diff || !diff.trim()) return '<span class="meta">(no changes)</span>';
+  return diff.split("\n").map((line) => {
+    const e = esc(line);
+    if (line.startsWith("+++") || line.startsWith("---")) return `<span class="meta">${e}</span>`;
+    if (line.startsWith("@@")) return `<span class="hunk">${e}</span>`;
+    if (line.startsWith("+")) return `<span class="add">${e}</span>`;
+    if (line.startsWith("-")) return `<span class="del">${e}</span>`;
+    if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("# ")) return `<span class="meta">${e}</span>`;
+    return e;
+  }).join("\n");
+}
+
+// ---------- SSE live updates ----------
+function connectSSE() {
+  const conn = document.getElementById("conn");
+  const setState = (cls, label) => {
+    conn.className = "conn " + cls;
+    conn.querySelector(".conn-label").textContent = label;
+  };
+  const es = new EventSource("/api/events");
+  es.onopen = () => setState("up", "live");
+  es.onerror = () => setState("down", "reconnecting…");
+  es.onmessage = (ev) => {
+    let e;
+    try { e = JSON.parse(ev.data); } catch { return; }
+    if (e.type === "hello") return;
+    // Re-render the current view on any relevant change. Cheap enough for a
+    // single-operator local tool.
+    refreshSoon();
+  };
+}
+
+let refreshTimer = null;
+function refreshSoon() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(render, 150);
+}
+
+// ---------- boot ----------
+window.addEventListener("hashchange", render);
+render();
+connectSSE();
