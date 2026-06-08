@@ -175,6 +175,12 @@ function mount(node) {
   app.appendChild(node);
 }
 
+// After acting on a task (merge / request changes), return to its directory's
+// task list — that's the next thing you want, not the now-stale task page.
+function backToDirectory(directoryId) {
+  location.hash = directoryId ? "#/dir/" + directoryId : "#/";
+}
+
 // ---------- dashboard ----------
 async function renderDashboard() {
   const dirs = await api("GET", "/directories");
@@ -444,7 +450,7 @@ async function renderTask(id) {
       try {
         await api("POST", "/tasks/" + id + "/approve");
         toast("merged ✓");
-        render();
+        backToDirectory(t.directory_id);
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });
     document.getElementById("reject").addEventListener("click", async (ev) => {
@@ -454,7 +460,7 @@ async function renderTask(id) {
       try {
         await api("POST", "/tasks/" + id + "/reject", { note });
         toast("changes requested — re-queued");
-        render();
+        backToDirectory(t.directory_id);
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });
   }
