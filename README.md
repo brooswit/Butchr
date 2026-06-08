@@ -32,6 +32,8 @@ the prompt and metadata.
 ```
 queued → running → review → merged
                       └────→ rejected → queued (re-runs with the note appended)
+
+any non-terminal state ──→ aborted (worktree + branch discarded, nothing merged)
 ```
 
 | status   | meaning |
@@ -41,6 +43,14 @@ queued → running → review → merged
 | review   | agent finished, output snapshot captured, awaiting human approval |
 | merged   | approved → branch merged to the default branch, worktree + branch removed |
 | rejected | rejected with a note → note appended to `task.md`, re-queued |
+| aborted  | abandoned from any non-terminal state → agent stopped (if running), worktree + branch discarded, **nothing merged** |
+
+**Aborting** is the escape hatch for work you don't want: a queued task you no
+longer need, a running agent gone off the rails, or a `review` whose diff you'd
+rather throw away than merge or re-run. It stops the agent (if running), removes
+the worktree and branch, and parks the task in the terminal `aborted` state —
+the `task.md` is kept as a record. Only `merged` tasks (already terminal) can't
+be aborted.
 
 ## Concurrency
 
@@ -168,6 +178,7 @@ Missing error handling on the 404 branch.
 | GET | `/api/tasks/:id/diff` | git diff of the task branch vs default branch |
 | POST | `/api/tasks/:id/approve` | merge + clean up |
 | POST | `/api/tasks/:id/reject` | reject `{ note }`, re-queue |
+| POST | `/api/tasks/:id/abort` | abort without merging — stop the agent, discard worktree + branch |
 | POST | `/api/tasks/:id/terminal` | open a GUI terminal attached to a running task |
 | GET | `/api/fs?path=` | list subdirectories of a path (powers the directory picker) |
 | GET | `/api/events` | SSE stream of task/directory changes |

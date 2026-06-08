@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- queued | running | review | merged | rejected
+  status          TEXT NOT NULL,            -- queued | running | review | merged | aborted
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -49,7 +49,13 @@ export type DirectoryRow = {
   created_at: string;
 };
 
-export type TaskStatus = "queued" | "running" | "review" | "merged" | "rejected";
+export type TaskStatus =
+  | "queued"
+  | "running"
+  | "review"
+  | "merged"
+  | "rejected"
+  | "aborted";
 
 export type TaskRow = {
   id: string;

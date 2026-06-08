@@ -3,6 +3,7 @@
 import { db, nowIso } from "./db.ts";
 import type { TaskRow, TaskStatus } from "./db.ts";
 import { HttpError, getDirectory } from "./directories.ts";
+import { signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
@@ -164,12 +165,54 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
   return taskView(id)!;
 }
 
+/**
+ * Abort a task without merging: discard its worktree + branch and move it to the
+ * terminal `aborted` state. Works from any non-terminal state (queued, running,
+ * review). For a running task we first signal its watcher to bail and close the
+ * herdr pane so the agent stops before we tear the worktree down.
+ */
+export async function abortTask(id: string): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (row.status === "merged") {
+    throw new HttpError(409, "task is already merged");
+  }
+  if (row.status === "aborted") {
+    throw new HttpError(409, "task is already aborted");
+  }
+  const dir = getDirectory(row.directory_id);
+  if (!dir) throw new HttpError(404, "directory not found");
+
+  // Tell the watcher (if any) to stop before we kill the pane / remove the tree,
+  // so it never transitions the task to review behind us.
+  signalAbort(id);
+  if (row.herdr_pane_id) {
+    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
+  }
+
+  // Throw away the worktree + branch — nothing gets merged.
+  await git.cleanup(dir.path, id).catch(() => {});
+
+  db.query(
+    `UPDATE tasks SET status='aborted', conflict=0, review_note=NULL,
+       output_snapshot=NULL, herdr_pane_id=NULL, completed_at=? WHERE id=?`,
+  ).run(nowIso(), id);
+  updateTaskMdStatus(dir.path, id, "aborted");
+
+  emitUpdated(id);
+  return taskView(id)!;
+}
+
 // --- dispatcher-facing state transitions (kept here so all writes live together) ---
 
 export function markRunning(id: string, paneId: string): void {
-  db.query(
-    `UPDATE tasks SET status='running', herdr_pane_id=?, started_at=COALESCE(started_at, ?) WHERE id=?`,
+  // Guard on status='queued' so a task aborted in the same tick it was dispatched
+  // isn't dragged back to 'running' behind abortTask.
+  const res = db.query(
+    `UPDATE tasks SET status='running', herdr_pane_id=?, started_at=COALESCE(started_at, ?)
+       WHERE id=? AND status='queued'`,
   ).run(paneId, nowIso(), id);
+  if (res.changes === 0) return; // aborted (or otherwise moved) under us
   const row = getTask(id);
   if (row) {
     const dir = getDirectory(row.directory_id);
@@ -179,9 +222,13 @@ export function markRunning(id: string, paneId: string): void {
 }
 
 export function markReview(id: string, snapshot: string): void {
-  db.query(
-    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL WHERE id=?`,
+  // Guard on status='running' so a task aborted while its agent was finishing
+  // isn't resurrected into 'review' after abortTask parked it as terminal.
+  const res = db.query(
+    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL
+       WHERE id=? AND status='running'`,
   ).run(nowIso(), snapshot, id);
+  if (res.changes === 0) return; // aborted (or otherwise moved) under us
   const row = getTask(id);
   if (row) {
     const dir = getDirectory(row.directory_id);

@@ -13,6 +13,7 @@
   --review: #d97706;
   --merged: #16a34a;
   --rejected: #dc2626;
+  --aborted: #6b7280;
 
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -96,6 +97,7 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 .chip.review { background: var(--review); }
 .chip.merged { background: var(--merged); }
 .chip.rejected { background: var(--rejected); }
+.chip.aborted { background: var(--aborted); }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
@@ -129,6 +131,8 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 .btn.ghost:hover { background: var(--panel-2); }
 .btn.danger { background: var(--rejected); }
 .btn.success { background: var(--merged); }
+.btn.ghost.danger-outline { border-color: var(--rejected); color: var(--rejected); }
+.btn.ghost.danger-outline:hover { background: var(--rejected); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 input[type="text"], textarea {

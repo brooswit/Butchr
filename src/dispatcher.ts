@@ -30,6 +30,20 @@ function shq(s: string): string {
 
 const dispatching = new Set<string>(); // task ids mid-dispatch
 const watching = new Set<string>(); // task ids with an active watcher
+// Task ids whose watcher has been told to bail WITHOUT moving the task to
+// review — set by abortTask, consumed (and cleared) by the watcher.
+const abortSignals = new Set<string>();
+
+/**
+ * Signal a running task's watcher to stop without transitioning the task to
+ * review (used when aborting a running task). Returns true if a watcher was
+ * actually active for this task.
+ */
+export function signalAbort(taskId: string): boolean {
+  if (!watching.has(taskId)) return false;
+  abortSignals.add(taskId);
+  return true;
+}
 
 // In-flight workspace create/heal keyed by directory id, so concurrent tasks in
 // the same directory share one workspace instead of racing to recreate it.
@@ -207,11 +221,21 @@ function spawnWatcher(
     let timedOut = false;
     // Poll for the completion marker written by the wrapped command.
     while (!existsSync(doneFile)) {
+      if (abortSignals.has(taskId)) break;
       if (Date.now() > deadline) {
         timedOut = true;
         break;
       }
       await sleep(1000);
+    }
+
+    // Aborted out from under us: drop the task without capturing output or
+    // moving it to review. abortTask owns the pane close + worktree cleanup.
+    if (abortSignals.has(taskId)) {
+      abortSignals.delete(taskId);
+      watching.delete(taskId);
+      console.log(`[butchr] task ${taskId} watcher aborted`);
+      return;
     }
 
     let snapshot = "";
@@ -235,6 +259,15 @@ function spawnWatcher(
 
     // Pane usually self-closes when the command exits; close defensively.
     await herdr.paneClose(paneId).catch(() => {});
+
+    // Last-moment abort (signalled while we captured output): bail without
+    // moving to review so abortTask's terminal state stands.
+    if (abortSignals.has(taskId)) {
+      abortSignals.delete(taskId);
+      watching.delete(taskId);
+      console.log(`[butchr] task ${taskId} watcher aborted`);
+      return;
+    }
 
     // Move to review regardless — human inspects diff + snapshot.
     markReview(taskId, snapshot);
