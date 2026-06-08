@@ -523,11 +523,11 @@ async function renderTask(id) {
   // diff + review controls (when in review)
   if (t.status === "review") {
     wrap.appendChild(el("h2", {}, "Diff vs main"));
-    const diffBox = el("pre", { class: "block diff" }, "loading diff…");
+    const diffBox = el("div", { class: "diffview" }, [el("div", { class: "meta" }, "loading diff…")]);
     wrap.appendChild(diffBox);
     api("GET", "/tasks/" + id + "/diff")
-      .then((d) => { diffBox.innerHTML = renderDiff(d.diff); })
-      .catch((e) => { diffBox.textContent = "diff error: " + e.message; });
+      .then((d) => { diffBox.innerHTML = renderDiff(d.diff); wireDiff(diffBox); })
+      .catch((e) => { diffBox.innerHTML = `<div class="meta">diff error: ${esc(e.message)}</div>`; });
 
     const controls = el("div", { class: "panel", style: "margin-top:18px" });
     controls.innerHTML = `
@@ -568,17 +568,76 @@ async function renderTask(id) {
   }
 }
 
+// Parse a unified diff into per-file groups for a readable, GitHub-style view.
+function parseDiff(diff) {
+  const files = [];
+  let cur = null;
+  const start = (header) => {
+    cur = { header, path: "", oldPath: "", add: 0, del: 0, binary: false, lines: [] };
+    files.push(cur);
+  };
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git")) {
+      const m = line.match(/ b\/(.+)$/);
+      start(line);
+      if (m) cur.path = m[1];
+      continue;
+    }
+    if (!cur) start(line); // diff without a "diff --git" preamble
+    if (line.startsWith("--- ")) { cur.oldPath = line.slice(4).replace(/^a\//, ""); continue; }
+    if (line.startsWith("+++ ")) { cur.path = line.slice(4).replace(/^b\//, "") || cur.path; continue; }
+    if (line.startsWith("index ") || line.startsWith("new file") ||
+        line.startsWith("deleted file") || line.startsWith("old mode") ||
+        line.startsWith("new mode") || line.startsWith("similarity") ||
+        line.startsWith("rename ")) continue;
+    if (line.startsWith("Binary files")) { cur.binary = true; continue; }
+    if (line.startsWith("@@")) { cur.lines.push({ t: "hunk", text: line }); continue; }
+    if (line.startsWith("+")) { cur.add++; cur.lines.push({ t: "add", text: line }); continue; }
+    if (line.startsWith("-")) { cur.del++; cur.lines.push({ t: "del", text: line }); continue; }
+    if (line.startsWith("\\")) { cur.lines.push({ t: "ctx", text: line }); continue; } // "No newline…"
+    if (line.length) cur.lines.push({ t: "ctx", text: line });
+  }
+  return files;
+}
+
 function renderDiff(diff) {
-  if (!diff || !diff.trim()) return '<span class="meta">(no changes)</span>';
-  return diff.split("\n").map((line) => {
-    const e = esc(line);
-    if (line.startsWith("+++") || line.startsWith("---")) return `<span class="meta">${e}</span>`;
-    if (line.startsWith("@@")) return `<span class="hunk">${e}</span>`;
-    if (line.startsWith("+")) return `<span class="add">${e}</span>`;
-    if (line.startsWith("-")) return `<span class="del">${e}</span>`;
-    if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("# ")) return `<span class="meta">${e}</span>`;
-    return e;
-  }).join("\n");
+  if (!diff || !diff.trim()) return '<div class="meta">(no changes)</div>';
+  const files = parseDiff(diff);
+  const totAdd = files.reduce((a, f) => a + f.add, 0);
+  const totDel = files.reduce((a, f) => a + f.del, 0);
+
+  const summary = `<div class="diff-summary">
+    <span>${files.length} file${files.length === 1 ? "" : "s"} changed</span>
+    <span class="add">+${totAdd}</span><span class="del">−${totDel}</span>
+  </div>`;
+
+  const cards = files.map((f) => {
+    const name = f.path || f.oldPath || "(unknown)";
+    const body = f.binary
+      ? `<div class="diff-binary">Binary file not shown</div>`
+      : f.lines.map((l) => {
+          const sign = l.t === "add" ? "+" : l.t === "del" ? "−" : l.t === "hunk" ? "" : " ";
+          const text = l.t === "add" || l.t === "del" ? l.text.slice(1) : l.text;
+          return `<div class="dl ${l.t}"><span class="dl-sign">${sign}</span><span class="dl-text">${esc(text)}</span></div>`;
+        }).join("");
+    return `<div class="diff-file">
+      <button class="diff-file-head" type="button">
+        <span class="caret">▾</span>
+        <span class="fname">${esc(name)}</span>
+        <span class="fstat"><span class="add">+${f.add}</span> <span class="del">−${f.del}</span></span>
+      </button>
+      <div class="diff-file-body">${body}</div>
+    </div>`;
+  }).join("");
+
+  return summary + cards;
+}
+
+// Collapse/expand individual file cards.
+function wireDiff(box) {
+  box.querySelectorAll(".diff-file-head").forEach((head) => {
+    head.addEventListener("click", () => head.parentElement.classList.toggle("collapsed"));
+  });
 }
 
 // ---------- SSE live updates ----------

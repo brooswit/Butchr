@@ -160,11 +160,49 @@ pre.block {
 }
 
 /* diff */
-pre.diff { font-size: 12px; white-space: pre; max-height: 560px; }
-.diff .add { color: #4ade80; }
-.diff .del { color: #f87171; }
-.diff .hunk { color: var(--accent-2); }
-.diff .meta { color: var(--muted); }
+.diffview { display: flex; flex-direction: column; gap: 12px; }
+.diffview > .meta { color: var(--muted); }
+
+.diff-summary {
+  display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted);
+}
+.diff-summary .add { color: #4ade80; font-family: var(--mono); }
+.diff-summary .del { color: #f87171; font-family: var(--mono); }
+
+.diff-file {
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg);
+}
+.diff-file-head {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 12px; background: var(--panel-2); border: 0; border-bottom: 1px solid var(--border);
+  color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+.diff-file-head:hover { background: var(--panel); }
+.diff-file-head .caret { color: var(--muted); font-size: 11px; transition: transform 0.12s; }
+.diff-file-head .fname { font-family: var(--mono); font-size: 12.5px; flex: 1; word-break: break-all; }
+.diff-file-head .fstat { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.diff-file-head .fstat .add { color: #4ade80; }
+.diff-file-head .fstat .del { color: #f87171; }
+
+.diff-file-body { max-height: 560px; overflow: auto; font-family: var(--mono); font-size: 12px; }
+.diff-file.collapsed .diff-file-body { display: none; }
+.diff-file.collapsed .caret { transform: rotate(-90deg); }
+
+.diff-binary { padding: 12px; color: var(--muted); }
+
+.dl { display: flex; white-space: pre; }
+.dl .dl-sign {
+  flex: 0 0 22px; text-align: center; color: var(--muted);
+  user-select: none; border-right: 1px solid var(--border);
+}
+.dl .dl-text { padding: 0 10px; flex: 1; }
+.dl.add { background: rgba(74, 222, 128, 0.10); }
+.dl.add .dl-sign { color: #4ade80; }
+.dl.del { background: rgba(248, 113, 113, 0.10); }
+.dl.del .dl-sign { color: #f87171; }
+.dl.hunk { background: rgba(59, 130, 246, 0.10); color: var(--accent-2); }
+.dl.hunk .dl-sign { border-right-color: transparent; }
+.dl.ctx { color: var(--text); }
 
 .empty { color: var(--muted); padding: 28px; text-align: center; border: 1px dashed var(--border); border-radius: 10px; }
 
