@@ -3,7 +3,7 @@
 import { db, nowIso } from "./db.ts";
 import type { TaskRow, TaskStatus } from "./db.ts";
 import { HttpError, getDirectory } from "./directories.ts";
-import { signalAbort } from "./dispatcher.ts";
+import { readRunLogSnapshot, signalAbort, startFinalizeWatcher } from "./dispatcher.ts";
 import { publish } from "./events.ts";
 import { cancelReview, hasPendingReview, resolveReview } from "./review.ts";
 import * as git from "./git.ts";
@@ -119,7 +119,12 @@ export type ApproveOutcome = { task: TaskView; conflictSentBack?: boolean };
  * already in task.md / review_note). Shared by rejectTask (human note) and
  * approveTask's conflict kick-back.
  */
-function requestChanges(id: string, dirPath: string, note: string): void {
+async function requestChanges(
+  id: string,
+  dirPath: string,
+  note: string,
+  paneId: string | null,
+): Promise<void> {
   if (hasPendingReview(id)) {
     db.query(
       `UPDATE tasks SET status='running', review_note=?, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
@@ -128,6 +133,12 @@ function requestChanges(id: string, dirPath: string, note: string): void {
     resolveReview(id, { decision: "changes_requested", notes: note });
     return;
   }
+  // No pending MCP review (service restarted, agent submitted then returned, or
+  // its review registration is gone): re-queue for a fresh agent. The herdr
+  // agent may still be ALIVE (its blocked call lost / outlived us), so close its
+  // pane first — otherwise we strand an orphan that wastes the session and would
+  // collide on `agent_name_taken` when the task re-dispatches.
+  if (paneId) await herdr.paneClose(paneId).catch(() => {});
   db.query(
     `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
   ).run(note, id);
@@ -177,12 +188,9 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
       const base = await git.defaultBranch(dir.path);
       const notes = buildConflictNotes(id, base, result.conflictFiles, result.message);
       appendRejection(dir.path, id, notes, nowIso());
-      // No live agent but a pane may linger (service was restarted): close it
-      // before re-queue so a fresh agent owns the worktree.
-      if (!hasPendingReview(id) && row.herdr_pane_id) {
-        await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-      }
-      requestChanges(id, dir.path, notes);
+      // Same channel as reject: into the live agent if blocked, else re-queue
+      // (requestChanges closes any lingering pane in the fallback).
+      await requestChanges(id, dir.path, notes, row.herdr_pane_id);
       emitUpdated(id);
       return { task: taskView(id)!, conflictSentBack: true };
     }
@@ -194,23 +202,70 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     throw new HttpError(409, `merge failed: ${result.message}`);
   }
 
-  // Merge succeeded. Close the pane — this kills the live agent mid-request_review
-  // (its blocked call never returns, so it generates nothing more). Then drop the
-  // pending review entry defensively in case the socket-abort cleanup hasn't fired.
+  // Merge succeeded. Unlike before, we do NOT close the pane or tear down the
+  // worktree yet: the agent stays alive to do its post-merge wrap-up (it prints
+  // useful summary info). Return "approved" to its blocked request_review call so
+  // it knows to finish up; the finalize-watcher closes it + cleans up once it goes
+  // idle (or exits / hits finalizeTimeoutMs). The merge has landed, so stamp
+  // merged_at now even though the task isn't `merged` until finalize.
+  resolveReview(id, { decision: "approved" });
+  const res = db.query(
+    `UPDATE tasks SET status='finalizing', conflict=0, merged_at=COALESCE(merged_at, ?)
+       WHERE id=? AND status='review'`,
+  ).run(nowIso(), id);
+  if (res.changes === 0) {
+    // Raced (e.g. aborted) between the merge and here — the branch already landed
+    // in main, but the task moved on. Nothing to finalize.
+    emitUpdated(id);
+    return { task: taskView(id)! };
+  }
+  updateTaskMdStatus(dir.path, id, "finalizing");
+  emitUpdated(id);
+
+  // Hand the finalizing phase to the dispatcher: it watches for the agent to go
+  // quiet/exit and then calls finalizeTask below.
+  startFinalizeWatcher(id);
+  return { task: taskView(id)! };
+}
+
+/**
+ * Finalize an approved task: `finalizing` → `merged`. Called by the dispatcher's
+ * finalize-watcher once the post-merge agent goes idle, exits, or times out (and
+ * by restart recovery for tasks left finalizing). The branch is already merged to
+ * main at this point; here we capture the agent's wrap-up output, close its pane,
+ * and remove the worktree + branch. Idempotent — guarded on status='finalizing'.
+ */
+export async function finalizeTask(id: string): Promise<TaskView | null> {
+  const row = getTask(id);
+  if (!row) return null;
+  if (row.status !== "finalizing") return taskView(id); // already finalized / moved
+  const dir = getDirectory(row.directory_id);
+  if (!dir) throw new HttpError(404, "directory not found");
+
+  // Capture the agent's post-merge wrap-up (the "good information") from its run
+  // log before we kill it, so it survives on the merged task.
+  const snapshot = readRunLogSnapshot(id);
+
+  // Close the pane (kills the now-finished agent); drop any blocked review call
+  // defensively in case the socket-abort cleanup hasn't fired.
   if (row.herdr_pane_id) {
     await herdr.paneClose(row.herdr_pane_id).catch(() => {});
   }
   cancelReview(id);
 
-  // Cleanup worktree + branch, mark merged.
-  await git.cleanup(dir.path, id);
-  db.query(
-    `UPDATE tasks SET status='merged', conflict=0, merged_at=?, herdr_pane_id=NULL WHERE id=?`,
-  ).run(nowIso(), id);
+  // The agent no longer needs its worktree cwd — tear down worktree + branch.
+  await git.cleanup(dir.path, id).catch(() => {});
+
+  const res = db.query(
+    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL,
+       output_snapshot=?, merged_at=COALESCE(merged_at, ?)
+       WHERE id=? AND status='finalizing'`,
+  ).run(snapshot || null, nowIso(), id);
+  if (res.changes === 0) return taskView(id); // finalized under us
   updateTaskMdStatus(dir.path, id, "merged");
 
   emitUpdated(id);
-  return { task: taskView(id)! };
+  return taskView(id)!;
 }
 
 export async function rejectTask(id: string, note: string): Promise<TaskView> {
@@ -228,9 +283,10 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
   // for the fallback re-dispatch path).
   appendRejection(dir.path, id, note, when);
 
-  // Stream the note back into the live agent if one is blocked, else re-queue.
-  // The pane id stays in the live case so a later approve/abort can close it.
-  requestChanges(id, dir.path, note.trim());
+  // Stream the note back into the live agent if one is blocked, else re-queue
+  // (closing any lingering pane first). The pane id stays in the live case so a
+  // later approve/abort can close it.
+  await requestChanges(id, dir.path, note.trim(), row.herdr_pane_id);
 
   emitUpdated(id);
   return taskView(id)!;
@@ -238,9 +294,11 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
 
 /**
  * Abort a task without merging: discard its worktree + branch and move it to the
- * terminal `aborted` state. Works from any non-terminal state (queued, running,
- * review). For a running task we first signal its watcher to bail and close the
- * herdr pane so the agent stops before we tear the worktree down.
+ * terminal `aborted` state. Works from any non-terminal state EXCEPT
+ * `finalizing` (queued, running, review). For a running task we first signal its
+ * watcher to bail and close the herdr pane so the agent stops before we tear the
+ * worktree down. A `finalizing` task has already merged to main, so there is
+ * nothing to discard — it auto-completes to `merged` and abort is a 409.
  */
 export async function abortTask(id: string): Promise<TaskView> {
   const row = getTask(id);
@@ -250,6 +308,9 @@ export async function abortTask(id: string): Promise<TaskView> {
   }
   if (row.status === "aborted") {
     throw new HttpError(409, "task is already aborted");
+  }
+  if (row.status === "finalizing") {
+    throw new HttpError(409, "task is finalizing (already merged) — cannot abort");
   }
   const dir = getDirectory(row.directory_id);
   if (!dir) throw new HttpError(404, "directory not found");
@@ -357,9 +418,30 @@ export function setIdle(id: string, idle: boolean): void {
   emitUpdated(id);
 }
 
-export function backToQueued(id: string): void {
+export async function backToQueued(id: string): Promise<void> {
+  // Close any lingering herdr agent for this task before re-queuing, so a failed
+  // dispatch never strands an orphan agent that would later collide on
+  // `agent_name_taken`.
+  const row = getTask(id);
+  if (row?.herdr_pane_id) {
+    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
+  }
   db.query(
     `UPDATE tasks SET status='queued', herdr_pane_id=NULL WHERE id=?`,
   ).run(id);
   emitUpdated(id);
+}
+
+/**
+ * On startup, any task left in `finalizing` (service killed mid-wrap-up) has lost
+ * its finalize-watcher. The branch already merged to main, so just complete the
+ * finalize: capture whatever wrap-up was logged, close the pane, clean up, and
+ * mark merged. Returns how many were recovered.
+ */
+export async function recoverFinalizingTasks(): Promise<number> {
+  const rows = db
+    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='finalizing'`)
+    .all();
+  for (const r of rows) await finalizeTask(r.id).catch(() => {});
+  return rows.length;
 }

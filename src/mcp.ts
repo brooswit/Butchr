@@ -20,7 +20,9 @@ const REQUEST_REVIEW_TOOL = {
   description:
     "Call when the task's work is complete and ready for human review. Blocks " +
     "until the reviewer responds. If changes are requested, returns the notes; " +
-    "address them and call this tool again. On approval the session ends.",
+    "address them and call this tool again. On approval the tool returns " +
+    "{decision:'approved'}; give a brief final summary of what you did, then stop " +
+    "— butchr finalizes and closes the session once you go quiet.",
   inputSchema: {
     type: "object",
     properties: {

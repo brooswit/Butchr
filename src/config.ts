@@ -81,6 +81,14 @@ export const config = {
   idleMs: envInt("BUTCHR_IDLE_MS", 1000 * 60),
 
   /**
+   * Hard cap (ms) on the `finalizing` phase: after an approve merges the branch,
+   * the agent stays alive to do its post-merge wrap-up and the task auto-closes
+   * once it goes idle (`idleMs`) or exits. This bounds how long a chatty agent
+   * can keep a task in `finalizing` before butchr closes it regardless.
+   */
+  finalizeTimeoutMs: envInt("BUTCHR_FINALIZE_TIMEOUT_MS", 1000 * 120),
+
+  /**
    * Optional override for opening a GUI terminal attached to a running task.
    * Template run via `bash -lc`; `{{CMD}}` is replaced with the shell-quoted
    * `herdr agent attach <id>` command. If unset, butchr auto-detects an
