@@ -77,8 +77,27 @@ async function tick(): Promise<void> {
   }
 }
 
+// Ensure the directory's herdr workspace still exists; recreate it (and update
+// the DB) if herdr was restarted or the workspace was closed out from under us.
+async function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
+  if (dir.herdr_workspace && (await herdr.workspaceExists(dir.herdr_workspace))) {
+    return dir.herdr_workspace;
+  }
+  const label = dir.label ?? dir.path.split("/").pop() ?? dir.path;
+  const ws = await herdr.workspaceCreate(dir.path, label);
+  db.query(
+    `UPDATE directories SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
+  ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, dir.id);
+  dir.herdr_workspace = ws.workspaceId ?? null;
+  console.log(`[butchr] recreated herdr workspace for ${label} (${ws.workspaceId})`);
+  return ws.workspaceId;
+}
+
 async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
   try {
+    // Heal a missing workspace (herdr restart / manual close).
+    const workspaceId = await ensureWorkspace(dir);
+
     // Ensure the worktree exists (idempotent — handles rejected re-runs).
     const worktree = await git.createWorktree(dir.path, task.id);
 
@@ -109,7 +128,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       task.id,
       worktree,
       argv,
-      dir.herdr_workspace ?? undefined,
+      workspaceId ?? undefined,
     );
 
     markRunning(task.id, started.paneId);

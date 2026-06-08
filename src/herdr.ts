@@ -53,6 +53,14 @@ export async function workspaceCreate(
   };
 }
 
+/** Does a workspace still exist? (herdr may have been restarted/closed.) */
+export async function workspaceExists(workspaceId: string): Promise<boolean> {
+  if (!workspaceId) return false;
+  const res = await run([bin, "workspace", "get", workspaceId]);
+  if (!res.ok) return false;
+  return !res.stdout.includes('"error"');
+}
+
 /** Tear a workspace down. */
 export async function workspaceClose(workspaceId: string): Promise<void> {
   if (!workspaceId) return;
