@@ -40,6 +40,20 @@ CREATE INDEX IF NOT EXISTS idx_tasks_dir    ON tasks(directory_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 `);
 
+// Lightweight forward migrations: add columns introduced after the initial
+// schema. Guarded so existing databases upgrade in place without data loss.
+function ensureColumn(table: string, column: string, decl: string): void {
+  const cols = db
+    .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+    .all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
+}
+
+// `summary` holds the agent's optional request_review summary (shown in review).
+ensureColumn("tasks", "summary", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -65,6 +79,7 @@ export type TaskRow = {
   output_snapshot: string | null;
   conflict: number;
   review_note: string | null;
+  summary: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

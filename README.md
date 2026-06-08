@@ -31,19 +31,27 @@ the prompt and metadata.
 
 ```
 queued → running → review → merged
-                      └────→ rejected → queued (re-runs with the note appended)
+            ▲          └────→ (request changes) → running   (SAME live agent, in-context)
 
 any non-terminal state ──→ aborted (worktree + branch discarded, nothing merged)
 ```
 
+The agent runs **interactively** and drives the review handshake itself via an
+MCP tool — see [Agent-driven review (MCP)](#agent-driven-review-mcp).
+
 | status   | meaning |
 |----------|---------|
 | queued   | worktree exists, `task.md` written, waiting for the dispatcher |
-| running  | agent executing inside the worktree |
-| review   | agent finished, output snapshot captured, awaiting human approval |
-| merged   | approved → branch merged to the default branch, worktree + branch removed |
-| rejected | rejected with a note → note appended to `task.md`, re-queued |
+| running  | interactive agent executing inside the worktree |
+| review   | agent called `request_review` (it stays alive, blocked on the tool), awaiting human approval |
+| merged   | approved → pane closed (agent killed), branch merged to the default branch, worktree + branch removed |
 | aborted  | abandoned from any non-terminal state → agent stopped (if running), worktree + branch discarded, **nothing merged** |
+
+On **request changes**, butchr does *not* restart the agent: it returns the note
+to the still-alive `request_review` call and flips the task back to `running`, so
+the agent keeps working with full context. (If the agent's session is gone — e.g.
+butchr was restarted — it falls back to re-queuing and dispatching a fresh agent
+with the note appended to `task.md`.)
 
 **Aborting** is the escape hatch for work you don't want: a queued task you no
 longer need, a running agent gone off the rails, or a `review` whose diff you'd
@@ -103,13 +111,25 @@ Then open the webapp at **http://127.0.0.1:47800**.
 | `BUTCHR_GIT_BIN` | `git` | git binary |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval |
 | `BUTCHR_MAX_CONCURRENT` | `0` | cap on simultaneously running tasks across all directories; `0` = unlimited |
-| `BUTCHR_AGENT_CMD` | `cat {{PROMPT_FILE}} \| claude --dangerously-skip-permissions {{CONTINUE}} -p` | command run in the worktree to execute the agent. `{{PROMPT_FILE}}` is replaced with the rendered prompt's path; `{{CONTINUE}}` is replaced with `BUTCHR_AGENT_CONTINUE_ARG` on a re-run and the empty string on the first run |
-| `BUTCHR_AGENT_CONTINUE_ARG` | `--continue` | substituted for `{{CONTINUE}}` when re-running a task that has already been started once (e.g. after a rejection). Lets the agent resume its prior session instead of starting a new one. If the resume exits non-zero, butchr automatically retries the run fresh (`{{CONTINUE}}` empty). Set empty to always start fresh |
-| `BUTCHR_AGENT_TIMEOUT_MS` | `3600000` | max time to wait for an agent to finish |
+| `BUTCHR_AGENT_CMD` | `claude --dangerously-skip-permissions --mcp-config {{MCP_CONFIG}} "$(cat {{PROMPT_FILE}})"` | command run in the worktree to execute the agent (interactive). `{{PROMPT_FILE}}` → rendered prompt path; `{{MCP_CONFIG}}` → per-task MCP config path |
+| `BUTCHR_AGENT_TIMEOUT_MS` | `3600000` | fallback ceiling: if an agent never calls `request_review`, it's swept to `review` after this long |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command |
 
 The agent command runs via `bash -lc` with the **worktree as cwd**. Override
 `BUTCHR_AGENT_CMD` to use any agent CLI.
+
+Two placeholders are substituted by the dispatcher:
+
+- `{{PROMPT_FILE}}` — absolute path to the rendered prompt (context files + prompt
+  + prior review notes + the review-handshake instructions).
+- `{{MCP_CONFIG}}` — absolute path to a per-task MCP config JSON
+  (`<data>/mcp/<task-id>.json`) wiring the agent to butchr's `request_review`
+  tool. It points at the per-task endpoint `http://<host>:<port>/mcp/<task-id>`.
+
+The default launches Claude Code **interactively** (no `-p`), so the pane stays
+live and attachable, and the agent signals completion by calling the MCP tool
+rather than by exiting. If your override is a headless one-shot agent that exits
+instead, the fallback watcher still sweeps it to `review` on exit.
 
 ---
 
@@ -120,41 +140,60 @@ immediately and concurrently (subject to `BUTCHR_MAX_CONCURRENT`):
 
 1. Ensure the worktree exists (`git worktree add -b <id> <repo>/<id>`).
 2. Render the prompt: each `context:` file's contents + the prompt + any prior
-   review notes, written to `<data>/prompts/<id>.md`.
-3. Start the agent in the worktree via `herdr agent start <id> --cwd <worktree>
-   --workspace <ws>`, wrapped so its output is `tee`'d to a log file (still
-   visible live in the herdr pane) and a completion marker with the exit code is
-   written when it finishes. If the task has run before (a rejected re-run, or a
-   run recovered after a restart), `{{CONTINUE}}` expands to
-   `BUTCHR_AGENT_CONTINUE_ARG` (`--continue` by default) so the agent **resumes
-   its prior session** in the same worktree rather than starting fresh; first
-   runs get a blank session. The resume is best-effort: if it exits non-zero
-   (claude can refuse `--continue` when there's no resumable session), the
-   dispatcher **falls back to a fresh run** of the same command so the task
-   still makes progress instead of failing.
-4. A watcher polls for the marker, captures the log as the output snapshot, and
-   transitions the task to `review`.
+   review notes + the review-handshake instructions, written to
+   `<data>/prompts/<id>.md`.
+3. Write the per-task MCP config to `<data>/mcp/<id>.json`.
+4. Start the **interactive** agent in the worktree via `herdr agent start <id>
+   --cwd <worktree> --workspace <ws>`, wrapped so its output is `tee`'d to a log
+   file (still visible live in the herdr pane).
+5. The task moves to `review` when the agent calls the `request_review` MCP tool
+   — *not* on process exit. A fallback watcher only steps in if the agent ends
+   without submitting (see below).
 
 If the directory's herdr workspace has gone away (herdr restart, manual close),
 butchr **recreates it on the next dispatch** and updates its record — no manual
 re-registration needed.
 
+## Agent-driven review (MCP)
+
+butchr hosts a tiny **MCP server** on its existing HTTP port at `/mcp/:taskId`
+(hand-rolled JSON-RPC over Streamable HTTP, zero dependencies). Each task's
+interactive agent connects to its own per-task endpoint and gets one tool:
+
+- **`request_review({ summary? })`** — call it when the work is done. It **blocks**
+  until a human responds (blocking is free token-wise: the agent just waits on a
+  tool result). Calling it moves the task to `review` while the agent stays alive.
+
+The reviewer's action releases that blocked call:
+
+- **Approve** → butchr merges the branch (auto-committing any uncommitted worktree
+  changes), removes the worktree, and **closes the pane** — which kills the agent
+  mid-call. The blocked `request_review` never returns, so there is *zero* extra
+  token spend and no "approved" round-trip.
+- **Request changes** → the tool returns `{ decision: "changes_requested", notes }`
+  to the **same live agent**, which addresses the notes in-context and calls
+  `request_review` again. The task flips back to `running`; no restart.
+- **Abort** → the pending call is released and the pane closed, then the worktree
+  is discarded (the normal `aborted` path).
+
+**Fallback.** If an interactive agent ever ends *without* calling `request_review`
+— it exited, crashed, or you killed its pane — the watcher notices (the process is
+gone / the herdr agent vanished) and sweeps the task to `review` with the captured
+output prefixed by a note explaining why, so it never gets stuck in `running`.
+
 ## Watching a running task
 
-A running task has an **Open terminal** button (task detail) and a **terminal**
-link (directory task list). It launches a GUI terminal attached to the live
-herdr pane (`herdr agent attach <task-id>`), so you can watch — or take over —
-the agent in real time. butchr auto-detects an emulator (kitty, konsole,
-alacritty, xterm, gnome-terminal, …); override with `BUTCHR_TERMINAL_CMD`. Needs
-`DISPLAY`/`WAYLAND_DISPLAY` (i.e. run the service inside your desktop session).
+Panes are **long-lived and interactive**: attaching to a task's pane in herdr
+(`herdr agent attach <task-id>`) shows the live Claude Code CLI — you can watch it
+work, or take over. The pane stays up through `review` (the agent is blocked on
+`request_review`) and is closed only on approve/abort. herdr owns the PTY/workspace;
+butchr owns task state and the review handshake.
 
-> **Note on herdr integration.** The spec sketches `herdr wait agent-status done`
-> + `herdr pane read` for completion/output. In practice the running herdr
-> destroys a pane the instant a one-shot command exits, which loses both the
-> wait and the output for non-interactive agent runs. butchr therefore detects
-> completion and captures output via filesystem markers (`tee` + a `.done`
-> marker), which is agent-agnostic and robust. herdr still owns the PTY/workspace
-> so you can watch or attach to a running task live.
+From the webapp, a running task has an **Open terminal** button (task detail) and
+a **terminal** link (directory task list) that launches a GUI terminal attached to
+that live pane. butchr auto-detects an emulator (kitty, konsole, alacritty, xterm,
+gnome-terminal, …); override with `BUTCHR_TERMINAL_CMD`. Needs
+`DISPLAY`/`WAYLAND_DISPLAY` (i.e. run the service inside your desktop session).
 
 ## task.md format
 
@@ -193,11 +232,12 @@ Missing error handling on the 404 branch.
 | GET | `/api/tasks/:id` | task detail (prompt, snapshot, notes) |
 | GET | `/api/tasks/:id/diff` | git diff of the task branch vs default branch |
 | POST | `/api/tasks/:id/approve` | merge + clean up |
-| POST | `/api/tasks/:id/reject` | reject `{ note }`, re-queue |
+| POST | `/api/tasks/:id/reject` | request changes `{ note }` — returns the note to the live agent (or re-queues if its session is gone) |
 | POST | `/api/tasks/:id/abort` | abort without merging — stop the agent, discard worktree + branch |
 | POST | `/api/tasks/:id/terminal` | open a GUI terminal attached to a running task |
 | GET | `/api/fs?path=` | list subdirectories of a path (powers the directory picker) |
 | GET | `/api/events` | SSE stream of task/directory changes |
+| POST | `/mcp/:taskId` | MCP (JSON-RPC) endpoint the task's interactive agent connects to for the `request_review` handshake |
 
 ## Merge strategy
 
@@ -221,8 +261,10 @@ src/
   terminal.ts     open a GUI terminal attached to a running task
   directories.ts  directory service
   tasks.ts        task service + state transitions
-  dispatcher.ts   dispatcher loop + per-task watcher + workspace self-heal
-  server.ts       REST + SSE + static file serving
+  review.ts       pending-review registry (blocks/releases request_review calls)
+  mcp.ts          per-task MCP server for the request_review handshake
+  dispatcher.ts   dispatcher loop + per-task fallback watcher + workspace self-heal
+  server.ts       REST + SSE + MCP + static file serving
 public/
   index.html / style.css / app.js   vanilla webapp
 ```

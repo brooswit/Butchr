@@ -48,36 +48,23 @@ export const config = {
 
   /**
    * Command template run inside a task's worktree to execute the agent.
-   * `{{PROMPT_FILE}}` is replaced with the absolute path to the rendered
-   * prompt file. `{{CONTINUE}}` is replaced with `agentContinueArg` on a
-   * re-run (a task that has already been started once in its worktree) and
-   * with the empty string on the very first run. It is run via `bash -lc`,
-   * in the worktree as cwd.
+   * Placeholders, both replaced by the dispatcher:
+   *  - `{{PROMPT_FILE}}` → absolute path to the rendered prompt file.
+   *  - `{{MCP_CONFIG}}`  → absolute path to the per-task MCP config JSON that
+   *    points the agent at butchr's `/mcp/<task-id>` endpoint.
+   * It is run via `bash -lc`, in the worktree as cwd.
    *
-   * Default: pipe the prompt into Claude Code in headless/print mode so the
-   * agent runs to completion and exits (which herdr reports as `done`). On a
-   * re-run `{{CONTINUE}}` becomes `--continue`, so the rejected task resumes
-   * its previous session (which lives in the same worktree cwd) instead of
-   * starting from a blank conversation. If that resume fails, butchr falls back
-   * to running this same command with `{{CONTINUE}}` stripped (a fresh session)
-   * — see the dispatcher.
+   * Default: launch Claude Code INTERACTIVELY (no `-p`) with the prompt as the
+   * positional arg and the butchr MCP server wired in. The agent stays alive and
+   * attachable; it signals completion by calling the `request_review` MCP tool
+   * rather than by exiting. On reject the same live session is handed the notes
+   * (no re-run), which supersedes the old `--continue` resume mechanism.
    * Override BUTCHR_AGENT_CMD to use a different agent.
    */
   agentCmd: env(
     "BUTCHR_AGENT_CMD",
-    'cat {{PROMPT_FILE}} | claude --dangerously-skip-permissions {{CONTINUE}} -p',
+    'claude --dangerously-skip-permissions --mcp-config {{MCP_CONFIG}} "$(cat {{PROMPT_FILE}})"',
   ),
-
-  /**
-   * Substituted for `{{CONTINUE}}` in `agentCmd` when re-running a task that
-   * has already been started once (e.g. after a rejection, or after butchr
-   * restarted mid-run). Lets the agent resume its prior session rather than
-   * launch a brand new one. If the resume attempt exits non-zero the dispatcher
-   * retries the same command with `{{CONTINUE}}` empty, so a refused resume
-   * degrades to a fresh run instead of failing the task. Set to the empty
-   * string to always start fresh — e.g. for agents that have no resume flag.
-   */
-  agentContinueArg: env("BUTCHR_AGENT_CONTINUE_ARG", "--continue"),
 
   /** Max time (ms) a single watcher waits for the agent to finish. */
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),

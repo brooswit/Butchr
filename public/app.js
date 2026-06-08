@@ -421,6 +421,12 @@ async function renderTask(id) {
     wrap.appendChild(el("pre", { class: "block", html: esc(t.review_notes) }));
   }
 
+  // agent summary (from request_review)
+  if (t.summary) {
+    wrap.appendChild(el("h2", {}, "Agent summary"));
+    wrap.appendChild(el("pre", { class: "block", html: esc(t.summary) }));
+  }
+
   // output snapshot
   if (t.output_snapshot) {
     wrap.appendChild(el("h2", {}, "Agent output (snapshot)"));
@@ -441,7 +447,7 @@ async function renderTask(id) {
       <h2 style="margin-top:0">Review</h2>
       <label class="field">
         <span class="lbl">change request note (required to request changes)</span>
-        <textarea id="rnote" placeholder="What needs to change? Appended to task.md; task re-runs."></textarea>
+        <textarea id="rnote" placeholder="What needs to change? The notes go back to the same live agent, which keeps working in-context (no restart)."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="approve">Approve &amp; merge</button>
@@ -483,7 +489,7 @@ async function renderTask(id) {
       ev.target.disabled = true;
       try {
         await api("POST", "/tasks/" + id + "/reject", { note });
-        toast("changes requested — re-queued");
+        toast("changes requested");
         backToDirectory(t.directory_id);
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });

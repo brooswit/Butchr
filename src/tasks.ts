@@ -5,6 +5,7 @@ import type { TaskRow, TaskStatus } from "./db.ts";
 import { HttpError, getDirectory } from "./directories.ts";
 import { signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
+import { cancelReview, hasPendingReview, resolveReview } from "./review.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
@@ -131,6 +132,14 @@ export async function approveTask(id: string): Promise<TaskView> {
     );
   }
 
+  // Merge succeeded. Close the pane — this kills the live agent mid-request_review
+  // (its blocked call never returns, so it generates nothing more). Then drop the
+  // pending review entry defensively in case the socket-abort cleanup hasn't fired.
+  if (row.herdr_pane_id) {
+    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
+  }
+  cancelReview(id);
+
   // Cleanup worktree + branch, mark merged.
   await git.cleanup(dir.path, id);
   db.query(
@@ -153,11 +162,28 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
   if (!dir) throw new HttpError(404, "directory not found");
 
   const when = nowIso();
+  // Persist the note to task.md either way (visible in the UI; survives restarts
+  // for the fallback re-dispatch path).
   appendRejection(dir.path, id, note, when);
 
-  // Back to queued — dispatcher re-runs into the SAME worktree/branch.
+  if (hasPendingReview(id)) {
+    // The agent is alive and blocked in request_review. Stream the notes back
+    // into that SAME session and flip the task back to running — NO fresh
+    // dispatch. The pane id stays so a later approve/abort can close it.
+    db.query(
+      `UPDATE tasks SET status='running', review_note=?, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
+    ).run(note.trim(), id);
+    updateTaskMdStatus(dir.path, id, "running");
+    resolveReview(id, { decision: "changes_requested", notes: note.trim() });
+    emitUpdated(id);
+    return taskView(id)!;
+  }
+
+  // No live session (service restarted, agent died): fall back to the original
+  // behavior — back to queued so the dispatcher re-runs a fresh agent into the
+  // SAME worktree/branch, with the note now in task.md.
   db.query(
-    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, conflict=0 WHERE id=?`,
+    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
   ).run(note.trim(), id);
   updateTaskMdStatus(dir.path, id, "queued");
 
@@ -186,6 +212,9 @@ export async function abortTask(id: string): Promise<TaskView> {
   // Tell the watcher (if any) to stop before we kill the pane / remove the tree,
   // so it never transitions the task to review behind us.
   signalAbort(id);
+  // Release any blocked request_review call (the pane close below kills the agent
+  // anyway, so we drop the call without returning a value).
+  cancelReview(id);
   if (row.herdr_pane_id) {
     await herdr.paneClose(row.herdr_pane_id).catch(() => {});
   }
@@ -235,6 +264,36 @@ export function markReview(id: string, snapshot: string): void {
     if (dir) updateTaskMdStatus(dir.path, id, "review");
   }
   emitUpdated(id);
+}
+
+/**
+ * Move a task to `review` because its live agent called the MCP `request_review`
+ * tool. Unlike markReview (the process-exit fallback), this KEEPS herdr_pane_id —
+ * the agent is still alive and blocked on the tool result, so approve/abort must
+ * be able to close its pane. Stores the agent's optional summary.
+ *
+ * Returns:
+ *  - "ok"        → transitioned to review (or already in review), block the call.
+ *  - "terminal"  → task is merged/aborted; the caller should not block.
+ *  - "notfound"  → no such task.
+ */
+export function markReviewFromAgent(
+  id: string,
+  summary?: string,
+): "ok" | "terminal" | "notfound" {
+  const row = getTask(id);
+  if (!row) return "notfound";
+  if (row.status === "merged" || row.status === "aborted") return "terminal";
+
+  // running → review (normal), or review → review (a duplicate call); keep pane.
+  db.query(
+    `UPDATE tasks SET status='review', completed_at=COALESCE(completed_at, ?), summary=?
+       WHERE id=? AND status IN ('running','review')`,
+  ).run(nowIso(), summary ?? null, id);
+  const dir = getDirectory(row.directory_id);
+  if (dir) updateTaskMdStatus(dir.path, id, "review");
+  emitUpdated(id);
+  return "ok";
 }
 
 export function backToQueued(id: string): void {
