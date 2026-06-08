@@ -37,6 +37,20 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // Crash supervision: if anything escapes to the top level, don't limp along in
+  // a half-broken state — log it and exit non-zero so the supervisor (see
+  // scripts/supervise.sh) relaunches a fresh, healthy process. On boot we
+  // re-queue running tasks and finalize finalizing ones, so a restart resumes
+  // cleanly rather than orphaning work.
+  process.on("uncaughtException", (err) => {
+    console.error("[butchr] uncaught exception:", err);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[butchr] unhandled rejection:", reason);
+    process.exit(1);
+  });
 }
 
 main().catch((e) => {

@@ -100,6 +100,68 @@ bun run start      # or: bun run dev   (watch mode)
 
 Then open the webapp at **http://127.0.0.1:47800**.
 
+### Crash supervision (keep butchr up)
+
+For an unattended/long-running setup, run butchr under the bundled supervisor so
+it relaunches itself if it ever crashes:
+
+```sh
+bun run start:supervised      # = bash scripts/supervise.sh
+```
+
+The supervisor (`scripts/supervise.sh`, plain bash, no extra deps) restarts the
+server whenever it exits **non-zero**, backing off between restarts and bailing
+out if it detects a tight crash loop. A **clean** exit (code 0 — including the
+Ctrl-C / `SIGTERM` shutdown butchr traps) stops the supervisor too, so quitting
+still quits for good. Tune it with:
+
+| var | default | description |
+|-----|---------|-------------|
+| `BUTCHR_RESTART_DELAY` | `2` | seconds to wait before a restart |
+| `BUTCHR_MAX_RESTARTS` | `10` | give up after this many crashes within the window (`0` = never give up) |
+| `BUTCHR_CRASH_WINDOW` | `60` | crash-loop detection window, in seconds |
+
+Auto-restart is **safe** because butchr re-adopts its state on boot: it re-queues
+any task left `running` and finalizes any left `finalizing` from the prior run
+(see `src/index.ts`), so a restart resumes work instead of orphaning it. To make
+restarts crisp, any error that escapes to the top level is logged and exits the
+process non-zero (so the supervisor relaunches a fresh, healthy server rather
+than letting a half-broken one limp along).
+
+#### Run it as a systemd user service
+
+To start butchr on login and keep it supervised by systemd instead, drop a unit
+at `~/.config/systemd/user/butchr.service`:
+
+```ini
+[Unit]
+Description=butchr agent task harness
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/path/to/butchr
+ExecStart=%h/.bun/bin/bun run src/index.ts
+Restart=on-failure
+RestartSec=2
+# Add any BUTCHR_* overrides here, e.g.:
+# Environment=BUTCHR_PORT=47800
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now butchr
+journalctl --user -u butchr -f      # follow logs
+```
+
+`Restart=on-failure` mirrors the script's policy (restart on crash, stay down on
+a clean stop). Use either the script **or** the systemd unit — not both.
+
 ## Configuration (environment variables)
 
 | var | default | description |
