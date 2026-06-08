@@ -6,6 +6,7 @@
   "module": "src/index.ts",
   "scripts": {
     "start": "bun run src/index.ts",
+    "start:supervised": "bash scripts/supervise.sh",
     "dev": "bun --watch run src/index.ts"
   },
   "engines": {

@@ -483,14 +483,18 @@ function spawnWatcher(
         /* best effort */
       }
     }
-    let reason = "the agent ended without calling request_review";
+    let reason = "the agent exited unexpectedly without calling request_review";
     if (timedOut) {
       reason = "the agent did not finish within the timeout";
     } else if (existsSync(doneFile)) {
       const code = readFileSync(doneFile, "utf8").trim();
-      if (code && code !== "0") reason = `the agent exited with code ${code}`;
+      reason =
+        code && code !== "0"
+          ? `the agent exited unexpectedly with code ${code} without calling request_review`
+          : "the agent process exited unexpectedly without calling request_review";
     } else if (vanished) {
-      reason = "the agent pane/process ended without calling request_review";
+      reason =
+        "the agent exited unexpectedly (its herdr pane/process is gone) without calling request_review";
     }
     snapshot =
       `[butchr] moved to review automatically: ${reason}. ` +
