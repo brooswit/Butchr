@@ -111,16 +111,25 @@ function parseConflictFiles(output: string): string[] {
 }
 
 /**
- * Commit any uncommitted worktree changes, then fast-forward-merge the task
- * branch into the default branch. On conflict, returns conflict=true (and the
- * conflicting file paths) so the caller can kick the task back to the agent.
- * The half-applied merge is always aborted so the working tree is left CLEAN.
+ * Commit any uncommitted worktree changes, then REBASE the task branch onto the
+ * current tip of the default branch and fast-forward the default branch to it.
+ *
+ * Rebase (rather than a merge commit) keeps history linear and, crucially, makes
+ * the result deterministic when approvals land close together: callers serialize
+ * this through a single merge queue (see src/tasks.ts), so each task rebases onto
+ * the up-to-date base tip left by the previous merge and then fast-forwards — no
+ * racing merges into a moving default branch, no surprise merge commits.
+ *
+ * On a clean rebase: ff the base to the (now linear) task branch → ok=true.
+ * On a rebase conflict: abort the rebase (task branch + worktree left UNCHANGED,
+ * base UNTOUCHED) and return conflict=true with the conflicting file paths so the
+ * caller can kick the task back to the agent to resolve and re-submit.
  */
 export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   const base = await defaultBranch(dir);
   const wt = join(dir, taskId);
 
-  // Auto-commit any dangling worktree changes so they're part of the merge.
+  // Auto-commit any dangling worktree changes so they're part of the rebase.
   if (existsSync(wt)) {
     const st = await run([git, "-C", wt, "status", "--porcelain"]);
     if (st.ok && st.stdout.trim().length > 0) {
@@ -131,30 +140,47 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
     }
   }
 
-  // Try fast-forward first, then a regular merge as fallback.
-  let m = await run([git, "-C", dir, "merge", "--ff-only", taskId]);
-  if (!m.ok) {
-    m = await run([
-      git, "-C", dir, "merge", "--no-edit", taskId,
+  // Rebase the task branch onto the current base tip. Run it in the worktree
+  // where the task branch is checked out (the base stays checked out at `dir`).
+  const rebaseDir = existsSync(wt) ? wt : dir;
+  const rb = await run([git, "-C", rebaseDir, "rebase", base]);
+  if (!rb.ok) {
+    // Conflict (or other rebase failure). Collect the unmerged files before we
+    // abort — `--diff-filter=U` is more reliable than scraping git's text.
+    const unmerged = await run([
+      git, "-C", rebaseDir, "diff", "--name-only", "--diff-filter=U",
     ]);
-  }
-  if (m.ok) {
-    return { ok: true, conflict: false, message: m.stdout.trim(), conflictFiles: [] };
+    let conflictFiles = unmerged.ok
+      ? unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+      : [];
+    if (conflictFiles.length === 0) {
+      conflictFiles = parseConflictFiles(rb.stdout + "\n" + rb.stderr);
+    }
+    // Abort so the task branch + worktree are left CLEAN and the base UNTOUCHED.
+    // The agent (or a fresh one) integrates base and re-submits.
+    await run([git, "-C", rebaseDir, "rebase", "--abort"]);
+    const combined = rb.stdout + "\n" + rb.stderr;
+    const conflict = /conflict/i.test(combined) || conflictFiles.length > 0;
+    return {
+      ok: false,
+      conflict,
+      message: (rb.stderr || rb.stdout).trim() || `rebase onto ${base} failed`,
+      conflictFiles,
+    };
   }
 
-  const combined = m.stdout + "\n" + m.stderr;
-  const conflict = /conflict/i.test(combined);
-  const conflictFiles = conflict ? parseConflictFiles(combined) : [];
-  if (conflict) {
-    // Abort the half-applied merge so the working tree + index are left CLEAN.
-    // The agent (or a fresh one) resolves in its worktree and re-submits.
-    await run([git, "-C", dir, "merge", "--abort"]);
+  // Clean rebase — the task branch is now linear atop base. Fast-forward base to
+  // it (no merge commit). This cannot conflict; it can only fail if base moved
+  // between the rebase and here (callers serialize merges to prevent that).
+  const ff = await run([git, "-C", dir, "merge", "--ff-only", taskId]);
+  if (ff.ok) {
+    return { ok: true, conflict: false, message: ff.stdout.trim(), conflictFiles: [] };
   }
   return {
     ok: false,
-    conflict,
-    message: (m.stderr || m.stdout).trim() || `merge into ${base} failed`,
-    conflictFiles,
+    conflict: false,
+    message: (ff.stderr || ff.stdout).trim() || `fast-forward into ${base} failed`,
+    conflictFiles: [],
   };
 }
 
