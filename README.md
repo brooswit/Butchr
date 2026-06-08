@@ -43,6 +43,7 @@ MCP tool — see [Agent-driven review (MCP)](#agent-driven-review-mcp).
 |----------|---------|
 | queued   | worktree exists, `task.md` written, waiting for the dispatcher |
 | running  | interactive agent executing inside the worktree |
+| idle     | a *running* task whose agent has gone quiet — alive in its CLI but no output for `BUTCHR_IDLE_MS` (waiting on input, blocked, or just thinking). Not a separate lifecycle stage: it's a flag on `running` that clears the instant output resumes |
 | review   | agent called `request_review` (it stays alive, blocked on the tool), awaiting human approval |
 | merged   | approved → pane closed (agent killed), branch merged to the default branch, worktree + branch removed |
 | aborted  | abandoned from any non-terminal state → agent stopped (if running), worktree + branch discarded, **nothing merged** |
@@ -113,6 +114,7 @@ Then open the webapp at **http://127.0.0.1:47800**.
 | `BUTCHR_MAX_CONCURRENT` | `0` | cap on simultaneously running tasks across all directories; `0` = unlimited |
 | `BUTCHR_AGENT_CMD` | `claude --dangerously-skip-permissions --mcp-config {{MCP_CONFIG}} "$(cat {{PROMPT_FILE}})"` | command run in the worktree to execute the agent (interactive). `{{PROMPT_FILE}}` → rendered prompt path; `{{MCP_CONFIG}}` → per-task MCP config path |
 | `BUTCHR_AGENT_TIMEOUT_MS` | `3600000` | fallback ceiling: if an agent never calls `request_review`, it's swept to `review` after this long |
+| `BUTCHR_IDLE_MS` | `60000` | how long a running agent's CLI can go without output before the task is flagged `idle`; `0` disables idle detection |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command |
 
 The agent command runs via `bash -lc` with the **worktree as cwd**. Override

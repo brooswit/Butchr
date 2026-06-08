@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- queued | running | review | merged | aborted
+  status          TEXT NOT NULL,            -- queued | running | review | finalizing | merged | aborted
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -54,6 +54,12 @@ function ensureColumn(table: string, column: string, decl: string): void {
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
 
+// `idle` flags a running task whose agent has gone quiet (no recent CLI output).
+// It is orthogonal to `status` — only ever set while status='running' — much
+// like `conflict` is orthogonal to status='review'. The dispatcher watcher owns
+// it and clears it as soon as output resumes or the task leaves `running`.
+ensureColumn("tasks", "idle", "INTEGER NOT NULL DEFAULT 0");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -67,6 +73,7 @@ export type TaskStatus =
   | "queued"
   | "running"
   | "review"
+  | "finalizing"
   | "merged"
   | "rejected"
   | "aborted";
@@ -78,6 +85,7 @@ export type TaskRow = {
   herdr_pane_id: string | null;
   output_snapshot: string | null;
   conflict: number;
+  idle: number;
   review_note: string | null;
   summary: string | null;
   created_at: string;
@@ -95,7 +103,7 @@ export function nowIso(): string {
 export function recoverRunningTasks(): number {
   const res = db
     .query(
-      `UPDATE tasks SET status='queued', herdr_pane_id=NULL WHERE status='running'`,
+      `UPDATE tasks SET status='queued', herdr_pane_id=NULL, idle=0 WHERE status='running'`,
     )
     .run();
   return res.changes;

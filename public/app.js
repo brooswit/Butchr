@@ -37,6 +37,16 @@ function fmtTime(iso) {
 function chip(status) {
   return `<span class="chip ${esc(status)}">${esc(status)}</span>`;
 }
+// `idle` is a flag on a running task (agent alive but its CLI has gone quiet),
+// not a real lifecycle status. Render it as its own chip in place of "running".
+function effStatus(t) {
+  return t.status === "running" && t.idle ? "idle" : t.status;
+}
+// The agent is live (attachable) in running/idle and during finalizing (it stays
+// up doing its post-merge wrap-up until butchr closes it on idle).
+function isLive(t) {
+  return t.status === "running" || t.status === "finalizing";
+}
 
 async function api(method, path, body) {
   const res = await fetch("/api" + path, {
@@ -259,10 +269,12 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "running", "review", "merged", "aborted"]
+  const pills = ["queued", "running", "idle", "review", "finalizing", "merged", "aborted"]
     .map((s) => {
       const cls = s === "running" && c[s] ? "count-pill has-running"
-        : s === "review" && c[s] ? "count-pill has-review" : "count-pill";
+        : s === "idle" && c[s] ? "count-pill has-idle"
+        : s === "review" && c[s] ? "count-pill has-review"
+        : s === "finalizing" && c[s] ? "count-pill has-finalizing" : "count-pill";
       return `<span class="${cls}">${s} <b>${c[s] || 0}</b></span>`;
     }).join("");
   const card = el("div", { class: "card" });
@@ -340,10 +352,15 @@ async function renderDirectory(id) {
 
 function queueLine(tasks) {
   const q = tasks.filter((t) => t.status === "queued").length;
-  const r = tasks.filter((t) => t.status === "running").length;
-  if (r) return `${r} running, ${q} queued.`;
-  if (q) return `${q} queued.`;
-  return "Idle.";
+  const r = tasks.filter((t) => t.status === "running" && !t.idle).length;
+  const i = tasks.filter((t) => t.status === "running" && t.idle).length;
+  const f = tasks.filter((t) => t.status === "finalizing").length;
+  const parts = [];
+  if (r) parts.push(`${r} running`);
+  if (i) parts.push(`${i} idle`);
+  if (f) parts.push(`${f} finalizing`);
+  if (q) parts.push(`${q} queued`);
+  return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
 function tasksTable(tasks) {
@@ -355,11 +372,11 @@ function tasksTable(tasks) {
   for (const t of tasks) {
     const tr = el("tr");
     const action = t.status === "review" ? "review →" : "open →";
-    const termLink = t.status === "running"
+    const termLink = isLive(t)
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
       <td class="id">${esc(t.id)}</td>
-      <td>${chip(t.status)}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
+      <td>${chip(effStatus(t))}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
     const tl = tr.querySelector(".term-link");
@@ -382,14 +399,15 @@ async function renderTask(id) {
     html: `<a href="#/">Directories</a> / <a href="#/dir/${esc(t.directory_id)}">${esc(dir ? (dir.label || dir.path) : t.directory_id)}</a> / ${esc(t.id)}`,
   }));
   const headerRight = el("div", { class: "row", style: "gap:10px" });
-  if (t.status === "running") {
+  if (isLive(t)) {
     const term = el("button", { class: "btn ghost" }, "⌗ Open terminal");
     term.addEventListener("click", () => openTaskTerminal(t.id, term));
     headerRight.appendChild(term);
   }
-  headerRight.appendChild(el("div", { html: chip(t.status) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }));
-  // Abort is available from any non-terminal state (queued/running/review).
-  const canAbort = !["merged", "aborted"].includes(t.status);
+  headerRight.appendChild(el("div", { html: chip(effStatus(t)) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }));
+  // Abort is available from any non-terminal state EXCEPT finalizing, whose merge
+  // already landed in main (it auto-completes to merged).
+  const canAbort = !["merged", "aborted", "finalizing"].includes(t.status);
   if (canAbort) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
@@ -402,7 +420,7 @@ async function renderTask(id) {
   // metadata
   const meta = el("div", { class: "panel" });
   meta.innerHTML = `<div class="meta-grid">
-    <div class="k">status</div><div class="v">${esc(t.status)}</div>
+    <div class="k">status</div><div class="v">${esc(effStatus(t))}</div>
     <div class="k">created</div><div class="v">${esc(t.created_at || "—")}</div>
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
@@ -426,9 +444,10 @@ async function renderTask(id) {
     wrap.appendChild(el("pre", { class: "block", html: esc(t.summary) }));
   }
 
-  // output snapshot
+  // output snapshot — on a merged task this is the agent's post-merge wrap-up
+  // captured during the finalizing phase; otherwise the rescue snapshot.
   if (t.output_snapshot) {
-    wrap.appendChild(el("h2", {}, "Agent output (snapshot)"));
+    wrap.appendChild(el("h2", {}, t.status === "merged" ? "Agent wrap-up" : "Agent output (snapshot)"));
     wrap.appendChild(el("pre", { class: "block", html: esc(t.output_snapshot) }));
   }
 
@@ -478,7 +497,7 @@ async function renderTask(id) {
       ev.target.disabled = true;
       try {
         await api("POST", "/tasks/" + id + "/approve");
-        toast("merged ✓");
+        toast("approved ✓ — merged, agent wrapping up");
         backToDirectory(t.directory_id);
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });

@@ -18,6 +18,7 @@
   --accent: #425eff;   /* blue-500 (interactive primary) */
   --accent-2: #3144d9; /* blue-600 (interactive text / hover) */
 
+<<<<<<< HEAD
   /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible */
   --queued: #6c727a;   /* gray-500 (neutral) */
   --running: #425eff;  /* blue-500 */
@@ -25,6 +26,16 @@
   --merged: #006933;   /* green-600 (success) */
   --rejected: #b6073c; /* red-600 (error) */
   --aborted: #545a62;  /* gray-600 (neutral) */
+=======
+  --queued: #7b8fa1;
+  --running: #2563eb;
+  --idle: #0891b2;
+  --review: #d97706;
+  --finalizing: #6366f1;
+  --merged: #16a34a;
+  --rejected: #dc2626;
+  --aborted: #6b7280;
+>>>>>>> main
 
   /* diff add/del — themeable so they read on both light and dark surfaces */
   --diff-add-text: #006933;
@@ -160,7 +171,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .chip.queued { background: var(--queued); }
 .chip.running { background: var(--running); }
+.chip.idle { background: var(--idle); }
 .chip.review { background: var(--review); }
+.chip.finalizing { background: var(--finalizing); }
 .chip.merged { background: var(--merged); }
 .chip.rejected { background: var(--rejected); }
 .chip.aborted { background: var(--aborted); }
@@ -173,7 +186,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .count-pill b { color: var(--text); }
 .count-pill.has-running { border-color: var(--running); color: var(--running); }
+.count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
 .count-pill.has-review { border-color: var(--review); color: var(--review); }
+.count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
 
 /* tasks table */
 .tasks { width: 100%; border-collapse: collapse; margin-top: 8px; }
