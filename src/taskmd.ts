@@ -40,6 +40,10 @@ const REVIEW_PROTOCOL = [
   "  Address them and call `request_review` again.",
   "- On approval, your session simply ends.",
   "",
+  "If anything about the requirements, conventions, or a design judgment call is",
+  "ambiguous, use the **butchr** MCP server's `ask` tool to put a clarifying",
+  "question to the CTO and get an answer — prefer asking over guessing.",
+  "",
   "Do not stop or exit before calling `request_review`. You do NOT need to commit",
   "or clean up — butchr captures your worktree changes automatically on approval.",
 ].join("\n");

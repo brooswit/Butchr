@@ -12,6 +12,9 @@
 // The one tool, `request_review`, BLOCKS: its tools/call awaits a promise from
 // review.ts until the human approves / rejects / aborts. Blocking is free
 // token-wise — the agent is parked waiting on a tool result.
+import { join } from "node:path";
+import { askCto } from "./cto.ts";
+import { getDirectory } from "./directories.ts";
 import { registerReview } from "./review.ts";
 import { getTask, markReviewFromAgent } from "./tasks.ts";
 
@@ -29,6 +32,26 @@ const REQUEST_REVIEW_TOOL = {
         description: "Optional short summary of what was done.",
       },
     },
+    additionalProperties: false,
+  },
+} as const;
+
+const ASK_TOOL = {
+  name: "ask",
+  description:
+    "Ask the CTO a clarifying question about this task — requirements, " +
+    "conventions, design judgment calls. Returns the CTO's answer. Read-only: " +
+    "the CTO cannot change files. Prefer asking over guessing when something is " +
+    "ambiguous.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      question: {
+        type: "string",
+        description: "The clarifying question to put to the CTO.",
+      },
+    },
+    required: ["question"],
     additionalProperties: false,
   },
 } as const;
@@ -62,6 +85,15 @@ function toolResult(payload: unknown): { content: unknown[]; isError: boolean } 
     content: [{ type: "text", text: JSON.stringify(payload) }],
     isError: false,
   };
+}
+
+// A plain-text tool result. `isError` flags a tool-level failure (the call still
+// succeeds at the JSON-RPC layer — the agent sees the message and can react).
+function textResult(
+  text: string,
+  isError = false,
+): { content: unknown[]; isError: boolean } {
+  return { content: [{ type: "text", text }], isError };
 }
 
 /**
@@ -110,7 +142,7 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
       return rpcResult(msg.id, {});
 
     case "tools/list":
-      return rpcResult(msg.id, { tools: [REQUEST_REVIEW_TOOL] });
+      return rpcResult(msg.id, { tools: [REQUEST_REVIEW_TOOL, ASK_TOOL] });
 
     case "tools/call":
       return handleToolCall(req, taskId, msg);
@@ -130,6 +162,7 @@ async function handleToolCall(
   msg: JsonRpcMessage,
 ): Promise<Response> {
   const name = msg.params?.name;
+  if (name === "ask") return handleAsk(taskId, msg);
   if (name !== "request_review") {
     return rpcError(msg.id, -32602, `unknown tool: ${name}`);
   }
@@ -170,4 +203,44 @@ async function handleToolCall(
   // approved / aborted / superseded: the socket is usually already dead; return
   // the decision in case it isn't.
   return rpcResult(msg.id, toolResult({ decision: verdict.decision }));
+}
+
+/**
+ * Handle an `ask` tool call: run the CTO Claude (forked, headless, read-only) in
+ * the asking task's worktree and return its answer. Any failure becomes an
+ * `isError` tool result — it never crashes the MCP server or the asking task.
+ */
+async function handleAsk(taskId: string, msg: JsonRpcMessage): Promise<Response> {
+  const question: unknown = msg.params?.arguments?.question;
+  if (typeof question !== "string" || !question.trim()) {
+    return rpcResult(
+      msg.id,
+      textResult("`ask` requires a non-empty `question` string.", true),
+    );
+  }
+
+  // Resolve the task's worktree so the CTO can READ the code under discussion.
+  const task = getTask(taskId)!; // handleMcp already verified the task exists.
+  const dir = getDirectory(task.directory_id);
+  if (!dir) {
+    return rpcResult(
+      msg.id,
+      textResult("Could not locate this task's directory to consult the CTO.", true),
+    );
+  }
+  const cwd = join(dir.path, taskId);
+
+  try {
+    const answer = await askCto(question, { cwd, taskId });
+    // askCto returns a human-readable error string on timeout/failure; treat a
+    // leading "CTO did not respond"/"could not"/"Failed" as a tool error so the
+    // agent knows the answer is not authoritative. Plain answers pass through.
+    const failed = /^(CTO (did not respond|could not)|Failed to consult|The CTO returned an empty)/.test(
+      answer,
+    );
+    return rpcResult(msg.id, textResult(answer, failed));
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return rpcResult(msg.id, textResult(`Failed to consult the CTO: ${detail}`, true));
+  }
 }

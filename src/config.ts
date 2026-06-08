@@ -73,6 +73,43 @@ export const config = {
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),
 
   /**
+   * Command run (via `bash -lc`, cwd = the asking task's worktree) to answer an
+   * engineer-agent's `ask` question in the CTO's voice. See src/cto.ts. The
+   * `{{QUESTION_FILE}}` placeholder is replaced with a temp file holding the
+   * question (avoids shell-escaping); `{{CTO_SESSION}}` with the resume flag.
+   *
+   * This MUST be READ-ONLY and MUST NOT recurse:
+   *  - `-p` runs headless and prints the answer to stdout, then exits.
+   *  - `--permission-mode dontAsk` resolves every tool request WITHOUT prompting
+   *    (in `-p` there is no human to prompt, so any other mode hangs the moment
+   *    the CTO touches a tool). Combined with the read-only allowlist below it
+   *    auto-DENIES anything not listed.
+   *  - `--allowedTools "Read Grep Glob"` grants only non-mutating tools. Write,
+   *    Edit, NotebookEdit and Bash are absent → denied → the CTO cannot change
+   *    files (verified: it refuses and creates nothing).
+   *  - `{{CTO_SESSION}}` expands to `--resume <id> --fork-session` when
+   *    `ctoSessionId` is set (forks the CTO session into a throwaway so the real
+   *    one isn't mutated), or to nothing for a fresh read-only session.
+   *  - NO `--mcp-config` and NO `--dangerously-skip-permissions`: the CTO can't
+   *    reach butchr's own tools (`ask`/`request_review`), so there's no recursion.
+   */
+  ctoCmd: env(
+    "BUTCHR_CTO_CMD",
+    "claude -p {{CTO_SESSION}} --permission-mode dontAsk " +
+      '--allowedTools "Read Grep Glob" -- "$(cat {{QUESTION_FILE}})"',
+  ),
+
+  /**
+   * Optional CTO session id to resume+fork so the CTO inherits prior context.
+   * When set, `{{CTO_SESSION}}` in ctoCmd resolves to `--resume <id>`; when empty
+   * it resolves to nothing and the CTO runs fresh.
+   */
+  ctoSessionId: env("BUTCHR_CTO_SESSION_ID", ""),
+
+  /** Max time (ms) to wait for a CTO `ask` answer before killing it. */
+  askTimeoutMs: envInt("BUTCHR_ASK_TIMEOUT_MS", 120000),
+
+  /**
    * How long (ms) a running agent's log can go with no new output before the
    * task is flagged `idle` — claude is alive but nothing is happening in its
    * interactive CLI (waiting on input, blocked, or just quiet). The watcher
