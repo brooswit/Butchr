@@ -1,6 +1,11 @@
-// The dispatcher loop. On each tick it finds every queued task, dispatches each
-// to herdr immediately, and spawns a watcher that blocks until the agent
-// finishes and then moves the task to review.
+// The dispatcher loop. On each tick it finds every queued task and dispatches it
+// to herdr immediately. A fresh task launches a new Claude session (butchr assigns
+// `--session-id <uuid>`); a rejected task (which already has a session id)
+// re-launches that SAME session via `--resume` so the agent reworks with full
+// prior context. Each dispatch spawns a watcher whose only job is to rescue an
+// agent that ENDS without submitting (the normal path is the agent calling the
+// non-blocking request_review MCP tool, which moves the task to `review` in the
+// DB and lets the agent exit — no live process is held waiting for a human).
 //
 // Concurrency model: fully concurrent. Every queued task runs as soon as it is
 // seen — there is no per-directory "one at a time" limit. Worktree isolation
@@ -15,8 +20,8 @@ import { db } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
-import { readTaskMd, renderAgentPrompt } from "./taskmd.ts";
-import { adoptPane, backToQueued, finalizeTask, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
+import { readTaskMd, renderAgentPrompt, renderReworkPrompt } from "./taskmd.ts";
+import { adoptPane, backToQueued, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -52,7 +57,6 @@ function sanitizeTypescript(raw: string): string {
 
 const dispatching = new Set<string>(); // task ids mid-dispatch
 const watching = new Set<string>(); // task ids with an active watcher
-const finalizing = new Set<string>(); // task ids with an active finalize-watcher
 // Task ids whose watcher has been told to bail WITHOUT moving the task to
 // review — set by abortTask, consumed (and cleared) by the watcher.
 const abortSignals = new Set<string>();
@@ -75,8 +79,8 @@ function runLogPath(taskId: string): string {
 
 /**
  * Read and sanitize a task's run log into a human-readable snapshot. Used by the
- * task service to capture the agent's post-merge wrap-up when finalizing. Returns
- * "" if the log is missing or unreadable.
+ * task service to capture the agent's terminal output when it submits for review
+ * and again when its branch merges. Returns "" if the log is missing/unreadable.
  */
 export function readRunLogSnapshot(taskId: string): string {
   const logFile = runLogPath(taskId);
@@ -309,10 +313,21 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // Ensure the worktree exists (idempotent — handles rejected re-runs).
     const worktree = await git.createWorktree(dir.path, task.id);
 
-    // Render the full prompt (context files + prompt + prior review notes) to a
-    // file in butchr's own data dir, so we never pollute the repo worktree.
+    // First launch vs. rework re-launch is decided by whether the task already
+    // has a Claude session id. A fresh task gets a butchr-generated UUID assigned
+    // via `--session-id`; a rejected task (session_id already set) is RESUMED via
+    // `--resume <id>` so the agent re-enters with full prior context.
+    const isResume = !!task.session_id;
+    const sessionId = task.session_id ?? crypto.randomUUID();
+
+    // Render the prompt to a file in butchr's own data dir (never pollute the repo
+    // worktree). First launch → the full prompt (context files + prompt). Resume →
+    // a focused rework prompt (just the review notes): the resumed session already
+    // holds the original prompt and prior work in its context.
     const doc = readTaskMd(dir.path, task.id);
-    const rendered = renderAgentPrompt(dir.path, doc);
+    const rendered = isResume
+      ? renderReworkPrompt(dir.path, doc)
+      : renderAgentPrompt(dir.path, doc);
     const promptFile = join(promptsDir, `${task.id}.md`);
     writeFileSync(promptFile, rendered, "utf8");
 
@@ -331,17 +346,19 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       "utf8",
     );
 
-    const agentCmd = config.agentCmd
+    const agentCmd = (isResume ? config.resumeCmd : config.agentCmd)
       .replaceAll("{{PROMPT_FILE}}", promptFile)
-      .replaceAll("{{MCP_CONFIG}}", mcpConfigFile);
+      .replaceAll("{{MCP_CONFIG}}", mcpConfigFile)
+      .replaceAll("{{SESSION_ID}}", sessionId);
 
-    // The agent is interactive and long-lived: it signals completion by calling
-    // the request_review MCP tool, NOT by exiting. We must keep its stdout/stdin
-    // attached to a TTY so its full-screen interface actually renders in the
-    // herdr pane — piping through `tee` would make stdout a pipe, so the agent
-    // detects "not a terminal" and never draws its interactive UI. Instead we run
-    // it under `script`, which allocates a pseudo-terminal for the agent (TTY
-    // preserved → UI renders + input works) while logging everything to a file.
+    // The agent is interactive: it signals completion by calling the
+    // request_review MCP tool (which returns immediately) and then EXITS. We must
+    // keep its stdout/stdin attached to a TTY so its full-screen interface
+    // actually renders in the herdr pane — piping through `tee` would make stdout
+    // a pipe, so the agent detects "not a terminal" and never draws its
+    // interactive UI. Instead we run it under `script`, which allocates a
+    // pseudo-terminal for the agent (TTY preserved → UI renders + input works)
+    // while logging everything to a file.
     //   -q quiet, -f flush after each write (live log), -e exit with the child's
     //   code, --log-out captures the typescript. SHELL=/bin/bash forces `-c` to
     //   use bash (the user's login shell may be fish, which can't parse the
@@ -364,7 +381,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       workspaceId ?? undefined,
     );
 
-    markRunning(task.id, started.paneId);
+    markRunning(task.id, started.paneId, sessionId);
     spawnWatcher(dir, task.id, started.paneId, logFile, doneFile);
   } catch (e) {
     // Dispatch failed — leave it queued so the next tick retries.
@@ -432,25 +449,23 @@ function spawnWatcher(
     const deadline = Date.now() + config.agentTimeoutMs;
     let timedOut = false;
     let vanished = false;
-    // The agent is interactive: it submits by calling request_review (which moves
-    // the task to `review` while the process stays ALIVE and blocked). So we do
-    // NOT treat process exit as completion. We only watch for the agent ENDING —
-    // process exited (`.done`) or its herdr pane vanished — so we can rescue a
-    // task that would otherwise be stuck in `running`. `seenAlive` guards against
-    // a false "vanished" during the brief agent-registration lag at startup.
+    // The agent submits by calling request_review (which moves the task to
+    // `review`) and then EXITS. The watcher's job is only to catch an agent that
+    // ENDS while still `running` — i.e. it exited/crashed WITHOUT submitting — so
+    // we can rescue the task instead of leaving it stuck. `seenAlive` guards
+    // against a false "vanished" during the brief agent-registration lag at
+    // startup.
     let seenAlive = false;
     while (true) {
       if (abortSignals.has(taskId)) break;
-      // Release our slot the moment the task leaves a state the watcher owns —
-      // even if the agent is still alive. We keep watching through `running`
-      // (agent working) and `review` (agent alive but blocked in request_review,
-      // possibly to be sent back to running on reject). If status becomes
-      // queued/merged/aborted — or the row vanishes — the agent has already been
-      // reclaimed elsewhere (a re-queue that closed the pane, an approve, an
-      // abort), so stop looping; otherwise we'd hold the `watching` slot forever
-      // and tick() would skip the task, leaving it permanently stuck.
+      // Release our slot the moment the task leaves `running`. Once it reaches
+      // `review` the agent has submitted (and is exiting) — there is nothing left
+      // to rescue. Any other state (queued after a reject, merged, aborted, or a
+      // vanished row) likewise means the task has been reclaimed elsewhere, so we
+      // stop looping; otherwise we'd hold the `watching` slot forever and tick()
+      // would skip the task, including blocking a reject's resume re-dispatch.
       const cur = getTask(taskId)?.status;
-      if (cur !== "running" && cur !== "review") break;
+      if (cur !== "running") break;
       if (existsSync(doneFile)) break; // process exited
       if (Date.now() > deadline) {
         timedOut = true;
@@ -462,9 +477,8 @@ function spawnWatcher(
         vanished = true;
         break;
       }
-      // While the agent is alive, surface whether its CLI has gone quiet. (Once
-      // it submits via request_review the task leaves `running`, and setIdle's
-      // status guard makes this a no-op until the pane finally closes.)
+      // While the agent is alive and working, surface whether its CLI has gone
+      // quiet (no recent log output) for the UI's idle indicator.
       refreshIdle(taskId, logFile);
       await sleep(1000);
     }
@@ -478,10 +492,9 @@ function spawnWatcher(
       return;
     }
 
-    // If the agent already submitted (status is `review`) or the human acted on
-    // it (merged/aborted), there is nothing to rescue — the request_review path
-    // owns the transition and keeps the session alive. Only a task still sitting
-    // in `running` here means the agent ended WITHOUT submitting.
+    // If the agent already submitted (status is `review`) or the task moved on
+    // (queued/merged/aborted), there is nothing to rescue. Only a task still
+    // sitting in `running` here means the agent ended WITHOUT submitting.
     const status = getTask(taskId)?.status;
     if (status !== "running") {
       watching.delete(taskId);
@@ -530,81 +543,5 @@ function spawnWatcher(
     markReview(taskId, snapshot);
     watching.delete(taskId);
     console.log(`[butchr] task ${taskId} → review (${reason})`);
-  })();
-}
-
-/**
- * Watch a `finalizing` task and complete it (→ merged) once the post-merge agent
- * is done wrapping up. Spawned by approveTask after a successful merge. The branch
- * is already in main; we just wait for the agent to go quiet and then hand off to
- * finalizeTask (which closes the pane, captures the wrap-up, and cleans up).
- *
- * Triggers finalize on ANY of:
- *   - the agent's run log goes quiet for `idleMs`. The idle clock starts at the
- *     agent's last log write, or at the moment we began watching if that write
- *     predates the approve (so a log left stale while the agent was blocked in
- *     request_review still gets a full idleMs grace window before finalizing,
- *     yet an agent that was already idle and never writes a wrap-up still
- *     finalizes instead of hanging until the pane vanishes / timeout);
- *   - the agent's pane/process ends (doneFile written or herdr pane vanished);
- *   - `finalizeTimeoutMs` elapses (hard cap on a chatty agent).
- */
-export function startFinalizeWatcher(taskId: string): void {
-  if (finalizing.has(taskId)) return;
-  finalizing.add(taskId);
-  const logFile = runLogPath(taskId);
-  const doneFile = join(runsDir, `${taskId}.done`);
-  (async () => {
-    const startedAt = Date.now();
-    const deadline = startedAt + config.finalizeTimeoutMs;
-    let seenAlive = false;
-    let reason = "the agent went idle";
-    while (true) {
-      // If the task left `finalizing` under us (e.g. recovery already merged it),
-      // there is nothing to do.
-      if (getTask(taskId)?.status !== "finalizing") {
-        finalizing.delete(taskId);
-        return;
-      }
-      if (existsSync(doneFile)) {
-        reason = "the agent finished and exited";
-        break;
-      }
-      if (Date.now() > deadline) {
-        reason = "the finalize timeout elapsed";
-        break;
-      }
-      const alive = await herdr.agentExists(taskId);
-      if (alive) seenAlive = true;
-      else if (seenAlive) {
-        reason = "the agent pane/process ended";
-        break;
-      }
-      // Idle trigger. The agent is "quiet since" its last log write — but if that
-      // write predates the approve (the log was left stale while the agent was
-      // blocked in request_review), we start the idle clock at startedAt instead.
-      // That gives an agent that's about to write its wrap-up a full idleMs grace
-      // window to wake up, while still finalizing an agent that was already idle
-      // and never writes anything post-approval (it would otherwise hang here
-      // until the pane vanished or the finalize timeout elapsed).
-      if (config.idleMs > 0) {
-        try {
-          const mtimeMs = statSync(logFile).mtimeMs;
-          const quietSince = Math.max(mtimeMs, startedAt);
-          if (Date.now() - quietSince > config.idleMs) {
-            reason = mtimeMs > startedAt ? "the agent went idle" : "the agent was already idle";
-            break;
-          }
-        } catch {
-          /* no log yet — keep waiting */
-        }
-      }
-      await sleep(1000);
-    }
-    finalizing.delete(taskId);
-    await finalizeTask(taskId).catch((e) => {
-      console.error(`[butchr] finalize failed for ${taskId}:`, (e as Error).message);
-    });
-    console.log(`[butchr] task ${taskId} → merged (${reason})`);
   })();
 }

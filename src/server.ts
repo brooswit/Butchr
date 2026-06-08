@@ -304,14 +304,14 @@ route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
 });
 
-// Open a GUI terminal attached to a task's live agent pane. The pane stays alive
-// in running / review / finalizing (the agent is blocked on the request_review
-// handshake or doing post-merge wrap-up), so attaching is useful in all of them.
+// Open a GUI terminal attached to a task's live agent pane. Only `running` tasks
+// have a live pane to attach to — the agent exits after the non-blocking
+// request_review, so `review` (and queued/merged/aborted) have no pane.
 route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   const t = getTask(p.id!);
   if (!t) throw new HttpError(404, "task not found");
-  // Gate on an actual live pane rather than a specific status — queued/merged/
-  // aborted have no pane (herdr_pane_id is NULL), so there's nothing to attach to.
+  // Gate on an actual live pane rather than a specific status — only a running
+  // agent has a pane (herdr_pane_id set); everything else has nothing to attach to.
   if (!t.herdr_pane_id) {
     throw new HttpError(409, `task has no live agent pane (status=${t.status})`);
   }

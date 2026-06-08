@@ -65,18 +65,24 @@ export const config = {
   maxConcurrent: envInt("BUTCHR_MAX_CONCURRENT", 0),
 
   /**
-   * Command template run inside a task's worktree to execute the agent.
-   * Placeholders, both replaced by the dispatcher:
+   * Command template run inside a task's worktree to execute the agent for its
+   * FIRST attempt. Placeholders, all replaced by the dispatcher:
    *  - `{{PROMPT_FILE}}` → absolute path to the rendered prompt file.
    *  - `{{MCP_CONFIG}}`  → absolute path to the per-task MCP config JSON that
    *    points the agent at butchr's `/mcp/<task-id>` endpoint.
+   *  - `{{SESSION_ID}}`  → a butchr-generated UUID assigned to the Claude Code
+   *    session via `--session-id`, so butchr already knows the id to `--resume`
+   *    later (see `resumeCmd`). Persisted on the task row.
    * It is run via `bash -lc`, in the worktree as cwd.
    *
    * Default: launch Claude Code INTERACTIVELY (no `-p`) with the prompt as the
-   * positional arg and the butchr MCP server wired in. The agent stays alive and
-   * attachable; it signals completion by calling the `request_review` MCP tool
-   * rather than by exiting. On reject the same live session is handed the notes
-   * (no re-run), which supersedes the old `--continue` resume mechanism.
+   * positional arg and the butchr MCP server wired in. The agent signals
+   * completion by calling the `request_review` MCP tool, which is now
+   * NON-BLOCKING: it records the review request in butchr's DB and returns
+   * immediately, after which the agent is expected to EXIT (its pane closes). The
+   * task then lives purely as DB state — no live process is held open waiting for
+   * a human, so nothing hangs and nothing is lost across a restart. On reject,
+   * butchr re-launches the SAME session with the notes via `resumeCmd`.
    * Override BUTCHR_AGENT_CMD to use a different agent.
    */
   agentCmd: env(
@@ -84,7 +90,24 @@ export const config = {
     // The `--` is REQUIRED: claude's `--mcp-config <configs...>` is variadic and
     // would otherwise swallow the positional prompt as a second config path.
     // `--` ends option parsing so the prompt is treated as the positional arg.
-    'claude --dangerously-skip-permissions --mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
+    "claude --dangerously-skip-permissions --session-id {{SESSION_ID}} " +
+      '--mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
+  ),
+
+  /**
+   * Command template run to RE-LAUNCH a rejected task's agent. Same placeholders
+   * as `agentCmd`, except `{{SESSION_ID}}` resolves to the id of the agent's
+   * EXISTING session, resumed via `--resume` so it re-enters with FULL prior
+   * context (the original prompt, its earlier work, and the review exchange). The
+   * rendered prompt here is just the reviewer's notes + a reminder to address them
+   * and call `request_review` again. This replaces the old "hand notes to a
+   * blocked live session" path with a durable suspend/resume model that survives
+   * the agent process or butchr itself restarting. Override BUTCHR_RESUME_CMD.
+   */
+  resumeCmd: env(
+    "BUTCHR_RESUME_CMD",
+    "claude --dangerously-skip-permissions --resume {{SESSION_ID}} " +
+      '--mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
   ),
 
   /** Max time (ms) a single watcher waits for the agent to finish. */
@@ -134,14 +157,6 @@ export const config = {
    * clears the flag the moment output resumes. `0` disables idle detection.
    */
   idleMs: envInt("BUTCHR_IDLE_MS", 1000 * 60),
-
-  /**
-   * Hard cap (ms) on the `finalizing` phase: after an approve merges the branch,
-   * the agent stays alive to do its post-merge wrap-up and the task auto-closes
-   * once it goes idle (`idleMs`) or exits. This bounds how long a chatty agent
-   * can keep a task in `finalizing` before butchr closes it regardless.
-   */
-  finalizeTimeoutMs: envInt("BUTCHR_FINALIZE_TIMEOUT_MS", 1000 * 120),
 
   /**
    * Optional override for opening a GUI terminal attached to a running task.

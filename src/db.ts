@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- queued | running | review | finalizing | merged | aborted
+  status          TEXT NOT NULL,            -- queued | running | review | merged | aborted
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -60,6 +60,14 @@ ensureColumn("tasks", "summary", "TEXT");
 // it and clears it as soon as output resumes or the task leaves `running`.
 ensureColumn("tasks", "idle", "INTEGER NOT NULL DEFAULT 0");
 
+// `session_id` is the Claude Code session UUID butchr assigns to the agent at
+// launch (`--session-id <uuid>`). It is what makes the review handshake durable:
+// once set, butchr can re-launch the SAME session with full prior context via
+// `claude --resume <session_id>` — used to hand a rejected task's notes back to
+// the agent without holding a live, blocking process open. Persisted so it
+// survives a butchr restart while a task waits in `review`.
+ensureColumn("tasks", "session_id", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -69,6 +77,10 @@ export type DirectoryRow = {
   created_at: string;
 };
 
+// `finalizing` is a legacy transient state from the old blocking-agent model. It
+// is no longer produced; the union keeps it only so startup migration can flush
+// any leftover `finalizing` rows from a pre-redesign database (see
+// recoverFinalizingTasks in tasks.ts).
 export type TaskStatus =
   | "queued"
   | "running"
@@ -83,6 +95,7 @@ export type TaskRow = {
   directory_id: string;
   status: TaskStatus;
   herdr_pane_id: string | null;
+  session_id: string | null;
   output_snapshot: string | null;
   conflict: number;
   idle: number;

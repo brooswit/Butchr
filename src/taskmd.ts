@@ -27,27 +27,32 @@ export type TaskDoc = {
 const REVIEW_BANNER = "<!-- appended by butchr on each rejection -->";
 
 // Appended to every rendered agent prompt: how to submit work for review via the
-// butchr MCP server. The handshake is what drives task completion now (the agent
-// runs interactively and does not exit on its own).
+// butchr MCP server. request_review is NON-BLOCKING — it records the request and
+// returns at once, after which the agent should EXIT. butchr owns the rest of the
+// lifecycle (merge on approve, resume-with-notes on reject).
 const REVIEW_PROTOCOL = [
   "# How to submit your work for review",
   "",
   "When you have completed ALL of the requested work, call the `request_review`",
-  "tool provided by the **butchr** MCP server. You may pass a short `summary` of",
-  "what you did. This call blocks until a human reviews your work:",
+  "tool provided by the **butchr** MCP server (optionally passing a short",
+  "`summary` of what you did).",
   "",
-  "- If changes are requested, the tool returns notes describing what to fix.",
-  "  Address them and call `request_review` again.",
-  "- On approval, the tool returns `{decision:'approved'}`. Give a brief final",
-  "  summary of what you did, then stop — butchr finalizes and closes the session",
-  "  once you go quiet.",
+  "This call returns IMMEDIATELY — it does NOT block waiting for a human. Once it",
+  "returns, your work has been recorded for review and you should STOP: end your",
+  "turn and exit. Do not keep the session open. butchr owns everything after this:",
+  "",
+  "- If the reviewer requests changes, butchr RE-LAUNCHES you in the same session",
+  "  with full prior context plus the reviewer's notes; address them and call",
+  "  `request_review` again.",
+  "- If the reviewer approves, butchr merges your branch automatically. Nothing",
+  "  further is required from you.",
   "",
   "If anything about the requirements, conventions, or a design judgment call is",
   "ambiguous, use the **butchr** MCP server's `ask` tool to put a clarifying",
   "question to the CTO and get an answer — prefer asking over guessing.",
   "",
-  "Do not stop or exit before calling `request_review`. You do NOT need to commit",
-  "or clean up — butchr captures your worktree changes automatically on approval.",
+  "You do NOT need to commit or clean up — butchr captures your worktree changes",
+  "automatically. After calling `request_review`, stop.",
 ].join("\n");
 
 /** Absolute path to a task's directory under .butchr/tasks/. */
@@ -235,6 +240,25 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
   parts.push(body);
   parts.push(REVIEW_PROTOCOL);
   return parts.join("\n\n---\n\n");
+}
+
+/**
+ * Build the prompt for a REJECTED task's re-launch. The agent is resumed via
+ * `claude --resume <session-id>`, so it already has the original prompt, its
+ * prior work, and the review exchange in context — we must NOT re-dump the
+ * context files or the full prompt (that's redundant and bloats the turn).
+ * Instead this is a focused message: the accumulated review notes plus a reminder
+ * to address them and submit again. Falls back to a generic instruction if no
+ * review notes are recorded (shouldn't happen, but keeps the agent unblocked).
+ */
+export function renderReworkPrompt(directoryRoot: string, doc: TaskDoc): string {
+  const notes = doc.reviewNotes.trim();
+  const body = notes
+    ? `Your previous submission was reviewed and changes were requested. Address ` +
+      `the following review notes, then call \`request_review\` again.\n\n${notes}`
+    : `Changes were requested on your previous submission. Review your work, ` +
+      `make the necessary fixes, then call \`request_review\` again.`;
+  return [`# Changes requested`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
 }
 
 /** Ensure a parent directory exists for a given file path. */

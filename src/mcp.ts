@@ -9,23 +9,26 @@
 // we answer with `application/json` (a valid Streamable-HTTP response — SSE
 // framing is unnecessary on loopback).
 //
-// The one tool, `request_review`, BLOCKS: its tools/call awaits a promise from
-// review.ts until the human approves / rejects / aborts. Blocking is free
-// token-wise — the agent is parked waiting on a tool result.
+// The one tool, `request_review`, is NON-BLOCKING: its tools/call records the
+// review request in butchr's DB (transitioning the task to `review`) and returns
+// immediately. The agent is then expected to EXIT — the task lives purely as DB
+// state with no live process. butchr owns the rest: it merges on approve, and on
+// reject it re-launches the SAME Claude session (`--resume <session-id>`) with the
+// notes. This is what makes review durable across an agent or butchr restart — an
+// MCP server cannot wake an idle Claude Code client, so we never park a call.
 import { join } from "node:path";
 import { askCto } from "./cto.ts";
 import { getDirectory } from "./directories.ts";
-import { registerReview } from "./review.ts";
 import { getTask, markReviewFromAgent } from "./tasks.ts";
 
 const REQUEST_REVIEW_TOOL = {
   name: "request_review",
   description:
-    "Call when the task's work is complete and ready for human review. Blocks " +
-    "until the reviewer responds. If changes are requested, returns the notes; " +
-    "address them and call this tool again. On approval the tool returns " +
-    "{decision:'approved'}; give a brief final summary of what you did, then stop " +
-    "— butchr finalizes and closes the session once you go quiet.",
+    "Call when the task's work is complete and ready for human review. Returns " +
+    "IMMEDIATELY (does not block): it records your work for review, after which " +
+    "you should stop and exit. If the reviewer requests changes, butchr re-launches " +
+    "you in the same session with their notes; address them and call this tool " +
+    "again. If the reviewer approves, butchr merges your branch automatically.",
   inputSchema: {
     type: "object",
     properties: {
@@ -147,7 +150,7 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
       return rpcResult(msg.id, { tools: [REQUEST_REVIEW_TOOL, ASK_TOOL] });
 
     case "tools/call":
-      return handleToolCall(req, taskId, msg);
+      return handleToolCall(taskId, msg);
 
     default:
       // Notifications (e.g. notifications/initialized) carry no id → ack with 202.
@@ -159,7 +162,6 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
 }
 
 async function handleToolCall(
-  req: Request,
   taskId: string,
   msg: JsonRpcMessage,
 ): Promise<Response> {
@@ -170,41 +172,27 @@ async function handleToolCall(
   }
   const summary: string | undefined = msg.params?.arguments?.summary;
 
-  // Move the task to `review` (keeps the pane — the agent stays alive). If the
-  // task is already terminal (merged/aborted out from under the agent), don't
-  // block; return its state so the call resolves.
+  // Record the review request and move the task to `review`, then RETURN AT ONCE
+  // (non-blocking). If the task is already terminal (merged/aborted out from under
+  // the agent), report that instead. The agent should exit after this call; butchr
+  // drives merge-on-approve / resume-on-reject entirely from DB state.
   const state = markReviewFromAgent(taskId, summary);
   if (state !== "ok") {
     return rpcResult(
       msg.id,
-      toolResult({ decision: getTask(taskId)?.status ?? "unknown" }),
+      toolResult({ status: getTask(taskId)?.status ?? "unknown" }),
     );
   }
-
-  // Park until the human acts. The connection-abort handler removes only this
-  // registration, so an approve/abort that closes the pane (dropping the socket)
-  // cleans up without leaking a pending entry.
-  const { promise, cancelThis } = registerReview(taskId);
-  req.signal?.addEventListener("abort", cancelThis);
-
-  let verdict;
-  try {
-    verdict = await promise;
-  } catch {
-    // Cancelled (approve/abort closed the pane) or the client disconnected. The
-    // agent is gone; nothing to send.
-    return new Response(null, { status: 204 });
-  }
-
-  if (verdict.decision === "changes_requested") {
-    return rpcResult(
-      msg.id,
-      toolResult({ decision: "changes_requested", notes: verdict.notes ?? "" }),
-    );
-  }
-  // approved / aborted / superseded: the socket is usually already dead; return
-  // the decision in case it isn't.
-  return rpcResult(msg.id, toolResult({ decision: verdict.decision }));
+  return rpcResult(
+    msg.id,
+    toolResult({
+      status: "submitted",
+      message:
+        "Your work has been submitted for human review. You can stop now — do " +
+        "not wait. If changes are requested, butchr will re-launch you with the " +
+        "reviewer's notes; if it is approved, butchr merges your branch.",
+    }),
+  );
 }
 
 /**
