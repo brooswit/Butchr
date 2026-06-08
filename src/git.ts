@@ -100,6 +100,25 @@ export type MergeResult = {
   conflictFiles: string[];
 };
 
+/**
+ * Scan the task worktree for committed git conflict markers an agent may have
+ * left behind. Returns the list of tracked text files (relative to the worktree)
+ * whose content contains a marker line (`<<<<<<<`, `=======`, `>>>>>>>`). Binary
+ * and untracked files are skipped. Used to refuse merging poisoned content into
+ * the base — see merge().
+ */
+async function findConflictMarkers(wt: string): Promise<string[]> {
+  // `git grep` over tracked content: -I skips binaries, -l lists matching files
+  // only, -E enables extended regex. A non-zero exit with no output just means
+  // "no matches", which we treat as clean.
+  const res = await run([
+    git, "-C", wt, "grep", "-I", "-l", "-E",
+    "^(<<<<<<<|=======|>>>>>>>)( |$)",
+  ]);
+  if (!res.ok || !res.stdout.trim()) return [];
+  return res.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
 /** Parse `CONFLICT (...): Merge conflict in <path>` lines from git output. */
 function parseConflictFiles(output: string): string[] {
   const files: string[] = [];
@@ -133,10 +152,39 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   if (existsSync(wt)) {
     const st = await run([git, "-C", wt, "status", "--porcelain"]);
     if (st.ok && st.stdout.trim().length > 0) {
+      // Stage everything first so the marker scan also sees newly-added files.
       await run([git, "-C", wt, "add", "-A"]);
+      // GUARD: never commit/merge content that still has unresolved conflict
+      // markers — that's exactly how a poisoned diff reached the base before.
+      // Hold the task for human review instead (worktree left staged, base
+      // untouched).
+      const poisoned = await findConflictMarkers(wt);
+      if (poisoned.length > 0) {
+        return {
+          ok: false,
+          conflict: true,
+          message:
+            `refusing to merge ${taskId}: unresolved git conflict markers in ` +
+            poisoned.join(", "),
+          conflictFiles: poisoned,
+        };
+      }
       await run([
         git, "-C", wt, "commit", "-m", `butchr: finalize task ${taskId}`,
       ]);
+    } else {
+      // No dangling changes, but the agent may have COMMITTED markers earlier.
+      const poisoned = await findConflictMarkers(wt);
+      if (poisoned.length > 0) {
+        return {
+          ok: false,
+          conflict: true,
+          message:
+            `refusing to merge ${taskId}: unresolved git conflict markers in ` +
+            poisoned.join(", "),
+          conflictFiles: poisoned,
+        };
+      }
     }
   }
 
