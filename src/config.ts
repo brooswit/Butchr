@@ -49,16 +49,35 @@ export const config = {
   /**
    * Command template run inside a task's worktree to execute the agent.
    * `{{PROMPT_FILE}}` is replaced with the absolute path to the rendered
-   * prompt file. It is run via `bash -lc`, in the worktree as cwd.
+   * prompt file. `{{CONTINUE}}` is replaced with `agentContinueArg` on a
+   * re-run (a task that has already been started once in its worktree) and
+   * with the empty string on the very first run. It is run via `bash -lc`,
+   * in the worktree as cwd.
    *
    * Default: pipe the prompt into Claude Code in headless/print mode so the
-   * agent runs to completion and exits (which herdr reports as `done`).
+   * agent runs to completion and exits (which herdr reports as `done`). On a
+   * re-run `{{CONTINUE}}` becomes `--continue`, so the rejected task resumes
+   * its previous session (which lives in the same worktree cwd) instead of
+   * starting from a blank conversation. If that resume fails, butchr falls back
+   * to running this same command with `{{CONTINUE}}` stripped (a fresh session)
+   * — see the dispatcher.
    * Override BUTCHR_AGENT_CMD to use a different agent.
    */
   agentCmd: env(
     "BUTCHR_AGENT_CMD",
-    'cat {{PROMPT_FILE}} | claude --dangerously-skip-permissions -p',
+    'cat {{PROMPT_FILE}} | claude --dangerously-skip-permissions {{CONTINUE}} -p',
   ),
+
+  /**
+   * Substituted for `{{CONTINUE}}` in `agentCmd` when re-running a task that
+   * has already been started once (e.g. after a rejection, or after butchr
+   * restarted mid-run). Lets the agent resume its prior session rather than
+   * launch a brand new one. If the resume attempt exits non-zero the dispatcher
+   * retries the same command with `{{CONTINUE}}` empty, so a refused resume
+   * degrades to a fresh run instead of failing the task. Set to the empty
+   * string to always start fresh — e.g. for agents that have no resume flag.
+   */
+  agentContinueArg: env("BUTCHR_AGENT_CONTINUE_ARG", "--continue"),
 
   /** Max time (ms) a single watcher waits for the agent to finish. */
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),

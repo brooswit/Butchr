@@ -171,7 +171,37 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     const promptFile = join(promptsDir, `${task.id}.md`);
     writeFileSync(promptFile, rendered, "utf8");
 
-    const agentCmd = config.agentCmd.replaceAll("{{PROMPT_FILE}}", promptFile);
+    // The "fresh" form of the command — {{CONTINUE}} stripped out. This is the
+    // original first-run behavior and is always valid, so it doubles as the
+    // safety net below.
+    const freshCmd = config.agentCmd
+      .replaceAll("{{PROMPT_FILE}}", promptFile)
+      .replaceAll("{{CONTINUE}}", "");
+
+    // If this task has been started before (a rejected re-run, or a run we
+    // recovered after a restart) AND a continue arg is configured, try to resume
+    // its previous agent session instead of opening a blank one. The prior
+    // session lives in the same worktree cwd — re-runs reuse the worktree — so
+    // `claude --continue` finds it.
+    //
+    // But resuming is best-effort: claude can refuse `--continue` (no resumable
+    // session, e.g. a first run that died before the session was saved; a
+    // restart that killed it mid-write; or plain version weirdness). So if the
+    // resume attempt exits non-zero, fall back to a fresh run. Worst case this
+    // is exactly the old always-fresh behavior; best case it keeps the session.
+    // The fallback's exit code is what lands in the completion marker, so the
+    // watcher reports the outcome of the run that actually executed.
+    let agentCmd: string;
+    if (task.started_at && config.agentContinueArg) {
+      const continueCmd = config.agentCmd
+        .replaceAll("{{PROMPT_FILE}}", promptFile)
+        .replaceAll("{{CONTINUE}}", config.agentContinueArg);
+      agentCmd =
+        `{ ${continueCmd} ; } || ` +
+        `{ echo '[butchr] resume (--continue) failed; starting a fresh session' >&2 ; ${freshCmd} ; }`;
+    } else {
+      agentCmd = freshCmd;
+    }
 
     // Wrap the agent command so that:
     //  - its output is teed to a log file (still visible live in the herdr pane)
