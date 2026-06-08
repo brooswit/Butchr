@@ -234,7 +234,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       `echo "$?" > ${shq(doneFile)}`;
     const argv = ["bash", "-lc", wrapped];
 
-    const started = await herdr.agentStart(
+    const started = await startAgentReconciling(
       task.id,
       worktree,
       argv,
@@ -246,7 +246,30 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
   } catch (e) {
     // Dispatch failed — leave it queued so the next tick retries.
     console.error(`[butchr] dispatch failed for ${task.id}:`, (e as Error).message);
-    backToQueued(task.id);
+    await backToQueued(task.id);
+  }
+}
+
+// Start the agent, self-healing an `agent_name_taken` collision: if a lingering
+// same-named agent (an orphan from an abandoned/aborted run) is still registered,
+// close its pane and retry once. Without this a single stale agent would block
+// the task from ever dispatching. A second failure propagates to dispatch()'s
+// catch (→ backToQueued, retried next tick).
+async function startAgentReconciling(
+  name: string,
+  worktree: string,
+  argv: string[],
+  workspaceId?: string,
+): Promise<herdr.StartedAgent> {
+  try {
+    return await herdr.agentStart(name, worktree, argv, workspaceId);
+  } catch (e) {
+    if (!herdr.isAgentNameTaken(e)) throw e;
+    // Reclaim the stale agent's pane (fall back to the name itself as a target).
+    const stalePane = (await herdr.agentPaneId(name)) ?? name;
+    await herdr.paneClose(stalePane).catch(() => {});
+    console.log(`[butchr] reclaimed stale agent name ${name}; retrying agentStart`);
+    return await herdr.agentStart(name, worktree, argv, workspaceId);
   }
 }
 
@@ -293,6 +316,16 @@ function spawnWatcher(
     let seenAlive = false;
     while (true) {
       if (abortSignals.has(taskId)) break;
+      // Release our slot the moment the task leaves a state the watcher owns —
+      // even if the agent is still alive. We keep watching through `running`
+      // (agent working) and `review` (agent alive but blocked in request_review,
+      // possibly to be sent back to running on reject). If status becomes
+      // queued/merged/aborted — or the row vanishes — the agent has already been
+      // reclaimed elsewhere (a re-queue that closed the pane, an approve, an
+      // abort), so stop looping; otherwise we'd hold the `watching` slot forever
+      // and tick() would skip the task, leaving it permanently stuck.
+      const cur = getTask(taskId)?.status;
+      if (cur !== "running" && cur !== "review") break;
       if (existsSync(doneFile)) break; // process exited
       if (Date.now() > deadline) {
         timedOut = true;

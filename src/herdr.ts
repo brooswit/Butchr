@@ -110,6 +110,44 @@ export async function agentExists(name: string): Promise<boolean> {
   return res.ok && !res.stdout.includes('"error"');
 }
 
+/**
+ * The pane id backing the existing agent terminal named `name`, or undefined if
+ * there is no such agent (or we can't determine it). Used by the dispatcher to
+ * reclaim a lingering same-named agent before retrying `agentStart` on an
+ * `agent_name_taken` collision.
+ */
+export async function agentPaneId(name: string): Promise<string | undefined> {
+  if (!name) return undefined;
+  const res = await run([bin, "agent", "get", name]);
+  if (!res.ok) return undefined;
+  const text = res.stdout.trim();
+  if (!text) return undefined;
+  let env: Envelope;
+  try {
+    env = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (env.error) return undefined;
+  const r = env.result ?? env;
+  return (
+    r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ?? r.terminal_id ??
+    r.terminal?.terminal_id ?? undefined
+  );
+}
+
+/**
+ * Does this error (thrown by `agentStart` / the herdr wrapper) indicate the
+ * agent name is already in use? herdr surfaces this as an `agent_name_taken`
+ * error code; we match loosely so a reworded message still reconciles.
+ */
+export function isAgentNameTaken(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /name[_-]?taken|name.{0,16}already|already.{0,16}(in use|exists|taken)/i.test(
+    msg,
+  );
+}
+
 /** Close a pane / terminate the agent terminal. */
 export async function paneClose(target: string): Promise<void> {
   if (!target) return;

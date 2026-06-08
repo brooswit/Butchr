@@ -179,9 +179,16 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
     return taskView(id)!;
   }
 
-  // No live session (service restarted, agent died): fall back to the original
-  // behavior — back to queued so the dispatcher re-runs a fresh agent into the
-  // SAME worktree/branch, with the note now in task.md.
+  // No pending MCP review (service restarted, the agent submitted then returned,
+  // or its review registration is gone): fall back to the original behavior —
+  // back to queued so the dispatcher re-runs a fresh agent into the SAME
+  // worktree/branch, with the note now in task.md. But the herdr agent may still
+  // be ALIVE (its blocked call lost / the process outlived us); close its pane
+  // first so we don't strand an orphan agent — which both wastes the session and
+  // would collide on `agent_name_taken` when the task re-dispatches.
+  if (row.herdr_pane_id) {
+    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
+  }
   db.query(
     `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
   ).run(note.trim(), id);
@@ -312,7 +319,14 @@ export function setIdle(id: string, idle: boolean): void {
   emitUpdated(id);
 }
 
-export function backToQueued(id: string): void {
+export async function backToQueued(id: string): Promise<void> {
+  // Close any lingering herdr agent for this task before re-queuing, so a failed
+  // dispatch never strands an orphan agent that would later collide on
+  // `agent_name_taken`.
+  const row = getTask(id);
+  if (row?.herdr_pane_id) {
+    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
+  }
   db.query(
     `UPDATE tasks SET status='queued', herdr_pane_id=NULL WHERE id=?`,
   ).run(id);
