@@ -161,94 +161,6 @@ function openPicker(onSelect) {
   load(seed.trim() || null);
 }
 
-// ---------- context-file picker modal ----------
-// Rooted at `rootPath` (a registered directory). Lets the operator browse the
-// repo's subtree and toggle-select files; onPick(relPaths[]) gets the chosen
-// paths relative to the root. Navigation is clamped to the root subtree.
-function openFilePicker(rootPath, preselected, onPick) {
-  const root = rootPath.replace(/\/+$/, "");
-  const selected = new Set(preselected || []);
-  let cur = null;
-
-  const backdrop = el("div", { class: "modal-backdrop" });
-  const modal = el("div", { class: "modal" });
-  backdrop.appendChild(modal);
-  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
-  function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
-  function onKey(e) { if (e.key === "Escape") close(); }
-  document.addEventListener("keydown", onKey);
-
-  const rel = (abs) => {
-    if (abs === root) return "";
-    return abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs;
-  };
-
-  async function load(path) {
-    let data;
-    try {
-      data = await api("GET", "/fs?files=1&path=" + encodeURIComponent(path));
-    } catch (e) { toast(e.message, true); return; }
-    cur = data;
-    paint();
-  }
-
-  function paint() {
-    modal.innerHTML = "";
-    const head = el("div", { class: "m-head" });
-    head.appendChild(el("h3", {}, "Select context files"));
-    const x = el("button", { class: "btn ghost" }, "✕");
-    x.addEventListener("click", close);
-    head.appendChild(x);
-    modal.appendChild(head);
-
-    modal.appendChild(el("div", { class: "m-path" }, rel(cur.path) || "(repo root)"));
-
-    const list = el("div", { class: "m-list" });
-    // Up row — only while below the root subtree.
-    if (cur.path !== root && cur.parent && (cur.parent === root || cur.parent.startsWith(root + "/"))) {
-      const up = el("div", { class: "fs-row up" }, [
-        el("span", { class: "ic" }, "↑"),
-        el("span", { class: "nm" }, ".. (up)"),
-      ]);
-      up.addEventListener("click", () => load(cur.parent));
-      list.appendChild(up);
-    }
-    if (cur.entries.length === 0) {
-      list.appendChild(el("div", { class: "muted", style: "padding:14px" }, "(empty)"));
-    }
-    for (const e of cur.entries) {
-      const row = el("div", { class: "fs-row" });
-      if (e.isDir) {
-        row.appendChild(el("span", { class: "ic" }, "▸"));
-        row.appendChild(el("span", { class: "nm" }, e.name));
-        row.addEventListener("click", () => load(e.path));
-      } else {
-        const r = rel(e.path);
-        const on = selected.has(r);
-        row.appendChild(el("span", { class: "ic" }, on ? "☑" : "☐"));
-        row.appendChild(el("span", { class: "nm" }, e.name));
-        if (on) row.classList.add("sel");
-        row.addEventListener("click", () => {
-          if (selected.has(r)) selected.delete(r); else selected.add(r);
-          paint();
-        });
-      }
-      list.appendChild(row);
-    }
-    modal.appendChild(list);
-
-    const foot = el("div", { class: "m-foot" });
-    foot.appendChild(el("span", { class: "hint" }, selected.size ? selected.size + " selected" : "Click files to select."));
-    const done = el("button", { class: "btn success" }, "Use selected");
-    done.addEventListener("click", () => { onPick([...selected]); close(); });
-    foot.appendChild(done);
-    modal.appendChild(foot);
-  }
-
-  document.body.appendChild(backdrop);
-  load(root);
-}
-
 // ---------- router ----------
 function parseHash() {
   const hash = location.hash.replace(/^#/, "") || "/";
@@ -379,13 +291,6 @@ async function renderDirectory(id) {
       <span class="lbl">prompt</span>
       <textarea id="tprompt" placeholder="Describe the work for the agent…"></textarea>
     </label>
-    <label class="field">
-      <span class="lbl">context files (optional, comma or newline separated, relative paths)</span>
-      <div class="row" style="gap:8px">
-        <input type="text" id="tctx" placeholder="src/api/routes.ts, src/types.ts" />
-        <button class="btn ghost" id="browse-ctx" type="button" style="white-space:nowrap">Browse…</button>
-      </div>
-    </label>
     <div class="row between">
       <small class="muted">Tasks run serially in this directory. ${queueLine(tasks)}</small>
       <button class="btn" id="add-task">Create task</button>
@@ -416,20 +321,11 @@ async function renderDirectory(id) {
 
   mount(wrap);
 
-  const parseCtx = (raw) => raw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-  document.getElementById("browse-ctx").addEventListener("click", () => {
-    const input = document.getElementById("tctx");
-    openFilePicker(dir.path, parseCtx(input.value), (picked) => {
-      input.value = picked.join(", ");
-    });
-  });
-
   document.getElementById("add-task").addEventListener("click", async () => {
     const prompt = document.getElementById("tprompt").value.trim();
-    const context = parseCtx(document.getElementById("tctx").value);
     if (!prompt) return toast("prompt is required", true);
     try {
-      await api("POST", "/directories/" + id + "/tasks", { prompt, context });
+      await api("POST", "/directories/" + id + "/tasks", { prompt });
       toast("task created");
       render();
     } catch (e) { toast(e.message, true); }
@@ -500,7 +396,6 @@ async function renderTask(id) {
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
     <div class="k">merged</div><div class="v">${esc(t.merged_at || "—")}</div>
-    <div class="k">context</div><div class="v">${esc((t.context || []).join(", ") || "—")}</div>
   </div>`;
   wrap.appendChild(meta);
 
