@@ -108,7 +108,68 @@ export async function taskDiff(id: string): Promise<string> {
   return git.diff(dir.path, id);
 }
 
-export async function approveTask(id: string): Promise<TaskView> {
+/** What approveTask did: merged the branch, or kicked a conflict back to the agent. */
+export type ApproveOutcome = { task: TaskView; conflictSentBack?: boolean };
+
+/**
+ * Stream a `changes_requested` verdict back into a task that's in review: if its
+ * agent is alive and blocked in request_review, resolve that SAME session and
+ * flip back to running (no fresh dispatch); otherwise fall back to re-queuing so
+ * the dispatcher runs a fresh agent into the same worktree/branch (the note is
+ * already in task.md / review_note). Shared by rejectTask (human note) and
+ * approveTask's conflict kick-back.
+ */
+async function requestChanges(
+  id: string,
+  dirPath: string,
+  note: string,
+  paneId: string | null,
+): Promise<void> {
+  if (hasPendingReview(id)) {
+    db.query(
+      `UPDATE tasks SET status='running', review_note=?, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
+    ).run(note, id);
+    updateTaskMdStatus(dirPath, id, "running");
+    resolveReview(id, { decision: "changes_requested", notes: note });
+    return;
+  }
+  // No pending MCP review (service restarted, agent submitted then returned, or
+  // its review registration is gone): re-queue for a fresh agent. The herdr
+  // agent may still be ALIVE (its blocked call lost / outlived us), so close its
+  // pane first — otherwise we strand an orphan that wastes the session and would
+  // collide on `agent_name_taken` when the task re-dispatches.
+  if (paneId) await herdr.paneClose(paneId).catch(() => {});
+  db.query(
+    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
+  ).run(note, id);
+  updateTaskMdStatus(dirPath, id, "queued");
+}
+
+/** Actionable change-request note for a merge conflict, naming the files + steps. */
+function buildConflictNotes(
+  id: string,
+  base: string,
+  files: string[],
+  rawMessage: string,
+): string {
+  const fileList = files.length
+    ? files.map((f) => `  - ${f}`).join("\n")
+    : "  (see the git output below)";
+  const tail = rawMessage.trim().split("\n").slice(-6).join("\n");
+  return [
+    `Merge conflict: your branch \`${id}\` conflicts with \`${base}\` on:`,
+    fileList,
+    ``,
+    `In your worktree, integrate the latest default branch and resolve these`,
+    `conflicts (e.g. \`git merge ${base}\` — or rebase — then fix the files and`,
+    `commit), then call \`request_review\` again. Do NOT leave conflict markers.`,
+    ``,
+    `--- git output ---`,
+    tail,
+  ].join("\n");
+}
+
+export async function approveTask(id: string): Promise<ApproveOutcome> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
   if (row.status !== "review") {
@@ -119,17 +180,26 @@ export async function approveTask(id: string): Promise<TaskView> {
 
   const result = await git.merge(dir.path, id);
   if (!result.ok) {
-    // Hold in review, flag the conflict for manual resolution.
+    if (result.conflict) {
+      // Content conflict — git.merge already aborted, so the tree is CLEAN.
+      // Don't dump the conflict on the human: send it back to the agent (the
+      // author of the code) as a changes_requested verdict with resolution
+      // steps, exactly like a reject. Returns 200, task flips back to running.
+      const base = await git.defaultBranch(dir.path);
+      const notes = buildConflictNotes(id, base, result.conflictFiles, result.message);
+      appendRejection(dir.path, id, notes, nowIso());
+      // Same channel as reject: into the live agent if blocked, else re-queue
+      // (requestChanges closes any lingering pane in the fallback).
+      await requestChanges(id, dir.path, notes, row.herdr_pane_id);
+      emitUpdated(id);
+      return { task: taskView(id)!, conflictSentBack: true };
+    }
+    // Non-conflict merge failure — genuinely unusual/unsafe; surface to the human.
     db.query(
       `UPDATE tasks SET conflict=1, review_note=? WHERE id=?`,
     ).run(result.message, id);
     emitUpdated(id);
-    throw new HttpError(
-      409,
-      result.conflict
-        ? `merge conflict — resolve manually, then approve again: ${result.message}`
-        : `merge failed: ${result.message}`,
-    );
+    throw new HttpError(409, `merge failed: ${result.message}`);
   }
 
   // Merge succeeded. Unlike before, we do NOT close the pane or tear down the
@@ -147,7 +217,7 @@ export async function approveTask(id: string): Promise<TaskView> {
     // Raced (e.g. aborted) between the merge and here — the branch already landed
     // in main, but the task moved on. Nothing to finalize.
     emitUpdated(id);
-    return taskView(id)!;
+    return { task: taskView(id)! };
   }
   updateTaskMdStatus(dir.path, id, "finalizing");
   emitUpdated(id);
@@ -155,7 +225,7 @@ export async function approveTask(id: string): Promise<TaskView> {
   // Hand the finalizing phase to the dispatcher: it watches for the agent to go
   // quiet/exit and then calls finalizeTask below.
   startFinalizeWatcher(id);
-  return taskView(id)!;
+  return { task: taskView(id)! };
 }
 
 /**
@@ -213,33 +283,10 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
   // for the fallback re-dispatch path).
   appendRejection(dir.path, id, note, when);
 
-  if (hasPendingReview(id)) {
-    // The agent is alive and blocked in request_review. Stream the notes back
-    // into that SAME session and flip the task back to running — NO fresh
-    // dispatch. The pane id stays so a later approve/abort can close it.
-    db.query(
-      `UPDATE tasks SET status='running', review_note=?, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
-    ).run(note.trim(), id);
-    updateTaskMdStatus(dir.path, id, "running");
-    resolveReview(id, { decision: "changes_requested", notes: note.trim() });
-    emitUpdated(id);
-    return taskView(id)!;
-  }
-
-  // No pending MCP review (service restarted, the agent submitted then returned,
-  // or its review registration is gone): fall back to the original behavior —
-  // back to queued so the dispatcher re-runs a fresh agent into the SAME
-  // worktree/branch, with the note now in task.md. But the herdr agent may still
-  // be ALIVE (its blocked call lost / the process outlived us); close its pane
-  // first so we don't strand an orphan agent — which both wastes the session and
-  // would collide on `agent_name_taken` when the task re-dispatches.
-  if (row.herdr_pane_id) {
-    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-  }
-  db.query(
-    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0 WHERE id=?`,
-  ).run(note.trim(), id);
-  updateTaskMdStatus(dir.path, id, "queued");
+  // Stream the note back into the live agent if one is blocked, else re-queue
+  // (closing any lingering pane first). The pane id stays in the live case so a
+  // later approve/abort can close it.
+  await requestChanges(id, dir.path, note.trim(), row.herdr_pane_id);
 
   emitUpdated(id);
   return taskView(id)!;

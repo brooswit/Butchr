@@ -496,8 +496,14 @@ async function renderTask(id) {
     document.getElementById("approve").addEventListener("click", async (ev) => {
       ev.target.disabled = true;
       try {
-        await api("POST", "/tasks/" + id + "/approve");
-        toast("approved ✓ — merged, agent wrapping up");
+        const r = await api("POST", "/tasks/" + id + "/approve");
+        // A merge conflict isn't an error — it's sent back to the live agent to
+        // resolve in-context. The SSE refresh will show the task back in running.
+        if (r && r.conflictSentBack) {
+          toast("Merge conflict — sent back to the agent to resolve");
+        } else {
+          toast("approved ✓ — merged, agent wrapping up");
+        }
         backToDirectory(t.directory_id);
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });

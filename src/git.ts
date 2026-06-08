@@ -91,12 +91,30 @@ export async function diff(dir: string, taskId: string): Promise<string> {
   return out;
 }
 
-export type MergeResult = { ok: boolean; conflict: boolean; message: string };
+export type MergeResult = {
+  ok: boolean;
+  conflict: boolean;
+  message: string;
+  // On a content conflict, the files git reported as conflicting (parsed from
+  // its output). Empty if none could be parsed.
+  conflictFiles: string[];
+};
+
+/** Parse `CONFLICT (...): Merge conflict in <path>` lines from git output. */
+function parseConflictFiles(output: string): string[] {
+  const files: string[] = [];
+  for (const line of output.split("\n")) {
+    const m = line.match(/Merge conflict in (.+?)\s*$/);
+    if (m && !files.includes(m[1])) files.push(m[1]);
+  }
+  return files;
+}
 
 /**
  * Commit any uncommitted worktree changes, then fast-forward-merge the task
- * branch into the default branch. On conflict, returns conflict=true so the
- * caller can hold the task in review.
+ * branch into the default branch. On conflict, returns conflict=true (and the
+ * conflicting file paths) so the caller can kick the task back to the agent.
+ * The half-applied merge is always aborted so the working tree is left CLEAN.
  */
 export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   const base = await defaultBranch(dir);
@@ -120,17 +138,23 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
       git, "-C", dir, "merge", "--no-edit", taskId,
     ]);
   }
-  if (m.ok) return { ok: true, conflict: false, message: m.stdout.trim() };
+  if (m.ok) {
+    return { ok: true, conflict: false, message: m.stdout.trim(), conflictFiles: [] };
+  }
 
-  const conflict = /conflict/i.test(m.stdout + m.stderr);
+  const combined = m.stdout + "\n" + m.stderr;
+  const conflict = /conflict/i.test(combined);
+  const conflictFiles = conflict ? parseConflictFiles(combined) : [];
   if (conflict) {
-    // Abort the half-applied merge so the repo is left clean; human resolves.
+    // Abort the half-applied merge so the working tree + index are left CLEAN.
+    // The agent (or a fresh one) resolves in its worktree and re-submits.
     await run([git, "-C", dir, "merge", "--abort"]);
   }
   return {
     ok: false,
     conflict,
     message: (m.stderr || m.stdout).trim() || `merge into ${base} failed`,
+    conflictFiles,
   };
 }
 

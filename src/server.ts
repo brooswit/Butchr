@@ -210,7 +210,10 @@ route("GET", "/api/tasks/:id/diff", async (_req, p) => {
 });
 
 route("POST", "/api/tasks/:id/approve", async (_req, p) => {
-  return json(await approveTask(p.id!));
+  const r = await approveTask(p.id!);
+  // Conflict kicked back to the agent: 200 with a flag the UI shows informationally.
+  if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
+  return json(r.task);
 });
 
 route("POST", "/api/tasks/:id/reject", async (req, p) => {
