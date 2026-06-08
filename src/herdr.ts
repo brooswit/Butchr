@@ -67,28 +67,96 @@ export async function workspaceClose(workspaceId: string): Promise<void> {
   await herdr(["workspace", "close", workspaceId]).catch(() => {});
 }
 
+export type Tab = { tabId?: string; rootPaneId?: string };
+
+/**
+ * Create a dedicated herdr TAB for a task (one tab per task — the operator's
+ * requirement). Returns the new tab id and the id of the empty root pane herdr
+ * spawns inside it. We start the agent in this tab via `agentStart({tabId})`;
+ * passing `--tab` makes herdr place the agent in THIS tab instead of splitting
+ * the currently-focused tab (the old behavior that produced a wall of panes).
+ *
+ * Best-effort: returns `{}` (no tabId) on any failure so the caller can fall back
+ * to the implicit-split path rather than failing the whole dispatch.
+ */
+export async function tabCreate(
+  workspaceId: string | undefined,
+  cwd: string,
+  label: string,
+): Promise<Tab> {
+  try {
+    const args = ["tab", "create", "--cwd", cwd, "--label", label, "--no-focus"];
+    if (workspaceId) args.push("--workspace", workspaceId);
+    const r = await herdr(args);
+    return {
+      tabId: r.tab?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id,
+      rootPaneId: r.root_pane?.pane_id ?? r.pane?.pane_id,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Close a herdr tab (kills every pane/agent inside it and removes the tab). */
+export async function tabClose(tabId: string | null | undefined): Promise<void> {
+  if (!tabId) return;
+  await run([bin, "tab", "close", tabId]).catch(() => {});
+}
+
+/**
+ * The tab id backing the agent terminal named `name`, or undefined if there is no
+ * such agent / we can't determine it. Used to derive a task's tab for teardown
+ * when it wasn't persisted (e.g. a re-adopted agent, or reclaiming a stale name).
+ */
+export async function agentTabId(name: string): Promise<string | undefined> {
+  if (!name) return undefined;
+  const res = await run([bin, "agent", "get", name]);
+  if (!res.ok) return undefined;
+  const text = res.stdout.trim();
+  if (!text) return undefined;
+  let env: Envelope;
+  try {
+    env = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (env.error) return undefined;
+  const r = env.result ?? env;
+  return r.agent?.tab_id ?? r.pane?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id ?? undefined;
+}
+
 export type StartedAgent = { paneId: string; terminalId?: string };
 
 /**
- * Start an agent process in a fresh pane rooted at `cwd` (the task worktree).
- * `argv` is the command to run, e.g. ["bash", "-lc", "<agent cmd>"].
- * The agent name is set to the task id for easy lookup.
+ * Start an agent process rooted at `cwd` (the task worktree). `argv` is the
+ * command to run, e.g. ["bash", "-lc", "<agent cmd>"]. The agent name is set to
+ * the task id for easy lookup.
+ *
+ * When `tabId` is given the agent is placed in THAT tab (`--tab`), so each task
+ * lands in its own dedicated tab; herdr would otherwise split the focused tab. We
+ * drop `--workspace` in that case — the tab already pins the workspace, and
+ * passing both is redundant. Without a tabId we fall back to the workspace-scoped
+ * implicit split (legacy path / tabCreate failure).
  */
 export async function agentStart(
   name: string,
   cwd: string,
   argv: string[],
   workspaceId?: string,
+  tabId?: string,
 ): Promise<StartedAgent> {
   const args = ["agent", "start", name, "--cwd", cwd, "--no-focus"];
-  if (workspaceId) args.push("--workspace", workspaceId);
+  if (tabId) args.push("--tab", tabId);
+  else if (workspaceId) args.push("--workspace", workspaceId);
   args.push("--", ...argv);
   const r = await herdr(args);
   // Response shapes vary slightly by herdr version; probe common fields.
   const paneId =
-    r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ?? r.terminal_id ??
-    r.terminal?.terminal_id ?? name;
-  const terminalId = r.terminal_id ?? r.pane?.terminal_id ?? r.terminal?.terminal_id;
+    r.agent?.pane_id ?? r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ??
+    r.terminal_id ?? r.terminal?.terminal_id ?? name;
+  const terminalId =
+    r.agent?.terminal_id ?? r.terminal_id ?? r.pane?.terminal_id ??
+    r.terminal?.terminal_id;
   return { paneId, terminalId };
 }
 
@@ -190,6 +258,29 @@ export async function paneClose(target: string): Promise<void> {
 }
 
 /**
+ * Tear down a task's herdr session: close its dedicated TAB, which kills the agent
+ * and every pane inside the tab and removes the tab itself (so finished/aborted
+ * tasks don't leave tabs accumulating). The tab id is the stable handle — pane ids
+ * renumber when sibling panes close, but the tab id never moves.
+ *
+ * Resolution order: the stored `tabId`, then the live agent's current tab (for
+ * re-adopted agents or rows predating tab tracking), and finally — if no tab can
+ * be determined — a direct pane close as a legacy fallback. All steps best-effort.
+ */
+export async function teardownTask(
+  tabId: string | null | undefined,
+  agentName: string,
+  paneId?: string | null,
+): Promise<void> {
+  const id = tabId ?? (await agentTabId(agentName));
+  if (id) {
+    await tabClose(id);
+    return;
+  }
+  if (paneId) await paneClose(paneId).catch(() => {});
+}
+
+/**
  * Definitively free an agent NAME so a fresh `agentStart` can reuse it.
  *
  * `pane close` alone is NOT enough: the running herdr keeps the agent NAME
@@ -198,13 +289,16 @@ export async function paneClose(target: string): Promise<void> {
  * reliable deregister is `agent rename <name> --clear`, which removes the NAME
  * itself (verified: `agent get <name>` reports `agent_not_found` afterwards).
  *
- * We resolve the pane id BEFORE clearing (the name stops resolving once cleared)
- * and close that pane afterwards to kill the now-orphaned process. Both steps are
- * best-effort — a missing agent/pane is already the state we want.
+ * We resolve the tab (and pane) id BEFORE clearing (the name stops resolving once
+ * cleared) and tear them down afterwards to kill the now-orphaned process. Closing
+ * the tab also removes the now-empty dedicated tab so stale tabs don't accumulate.
+ * Every step is best-effort — a missing agent/pane/tab is already the state we want.
  */
 export async function agentDeregister(name: string): Promise<void> {
   if (!name) return;
+  const tab = await agentTabId(name);
   const pane = await agentPaneId(name);
   await run([bin, "agent", "rename", name, "--clear"]).catch(() => {});
   if (pane) await run([bin, "pane", "close", pane]).catch(() => {});
+  if (tab) await run([bin, "tab", "close", tab]).catch(() => {});
 }

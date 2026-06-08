@@ -195,20 +195,21 @@ export async function reconcileRunningTasks(
     const doneFile = join(runsDir, `${row.id}.done`);
 
     if (await herdr.agentExists(row.id)) {
-      // Live agent — re-adopt. Record its current pane (it may have moved while
-      // butchr was down) and re-attach a watcher so completion/idle resume.
+      // Live agent — re-adopt. Record its current pane + tab (both may have moved
+      // while butchr was down) and re-attach a watcher so completion/idle resume.
       const paneId =
         (await herdr.agentPaneId(row.id)) ?? row.herdr_pane_id ?? row.id;
-      if (paneId !== row.herdr_pane_id) adoptPane(row.id, paneId);
+      const tabId = (await herdr.agentTabId(row.id)) ?? row.herdr_tab_id ?? undefined;
+      if (paneId !== row.herdr_pane_id || tabId !== row.herdr_tab_id) {
+        adoptPane(row.id, paneId, tabId);
+      }
       spawnWatcher(dir, row.id, paneId, logFile, doneFile);
       adopted++;
-      console.log(`[butchr] re-adopted running task ${row.id} (pane ${paneId})`);
+      console.log(`[butchr] re-adopted running task ${row.id} (pane ${paneId}, tab ${tabId})`);
     } else {
       // Agent gone — it ended while butchr was offline. Rescue into review with
-      // whatever output was logged, closing any husk pane defensively.
-      if (row.herdr_pane_id) {
-        await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-      }
+      // whatever output was logged, closing its (now husk) tab defensively.
+      await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
       const snapshot = readRunLogSnapshot(row.id);
       markReview(
         row.id,
@@ -374,15 +375,32 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       `echo "$?" > ${shq(doneFile)}`;
     const argv = ["bash", "-lc", wrapped];
 
+    // One TAB PER TASK: create a dedicated herdr tab (labeled with the task id)
+    // and start the agent in it, so tasks land as separate tabs instead of a wall
+    // of split panes in one shared tab. tabCreate is best-effort — on failure it
+    // returns {} and agentStart falls back to the legacy workspace-scoped split.
+    const tab = await herdr.tabCreate(workspaceId ?? undefined, worktree, task.id);
+
     const started = await startAgentReconciling(
       task.id,
       worktree,
       argv,
       workspaceId ?? undefined,
+      tab.tabId,
     );
 
-    markRunning(task.id, started.paneId, sessionId);
-    spawnWatcher(dir, task.id, started.paneId, logFile, doneFile);
+    // `tab create` spawns an empty root shell pane; `agent start --tab` then adds
+    // the agent as a SECOND pane. Close that empty pane so the tab holds only the
+    // agent. Closing a sibling pane renumbers the survivor (herdr pane ids are
+    // positional), so re-resolve the agent's current pane id before recording it.
+    let paneId = started.paneId;
+    if (tab.tabId && tab.rootPaneId) {
+      await herdr.paneClose(tab.rootPaneId).catch(() => {});
+      paneId = (await herdr.agentPaneId(task.id)) ?? paneId;
+    }
+
+    markRunning(task.id, paneId, sessionId, tab.tabId);
+    spawnWatcher(dir, task.id, paneId, logFile, doneFile);
   } catch (e) {
     // Dispatch failed — leave it queued so the next tick retries.
     console.error(`[butchr] dispatch failed for ${task.id}:`, (e as Error).message);
@@ -400,18 +418,20 @@ async function startAgentReconciling(
   worktree: string,
   argv: string[],
   workspaceId?: string,
+  tabId?: string,
 ): Promise<herdr.StartedAgent> {
   try {
-    return await herdr.agentStart(name, worktree, argv, workspaceId);
+    return await herdr.agentStart(name, worktree, argv, workspaceId, tabId);
   } catch (e) {
     if (!herdr.isAgentNameTaken(e)) throw e;
     // Reclaim the stale agent. Closing its pane is NOT enough — herdr keeps the
     // NAME registered (and respawns the agent), so the retry would fail again.
     // agentDeregister clears the name via `agent rename --clear` and then closes
-    // the orphaned pane, truly freeing the name for reuse.
+    // the orphaned pane + its (old) tab, truly freeing the name for reuse. We
+    // retry into the fresh tab created for this dispatch.
     await herdr.agentDeregister(name);
     console.log(`[butchr] reclaimed stale agent name ${name}; retrying agentStart`);
-    return await herdr.agentStart(name, worktree, argv, workspaceId);
+    return await herdr.agentStart(name, worktree, argv, workspaceId, tabId);
   }
 }
 
@@ -527,8 +547,10 @@ function spawnWatcher(
       `Output captured as-is.\n\n` +
       snapshot;
 
-    // The process is gone; close the pane defensively in case a husk remains.
-    await herdr.paneClose(paneId).catch(() => {});
+    // The process is gone; close the whole tab defensively in case a husk pane
+    // remains, so the dead task's tab doesn't linger. (markReview clears the
+    // stored tab id, so close it now while we still have it.)
+    await herdr.teardownTask(getTask(taskId)?.herdr_tab_id, taskId, paneId);
 
     // Last-moment abort (signalled while we captured output): bail without
     // moving to review so abortTask's terminal state stands.

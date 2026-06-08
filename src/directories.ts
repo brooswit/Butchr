@@ -165,7 +165,10 @@ export async function unregisterDirectory(id: string): Promise<void> {
     .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE directory_id=?`)
     .all(id);
   for (const t of tasks) {
-    if (t.herdr_pane_id) await herdr.paneClose(t.herdr_pane_id).catch(() => {});
+    // Close the task's dedicated tab (kills its agent + removes the tab); the
+    // workspace close below is a backstop, but per-tab teardown keeps things tidy
+    // even if the workspace outlives this directory.
+    await herdr.teardownTask(t.herdr_tab_id, t.id, t.herdr_pane_id);
     if (t.status !== "merged") {
       await git.cleanup(dir.path, t.id).catch(() => {});
     }

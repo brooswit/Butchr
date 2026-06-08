@@ -144,10 +144,16 @@ async function requestChanges(
   dirPath: string,
   note: string,
   paneId: string | null,
+  tabId: string | null,
 ): Promise<void> {
-  if (paneId) await herdr.paneClose(paneId).catch(() => {});
+  // Non-blocking model: the agent already exited after request_review, so there
+  // is no live call to resolve — just re-queue for a `--resume` re-launch. Tear
+  // down any lingering tab defensively (a misbehaving agent that didn't exit would
+  // otherwise strand an orphan that collides on `agent_name_taken`), and clear the
+  // stored tab id since that tab is now gone; the re-dispatch spins up a fresh one.
+  await herdr.teardownTask(tabId, id, paneId);
   db.query(
-    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0 WHERE id=?`,
+    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0 WHERE id=?`,
   ).run(note, id);
   updateTaskMdStatus(dirPath, id, "queued");
 }
@@ -198,8 +204,8 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
       const notes = buildConflictNotes(id, base, result.conflictFiles, result.message);
       appendRejection(dir.path, id, notes, nowIso());
       // Same channel as reject: into the live agent if blocked, else re-queue
-      // (requestChanges closes any lingering pane in the fallback).
-      await requestChanges(id, dir.path, notes, row.herdr_pane_id);
+      // (requestChanges tears down any lingering tab in the fallback).
+      await requestChanges(id, dir.path, notes, row.herdr_pane_id, row.herdr_tab_id);
       emitUpdated(id);
       return { task: taskView(id)!, conflictSentBack: true };
     }
@@ -217,12 +223,12 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   // branch is already in main; capture whatever the agent logged, tear down the
   // worktree + branch, and stamp merged.
   const snapshot = readRunLogSnapshot(id);
-  if (row.herdr_pane_id) {
-    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-  }
+  // Close the agent's dedicated tab (best-effort — usually already gone since the
+  // agent exited after request_review, but removes any empty husk tab).
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
   await git.cleanup(dir.path, id).catch(() => {});
   const res = db.query(
-    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL,
+    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
        output_snapshot=?, merged_at=COALESCE(merged_at, ?)
        WHERE id=? AND status='review'`,
   ).run(snapshot || null, nowIso(), id);
@@ -252,14 +258,14 @@ export async function finalizeTask(id: string): Promise<TaskView | null> {
   if (!dir) throw new HttpError(404, "directory not found");
 
   const snapshot = readRunLogSnapshot(id);
-  if (row.herdr_pane_id) {
-    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-  }
+  // Close the agent's tab (kills the now-finished agent and removes the tab so it
+  // doesn't linger).
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
   // The agent no longer needs its worktree cwd — tear down worktree + branch.
   await git.cleanup(dir.path, id).catch(() => {});
 
   const res = db.query(
-    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL,
+    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
        output_snapshot=?, merged_at=COALESCE(merged_at, ?)
        WHERE id=? AND status='finalizing'`,
   ).run(snapshot || null, nowIso(), id);
@@ -287,8 +293,9 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
 
   // Re-queue for rework. The dispatcher re-launches the agent's existing Claude
   // session via `--resume <session_id>` with the notes — full prior context, no
-  // context loss. The agent already exited after the non-blocking request_review.
-  await requestChanges(id, dir.path, note.trim(), row.herdr_pane_id);
+  // context loss. The agent already exited after the non-blocking request_review;
+  // requestChanges tears down any lingering tab defensively.
+  await requestChanges(id, dir.path, note.trim(), row.herdr_pane_id, row.herdr_tab_id);
 
   emitUpdated(id);
   return taskView(id)!;
@@ -314,19 +321,18 @@ export async function abortTask(id: string): Promise<TaskView> {
   const dir = getDirectory(row.directory_id);
   if (!dir) throw new HttpError(404, "directory not found");
 
-  // Tell the watcher (if any) to stop before we kill the pane / remove the tree,
+  // Tell the watcher (if any) to stop before we kill the tab / remove the tree,
   // so it never transitions the task to review behind us.
   signalAbort(id);
-  if (row.herdr_pane_id) {
-    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-  }
+  // Close the agent's whole tab (kills the agent + removes the dedicated tab).
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
 
   // Throw away the worktree + branch — nothing gets merged.
   await git.cleanup(dir.path, id).catch(() => {});
 
   db.query(
     `UPDATE tasks SET status='aborted', conflict=0, idle=0, review_note=NULL,
-       output_snapshot=NULL, herdr_pane_id=NULL, completed_at=? WHERE id=?`,
+       output_snapshot=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL, completed_at=? WHERE id=?`,
   ).run(nowIso(), id);
   updateTaskMdStatus(dir.path, id, "aborted");
 
@@ -336,17 +342,23 @@ export async function abortTask(id: string): Promise<TaskView> {
 
 // --- dispatcher-facing state transitions (kept here so all writes live together) ---
 
-export function markRunning(id: string, paneId: string, sessionId: string): void {
+export function markRunning(
+  id: string,
+  paneId: string,
+  sessionId: string,
+  tabId?: string,
+): void {
   // Guard on status='queued' so a task aborted in the same tick it was dispatched
   // isn't dragged back to 'running' behind abortTask. `session_id` is set with
   // COALESCE so it sticks to the FIRST id assigned: a fresh task records the new
   // uuid; a re-launched (rejected) task keeps its existing id, which is exactly
-  // the one the dispatcher just `--resume`d.
+  // the one the dispatcher just `--resume`d. The tab id is the dedicated herdr tab
+  // the agent runs in (one tab per task).
   const res = db.query(
-    `UPDATE tasks SET status='running', herdr_pane_id=?, session_id=COALESCE(session_id, ?),
-       started_at=COALESCE(started_at, ?)
+    `UPDATE tasks SET status='running', herdr_pane_id=?, herdr_tab_id=?,
+       session_id=COALESCE(session_id, ?), started_at=COALESCE(started_at, ?)
        WHERE id=? AND status='queued'`,
-  ).run(paneId, sessionId, nowIso(), id);
+  ).run(paneId, tabId ?? null, sessionId, nowIso(), id);
   if (res.changes === 0) return; // aborted (or otherwise moved) under us
   const row = getTask(id);
   if (row) {
@@ -357,24 +369,28 @@ export function markRunning(id: string, paneId: string, sessionId: string): void
 }
 
 /**
- * Record a re-adopted running task's current herdr pane id. Used by the startup
- * reconcile (dispatcher.reconcileRunningTasks) when an agent it re-adopts now
- * lives on a different pane than the one stored before butchr restarted. Guarded
- * on status='running' so a concurrent transition isn't clobbered.
+ * Record a re-adopted running task's current herdr pane + tab id. Used by the
+ * startup reconcile (dispatcher.reconcileRunningTasks) when an agent it re-adopts
+ * now lives on a different pane/tab than the one stored before butchr restarted.
+ * Guarded on status='running' so a concurrent transition isn't clobbered. A
+ * missing tabId leaves the stored value untouched (COALESCE) rather than nulling
+ * a still-valid tab.
  */
-export function adoptPane(id: string, paneId: string): void {
+export function adoptPane(id: string, paneId: string, tabId?: string): void {
   const res = db.query(
-    `UPDATE tasks SET herdr_pane_id=? WHERE id=? AND status='running'`,
-  ).run(paneId, id);
+    `UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=COALESCE(?, herdr_tab_id) WHERE id=? AND status='running'`,
+  ).run(paneId, tabId ?? null, id);
   if (res.changes === 0) return;
   emitUpdated(id);
 }
 
 export function markReview(id: string, snapshot: string): void {
   // Guard on status='running' so a task aborted while its agent was finishing
-  // isn't resurrected into 'review' after abortTask parked it as terminal.
+  // isn't resurrected into 'review' after abortTask parked it as terminal. This is
+  // the dead-agent fallback (the live request_review path is markReviewFromAgent),
+  // so the agent's tab is already being torn down by the caller — clear its id.
   const res = db.query(
-    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL, idle=0
+    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL, herdr_tab_id=NULL, idle=0
        WHERE id=? AND status='running'`,
   ).run(nowIso(), snapshot, id);
   if (res.changes === 0) return; // aborted (or otherwise moved) under us
@@ -441,15 +457,13 @@ export function setIdle(id: string, idle: boolean): void {
 }
 
 export async function backToQueued(id: string): Promise<void> {
-  // Close any lingering herdr agent for this task before re-queuing, so a failed
-  // dispatch never strands an orphan agent that would later collide on
-  // `agent_name_taken`.
+  // Close any lingering herdr agent/tab for this task before re-queuing, so a
+  // failed dispatch never strands an orphan agent (or its tab) that would later
+  // collide on `agent_name_taken`. Re-dispatch creates a fresh tab.
   const row = getTask(id);
-  if (row?.herdr_pane_id) {
-    await herdr.paneClose(row.herdr_pane_id).catch(() => {});
-  }
+  await herdr.teardownTask(row?.herdr_tab_id, id, row?.herdr_pane_id);
   db.query(
-    `UPDATE tasks SET status='queued', herdr_pane_id=NULL WHERE id=?`,
+    `UPDATE tasks SET status='queued', herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
   ).run(id);
   emitUpdated(id);
 }

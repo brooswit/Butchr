@@ -68,6 +68,12 @@ ensureColumn("tasks", "idle", "INTEGER NOT NULL DEFAULT 0");
 // survives a butchr restart while a task waits in `review`.
 ensureColumn("tasks", "session_id", "TEXT");
 
+// `herdr_tab_id` is the dedicated herdr tab the task's agent runs in (one tab per
+// task — see herdr.ts/dispatcher.ts). Unlike herdr_pane_id (positional, renumbers
+// when sibling panes close), the tab id is a stable handle: teardown closes the
+// whole tab so the agent dies and the tab disappears regardless of pane churn.
+ensureColumn("tasks", "herdr_tab_id", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -96,6 +102,7 @@ export type TaskRow = {
   status: TaskStatus;
   herdr_pane_id: string | null;
   session_id: string | null;
+  herdr_tab_id: string | null;
   output_snapshot: string | null;
   conflict: number;
   idle: number;
