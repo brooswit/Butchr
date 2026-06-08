@@ -1,9 +1,13 @@
-// The dispatcher loop. On each tick it finds directories that have queued tasks
-// and no running task, dispatches the next queued task to herdr, and spawns a
-// watcher that blocks until the agent finishes and then moves the task to review.
+// The dispatcher loop. On each tick it finds every queued task, dispatches each
+// to herdr immediately, and spawns a watcher that blocks until the agent
+// finishes and then moves the task to review.
 //
-// Concurrency model: serial per directory. The `status='running'` row is the
-// lock; `dispatching`/`watching` sets guard against the in-tick race window.
+// Concurrency model: fully concurrent. Every queued task runs as soon as it is
+// seen — there is no per-directory "one at a time" limit. Worktree isolation
+// keeps tasks safe at the filesystem level (each is its own git worktree on its
+// own branch). The `dispatching`/`watching` sets (both keyed by task id) guard
+// against double-dispatching the same task across overlapping ticks. An optional
+// global cap (config.maxConcurrent) bounds the total running count.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
@@ -24,8 +28,12 @@ function shq(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-const dispatching = new Set<string>(); // directory ids mid-dispatch
+const dispatching = new Set<string>(); // task ids mid-dispatch
 const watching = new Set<string>(); // task ids with an active watcher
+
+// In-flight workspace create/heal keyed by directory id, so concurrent tasks in
+// the same directory share one workspace instead of racing to recreate it.
+const workspaceInFlight = new Map<string, Promise<string | undefined>>();
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -41,6 +49,18 @@ export function stopDispatcher(): void {
   timer = null;
 }
 
+// A queued task joined to its directory, as returned by the dispatch query.
+// `dir_id` aliases the directory's id (the unaliased `id` is the task's). The
+// task's `created_at` shadows the directory's, which is fine — we never read the
+// directory's created_at here.
+type QueuedRow = TaskRow & {
+  path: string;
+  label: string | null;
+  herdr_workspace: string | null;
+  herdr_pane: string | null;
+  dir_id: string;
+};
+
 let ticking = false;
 async function tick(): Promise<void> {
   if (ticking) return;
@@ -49,28 +69,46 @@ async function tick(): Promise<void> {
     // If herdr is down, do nothing this tick (no error spam — it may come back).
     if (!(await herdr.isUp())) return;
 
-    const dirs = db.query<DirectoryRow, []>(`SELECT * FROM directories`).all();
-    for (const dir of dirs) {
-      if (dispatching.has(dir.id)) continue;
-
+    // Optional global cap on simultaneously running tasks. 0 = unlimited.
+    // Count both running tasks and in-flight dispatches (which haven't reached
+    // status='running' yet) so we never overshoot the cap across ticks.
+    let budget = Infinity;
+    if (config.maxConcurrent > 0) {
       const running = db
-        .query<{ n: number }, [string]>(
-          `SELECT COUNT(*) AS n FROM tasks WHERE directory_id=? AND status='running'`,
+        .query<{ n: number }, []>(
+          `SELECT COUNT(*) AS n FROM tasks WHERE status='running'`,
         )
-        .get(dir.id)!.n;
-      if (running > 0) continue;
+        .get()!.n;
+      budget = config.maxConcurrent - running - dispatching.size;
+      if (budget <= 0) return;
+    }
 
-      const next = db
-        .query<TaskRow, [string]>(
-          `SELECT * FROM tasks WHERE directory_id=? AND status='queued'
-           ORDER BY created_at ASC LIMIT 1`,
-        )
-        .get(dir.id);
-      if (!next) continue;
+    const rows = db
+      .query<QueuedRow, []>(
+        `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
+         FROM tasks t JOIN directories d ON d.id = t.directory_id
+         WHERE t.status='queued'
+         ORDER BY t.created_at ASC`,
+      )
+      .all();
 
-      dispatching.add(dir.id);
-      // Fire-and-forget; the watcher is spawned inside dispatch().
-      dispatch(dir, next).finally(() => dispatching.delete(dir.id));
+    for (const row of rows) {
+      if (dispatching.has(row.id) || watching.has(row.id)) continue;
+      if (budget <= 0) break;
+      budget--;
+
+      const dir: DirectoryRow = {
+        id: row.dir_id,
+        path: row.path,
+        label: row.label,
+        herdr_workspace: row.herdr_workspace,
+        herdr_pane: row.herdr_pane,
+        created_at: row.created_at,
+      };
+
+      dispatching.add(row.id);
+      // Fire-and-forget, concurrently; the watcher is spawned inside dispatch().
+      dispatch(dir, row).finally(() => dispatching.delete(row.id));
     }
   } finally {
     ticking = false;
@@ -79,7 +117,18 @@ async function tick(): Promise<void> {
 
 // Ensure the directory's herdr workspace still exists; recreate it (and update
 // the DB) if herdr was restarted or the workspace was closed out from under us.
-async function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
+// Concurrent tasks in the same directory can call this at once, so dedupe by
+// directory id: the first caller does the create/heal and the rest await its
+// promise, which is cleared once it settles.
+function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
+  const existing = workspaceInFlight.get(dir.id);
+  if (existing) return existing;
+  const p = healWorkspace(dir).finally(() => workspaceInFlight.delete(dir.id));
+  workspaceInFlight.set(dir.id, p);
+  return p;
+}
+
+async function healWorkspace(dir: DirectoryRow): Promise<string | undefined> {
   if (dir.herdr_workspace && (await herdr.workspaceExists(dir.herdr_workspace))) {
     return dir.herdr_workspace;
   }
