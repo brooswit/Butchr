@@ -201,6 +201,8 @@ pre.diff { font-size: 12px; white-space: pre; max-height: 560px; }
   color: var(--merged); border: 1px solid var(--merged); border-radius: 5px; padding: 1px 6px;
 }
 .fs-row.up { color: var(--muted); }
+.fs-row.sel { background: var(--panel-2); }
+.fs-row.sel .ic { opacity: 1; color: var(--merged); }
 .modal .m-foot {
   padding: 12px 16px; border-top: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;

@@ -119,12 +119,15 @@ function route(method: string, path: string, handler: Handler): void {
   routes.push({ method, pattern, keys, handler });
 }
 
-// Filesystem browser — powers the directory picker in the webapp. butchr is a
-// local single-operator tool (trusted environment per spec), so listing dirs on
-// the host is fine. Returns subdirectories of `path`, flagging git repos.
+// Filesystem browser — powers the directory picker and the context-file
+// selector in the webapp. butchr is a local single-operator tool (trusted
+// environment per spec), so listing the host filesystem is fine. Returns the
+// subdirectories of `path`, flagging git repos. Pass `files=1` to also include
+// regular files (used by the context-file selector).
 route("GET", "/api/fs", async (req) => {
   const url = new URL(req.url);
   const raw = url.searchParams.get("path");
+  const withFiles = url.searchParams.get("files") === "1";
   const path = resolve(raw && raw.length > 0 ? raw : homedir());
   if (!existsSync(path)) throw new HttpError(404, `no such path: ${path}`);
   let st;
@@ -135,7 +138,7 @@ route("GET", "/api/fs", async (req) => {
   }
   if (!st.isDirectory()) throw new HttpError(400, `not a directory: ${path}`);
 
-  const entries: { name: string; path: string; isGitRepo: boolean }[] = [];
+  const entries: { name: string; path: string; isDir: boolean; isGitRepo: boolean }[] = [];
   let names: string[] = [];
   try {
     names = readdirSync(path);
@@ -145,14 +148,17 @@ route("GET", "/api/fs", async (req) => {
   for (const name of names) {
     if (name.startsWith(".")) continue; // hide dotfiles/dirs
     const full = join(path, name);
+    let isDir: boolean;
     try {
-      if (!statSync(full).isDirectory()) continue;
+      isDir = statSync(full).isDirectory();
     } catch {
       continue; // unreadable / broken symlink
     }
-    entries.push({ name, path: full, isGitRepo: existsSync(join(full, ".git")) });
+    if (!isDir && !withFiles) continue;
+    entries.push({ name, path: full, isDir, isGitRepo: isDir && existsSync(join(full, ".git")) });
   }
-  entries.sort((a, b) => a.name.localeCompare(b.name));
+  // Directories first, then files; alphabetical within each group.
+  entries.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
 
   const parent = dirname(path);
   return json({
