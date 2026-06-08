@@ -63,7 +63,10 @@ export const config = {
    */
   agentCmd: env(
     "BUTCHR_AGENT_CMD",
-    'claude --dangerously-skip-permissions --mcp-config {{MCP_CONFIG}} "$(cat {{PROMPT_FILE}})"',
+    // The `--` is REQUIRED: claude's `--mcp-config <configs...>` is variadic and
+    // would otherwise swallow the positional prompt as a second config path.
+    // `--` ends option parsing so the prompt is treated as the positional arg.
+    'claude --dangerously-skip-permissions --mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
   ),
 
   /** Max time (ms) a single watcher waits for the agent to finish. */
