@@ -32,9 +32,26 @@ export async function createWorktree(
   taskId: string,
 ): Promise<string> {
   const path = join(dir, taskId);
+  // Locally ignore the worktree dir so it never shows as an untracked/embedded
+  // repo (and can't be accidentally `git add`-ed). Uses .git/info/exclude, which
+  // is local-only — we never touch the user's tracked .gitignore for this.
+  await addLocalExclude(dir, `/${taskId}/`);
   if (existsSync(path)) return path; // already created (idempotent dispatch)
   await runOrThrow([git, "-C", dir, "worktree", "add", "-b", taskId, path]);
   return path;
+}
+
+/** Append a pattern to .git/info/exclude (local, non-committed) if absent. */
+async function addLocalExclude(dir: string, pattern: string): Promise<void> {
+  const res = await run([git, "-C", dir, "rev-parse", "--git-path", "info/exclude"]);
+  if (!res.ok) return;
+  const rel = res.stdout.trim();
+  const excludePath = rel.startsWith("/") ? rel : join(dir, rel);
+  let text = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
+  const lines = text.split("\n").map((l) => l.trim());
+  if (lines.includes(pattern)) return;
+  if (text.length > 0 && !text.endsWith("\n")) text += "\n";
+  writeFileSync(excludePath, text + pattern + "\n", "utf8");
 }
 
 /** Whether the task branch has any changes vs the default branch. */
