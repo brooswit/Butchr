@@ -277,7 +277,7 @@ async function renderDirectory(id) {
       <textarea id="tprompt" placeholder="Describe the work for the agent…"></textarea>
     </label>
     <div class="row between">
-      <small class="muted">Tasks run serially in this directory. ${queueLine(tasks)}</small>
+      <small class="muted">Tasks run concurrently, each in its own worktree. ${queueLine(tasks)}</small>
       <button class="btn" id="add-task">Create task</button>
     </div>`;
   wrap.appendChild(form);
@@ -320,7 +320,7 @@ async function renderDirectory(id) {
 function queueLine(tasks) {
   const q = tasks.filter((t) => t.status === "queued").length;
   const r = tasks.filter((t) => t.status === "running").length;
-  if (r) return `1 running, ${q} queued.`;
+  if (r) return `${r} running, ${q} queued.`;
   if (q) return `${q} queued.`;
   return "Idle.";
 }

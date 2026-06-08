@@ -37,16 +37,31 @@ queued → running → review → merged
 | status   | meaning |
 |----------|---------|
 | queued   | worktree exists, `task.md` written, waiting for the dispatcher |
-| running  | agent executing inside the worktree (one per directory at a time) |
+| running  | agent executing inside the worktree |
 | review   | agent finished, output snapshot captured, awaiting human approval |
 | merged   | approved → branch merged to the default branch, worktree + branch removed |
 | rejected | rejected with a note → note appended to `task.md`, re-queued |
 
 ## Concurrency
 
-**Serial per directory.** One task runs at a time within a directory; the rest
-queue. Multiple directories run independently and concurrently. Need parallelism
-in one repo? Register the same path twice — a deliberate, explicit choice.
+**Fully concurrent.** Every queued task is dispatched immediately and runs in
+parallel — there is no per-directory "one at a time" limit. Each task gets its
+own git worktree on its own branch, so tasks are isolated at the filesystem
+level and can't clobber each other's files.
+
+**The catch: tasks branch from the same base.** Concurrent tasks in one
+directory each branch off the directory's current HEAD and never see each
+other's changes until merged. So:
+
+- Two tasks editing the same lines will merge cleanly individually but can
+  **conflict with each other** at merge time (resolved during approve/merge).
+- A task does **not** observe another in-flight task's changes while running.
+
+This is accepted by design — isolation over coordination. If you need tasks to
+build on each other, merge the first before queueing the second.
+
+Set `BUTCHR_MAX_CONCURRENT` to cap the total number of simultaneously running
+tasks across all directories (`0` = unlimited, the default).
 
 ---
 
@@ -77,6 +92,7 @@ Then open the webapp at **http://127.0.0.1:47800**.
 | `BUTCHR_HERDR_BIN` | `herdr` | herdr binary |
 | `BUTCHR_GIT_BIN` | `git` | git binary |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval |
+| `BUTCHR_MAX_CONCURRENT` | `0` | cap on simultaneously running tasks across all directories; `0` = unlimited |
 | `BUTCHR_AGENT_CMD` | `cat {{PROMPT_FILE}} \| claude --dangerously-skip-permissions -p` | command run in the worktree to execute the agent. `{{PROMPT_FILE}}` is replaced with the rendered prompt's path |
 | `BUTCHR_AGENT_TIMEOUT_MS` | `3600000` | max time to wait for an agent to finish |
 
@@ -87,8 +103,8 @@ The agent command runs via `bash -lc` with the **worktree as cwd**. Override
 
 ## How dispatch works
 
-On each tick the dispatcher finds directories that have a queued task and no
-running task, and dispatches the next queued task:
+On each tick the dispatcher finds every queued task and dispatches each one
+immediately and concurrently (subject to `BUTCHR_MAX_CONCURRENT`):
 
 1. Ensure the worktree exists (`git worktree add -b <id> <repo>/<id>`).
 2. Render the prompt: each `context:` file's contents + the prompt + any prior
@@ -186,4 +202,4 @@ public/
 ## Out of scope (v1)
 
 Auth, multi-user, file upload, agent selection (uses `BUTCHR_AGENT_CMD`),
-parallel tasks per directory (register the path twice), automated reviewer.
+automated reviewer.

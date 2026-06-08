@@ -39,6 +39,14 @@ export const config = {
   tickMs: envInt("BUTCHR_TICK_MS", 1500),
 
   /**
+   * Optional cap on the total number of simultaneously running tasks across all
+   * directories. `0` (the default) means unlimited — every queued task is
+   * dispatched immediately. If > 0, dispatch stops once that many tasks are
+   * running and the rest stay queued until a slot frees.
+   */
+  maxConcurrent: envInt("BUTCHR_MAX_CONCURRENT", 0),
+
+  /**
    * Command template run inside a task's worktree to execute the agent.
    * `{{PROMPT_FILE}}` is replaced with the absolute path to the rendered
    * prompt file. It is run via `bash -lc`, in the worktree as cwd.
