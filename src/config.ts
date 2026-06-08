@@ -62,6 +62,14 @@ export const config = {
 
   /** Max time (ms) a single watcher waits for the agent to finish. */
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),
+
+  /**
+   * Optional override for opening a GUI terminal attached to a running task.
+   * Template run via `bash -lc`; `{{CMD}}` is replaced with the shell-quoted
+   * `herdr agent attach <id>` command. If unset, butchr auto-detects an
+   * emulator (gnome-terminal, kitty, konsole, …).
+   */
+  terminalCmd: process.env.BUTCHR_TERMINAL_CMD || "",
 };
 
 export type Config = typeof config;

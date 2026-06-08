@@ -61,6 +61,21 @@ function toast(msg, isErr) {
   toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
 }
 
+// Open a GUI terminal attached to a running task's live agent pane.
+async function openTaskTerminal(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("POST", "/tasks/" + id + "/terminal");
+    toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
+  } catch (e) {
+    // Fallback: show the command to run manually.
+    const msg = e.message || "could not open terminal";
+    toast(msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ---------- directory picker modal ----------
 // onSelect(path, register): register=false fills the field; true registers now.
 function openPicker(onSelect) {
@@ -340,12 +355,16 @@ function tasksTable(tasks) {
   for (const t of tasks) {
     const tr = el("tr");
     const action = t.status === "review" ? "review →" : "open →";
+    const termLink = t.status === "running"
+      ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
       <td class="id">${esc(t.id)}</td>
       <td>${chip(t.status)}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
       <td class="prompt-cell">${esc(t.prompt || t.review_note || "")}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
-      <td><a href="#/task/${esc(t.id)}">${action}</a></td>`;
+      <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
+    const tl = tr.querySelector(".term-link");
+    if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(t.id); });
     tb.appendChild(tr);
   }
   table.appendChild(tb);
@@ -364,6 +383,11 @@ async function renderTask(id) {
     html: `<a href="#/">Directories</a> / <a href="#/dir/${esc(t.directory_id)}">${esc(dir ? (dir.label || dir.path) : t.directory_id)}</a> / ${esc(t.id)}`,
   }));
   const headerRight = el("div", { class: "row", style: "gap:10px" });
+  if (t.status === "running") {
+    const term = el("button", { class: "btn ghost" }, "⌗ Open terminal");
+    term.addEventListener("click", () => openTaskTerminal(t.id, term));
+    headerRight.appendChild(term);
+  }
   headerRight.appendChild(el("div", { html: chip(t.status) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }));
   // Abort is available from any non-terminal state (queued/running/review).
   const canAbort = !["merged", "aborted"].includes(t.status);

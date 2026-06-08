@@ -16,11 +16,13 @@ import {
   abortTask,
   approveTask,
   createTask,
+  getTask,
   listTasks,
   rejectTask,
   taskDiff,
   taskView,
 } from "./tasks.ts";
+import { attachArgv, openTerminal } from "./terminal.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
 
@@ -217,6 +219,24 @@ route("POST", "/api/tasks/:id/reject", async (req, p) => {
 
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
+});
+
+// Open a GUI terminal attached to a running task's live agent pane.
+route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
+  const t = getTask(p.id!);
+  if (!t) throw new HttpError(404, "task not found");
+  if (t.status !== "running") {
+    throw new HttpError(409, `task is not running (status=${t.status})`);
+  }
+  const argv = attachArgv(p.id!);
+  const res = await openTerminal(argv);
+  if (!res.ok) {
+    throw new HttpError(
+      503,
+      `couldn't open a terminal automatically — run this yourself: ${res.command}`,
+    );
+  }
+  return json(res);
 });
 
 export function startServer(): void {

@@ -105,6 +105,7 @@ Then open the webapp at **http://127.0.0.1:47800**.
 | `BUTCHR_MAX_CONCURRENT` | `0` | cap on simultaneously running tasks across all directories; `0` = unlimited |
 | `BUTCHR_AGENT_CMD` | `cat {{PROMPT_FILE}} \| claude --dangerously-skip-permissions -p` | command run in the worktree to execute the agent. `{{PROMPT_FILE}}` is replaced with the rendered prompt's path |
 | `BUTCHR_AGENT_TIMEOUT_MS` | `3600000` | max time to wait for an agent to finish |
+| `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command |
 
 The agent command runs via `bash -lc` with the **worktree as cwd**. Override
 `BUTCHR_AGENT_CMD` to use any agent CLI.
@@ -131,6 +132,13 @@ butchr **recreates it on the next dispatch** and updates its record — no manua
 re-registration needed.
 
 ## Watching a running task
+
+A running task has an **Open terminal** button (task detail) and a **terminal**
+link (directory task list). It launches a GUI terminal attached to the live
+herdr pane (`herdr agent attach <task-id>`), so you can watch — or take over —
+the agent in real time. butchr auto-detects an emulator (kitty, konsole,
+alacritty, xterm, gnome-terminal, …); override with `BUTCHR_TERMINAL_CMD`. Needs
+`DISPLAY`/`WAYLAND_DISPLAY` (i.e. run the service inside your desktop session).
 
 > **Note on herdr integration.** The spec sketches `herdr wait agent-status done`
 > + `herdr pane read` for completion/output. In practice the running herdr
@@ -202,6 +210,7 @@ src/
   git.ts          worktree / merge / diff / cleanup
   herdr.ts        herdr CLI wrapper
   events.ts       SSE pub/sub
+  terminal.ts     open a GUI terminal attached to a running task
   directories.ts  directory service
   tasks.ts        task service + state transitions
   dispatcher.ts   dispatcher loop + per-task watcher + workspace self-heal
