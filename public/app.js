@@ -238,7 +238,7 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "running", "review", "merged", "rejected"]
+  const pills = ["queued", "running", "review", "merged", "aborted"]
     .map((s) => {
       const cls = s === "running" && c[s] ? "count-pill has-running"
         : s === "review" && c[s] ? "count-pill has-review" : "count-pill";
@@ -359,6 +359,12 @@ async function renderTask(id) {
   }));
   const headerRight = el("div", { class: "row", style: "gap:10px" });
   headerRight.appendChild(el("div", { html: chip(t.status) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }));
+  // Abort is available from any non-terminal state (queued/running/review).
+  const canAbort = !["merged", "aborted"].includes(t.status);
+  if (canAbort) {
+    const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
+    headerRight.appendChild(abortBtn);
+  }
   wrap.appendChild(el("div", { class: "row between" }, [
     el("h1", { html: `<span style="font-family:var(--mono)">${esc(t.id)}</span>` }),
     headerRight,
@@ -416,6 +422,21 @@ async function renderTask(id) {
   }
 
   mount(wrap);
+
+  if (canAbort) {
+    document.getElementById("abort").addEventListener("click", async (ev) => {
+      const msg = t.status === "running"
+        ? "Abort this running task? The agent is stopped and its worktree + branch are discarded without merging."
+        : "Abort this task? Its worktree + branch are discarded without merging.";
+      if (!confirm(msg)) return;
+      ev.target.disabled = true;
+      try {
+        await api("POST", "/tasks/" + id + "/abort");
+        toast("task aborted");
+        render();
+      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    });
+  }
 
   if (t.status === "review") {
     document.getElementById("approve").addEventListener("click", async (ev) => {

@@ -13,6 +13,7 @@ import {
 import { subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
 import {
+  abortTask,
   approveTask,
   createTask,
   listTasks,
@@ -212,6 +213,10 @@ route("POST", "/api/tasks/:id/approve", async (_req, p) => {
 route("POST", "/api/tasks/:id/reject", async (req, p) => {
   const body = await readJson(req);
   return json(await rejectTask(p.id!, body.note));
+});
+
+route("POST", "/api/tasks/:id/abort", async (_req, p) => {
+  return json(await abortTask(p.id!));
 });
 
 export function startServer(): void {
