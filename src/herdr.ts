@@ -153,3 +153,23 @@ export async function paneClose(target: string): Promise<void> {
   if (!target) return;
   await run([bin, "pane", "close", target]);
 }
+
+/**
+ * Definitively free an agent NAME so a fresh `agentStart` can reuse it.
+ *
+ * `pane close` alone is NOT enough: the running herdr keeps the agent NAME
+ * registered even after its pane is closed (and may respawn the agent on a new
+ * pane), so a close-and-retry loop spins forever on `agent_name_taken`. The
+ * reliable deregister is `agent rename <name> --clear`, which removes the NAME
+ * itself (verified: `agent get <name>` reports `agent_not_found` afterwards).
+ *
+ * We resolve the pane id BEFORE clearing (the name stops resolving once cleared)
+ * and close that pane afterwards to kill the now-orphaned process. Both steps are
+ * best-effort — a missing agent/pane is already the state we want.
+ */
+export async function agentDeregister(name: string): Promise<void> {
+  if (!name) return;
+  const pane = await agentPaneId(name);
+  await run([bin, "agent", "rename", name, "--clear"]).catch(() => {});
+  if (pane) await run([bin, "pane", "close", pane]).catch(() => {});
+}
