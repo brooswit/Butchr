@@ -523,9 +523,12 @@ function spawnWatcher(
  * finalizeTask (which closes the pane, captures the wrap-up, and cleans up).
  *
  * Triggers finalize on ANY of:
- *   - the agent's run log goes quiet for `idleMs` AFTER it has produced fresh
- *     post-approval output (so a log left stale while the agent was blocked in
- *     request_review doesn't finalize before the wrap-up even starts);
+ *   - the agent's run log goes quiet for `idleMs`. The idle clock starts at the
+ *     agent's last log write, or at the moment we began watching if that write
+ *     predates the approve (so a log left stale while the agent was blocked in
+ *     request_review still gets a full idleMs grace window before finalizing,
+ *     yet an agent that was already idle and never writes a wrap-up still
+ *     finalizes instead of hanging until the pane vanishes / timeout);
  *   - the agent's pane/process ends (doneFile written or herdr pane vanished);
  *   - `finalizeTimeoutMs` elapses (hard cap on a chatty agent).
  */
@@ -538,7 +541,6 @@ export function startFinalizeWatcher(taskId: string): void {
     const startedAt = Date.now();
     const deadline = startedAt + config.finalizeTimeoutMs;
     let seenAlive = false;
-    let seenFreshOutput = false;
     let reason = "the agent went idle";
     while (true) {
       // If the task left `finalizing` under us (e.g. recovery already merged it),
@@ -561,14 +563,21 @@ export function startFinalizeWatcher(taskId: string): void {
         reason = "the agent pane/process ended";
         break;
       }
-      // Idle trigger — only trusted once the agent has written something AFTER the
-      // approve (mtime past startedAt). While it was blocked in request_review the
-      // log's mtime is already stale, so we must not read that as "idle".
+      // Idle trigger. The agent is "quiet since" its last log write — but if that
+      // write predates the approve (the log was left stale while the agent was
+      // blocked in request_review), we start the idle clock at startedAt instead.
+      // That gives an agent that's about to write its wrap-up a full idleMs grace
+      // window to wake up, while still finalizing an agent that was already idle
+      // and never writes anything post-approval (it would otherwise hang here
+      // until the pane vanished or the finalize timeout elapsed).
       if (config.idleMs > 0) {
         try {
           const mtimeMs = statSync(logFile).mtimeMs;
-          if (mtimeMs > startedAt) seenFreshOutput = true;
-          if (seenFreshOutput && Date.now() - mtimeMs > config.idleMs) break;
+          const quietSince = Math.max(mtimeMs, startedAt);
+          if (Date.now() - quietSince > config.idleMs) {
+            reason = mtimeMs > startedAt ? "the agent went idle" : "the agent was already idle";
+            break;
+          }
         } catch {
           /* no log yet — keep waiting */
         }
