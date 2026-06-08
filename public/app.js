@@ -42,10 +42,12 @@ function chip(status) {
 function effStatus(t) {
   return t.status === "running" && t.idle ? "idle" : t.status;
 }
-// The agent is live (attachable) in running/idle and during finalizing (it stays
-// up doing its post-merge wrap-up until butchr closes it on idle).
+// The agent is live (attachable) whenever it has a herdr pane: running/idle, while
+// blocked on the request_review handshake in `review`, and during `finalizing` (its
+// post-merge wrap-up) until butchr closes the pane. Gating on herdr_pane_id mirrors
+// the /terminal endpoint exactly — the button shows iff the attach would succeed.
 function isLive(t) {
-  return t.status === "running" || t.status === "finalizing";
+  return !!t.herdr_pane_id;
 }
 
 async function api(method, path, body) {
