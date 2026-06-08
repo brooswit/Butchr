@@ -8,7 +8,7 @@
 // own branch). The `dispatching`/`watching` sets (both keyed by task id) guard
 // against double-dispatching the same task across overlapping ticks. An optional
 // global cap (config.maxConcurrent) bounds the total running count.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
@@ -16,7 +16,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt } from "./taskmd.ts";
-import { backToQueued, getTask, markReview, markRunning } from "./tasks.ts";
+import { backToQueued, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -254,6 +254,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Toggle a running task's `idle` flag from its log file's last-write time. The
+// agent runs under `script -f` (flush after every write), so the log's mtime
+// tracks live CLI output: if nothing has been written for `idleMs`, claude is
+// alive but quiet → idle; the moment it writes again → active. Skipped entirely
+// when idle detection is disabled or the log hasn't appeared yet (treating a
+// missing log as "stale" would flag a just-started agent as idle).
+function refreshIdle(taskId: string, logFile: string): void {
+  if (config.idleMs <= 0) return;
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(logFile).mtimeMs;
+  } catch {
+    return; // no log yet — agent is still spinning up
+  }
+  setIdle(taskId, Date.now() - mtimeMs > config.idleMs);
+}
+
 function spawnWatcher(
   _dir: DirectoryRow,
   taskId: string,
@@ -287,6 +304,10 @@ function spawnWatcher(
         vanished = true;
         break;
       }
+      // While the agent is alive, surface whether its CLI has gone quiet. (Once
+      // it submits via request_review the task leaves `running`, and setIdle's
+      // status guard makes this a no-op until the pane finally closes.)
+      refreshIdle(taskId, logFile);
       await sleep(1000);
     }
 

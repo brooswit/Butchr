@@ -73,6 +73,14 @@ export const config = {
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),
 
   /**
+   * How long (ms) a running agent's log can go with no new output before the
+   * task is flagged `idle` — claude is alive but nothing is happening in its
+   * interactive CLI (waiting on input, blocked, or just quiet). The watcher
+   * clears the flag the moment output resumes. `0` disables idle detection.
+   */
+  idleMs: envInt("BUTCHR_IDLE_MS", 1000 * 60),
+
+  /**
    * Optional override for opening a GUI terminal attached to a running task.
    * Template run via `bash -lc`; `{{CMD}}` is replaced with the shell-quoted
    * `herdr agent attach <id>` command. If unset, butchr auto-detects an

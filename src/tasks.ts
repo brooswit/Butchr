@@ -223,7 +223,7 @@ export async function abortTask(id: string): Promise<TaskView> {
   await git.cleanup(dir.path, id).catch(() => {});
 
   db.query(
-    `UPDATE tasks SET status='aborted', conflict=0, review_note=NULL,
+    `UPDATE tasks SET status='aborted', conflict=0, idle=0, review_note=NULL,
        output_snapshot=NULL, herdr_pane_id=NULL, completed_at=? WHERE id=?`,
   ).run(nowIso(), id);
   updateTaskMdStatus(dir.path, id, "aborted");
@@ -254,7 +254,7 @@ export function markReview(id: string, snapshot: string): void {
   // Guard on status='running' so a task aborted while its agent was finishing
   // isn't resurrected into 'review' after abortTask parked it as terminal.
   const res = db.query(
-    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL
+    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL, idle=0
        WHERE id=? AND status='running'`,
   ).run(nowIso(), snapshot, id);
   if (res.changes === 0) return; // aborted (or otherwise moved) under us
@@ -287,13 +287,29 @@ export function markReviewFromAgent(
 
   // running → review (normal), or review → review (a duplicate call); keep pane.
   db.query(
-    `UPDATE tasks SET status='review', completed_at=COALESCE(completed_at, ?), summary=?
+    `UPDATE tasks SET status='review', completed_at=COALESCE(completed_at, ?), summary=?, idle=0
        WHERE id=? AND status IN ('running','review')`,
   ).run(nowIso(), summary ?? null, id);
   const dir = getDirectory(row.directory_id);
   if (dir) updateTaskMdStatus(dir.path, id, "review");
   emitUpdated(id);
   return "ok";
+}
+
+/**
+ * Flag/unflag a running task as `idle` (agent alive but no recent CLI output).
+ * Owned by the dispatcher watcher. Guarded on status='running' so a lagging
+ * watcher can't stamp the flag onto a task that has already moved to
+ * review/merged/aborted, and on a value change so we only emit when it actually
+ * flips (no per-second event spam).
+ */
+export function setIdle(id: string, idle: boolean): void {
+  const want = idle ? 1 : 0;
+  const res = db.query(
+    `UPDATE tasks SET idle=? WHERE id=? AND status='running' AND idle<>?`,
+  ).run(want, id, want);
+  if (res.changes === 0) return;
+  emitUpdated(id);
 }
 
 export function backToQueued(id: string): void {

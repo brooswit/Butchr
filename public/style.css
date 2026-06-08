@@ -10,6 +10,7 @@
 
   --queued: #7b8fa1;
   --running: #2563eb;
+  --idle: #0891b2;
   --review: #d97706;
   --merged: #16a34a;
   --rejected: #dc2626;
@@ -94,6 +95,7 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 }
 .chip.queued { background: var(--queued); }
 .chip.running { background: var(--running); }
+.chip.idle { background: var(--idle); }
 .chip.review { background: var(--review); }
 .chip.merged { background: var(--merged); }
 .chip.rejected { background: var(--rejected); }
@@ -107,6 +109,7 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 }
 .count-pill b { color: var(--text); }
 .count-pill.has-running { border-color: var(--running); color: var(--running); }
+.count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
 .count-pill.has-review { border-color: var(--review); color: var(--review); }
 
 /* tasks table */
