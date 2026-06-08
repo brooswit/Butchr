@@ -5,12 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>butchr</title>
     <link rel="stylesheet" href="/style.css" />
+    <script>
+      // Set the theme before first paint so there's no flash of the wrong theme.
+      (function () {
+        try {
+          var t = localStorage.getItem("butchr-theme");
+          document.documentElement.dataset.theme = t === "dark" ? "dark" : "light";
+        } catch (e) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
   </head>
   <body>
     <header class="topbar">
       <a href="#/" class="brand">butchr<span class="dot">·</span></a>
-      <div class="conn" id="conn" title="live connection">
-        <span class="led"></span><span class="conn-label">connecting…</span>
+      <div class="topbar-right">
+        <button
+          type="button"
+          id="theme-toggle"
+          class="theme-toggle"
+          title="Toggle light / dark theme"
+          aria-label="Toggle light / dark theme"
+        >☾</button>
+        <div class="conn" id="conn" title="live connection">
+          <span class="led"></span><span class="conn-label">connecting…</span>
+        </div>
       </div>
     </header>
     <main id="app"><div class="loading">loading…</div></main>

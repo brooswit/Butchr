@@ -593,7 +593,35 @@ function refreshSoon() {
   refreshTimer = setTimeout(render, 150);
 }
 
+// ---------- theme toggle ----------
+// The initial data-theme is set by an inline <head> script (no-flash); here we
+// keep the toggle button's icon in sync and persist the user's choice.
+const THEME_KEY = "butchr-theme";
+function currentTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    // Show the icon for the theme you'd switch TO.
+    btn.textContent = theme === "dark" ? "☀" : "☾";
+    btn.title = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  }
+}
+function setupTheme() {
+  applyTheme(currentTheme());
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const next = currentTheme() === "dark" ? "light" : "dark";
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* ignore */ }
+    applyTheme(next);
+  });
+}
+
 // ---------- boot ----------
 window.addEventListener("hashchange", render);
+setupTheme();
 render();
 connectSSE();
