@@ -356,6 +356,20 @@ export function markRunning(id: string, paneId: string): void {
   emitUpdated(id);
 }
 
+/**
+ * Record a re-adopted running task's current herdr pane id. Used by the startup
+ * reconcile (dispatcher.reconcileRunningTasks) when an agent it re-adopts now
+ * lives on a different pane than the one stored before butchr restarted. Guarded
+ * on status='running' so a concurrent transition isn't clobbered.
+ */
+export function adoptPane(id: string, paneId: string): void {
+  const res = db.query(
+    `UPDATE tasks SET herdr_pane_id=? WHERE id=? AND status='running'`,
+  ).run(paneId, id);
+  if (res.changes === 0) return;
+  emitUpdated(id);
+}
+
 export function markReview(id: string, snapshot: string): void {
   // Guard on status='running' so a task aborted while its agent was finishing
   // isn't resurrected into 'review' after abortTask parked it as terminal.

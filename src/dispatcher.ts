@@ -16,7 +16,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt } from "./taskmd.ts";
-import { backToQueued, finalizeTask, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
+import { adoptPane, backToQueued, finalizeTask, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -117,6 +117,95 @@ type QueuedRow = TaskRow & {
   herdr_pane: string | null;
   dir_id: string;
 };
+
+/**
+ * Startup reconcile: re-adopt the herdr agents butchr launched before it was
+ * restarted, instead of orphaning them. Meant to run ONCE, before the tick loop
+ * begins (see index.ts).
+ *
+ * For every task still marked `running` in the DB (its in-memory watcher was lost
+ * when butchr stopped):
+ *   - If a live herdr agent with the task's name still exists, RE-ADOPT it:
+ *     record its (possibly new) pane id back onto the task and re-spawn the
+ *     watcher against it. No fresh agentStart — the agent keeps working and its
+ *     completion/idle detection resumes. (If it already ended, spawnWatcher's
+ *     normal "ended without request_review" path rescues it to review.)
+ *   - If no live agent exists, the agent died while butchr was down: rescue the
+ *     task into `review` with an "ended while butchr was offline" snapshot,
+ *     mirroring the watcher's vanished-path.
+ *
+ * Genuinely-queued tasks (never dispatched) are untouched here — the normal tick
+ * loop gives them their fresh agentStart.
+ *
+ * `herdrUp` says whether we can probe agent liveness. If herdr is down we cannot
+ * tell adopt from rescue without risking either orphaning a live agent or falsely
+ * rescuing one, so we leave the tasks `running` (they can still submit via the
+ * request_review MCP path) and reconcile on a later restart with herdr up.
+ */
+export async function reconcileRunningTasks(
+  herdrUp: boolean,
+): Promise<{ adopted: number; rescued: number; skipped: number }> {
+  const rows = db
+    .query<QueuedRow, []>(
+      `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
+         FROM tasks t JOIN directories d ON d.id = t.directory_id
+         WHERE t.status='running'`,
+    )
+    .all();
+  if (rows.length === 0) return { adopted: 0, rescued: 0, skipped: 0 };
+
+  if (!herdrUp) {
+    console.warn(
+      `[butchr] herdr down at startup — leaving ${rows.length} running task(s) ` +
+        `as-is (cannot distinguish live agents from dead ones); will reconcile ` +
+        `on a later restart with herdr up`,
+    );
+    return { adopted: 0, rescued: 0, skipped: rows.length };
+  }
+
+  let adopted = 0;
+  let rescued = 0;
+  for (const row of rows) {
+    if (watching.has(row.id)) continue; // already adopted (defensive)
+
+    const dir: DirectoryRow = {
+      id: row.dir_id,
+      path: row.path,
+      label: row.label,
+      herdr_workspace: row.herdr_workspace,
+      herdr_pane: row.herdr_pane,
+      created_at: row.created_at,
+    };
+    const logFile = runLogPath(row.id);
+    const doneFile = join(runsDir, `${row.id}.done`);
+
+    if (await herdr.agentExists(row.id)) {
+      // Live agent — re-adopt. Record its current pane (it may have moved while
+      // butchr was down) and re-attach a watcher so completion/idle resume.
+      const paneId =
+        (await herdr.agentPaneId(row.id)) ?? row.herdr_pane_id ?? row.id;
+      if (paneId !== row.herdr_pane_id) adoptPane(row.id, paneId);
+      spawnWatcher(dir, row.id, paneId, logFile, doneFile);
+      adopted++;
+      console.log(`[butchr] re-adopted running task ${row.id} (pane ${paneId})`);
+    } else {
+      // Agent gone — it ended while butchr was offline. Rescue into review with
+      // whatever output was logged, closing any husk pane defensively.
+      if (row.herdr_pane_id) {
+        await herdr.paneClose(row.herdr_pane_id).catch(() => {});
+      }
+      const snapshot = readRunLogSnapshot(row.id);
+      markReview(
+        row.id,
+        `[butchr] moved to review automatically: the agent ended while butchr ` +
+          `was offline. Output captured as-is.\n\n${snapshot}`,
+      );
+      rescued++;
+      console.log(`[butchr] rescued task ${row.id} → review (agent gone while offline)`);
+    }
+  }
+  return { adopted, rescued, skipped: 0 };
+}
 
 let ticking = false;
 async function tick(): Promise<void> {
@@ -273,9 +362,9 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
 
 // Start the agent, self-healing an `agent_name_taken` collision: if a lingering
 // same-named agent (an orphan from an abandoned/aborted run) is still registered,
-// close its pane and retry once. Without this a single stale agent would block
-// the task from ever dispatching. A second failure propagates to dispatch()'s
-// catch (→ backToQueued, retried next tick).
+// deregister it and retry once. Without this a single stale agent would block the
+// task from ever dispatching. A second failure propagates to dispatch()'s catch
+// (→ backToQueued, retried next tick).
 async function startAgentReconciling(
   name: string,
   worktree: string,
@@ -286,9 +375,11 @@ async function startAgentReconciling(
     return await herdr.agentStart(name, worktree, argv, workspaceId);
   } catch (e) {
     if (!herdr.isAgentNameTaken(e)) throw e;
-    // Reclaim the stale agent's pane (fall back to the name itself as a target).
-    const stalePane = (await herdr.agentPaneId(name)) ?? name;
-    await herdr.paneClose(stalePane).catch(() => {});
+    // Reclaim the stale agent. Closing its pane is NOT enough — herdr keeps the
+    // NAME registered (and respawns the agent), so the retry would fail again.
+    // agentDeregister clears the name via `agent rename --clear` and then closes
+    // the orphaned pane, truly freeing the name for reuse.
+    await herdr.agentDeregister(name);
     console.log(`[butchr] reclaimed stale agent name ${name}; retrying agentStart`);
     return await herdr.agentStart(name, worktree, argv, workspaceId);
   }
