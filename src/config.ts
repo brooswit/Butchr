@@ -32,6 +32,13 @@ export const config = {
   /** Path to the herdr binary. */
   herdrBin: env("BUTCHR_HERDR_BIN", "herdr"),
 
+  /**
+   * Optional path to a file whose contents seed a freshly registered
+   * directory's `.butchr/CTO.md`. When unset or unreadable, the built-in
+   * default CTO context is used instead.
+   */
+  ctoContextPath: process.env.BUTCHR_CTO_CONTEXT || "",
+
   /** Path to the git binary. */
   gitBin: env("BUTCHR_GIT_BIN", "git"),
 

@@ -49,6 +49,11 @@ export function taskDir(directoryRoot: string, taskId: string): string {
   return join(directoryRoot, ".butchr", "tasks", taskId);
 }
 
+/** Absolute path to a directory's CTO context file under .butchr/. */
+export function ctoMdPath(directoryRoot: string): string {
+  return join(directoryRoot, ".butchr", "CTO.md");
+}
+
 /** Absolute path to a task's task.md. */
 export function taskMdPath(directoryRoot: string, taskId: string): string {
   return join(taskDir(directoryRoot, taskId), "task.md");
@@ -193,6 +198,19 @@ export function parseTaskMd(raw: string): TaskDoc {
  */
 export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
   const parts: string[] = [];
+
+  // Prepend the directory's CTO context (best-effort) so every agent starts with
+  // it ABOVE the context files, task prompt, and review-handshake instructions.
+  const ctoPath = ctoMdPath(directoryRoot);
+  if (existsSync(ctoPath)) {
+    try {
+      const cto = readFileSync(ctoPath, "utf8").trim();
+      if (cto) parts.push(`# CTO context\n\n${cto}`);
+    } catch {
+      // ignore unreadable CTO context
+    }
+  }
+
   for (const rel of doc.meta.context) {
     const abs = join(directoryRoot, rel);
     if (existsSync(abs)) {
