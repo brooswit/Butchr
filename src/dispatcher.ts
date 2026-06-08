@@ -118,10 +118,23 @@ type QueuedRow = TaskRow & {
   dir_id: string;
 };
 
+// Liveness markers for the /health endpoint: when the loop last ran and how many
+// times. Stamped at the START of every tick (before any early-out) so the health
+// check reflects that the loop itself is alive even while herdr is down.
+let lastTickAt = 0; // ms epoch of the most recent tick; 0 = not yet ticked
+let tickCount = 0;
+
+/** Snapshot of dispatcher liveness for the health endpoint. */
+export function dispatcherHealth(): { lastTickAt: number; tickCount: number; tickMs: number } {
+  return { lastTickAt, tickCount, tickMs: config.tickMs };
+}
+
 let ticking = false;
 async function tick(): Promise<void> {
   if (ticking) return;
   ticking = true;
+  lastTickAt = Date.now();
+  tickCount++;
   try {
     // If herdr is down, do nothing this tick (no error spam — it may come back).
     if (!(await herdr.isUp())) return;

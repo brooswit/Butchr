@@ -2,11 +2,15 @@
 // up clean shutdown. Run with `bun run src/index.ts` (see package.json scripts).
 import { recoverRunningTasks } from "./db.ts";
 import { startDispatcher, stopDispatcher } from "./dispatcher.ts";
+import { initFileLogging } from "./log.ts";
 import { startServer } from "./server.ts";
 import { recoverFinalizingTasks } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
 
 async function main(): Promise<void> {
+  // Install the persistent log sink before anything else so all startup output
+  // is captured to the log file too.
+  initFileLogging();
   console.log("[butchr] starting…");
 
   const recovered = recoverRunningTasks();

@@ -29,6 +29,17 @@ export const config = {
   dataDir,
   dbPath: env("BUTCHR_DB", join(dataDir, "butchr.db")),
 
+  /**
+   * Persistent server log file. butchr's console output is teed here (in
+   * addition to stdout) so logs survive restarts and detached runs. Empty
+   * disables file logging. Rotated by size — see `logMaxBytes`/`logKeep`.
+   */
+  logFile: env("BUTCHR_LOG_FILE", join(dataDir, "butchr.log")),
+  /** Rotate the log once it exceeds this many bytes (0 disables rotation). */
+  logMaxBytes: envInt("BUTCHR_LOG_MAX_BYTES", 10 * 1024 * 1024),
+  /** Number of rotated log files to keep (butchr.log.1 … butchr.log.N). */
+  logKeep: envInt("BUTCHR_LOG_KEEP", 3),
+
   /** Path to the herdr binary. */
   herdrBin: env("BUTCHR_HERDR_BIN", "herdr"),
 

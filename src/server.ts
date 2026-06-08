@@ -3,6 +3,8 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { config } from "./config.ts";
+import { db } from "./db.ts";
+import { dispatcherHealth } from "./dispatcher.ts";
 import {
   HttpError,
   getDirectory,
@@ -12,7 +14,9 @@ import {
 } from "./directories.ts";
 import { subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
+import * as herdr from "./herdr.ts";
 import { handleMcp } from "./mcp.ts";
+import pkg from "../package.json" with { type: "json" };
 import {
   abortTask,
   approveTask,
@@ -103,6 +107,68 @@ async function serveStatic(pathname: string): Promise<Response> {
   return new Response("not found", { status: 404 });
 }
 
+// ---- health ----
+// Operational health snapshot for supervisors / uptime checks. 200 when healthy,
+// 503 when the DB is unreachable or the dispatcher tick loop has stalled.
+async function healthResponse(): Promise<Response> {
+  // DB reachable: a trivial query.
+  let dbOk = true;
+  try {
+    db.query("SELECT 1").get();
+  } catch {
+    dbOk = false;
+  }
+
+  // Task counts by status (best-effort; skipped if the DB is down).
+  const tasks: Record<string, number> = {};
+  if (dbOk) {
+    try {
+      const rows = db
+        .query<{ status: string; n: number }, []>(
+          `SELECT status, COUNT(*) AS n FROM tasks GROUP BY status`,
+        )
+        .all();
+      for (const r of rows) tasks[r.status] = r.n;
+    } catch {
+      /* counts are best-effort */
+    }
+  }
+
+  // Tick-loop liveness: stale if we've ticked at least once but not within
+  // several intervals — meaning the dispatcher loop wedged. A never-ticked
+  // loop (lastTickAt === 0) is treated as still-starting, not stalled.
+  const { lastTickAt, tickCount, tickMs } = dispatcherHealth();
+  const tickAgeMs = lastTickAt > 0 ? Date.now() - lastTickAt : null;
+  const tickStaleAfterMs = Math.max(tickMs * 5, 10000);
+  const tickAlive = lastTickAt === 0 || (tickAgeMs as number) <= tickStaleAfterMs;
+
+  // herdr reachability — best-effort, never throws.
+  let herdrReachable = false;
+  try {
+    herdrReachable = await herdr.isUp();
+  } catch {
+    herdrReachable = false;
+  }
+
+  const healthy = dbOk && tickAlive;
+  const body = {
+    status: healthy ? "ok" : "degraded",
+    version: (pkg as { version?: string }).version ?? "unknown",
+    uptimeSec: Math.round(process.uptime()),
+    db: { ok: dbOk },
+    tick: {
+      alive: tickAlive,
+      count: tickCount,
+      lastTickAt: lastTickAt > 0 ? new Date(lastTickAt).toISOString() : null,
+      ageMs: tickAgeMs,
+      staleAfterMs: tickStaleAfterMs,
+    },
+    tasks,
+    herdr: { reachable: herdrReachable },
+  };
+  return json(body, healthy ? 200 : 503);
+}
+
 // ---- router ----
 type Handler = (req: Request, params: Record<string, string>) => Promise<Response>;
 
@@ -171,6 +237,9 @@ route("GET", "/api/fs", async (req) => {
     entries,
   });
 });
+
+// Health (also exposed at the bare /health path — see fetch()).
+route("GET", "/api/health", async () => healthResponse());
 
 // Directories
 route("GET", "/api/directories", async () => json(listDirectories()));
@@ -253,6 +322,16 @@ export function startServer(): void {
       const { pathname } = url;
 
       if (pathname === "/api/events") return sseResponse();
+
+      // Bare /health alias (supervisors often probe a top-level path) — the same
+      // payload is also served under /api/health via the router below.
+      if (pathname === "/health") {
+        try {
+          return await healthResponse();
+        } catch (e) {
+          return errResponse(e);
+        }
+      }
 
       // Per-task MCP endpoint the interactive agent connects to for the
       // request_review handshake. Identity is the path param.
