@@ -148,6 +148,41 @@ export function isAgentNameTaken(e: unknown): boolean {
   );
 }
 
+// Control sequences that survive even herdr's `--format text` read (stray CSI
+// escapes, charset selects, lone control chars). Strip them so the live-output
+// panel renders as readable plain text rather than terminal noise.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+
+/**
+ * Best-effort recent output of the agent terminal named `name`, for the webapp's
+ * live-output panel. Reads herdr's `recent-unwrapped` buffer (text format, so
+ * most styling is already gone) and strips the remaining control sequences.
+ * Returns "" if the pane/agent is gone or herdr can't read it — this is a
+ * convenience view, never the source of truth for review (that's the git diff).
+ */
+export async function agentRead(name: string, lines = 200): Promise<string> {
+  if (!name) return "";
+  const res = await run([
+    bin, "agent", "read", name,
+    "--source", "recent-unwrapped", "--format", "text", "--lines", String(lines),
+  ]);
+  if (!res.ok) return "";
+  const text = res.stdout.trim();
+  if (!text) return "";
+  let env: Envelope;
+  try {
+    env = JSON.parse(text);
+  } catch {
+    return "";
+  }
+  if (env.error) return "";
+  const r = env.result ?? env;
+  const raw: string = r.read?.text ?? r.text ?? "";
+  if (!raw) return "";
+  return raw.replace(ANSI_RE, "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trimEnd();
+}
+
 /** Close a pane / terminate the agent terminal. */
 export async function paneClose(target: string): Promise<void> {
   if (!target) return;

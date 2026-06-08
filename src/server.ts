@@ -12,6 +12,7 @@ import {
 } from "./directories.ts";
 import { subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
+import * as herdr from "./herdr.ts";
 import { handleMcp } from "./mcp.ts";
 import {
   abortTask,
@@ -207,6 +208,16 @@ route("GET", "/api/tasks/:id", async (_req, p) => {
 route("GET", "/api/tasks/:id/diff", async (_req, p) => {
   const d = await taskDiff(p.id!);
   return json({ diff: d });
+});
+
+// Best-effort live snapshot of the agent's recent terminal output, for the task
+// page's "Live output" panel. Only meaningful while the task has a live pane;
+// returns "" once the pane is gone. Never the source of truth for review.
+route("GET", "/api/tasks/:id/output", async (_req, p) => {
+  const t = getTask(p.id!);
+  if (!t) throw new HttpError(404, "task not found");
+  const output = t.herdr_pane_id ? await herdr.agentRead(p.id!) : "";
+  return json({ output });
 });
 
 route("POST", "/api/tasks/:id/approve", async (_req, p) => {
