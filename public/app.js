@@ -49,6 +49,12 @@ function effStatus(t) {
 function isLive(t) {
   return !!t.herdr_pane_id;
 }
+// A task has a live agent pane we can read recent output from whenever its
+// herdr_pane_id is set — running/idle/review (agent blocked in request_review)
+// and finalizing. This is exactly what the backend /output route gates on.
+function hasLivePane(t) {
+  return !!t.herdr_pane_id;
+}
 
 async function api(method, path, body) {
   const res = await fetch("/api" + path, {
@@ -183,10 +189,23 @@ function parseHash() {
   return { name: "dashboard" };
 }
 
+// ---------- live output panel state ----------
+// A single poll timer drives the task page's "Live output" panel. It must not
+// survive a navigation/re-render (the page is rebuilt on every SSE event), so
+// render() clears it up front and renderTask restarts it if appropriate.
+let liveOutputTimer = null;
+let liveOutputOpen = true; // panel open/closed, persisted across re-renders
+let liveOutputCache = ""; // last text, so SSE rebuilds don't flash empty
+let liveOutputCacheId = null; // task id the cache belongs to
+function stopLiveOutput() {
+  if (liveOutputTimer) { clearInterval(liveOutputTimer); liveOutputTimer = null; }
+}
+
 let current = null;
 async function render() {
   const route = parseHash();
   current = route;
+  stopLiveOutput();
   try {
     if (route.name === "dashboard") await renderDashboard();
     else if (route.name === "directory") await renderDirectory(route.id);
@@ -486,6 +505,45 @@ async function renderTask(id) {
   // prompt
   wrap.appendChild(el("h2", {}, "Prompt"));
   wrap.appendChild(el("pre", { class: "block", html: esc(t.prompt || "—") }));
+
+  // live output — best-effort snapshot of the agent's recent terminal output,
+  // polled while the panel is open and the task still has a live pane. This is a
+  // convenience view; the git diff below stays the source of truth for review.
+  if (hasLivePane(t)) {
+    if (liveOutputCacheId !== t.id) { liveOutputCache = ""; liveOutputCacheId = t.id; }
+    const pre = el("pre", { class: "block live-output-body" },
+      liveOutputCache || "loading recent output…");
+    const caret = el("span", { class: "caret" }, liveOutputOpen ? "▾" : "▸");
+    const head = el("button", { class: "live-output-head", type: "button" }, [
+      caret,
+      el("span", { class: "lo-title" }, "Live output"),
+      el("span", { class: "lo-hint" }, "best-effort · updates every few seconds"),
+    ]);
+    const panel = el("div", { class: "panel live-output" + (liveOutputOpen ? "" : " collapsed") },
+      [head, pre]);
+
+    const poll = async () => {
+      try {
+        const r = await api("GET", "/tasks/" + t.id + "/output");
+        const text = (r.output || "").trimEnd();
+        liveOutputCache = text;
+        // Keep the view pinned to the newest output if already scrolled to bottom.
+        const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+        pre.textContent = text || "(no recent output)";
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+      } catch { /* transient — keep whatever was there */ }
+    };
+    const startPolling = () => { stopLiveOutput(); poll(); liveOutputTimer = setInterval(poll, 2500); };
+
+    head.addEventListener("click", () => {
+      liveOutputOpen = !liveOutputOpen;
+      panel.classList.toggle("collapsed", !liveOutputOpen);
+      caret.textContent = liveOutputOpen ? "▾" : "▸";
+      if (liveOutputOpen) startPolling(); else stopLiveOutput();
+    });
+    if (liveOutputOpen) startPolling();
+    wrap.appendChild(panel);
+  }
 
   // review notes
   if (t.review_notes) {
