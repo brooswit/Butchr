@@ -12,6 +12,7 @@ import {
 } from "./directories.ts";
 import { subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
+import { handleMcp } from "./mcp.ts";
 import {
   abortTask,
   approveTask,
@@ -229,6 +230,18 @@ export function startServer(): void {
       const { pathname } = url;
 
       if (pathname === "/api/events") return sseResponse();
+
+      // Per-task MCP endpoint the interactive agent connects to for the
+      // request_review handshake. Identity is the path param.
+      if (pathname.startsWith("/mcp/")) {
+        const taskId = decodeURIComponent(pathname.slice("/mcp/".length).split("/")[0] ?? "");
+        if (!taskId) return json({ error: "missing task id" }, 404);
+        try {
+          return await handleMcp(req, taskId);
+        } catch (e) {
+          return errResponse(e);
+        }
+      }
 
       if (pathname.startsWith("/api/")) {
         for (const r of routes) {

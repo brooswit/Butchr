@@ -26,6 +26,24 @@ export type TaskDoc = {
 
 const REVIEW_BANNER = "<!-- appended by butchr on each rejection -->";
 
+// Appended to every rendered agent prompt: how to submit work for review via the
+// butchr MCP server. The handshake is what drives task completion now (the agent
+// runs interactively and does not exit on its own).
+const REVIEW_PROTOCOL = [
+  "# How to submit your work for review",
+  "",
+  "When you have completed ALL of the requested work, call the `request_review`",
+  "tool provided by the **butchr** MCP server. You may pass a short `summary` of",
+  "what you did. This call blocks until a human reviews your work:",
+  "",
+  "- If changes are requested, the tool returns notes describing what to fix.",
+  "  Address them and call `request_review` again.",
+  "- On approval, your session simply ends.",
+  "",
+  "Do not stop or exit before calling `request_review`. You do NOT need to commit",
+  "or clean up — butchr captures your worktree changes automatically on approval.",
+].join("\n");
+
 /** Absolute path to a task's directory under .butchr/tasks/. */
 export function taskDir(directoryRoot: string, taskId: string): string {
   return join(directoryRoot, ".butchr", "tasks", taskId);
@@ -191,6 +209,7 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
     body += `\n\n# Review notes from previous attempts\n\n${doc.reviewNotes}\n\nAddress the review notes above in this attempt.`;
   }
   parts.push(body);
+  parts.push(REVIEW_PROTOCOL);
   return parts.join("\n\n---\n\n");
 }
 

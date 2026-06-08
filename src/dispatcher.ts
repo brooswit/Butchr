@@ -16,12 +16,18 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt } from "./taskmd.ts";
-import { backToQueued, markReview, markRunning } from "./tasks.ts";
+import { backToQueued, getTask, markReview, markRunning } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
+const mcpDir = join(config.dataDir, "mcp");
 mkdirSync(promptsDir, { recursive: true });
 mkdirSync(runsDir, { recursive: true });
+mkdirSync(mcpDir, { recursive: true });
+
+// The host the agent (running locally) should dial to reach butchr's MCP server.
+// If butchr binds 0.0.0.0 (all interfaces), the agent still connects via loopback.
+const mcpHost = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
 
 // Shell-escape a string for safe interpolation inside a single-quoted context.
 function shq(s: string): string {
@@ -171,13 +177,30 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     const promptFile = join(promptsDir, `${task.id}.md`);
     writeFileSync(promptFile, rendered, "utf8");
 
-    const agentCmd = config.agentCmd.replaceAll("{{PROMPT_FILE}}", promptFile);
+    // Per-task MCP config pointing the agent at butchr's /mcp/<id> endpoint.
+    const mcpConfigFile = join(mcpDir, `${task.id}.json`);
+    writeFileSync(
+      mcpConfigFile,
+      JSON.stringify({
+        mcpServers: {
+          butchr: {
+            type: "http",
+            url: `http://${mcpHost}:${config.port}/mcp/${task.id}`,
+          },
+        },
+      }),
+      "utf8",
+    );
 
-    // Wrap the agent command so that:
-    //  - its output is teed to a log file (still visible live in the herdr pane)
-    //  - a completion marker (with the agent's exit code) is written when done
-    // This is how the watcher detects completion + captures output, independent
-    // of herdr's pane/agent-status lifecycle (panes vanish on command exit).
+    const agentCmd = config.agentCmd
+      .replaceAll("{{PROMPT_FILE}}", promptFile)
+      .replaceAll("{{MCP_CONFIG}}", mcpConfigFile);
+
+    // The agent is interactive and long-lived: it signals completion by calling
+    // the request_review MCP tool, NOT by exiting. We still tee its output to a
+    // log (live in the herdr pane + a snapshot/fallback) and write a `.done`
+    // marker when the process DOES exit — the watcher uses that (plus an herdr
+    // liveness check) only to catch an agent that ended WITHOUT submitting.
     const logFile = join(runsDir, `${task.id}.log`);
     const doneFile = join(runsDir, `${task.id}.done`);
     rmSync(logFile, { force: true });
@@ -219,11 +242,25 @@ function spawnWatcher(
   (async () => {
     const deadline = Date.now() + config.agentTimeoutMs;
     let timedOut = false;
-    // Poll for the completion marker written by the wrapped command.
-    while (!existsSync(doneFile)) {
+    let vanished = false;
+    // The agent is interactive: it submits by calling request_review (which moves
+    // the task to `review` while the process stays ALIVE and blocked). So we do
+    // NOT treat process exit as completion. We only watch for the agent ENDING —
+    // process exited (`.done`) or its herdr pane vanished — so we can rescue a
+    // task that would otherwise be stuck in `running`. `seenAlive` guards against
+    // a false "vanished" during the brief agent-registration lag at startup.
+    let seenAlive = false;
+    while (true) {
       if (abortSignals.has(taskId)) break;
+      if (existsSync(doneFile)) break; // process exited
       if (Date.now() > deadline) {
         timedOut = true;
+        break;
+      }
+      const alive = await herdr.agentExists(taskId);
+      if (alive) seenAlive = true;
+      else if (seenAlive) {
+        vanished = true;
         break;
       }
       await sleep(1000);
@@ -238,6 +275,16 @@ function spawnWatcher(
       return;
     }
 
+    // If the agent already submitted (status is `review`) or the human acted on
+    // it (merged/aborted), there is nothing to rescue — the request_review path
+    // owns the transition and keeps the session alive. Only a task still sitting
+    // in `running` here means the agent ended WITHOUT submitting.
+    const status = getTask(taskId)?.status;
+    if (status !== "running") {
+      watching.delete(taskId);
+      return;
+    }
+
     let snapshot = "";
     if (existsSync(logFile)) {
       try {
@@ -246,18 +293,21 @@ function spawnWatcher(
         /* best effort */
       }
     }
+    let reason = "the agent ended without calling request_review";
     if (timedOut) {
-      snapshot =
-        `[butchr] agent did not finish within the timeout; output captured as-is.\n\n` +
-        snapshot;
+      reason = "the agent did not finish within the timeout";
     } else if (existsSync(doneFile)) {
       const code = readFileSync(doneFile, "utf8").trim();
-      if (code && code !== "0") {
-        snapshot = `[butchr] agent exited with code ${code}.\n\n` + snapshot;
-      }
+      if (code && code !== "0") reason = `the agent exited with code ${code}`;
+    } else if (vanished) {
+      reason = "the agent pane/process ended without calling request_review";
     }
+    snapshot =
+      `[butchr] moved to review automatically: ${reason}. ` +
+      `Output captured as-is.\n\n` +
+      snapshot;
 
-    // Pane usually self-closes when the command exits; close defensively.
+    // The process is gone; close the pane defensively in case a husk remains.
     await herdr.paneClose(paneId).catch(() => {});
 
     // Last-moment abort (signalled while we captured output): bail without
@@ -269,9 +319,9 @@ function spawnWatcher(
       return;
     }
 
-    // Move to review regardless — human inspects diff + snapshot.
+    // Rescue the orphaned task into review so a human can inspect it.
     markReview(taskId, snapshot);
     watching.delete(taskId);
-    console.log(`[butchr] task ${taskId} → review`);
+    console.log(`[butchr] task ${taskId} → review (${reason})`);
   })();
 }

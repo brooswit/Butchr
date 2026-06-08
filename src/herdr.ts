@@ -98,6 +98,17 @@ export async function agentStart(
 // the agent under `tee` (live output still shows in the herdr pane) and observes
 // completion + captures output via filesystem markers — see dispatcher.ts.
 
+/**
+ * Is the agent terminal named `name` still alive? Used by the fallback watcher
+ * to notice an interactive agent whose pane/process ended without it calling
+ * request_review. `herdr agent get` exits non-zero when the agent is gone.
+ */
+export async function agentExists(name: string): Promise<boolean> {
+  if (!name) return false;
+  const res = await run([bin, "agent", "get", name]);
+  return res.ok && !res.stdout.includes('"error"');
+}
+
 /** Close a pane / terminate the agent terminal. */
 export async function paneClose(target: string): Promise<void> {
   if (!target) return;
