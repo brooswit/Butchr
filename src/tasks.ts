@@ -108,6 +108,24 @@ export async function taskDiff(id: string): Promise<string> {
   return git.diff(dir.path, id);
 }
 
+/**
+ * Global merge queue: run at most ONE merge at a time across ALL tasks and
+ * directories. Approvals that land close together would otherwise rebase+ff into
+ * a moving default branch in parallel and race; serializing them means each merge
+ * rebases onto the up-to-date base tip the previous merge left behind. The chain
+ * is process-wide (a single butchr instance owns all merges) and never rejects —
+ * each link swallows the prior result so one failed merge can't break the queue.
+ */
+let mergeChain: Promise<unknown> = Promise.resolve();
+function runExclusiveMerge<T>(fn: () => Promise<T>): Promise<T> {
+  const result = mergeChain.then(fn, fn);
+  mergeChain = result.then(
+    () => {},
+    () => {},
+  );
+  return result;
+}
+
 /** What approveTask did: merged the branch, or kicked a conflict back to the agent. */
 export type ApproveOutcome = { task: TaskView; conflictSentBack?: boolean };
 
@@ -178,7 +196,9 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   const dir = getDirectory(row.directory_id);
   if (!dir) throw new HttpError(404, "directory not found");
 
-  const result = await git.merge(dir.path, id);
+  // Serialize through the global merge queue so concurrent approvals rebase+ff
+  // one-at-a-time against an up-to-date base tip instead of racing in parallel.
+  const result = await runExclusiveMerge(() => git.merge(dir.path, id));
   if (!result.ok) {
     if (result.conflict) {
       // Content conflict — git.merge already aborted, so the tree is CLEAN.
