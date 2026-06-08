@@ -349,7 +349,7 @@ function queueLine(tasks) {
 function tasksTable(tasks) {
   const table = el("table", { class: "tasks" });
   table.innerHTML = `<thead><tr>
-    <th>id</th><th>status</th><th>prompt</th><th>created</th><th></th>
+    <th>id</th><th>status</th><th>created</th><th></th>
   </tr></thead>`;
   const tb = el("tbody");
   for (const t of tasks) {
@@ -360,7 +360,6 @@ function tasksTable(tasks) {
     tr.innerHTML = `
       <td class="id">${esc(t.id)}</td>
       <td>${chip(t.status)}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
-      <td class="prompt-cell">${esc(t.prompt || t.review_note || "")}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
     const tl = tr.querySelector(".term-link");

@@ -118,7 +118,6 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 .tasks td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .tasks tr:hover td { background: var(--panel-2); }
 .tasks .id { font-family: var(--mono); font-size: 13px; }
-.tasks .prompt-cell { color: var(--muted); max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
 /* forms */
