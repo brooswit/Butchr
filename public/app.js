@@ -317,12 +317,25 @@ async function renderDirectory(id) {
     </div>`;
   wrap.appendChild(form);
 
-  // tasks table
+  // tasks table — split active (queued/running/idle/review/finalizing) from
+  // terminal-state history (merged/aborted/rejected). The active list is the
+  // main focus; history is tucked behind a collapsed toggle so it doesn't bury
+  // the live work. `idle` is a flag on a running task, so it's covered by the
+  // "running" status here.
+  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+  const history = tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status));
+
   wrap.appendChild(el("h2", {}, "Tasks"));
   if (tasks.length === 0) {
     wrap.appendChild(el("div", { class: "empty" }, "No tasks yet."));
+  } else if (active.length === 0) {
+    wrap.appendChild(el("div", { class: "empty" }, "No active tasks."));
   } else {
-    wrap.appendChild(tasksTable(tasks));
+    wrap.appendChild(tasksTable(active));
+  }
+
+  if (history.length) {
+    wrap.appendChild(historySection(history));
   }
 
   // danger zone
@@ -363,6 +376,46 @@ function queueLine(tasks) {
   if (f) parts.push(`${f} finalizing`);
   if (q) parts.push(`${q} queued`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
+}
+
+// Lifecycle statuses still in flight — these stay in the main directory list.
+// Everything else (merged, aborted, rejected) is terminal and lives in History.
+const ACTIVE_STATUSES = ["queued", "running", "review", "finalizing"];
+const HISTORY_KEY = "butchr-history-open";
+
+function historyOpen() {
+  try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch (e) { return false; }
+}
+function setHistoryOpen(open) {
+  try { localStorage.setItem(HISTORY_KEY, open ? "1" : "0"); } catch (e) { /* ignore */ }
+}
+
+// Collapsible History section for terminal-state tasks. Collapsed by default;
+// the open/closed state persists in localStorage across reloads and SSE
+// re-renders (which rebuild this node from scratch each time).
+function historySection(tasks) {
+  const open = historyOpen();
+  const sec = el("div", { class: "history" + (open ? " open" : "") , style: "margin-top:24px" });
+  const head = el("button", { class: "history-head", type: "button" }, [
+    el("span", { class: "caret" }, open ? "▾" : "▸"),
+    el("span", { class: "history-title" }, "History"),
+    el("span", { class: "history-count" }, String(tasks.length)),
+  ]);
+  const body = el("div", { class: "history-body" });
+  if (open) body.appendChild(tasksTable(tasks));
+
+  head.addEventListener("click", () => {
+    const nowOpen = !sec.classList.contains("open");
+    sec.classList.toggle("open", nowOpen);
+    setHistoryOpen(nowOpen);
+    head.querySelector(".caret").textContent = nowOpen ? "▾" : "▸";
+    body.innerHTML = "";
+    if (nowOpen) body.appendChild(tasksTable(tasks));
+  });
+
+  sec.appendChild(head);
+  sec.appendChild(body);
+  return sec;
 }
 
 function tasksTable(tasks) {
