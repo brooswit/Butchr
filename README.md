@@ -103,7 +103,8 @@ Then open the webapp at **http://127.0.0.1:47800**.
 | `BUTCHR_GIT_BIN` | `git` | git binary |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval |
 | `BUTCHR_MAX_CONCURRENT` | `0` | cap on simultaneously running tasks across all directories; `0` = unlimited |
-| `BUTCHR_AGENT_CMD` | `cat {{PROMPT_FILE}} \| claude --dangerously-skip-permissions -p` | command run in the worktree to execute the agent. `{{PROMPT_FILE}}` is replaced with the rendered prompt's path |
+| `BUTCHR_AGENT_CMD` | `cat {{PROMPT_FILE}} \| claude --dangerously-skip-permissions {{CONTINUE}} -p` | command run in the worktree to execute the agent. `{{PROMPT_FILE}}` is replaced with the rendered prompt's path; `{{CONTINUE}}` is replaced with `BUTCHR_AGENT_CONTINUE_ARG` on a re-run and the empty string on the first run |
+| `BUTCHR_AGENT_CONTINUE_ARG` | `--continue` | substituted for `{{CONTINUE}}` when re-running a task that has already been started once (e.g. after a rejection). Lets the agent resume its prior session instead of starting a new one. If the resume exits non-zero, butchr automatically retries the run fresh (`{{CONTINUE}}` empty). Set empty to always start fresh |
 | `BUTCHR_AGENT_TIMEOUT_MS` | `3600000` | max time to wait for an agent to finish |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command |
 
@@ -123,7 +124,14 @@ immediately and concurrently (subject to `BUTCHR_MAX_CONCURRENT`):
 3. Start the agent in the worktree via `herdr agent start <id> --cwd <worktree>
    --workspace <ws>`, wrapped so its output is `tee`'d to a log file (still
    visible live in the herdr pane) and a completion marker with the exit code is
-   written when it finishes.
+   written when it finishes. If the task has run before (a rejected re-run, or a
+   run recovered after a restart), `{{CONTINUE}}` expands to
+   `BUTCHR_AGENT_CONTINUE_ARG` (`--continue` by default) so the agent **resumes
+   its prior session** in the same worktree rather than starting fresh; first
+   runs get a blank session. The resume is best-effort: if it exits non-zero
+   (claude can refuse `--continue` when there's no resumable session), the
+   dispatcher **falls back to a fresh run** of the same command so the task
+   still makes progress instead of failing.
 4. A watcher polls for the marker, captures the log as the output snapshot, and
    transitions the task to `review`.
 
