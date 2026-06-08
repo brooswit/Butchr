@@ -114,6 +114,15 @@ export const config = {
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),
 
   /**
+   * Grace period (ms) for a freshly-dispatched agent to REGISTER with herdr.
+   * herdr registers the agent name the instant `agent start` runs, so this only
+   * needs to cover transient lookup lag — but if the agent never appears within
+   * it (a failed/clobbered start the dispatch-time check somehow missed), the
+   * watcher rescues the task to review instead of waiting out `agentTimeoutMs`.
+   */
+  agentStartGraceMs: envInt("BUTCHR_AGENT_START_GRACE_MS", 1000 * 60),
+
+  /**
    * Command run (via `bash -lc`, cwd = the asking task's worktree) to answer an
    * engineer-agent's `ask` question in the CTO's voice. See src/cto.ts. The
    * `{{QUESTION_FILE}}` placeholder is replaced with a temp file holding the

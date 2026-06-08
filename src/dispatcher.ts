@@ -96,6 +96,26 @@ export function readRunLogSnapshot(taskId: string): string {
 // the same directory share one workspace instead of racing to recreate it.
 const workspaceInFlight = new Map<string, Promise<string | undefined>>();
 
+// Per-workspace lock serializing the herdr "create a task's tab + start its agent
+// + close the leftover root pane" critical section. herdr pane ids are POSITIONAL
+// and renumber workspace-globally whenever ANY pane closes, so two concurrent
+// dispatches in the same workspace would clobber each other: task B's
+// `pane close <captured rootId>` can land on task A's agent pane after A's own
+// close renumbered everything down (verified live — it killed A's agent and left
+// B's real root pane orphaned). Serializing per workspace makes each task's pane
+// setup atomic with respect to renumbering. Keyed by workspace id (panes only
+// renumber within their own workspace), so tasks in DIFFERENT directories still
+// run their herdr setup concurrently.
+const herdrPaneLocks = new Map<string, Promise<unknown>>();
+function withHerdrPaneLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = herdrPaneLocks.get(key) ?? Promise.resolve();
+  const result = prev.then(fn, fn);
+  // Keep the chain alive regardless of outcome so one failure doesn't break the
+  // lock for later tasks in the same workspace.
+  herdrPaneLocks.set(key, result.then(() => {}, () => {}));
+  return result;
+}
+
 let timer: ReturnType<typeof setInterval> | null = null;
 
 export function startDispatcher(): void {
@@ -379,31 +399,67 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // and start the agent in it, so tasks land as separate tabs instead of a wall
     // of split panes in one shared tab. tabCreate is best-effort — on failure it
     // returns {} and agentStart falls back to the legacy workspace-scoped split.
-    const tab = await herdr.tabCreate(workspaceId ?? undefined, worktree, task.id);
+    //
+    // This whole tab-create → agent-start → close-leftover-pane sequence runs
+    // under the per-workspace herdr pane lock: pane ids are positional and
+    // renumber workspace-globally on any close, so a concurrent dispatch's close
+    // could otherwise land on THIS task's just-started agent pane (the phantom-task
+    // bug). Serializing per workspace keeps each task's pane ids stable across the
+    // sequence; tasks in other workspaces still run concurrently.
+    const { paneId, tabId } = await withHerdrPaneLock(
+      workspaceId ?? "default",
+      async () => {
+        const tab = await herdr.tabCreate(workspaceId ?? undefined, worktree, task.id);
+        try {
+          const started = await startAgentReconciling(
+            task.id,
+            worktree,
+            argv,
+            workspaceId ?? undefined,
+            tab.tabId,
+          );
 
-    const started = await startAgentReconciling(
-      task.id,
-      worktree,
-      argv,
-      workspaceId ?? undefined,
-      tab.tabId,
+          // `tab create` spawns an empty root shell pane; `agent start --tab` then
+          // adds the agent as a SECOND pane. Close that empty pane so the tab holds
+          // only the agent. Closing a sibling renumbers the survivor (positional
+          // ids), so re-resolve the agent's pane by NAME afterwards.
+          if (tab.tabId && tab.rootPaneId) {
+            await herdr.paneClose(tab.rootPaneId).catch(() => {});
+          }
+
+          // Verify the agent really registered a live pane. If the start failed or
+          // was clobbered, agentExists/agentPaneId come up empty — treat the whole
+          // dispatch as FAILED rather than marking the task running against a pane
+          // that never existed (the phantom-task bug).
+          const realPane = (await herdr.agentPaneId(task.id)) ?? started.paneId;
+          if (!(await herdr.agentExists(task.id))) {
+            throw new Error(
+              `agent ${task.id} did not register with herdr after start`,
+            );
+          }
+          return { paneId: realPane, tabId: tab.tabId };
+        } catch (e) {
+          // Clean up INSIDE the lock so the just-created tab id can't be renumbered
+          // by a concurrent dispatch before we close it: deregister the name (frees
+          // it + closes its pane/tab if it partly registered) and close the
+          // dedicated tab in case the agent never registered (an empty husk tab).
+          await herdr.agentDeregister(task.id).catch(() => {});
+          if (tab.tabId) await herdr.tabClose(tab.tabId).catch(() => {});
+          throw e;
+        }
+      },
     );
 
-    // `tab create` spawns an empty root shell pane; `agent start --tab` then adds
-    // the agent as a SECOND pane. Close that empty pane so the tab holds only the
-    // agent. Closing a sibling pane renumbers the survivor (herdr pane ids are
-    // positional), so re-resolve the agent's current pane id before recording it.
-    let paneId = started.paneId;
-    if (tab.tabId && tab.rootPaneId) {
-      await herdr.paneClose(tab.rootPaneId).catch(() => {});
-      paneId = (await herdr.agentPaneId(task.id)) ?? paneId;
-    }
-
-    markRunning(task.id, paneId, sessionId, tab.tabId);
+    markRunning(task.id, paneId, sessionId, tabId);
     spawnWatcher(dir, task.id, paneId, logFile, doneFile);
   } catch (e) {
-    // Dispatch failed — leave it queued so the next tick retries.
+    // Dispatch failed — re-queue so the next tick retries. Any herdr tab/agent we
+    // created was already torn down inside the locked section above (where its id
+    // was still fresh); a failure BEFORE that section (workspace heal / worktree)
+    // created nothing to clean up. A defensive name-based deregister covers the
+    // unlikely middle ground without touching stale positional ids.
     console.error(`[butchr] dispatch failed for ${task.id}:`, (e as Error).message);
+    await herdr.agentDeregister(task.id).catch(() => {});
     await backToQueued(task.id);
   }
 }
@@ -466,9 +522,11 @@ function spawnWatcher(
   if (watching.has(taskId)) return;
   watching.add(taskId);
   (async () => {
-    const deadline = Date.now() + config.agentTimeoutMs;
+    const startedAt = Date.now();
+    const deadline = startedAt + config.agentTimeoutMs;
     let timedOut = false;
     let vanished = false;
+    let neverStarted = false;
     // The agent submits by calling request_review (which moves the task to
     // `review`) and then EXITS. The watcher's job is only to catch an agent that
     // ENDS while still `running` — i.e. it exited/crashed WITHOUT submitting — so
@@ -495,6 +553,12 @@ function spawnWatcher(
       if (alive) seenAlive = true;
       else if (seenAlive) {
         vanished = true;
+        break;
+      } else if (Date.now() - startedAt > config.agentStartGraceMs) {
+        // Never came alive within the grace window: the agent failed to register
+        // with herdr (a failed/clobbered start the dispatch-time check missed).
+        // Rescue it now rather than holding `running` until agentTimeoutMs.
+        neverStarted = true;
         break;
       }
       // While the agent is alive and working, surface whether its CLI has gone
@@ -541,6 +605,9 @@ function spawnWatcher(
     } else if (vanished) {
       reason =
         "the agent exited unexpectedly (its herdr pane/process is gone) without calling request_review";
+    } else if (neverStarted) {
+      reason =
+        "the agent never registered with herdr (it failed to start)";
     }
     snapshot =
       `[butchr] moved to review automatically: ${reason}. ` +

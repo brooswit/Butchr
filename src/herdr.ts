@@ -151,12 +151,24 @@ export async function agentStart(
   args.push("--", ...argv);
   const r = await herdr(args);
   // Response shapes vary slightly by herdr version; probe common fields.
-  const paneId =
+  let paneId =
     r.agent?.pane_id ?? r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ??
-    r.terminal_id ?? r.terminal?.terminal_id ?? name;
+    r.terminal_id ?? r.terminal?.terminal_id;
   const terminalId =
     r.agent?.terminal_id ?? r.terminal_id ?? r.pane?.terminal_id ??
     r.terminal?.terminal_id;
+  // Verify the agent actually registered a real pane. Under concurrent dispatches
+  // a start can return without a usable pane id in the envelope; resolve it by
+  // NAME as a fallback. We MUST NOT invent a pane id from `name` (the old
+  // behavior) — that let dispatch mark a task `running` against a pane that never
+  // existed (the phantom-task bug). If no real pane resolves, the agent did not
+  // start: fail loudly so the caller treats the dispatch as failed.
+  if (!paneId) paneId = await agentPaneId(name);
+  if (!paneId) {
+    throw new Error(
+      `herdr agent start ${name}: agent did not register a pane (failed to start)`,
+    );
+  }
   return { paneId, terminalId };
 }
 
@@ -260,24 +272,32 @@ export async function paneClose(target: string): Promise<void> {
 /**
  * Tear down a task's herdr session: close its dedicated TAB, which kills the agent
  * and every pane inside the tab and removes the tab itself (so finished/aborted
- * tasks don't leave tabs accumulating). The tab id is the stable handle — pane ids
- * renumber when sibling panes close, but the tab id never moves.
+ * tasks don't leave tabs accumulating).
  *
- * Resolution order: the stored `tabId`, then the live agent's current tab (for
- * re-adopted agents or rows predating tab tracking), and finally — if no tab can
- * be determined — a direct pane close as a legacy fallback. All steps best-effort.
+ * We resolve the tab to close LIVE, by the agent NAME — NOT from the stored
+ * `tabId`. herdr tab ids (like pane ids) are POSITIONAL: closing a lower-numbered
+ * tab renumbers every higher one (verified live — e.g. tab `:3` becomes `:2` once
+ * `:2` closes). So the `tabId` captured at launch goes stale the moment any
+ * earlier task's tab closes, and may now point at a DIFFERENT task's tab — closing
+ * it would wrongly kill that other task (observed: aborting two tasks in sequence
+ * left the second's tab open while the stored id no-op'd). The agent name is the
+ * only stable, butchr-owned handle, so we trust the live lookup.
+ *
+ * If no live agent resolves, its single-pane tab was already auto-removed when the
+ * agent's pane closed (one pane per task) — there is nothing left to tear down. We
+ * deliberately do NOT fall back to closing the stored `tabId`/`paneId`: both are
+ * positional and may now belong to another task. (Failed-dispatch husk tabs, which
+ * never registered an agent, are torn down at the dispatch site while their id is
+ * still fresh.) The `tabId`/`paneId` params are retained for call-site
+ * compatibility. Every step is best-effort.
  */
 export async function teardownTask(
-  tabId: string | null | undefined,
+  _tabId: string | null | undefined,
   agentName: string,
-  paneId?: string | null,
+  _paneId?: string | null,
 ): Promise<void> {
-  const id = tabId ?? (await agentTabId(agentName));
-  if (id) {
-    await tabClose(id);
-    return;
-  }
-  if (paneId) await paneClose(paneId).catch(() => {});
+  const live = await agentTabId(agentName);
+  if (live) await tabClose(live);
 }
 
 /**
