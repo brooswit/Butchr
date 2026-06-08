@@ -1,5 +1,7 @@
 // HTTP layer: REST API + SSE + static webapp, all on one Bun.serve.
-import { join } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { config } from "./config.ts";
 import {
   HttpError,
@@ -114,6 +116,51 @@ function route(method: string, path: string, handler: Handler): void {
   );
   routes.push({ method, pattern, keys, handler });
 }
+
+// Filesystem browser — powers the directory picker in the webapp. butchr is a
+// local single-operator tool (trusted environment per spec), so listing dirs on
+// the host is fine. Returns subdirectories of `path`, flagging git repos.
+route("GET", "/api/fs", async (req) => {
+  const url = new URL(req.url);
+  const raw = url.searchParams.get("path");
+  const path = resolve(raw && raw.length > 0 ? raw : homedir());
+  if (!existsSync(path)) throw new HttpError(404, `no such path: ${path}`);
+  let st;
+  try {
+    st = statSync(path);
+  } catch (e) {
+    throw new HttpError(400, `cannot stat: ${(e as Error).message}`);
+  }
+  if (!st.isDirectory()) throw new HttpError(400, `not a directory: ${path}`);
+
+  const entries: { name: string; path: string; isGitRepo: boolean }[] = [];
+  let names: string[] = [];
+  try {
+    names = readdirSync(path);
+  } catch (e) {
+    throw new HttpError(403, `cannot read directory: ${(e as Error).message}`);
+  }
+  for (const name of names) {
+    if (name.startsWith(".")) continue; // hide dotfiles/dirs
+    const full = join(path, name);
+    try {
+      if (!statSync(full).isDirectory()) continue;
+    } catch {
+      continue; // unreadable / broken symlink
+    }
+    entries.push({ name, path: full, isGitRepo: existsSync(join(full, ".git")) });
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  const parent = dirname(path);
+  return json({
+    path,
+    parent: parent === path ? null : parent, // null at filesystem root
+    home: homedir(),
+    isGitRepo: existsSync(join(path, ".git")),
+    entries,
+  });
+});
 
 // Directories
 route("GET", "/api/directories", async () => json(listDirectories()));

@@ -61,6 +61,91 @@ function toast(msg, isErr) {
   toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
 }
 
+// ---------- directory picker modal ----------
+// onSelect(path, register): register=false fills the field; true registers now.
+function openPicker(onSelect) {
+  let cur = null;
+
+  const backdrop = el("div", { class: "modal-backdrop" });
+  const modal = el("div", { class: "modal" });
+  backdrop.appendChild(modal);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
+  function onKey(e) { if (e.key === "Escape") close(); }
+  document.addEventListener("keydown", onKey);
+
+  async function load(path) {
+    let data;
+    try {
+      data = await api("GET", "/fs" + (path ? "?path=" + encodeURIComponent(path) : ""));
+    } catch (e) { toast(e.message, true); return; }
+    cur = data;
+    paint();
+  }
+
+  function paint() {
+    modal.innerHTML = "";
+    const head = el("div", { class: "m-head" });
+    head.appendChild(el("h3", {}, "Choose a git repository"));
+    const homeBtn = el("button", { class: "btn ghost" }, "Home");
+    homeBtn.addEventListener("click", () => load(cur.home));
+    const x = el("button", { class: "btn ghost" }, "✕");
+    x.addEventListener("click", close);
+    head.appendChild(homeBtn);
+    head.appendChild(x);
+    modal.appendChild(head);
+
+    modal.appendChild(el("div", { class: "m-path" }, cur.path));
+
+    const list = el("div", { class: "m-list" });
+    if (cur.parent) {
+      const up = el("div", { class: "fs-row up" }, [
+        el("span", { class: "ic" }, "↑"),
+        el("span", { class: "nm" }, ".. (up)"),
+      ]);
+      up.addEventListener("click", () => load(cur.parent));
+      list.appendChild(up);
+    }
+    if (cur.entries.length === 0) {
+      list.appendChild(el("div", { class: "muted", style: "padding:14px" }, "(no subfolders)"));
+    }
+    for (const e of cur.entries) {
+      const row = el("div", { class: "fs-row" });
+      row.appendChild(el("span", { class: "ic" }, e.isGitRepo ? "◆" : "▸"));
+      row.appendChild(el("span", { class: "nm" }, e.name));
+      if (e.isGitRepo) {
+        const badge = el("span", { class: "git-badge" }, "git");
+        row.appendChild(badge);
+        const reg = el("button", { class: "btn" }, "Register");
+        reg.addEventListener("click", (ev) => { ev.stopPropagation(); onSelect(e.path, true); close(); });
+        row.appendChild(reg);
+      }
+      row.addEventListener("click", () => load(e.path));
+      list.appendChild(row);
+    }
+    modal.appendChild(list);
+
+    const foot = el("div", { class: "m-foot" });
+    if (cur.isGitRepo) {
+      foot.appendChild(el("span", { class: "hint" }, "This folder is a git repository."));
+      const reg = el("button", { class: "btn success" }, "Register this folder");
+      reg.addEventListener("click", () => { onSelect(cur.path, true); close(); });
+      foot.appendChild(reg);
+    } else {
+      foot.appendChild(el("span", { class: "hint" }, "Open a folder, or pick its path."));
+      const use = el("button", { class: "btn ghost" }, "Use this path");
+      use.addEventListener("click", () => { onSelect(cur.path, false); close(); });
+      foot.appendChild(use);
+    }
+    modal.appendChild(foot);
+  }
+
+  document.body.appendChild(backdrop);
+  // Start from the current field value if set, else home.
+  const seed = (document.getElementById("dpath") || {}).value || "";
+  load(seed.trim() || null);
+}
+
 // ---------- router ----------
 function parseHash() {
   const hash = location.hash.replace(/^#/, "") || "/";
@@ -103,8 +188,11 @@ async function renderDashboard() {
     <h2 style="margin-top:0">Register a directory</h2>
     <div class="row" style="align-items:flex-end; gap:10px">
       <label class="field" style="flex:2; margin:0">
-        <span class="lbl">absolute path to a git repository</span>
-        <input type="text" id="dpath" placeholder="/home/you/code/project" />
+        <span class="lbl">path to a git repository</span>
+        <div class="row" style="gap:8px">
+          <input type="text" id="dpath" placeholder="/home/you/code/project" />
+          <button class="btn ghost" id="browse-dir" style="white-space:nowrap">Browse…</button>
+        </div>
       </label>
       <label class="field" style="flex:1; margin:0">
         <span class="lbl">label (optional)</span>
@@ -113,6 +201,19 @@ async function renderDashboard() {
       <button class="btn" id="add-dir">Register</button>
     </div>`;
   wrap.appendChild(form);
+
+  document.getElementById("browse-dir").addEventListener("click", () => {
+    openPicker(async (picked, register) => {
+      document.getElementById("dpath").value = picked;
+      if (register) {
+        try {
+          await api("POST", "/directories", { path: picked });
+          toast("directory registered");
+          render();
+        } catch (e) { toast(e.message, true); }
+      }
+    });
+  });
 
   if (dirs.length === 0) {
     wrap.appendChild(el("div", { class: "empty" }, "No directories yet. Register a git repo above to begin."));
