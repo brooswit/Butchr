@@ -404,12 +404,12 @@ async function renderTask(id) {
     controls.innerHTML = `
       <h2 style="margin-top:0">Review</h2>
       <label class="field">
-        <span class="lbl">rejection note (required to reject)</span>
+        <span class="lbl">change request note (required to request changes)</span>
         <textarea id="rnote" placeholder="What needs to change? Appended to task.md; task re-runs."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="approve">Approve &amp; merge</button>
-        <button class="btn danger" id="reject">Reject</button>
+        <button class="btn danger" id="reject">Request change</button>
         <div class="spacer"></div>
       </div>`;
     wrap.appendChild(controls);
@@ -428,11 +428,11 @@ async function renderTask(id) {
     });
     document.getElementById("reject").addEventListener("click", async (ev) => {
       const note = document.getElementById("rnote").value.trim();
-      if (!note) return toast("rejection note is required", true);
+      if (!note) return toast("change request note is required", true);
       ev.target.disabled = true;
       try {
         await api("POST", "/tasks/" + id + "/reject", { note });
-        toast("rejected — re-queued");
+        toast("changes requested — re-queued");
         render();
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });
