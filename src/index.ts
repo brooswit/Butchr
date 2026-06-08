@@ -3,6 +3,7 @@
 import { recoverRunningTasks } from "./db.ts";
 import { startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import { startServer } from "./server.ts";
+import { recoverFinalizingTasks } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
 
 async function main(): Promise<void> {
@@ -11,6 +12,12 @@ async function main(): Promise<void> {
   const recovered = recoverRunningTasks();
   if (recovered > 0) {
     console.log(`[butchr] re-queued ${recovered} task(s) left running from a prior run`);
+  }
+
+  // Complete any task left mid-finalize (the branch already merged to main).
+  const finalized = await recoverFinalizingTasks();
+  if (finalized > 0) {
+    console.log(`[butchr] finalized ${finalized} task(s) left finalizing from a prior run`);
   }
 
   if (!(await isUp())) {

@@ -20,7 +20,7 @@ function counts(directoryId: string): Record<string, number> {
     )
     .all(directoryId);
   const out: Record<string, number> = {
-    queued: 0, running: 0, idle: 0, review: 0, merged: 0, rejected: 0, aborted: 0,
+    queued: 0, running: 0, idle: 0, review: 0, finalizing: 0, merged: 0, rejected: 0, aborted: 0,
   };
   for (const r of rows) out[r.status] = r.n;
   // `idle` is a flag on running tasks, not a status — peel it out of the running

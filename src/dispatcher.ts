@@ -16,7 +16,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt } from "./taskmd.ts";
-import { backToQueued, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
+import { backToQueued, finalizeTask, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -52,6 +52,7 @@ function sanitizeTypescript(raw: string): string {
 
 const dispatching = new Set<string>(); // task ids mid-dispatch
 const watching = new Set<string>(); // task ids with an active watcher
+const finalizing = new Set<string>(); // task ids with an active finalize-watcher
 // Task ids whose watcher has been told to bail WITHOUT moving the task to
 // review — set by abortTask, consumed (and cleared) by the watcher.
 const abortSignals = new Set<string>();
@@ -65,6 +66,26 @@ export function signalAbort(taskId: string): boolean {
   if (!watching.has(taskId)) return false;
   abortSignals.add(taskId);
   return true;
+}
+
+/** Absolute path to a task's run log (the `script` typescript). */
+function runLogPath(taskId: string): string {
+  return join(runsDir, `${taskId}.log`);
+}
+
+/**
+ * Read and sanitize a task's run log into a human-readable snapshot. Used by the
+ * task service to capture the agent's post-merge wrap-up when finalizing. Returns
+ * "" if the log is missing or unreadable.
+ */
+export function readRunLogSnapshot(taskId: string): string {
+  const logFile = runLogPath(taskId);
+  if (!existsSync(logFile)) return "";
+  try {
+    return sanitizeTypescript(readFileSync(logFile, "utf8"));
+  } catch {
+    return "";
+  }
 }
 
 // In-flight workspace create/heal keyed by directory id, so concurrent tasks in
@@ -401,5 +422,72 @@ function spawnWatcher(
     markReview(taskId, snapshot);
     watching.delete(taskId);
     console.log(`[butchr] task ${taskId} → review (${reason})`);
+  })();
+}
+
+/**
+ * Watch a `finalizing` task and complete it (→ merged) once the post-merge agent
+ * is done wrapping up. Spawned by approveTask after a successful merge. The branch
+ * is already in main; we just wait for the agent to go quiet and then hand off to
+ * finalizeTask (which closes the pane, captures the wrap-up, and cleans up).
+ *
+ * Triggers finalize on ANY of:
+ *   - the agent's run log goes quiet for `idleMs` AFTER it has produced fresh
+ *     post-approval output (so a log left stale while the agent was blocked in
+ *     request_review doesn't finalize before the wrap-up even starts);
+ *   - the agent's pane/process ends (doneFile written or herdr pane vanished);
+ *   - `finalizeTimeoutMs` elapses (hard cap on a chatty agent).
+ */
+export function startFinalizeWatcher(taskId: string): void {
+  if (finalizing.has(taskId)) return;
+  finalizing.add(taskId);
+  const logFile = runLogPath(taskId);
+  const doneFile = join(runsDir, `${taskId}.done`);
+  (async () => {
+    const startedAt = Date.now();
+    const deadline = startedAt + config.finalizeTimeoutMs;
+    let seenAlive = false;
+    let seenFreshOutput = false;
+    let reason = "the agent went idle";
+    while (true) {
+      // If the task left `finalizing` under us (e.g. recovery already merged it),
+      // there is nothing to do.
+      if (getTask(taskId)?.status !== "finalizing") {
+        finalizing.delete(taskId);
+        return;
+      }
+      if (existsSync(doneFile)) {
+        reason = "the agent finished and exited";
+        break;
+      }
+      if (Date.now() > deadline) {
+        reason = "the finalize timeout elapsed";
+        break;
+      }
+      const alive = await herdr.agentExists(taskId);
+      if (alive) seenAlive = true;
+      else if (seenAlive) {
+        reason = "the agent pane/process ended";
+        break;
+      }
+      // Idle trigger — only trusted once the agent has written something AFTER the
+      // approve (mtime past startedAt). While it was blocked in request_review the
+      // log's mtime is already stale, so we must not read that as "idle".
+      if (config.idleMs > 0) {
+        try {
+          const mtimeMs = statSync(logFile).mtimeMs;
+          if (mtimeMs > startedAt) seenFreshOutput = true;
+          if (seenFreshOutput && Date.now() - mtimeMs > config.idleMs) break;
+        } catch {
+          /* no log yet — keep waiting */
+        }
+      }
+      await sleep(1000);
+    }
+    finalizing.delete(taskId);
+    await finalizeTask(taskId).catch((e) => {
+      console.error(`[butchr] finalize failed for ${taskId}:`, (e as Error).message);
+    });
+    console.log(`[butchr] task ${taskId} → merged (${reason})`);
   })();
 }
