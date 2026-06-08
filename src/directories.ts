@@ -1,13 +1,64 @@
 // Directory service: register/list/unregister directories. Each directory is a
 // git repo that maps 1:1 to a herdr workspace.
-import { resolve } from "node:path";
-import { basename } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { config } from "./config.ts";
 import { db, nowIso } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { generateDirectoryId } from "./ids.ts";
+import { ctoMdPath } from "./taskmd.ts";
+
+// Default CTO context seeded into a freshly registered directory's
+// `.butchr/CTO.md`. Kept short and editable; surfaced to every agent by
+// renderAgentPrompt (which adds the `# CTO context` heading above it).
+const DEFAULT_CTO_CONTEXT = `A CTO — the human's principal engineer (the Claude running in the project
+root) — is available for guidance on this work.
+
+When requirements are ambiguous or you hit a judgment call, call the **\`ask\`**
+MCP tool (provided by the butchr MCP server) to consult the CTO before
+guessing. Keep your questions specific and actionable.
+
+## Project conventions
+
+<!-- Fill in project-specific conventions, norms, and gotchas here. -->
+`;
+
+// Seed `<path>/.butchr/CTO.md` on registration unless one already exists (never
+// clobber a user-edited file). Best-effort: a write failure must not break
+// registration. Seed source is BUTCHR_CTO_CONTEXT when readable, else the
+// built-in default.
+function seedCtoContext(path: string): void {
+  const target = ctoMdPath(path);
+  if (existsSync(target)) return;
+
+  let contents = DEFAULT_CTO_CONTEXT;
+  if (config.ctoContextPath) {
+    try {
+      contents = readFileSync(config.ctoContextPath, "utf8");
+    } catch {
+      // unreadable seed file — fall back to the built-in default
+    }
+  }
+
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, contents, "utf8");
+  } catch (e) {
+    console.error(
+      `butchr: failed to seed CTO context at ${target}: ${(e as Error).message}`,
+    );
+  }
+}
 
 export type DirectoryView = DirectoryRow & {
   counts: Record<string, number>;
@@ -88,6 +139,10 @@ export async function registerDirectory(
 
   git.ensureGitignore(path);
 
+  // Seed the CTO context into the (now-gitignored) `.butchr/` folder so every
+  // task agent launched here starts with it.
+  seedCtoContext(path);
+
   const id = generateDirectoryId();
   const created = nowIso();
   db.query(
@@ -118,6 +173,19 @@ export async function unregisterDirectory(id: string): Promise<void> {
 
   if (dir.herdr_workspace) {
     await herdr.workspaceClose(dir.herdr_workspace).catch(() => {});
+  }
+
+  // Remove the CTO context we seeded on registration, and tidy `.butchr/` if it
+  // is now empty. Best-effort: never let cleanup break unregister.
+  try {
+    const cto = ctoMdPath(dir.path);
+    if (existsSync(cto)) rmSync(cto);
+    const butchrDir = join(dir.path, ".butchr");
+    if (existsSync(butchrDir) && readdirSync(butchrDir).length === 0) {
+      rmSync(butchrDir, { recursive: true });
+    }
+  } catch {
+    // ignore cleanup failures
   }
 
   db.query(`DELETE FROM directories WHERE id=?`).run(id); // cascades to tasks

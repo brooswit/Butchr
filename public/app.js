@@ -42,10 +42,18 @@ function chip(status) {
 function effStatus(t) {
   return t.status === "running" && t.idle ? "idle" : t.status;
 }
-// The agent is live (attachable) in running/idle and during finalizing (it stays
-// up doing its post-merge wrap-up until butchr closes it on idle).
+// The agent is live (attachable) whenever it has a herdr pane: running/idle, while
+// blocked on the request_review handshake in `review`, and during `finalizing` (its
+// post-merge wrap-up) until butchr closes the pane. Gating on herdr_pane_id mirrors
+// the /terminal endpoint exactly — the button shows iff the attach would succeed.
 function isLive(t) {
-  return t.status === "running" || t.status === "finalizing";
+  return !!t.herdr_pane_id;
+}
+// A task has a live agent pane we can read recent output from whenever its
+// herdr_pane_id is set — running/idle/review (agent blocked in request_review)
+// and finalizing. This is exactly what the backend /output route gates on.
+function hasLivePane(t) {
+  return !!t.herdr_pane_id;
 }
 
 async function api(method, path, body) {
@@ -181,10 +189,23 @@ function parseHash() {
   return { name: "dashboard" };
 }
 
+// ---------- live output panel state ----------
+// A single poll timer drives the task page's "Live output" panel. It must not
+// survive a navigation/re-render (the page is rebuilt on every SSE event), so
+// render() clears it up front and renderTask restarts it if appropriate.
+let liveOutputTimer = null;
+let liveOutputOpen = true; // panel open/closed, persisted across re-renders
+let liveOutputCache = ""; // last text, so SSE rebuilds don't flash empty
+let liveOutputCacheId = null; // task id the cache belongs to
+function stopLiveOutput() {
+  if (liveOutputTimer) { clearInterval(liveOutputTimer); liveOutputTimer = null; }
+}
+
 let current = null;
 async function render() {
   const route = parseHash();
   current = route;
+  stopLiveOutput();
   try {
     if (route.name === "dashboard") await renderDashboard();
     else if (route.name === "directory") await renderDirectory(route.id);
@@ -315,12 +336,25 @@ async function renderDirectory(id) {
     </div>`;
   wrap.appendChild(form);
 
-  // tasks table
+  // tasks table — split active (queued/running/idle/review/finalizing) from
+  // terminal-state history (merged/aborted/rejected). The active list is the
+  // main focus; history is tucked behind a collapsed toggle so it doesn't bury
+  // the live work. `idle` is a flag on a running task, so it's covered by the
+  // "running" status here.
+  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+  const history = tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status));
+
   wrap.appendChild(el("h2", {}, "Tasks"));
   if (tasks.length === 0) {
     wrap.appendChild(el("div", { class: "empty" }, "No tasks yet."));
+  } else if (active.length === 0) {
+    wrap.appendChild(el("div", { class: "empty" }, "No active tasks."));
   } else {
-    wrap.appendChild(tasksTable(tasks));
+    wrap.appendChild(tasksTable(active));
+  }
+
+  if (history.length) {
+    wrap.appendChild(historySection(history));
   }
 
   // danger zone
@@ -361,6 +395,46 @@ function queueLine(tasks) {
   if (f) parts.push(`${f} finalizing`);
   if (q) parts.push(`${q} queued`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
+}
+
+// Lifecycle statuses still in flight — these stay in the main directory list.
+// Everything else (merged, aborted, rejected) is terminal and lives in History.
+const ACTIVE_STATUSES = ["queued", "running", "review", "finalizing"];
+const HISTORY_KEY = "butchr-history-open";
+
+function historyOpen() {
+  try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch (e) { return false; }
+}
+function setHistoryOpen(open) {
+  try { localStorage.setItem(HISTORY_KEY, open ? "1" : "0"); } catch (e) { /* ignore */ }
+}
+
+// Collapsible History section for terminal-state tasks. Collapsed by default;
+// the open/closed state persists in localStorage across reloads and SSE
+// re-renders (which rebuild this node from scratch each time).
+function historySection(tasks) {
+  const open = historyOpen();
+  const sec = el("div", { class: "history" + (open ? " open" : "") , style: "margin-top:24px" });
+  const head = el("button", { class: "history-head", type: "button" }, [
+    el("span", { class: "caret" }, open ? "▾" : "▸"),
+    el("span", { class: "history-title" }, "History"),
+    el("span", { class: "history-count" }, String(tasks.length)),
+  ]);
+  const body = el("div", { class: "history-body" });
+  if (open) body.appendChild(tasksTable(tasks));
+
+  head.addEventListener("click", () => {
+    const nowOpen = !sec.classList.contains("open");
+    sec.classList.toggle("open", nowOpen);
+    setHistoryOpen(nowOpen);
+    head.querySelector(".caret").textContent = nowOpen ? "▾" : "▸";
+    body.innerHTML = "";
+    if (nowOpen) body.appendChild(tasksTable(tasks));
+  });
+
+  sec.appendChild(head);
+  sec.appendChild(body);
+  return sec;
 }
 
 function tasksTable(tasks) {
@@ -431,6 +505,45 @@ async function renderTask(id) {
   // prompt
   wrap.appendChild(el("h2", {}, "Prompt"));
   wrap.appendChild(el("pre", { class: "block", html: esc(t.prompt || "—") }));
+
+  // live output — best-effort snapshot of the agent's recent terminal output,
+  // polled while the panel is open and the task still has a live pane. This is a
+  // convenience view; the git diff below stays the source of truth for review.
+  if (hasLivePane(t)) {
+    if (liveOutputCacheId !== t.id) { liveOutputCache = ""; liveOutputCacheId = t.id; }
+    const pre = el("pre", { class: "block live-output-body" },
+      liveOutputCache || "loading recent output…");
+    const caret = el("span", { class: "caret" }, liveOutputOpen ? "▾" : "▸");
+    const head = el("button", { class: "live-output-head", type: "button" }, [
+      caret,
+      el("span", { class: "lo-title" }, "Live output"),
+      el("span", { class: "lo-hint" }, "best-effort · updates every few seconds"),
+    ]);
+    const panel = el("div", { class: "panel live-output" + (liveOutputOpen ? "" : " collapsed") },
+      [head, pre]);
+
+    const poll = async () => {
+      try {
+        const r = await api("GET", "/tasks/" + t.id + "/output");
+        const text = (r.output || "").trimEnd();
+        liveOutputCache = text;
+        // Keep the view pinned to the newest output if already scrolled to bottom.
+        const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+        pre.textContent = text || "(no recent output)";
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+      } catch { /* transient — keep whatever was there */ }
+    };
+    const startPolling = () => { stopLiveOutput(); poll(); liveOutputTimer = setInterval(poll, 2500); };
+
+    head.addEventListener("click", () => {
+      liveOutputOpen = !liveOutputOpen;
+      panel.classList.toggle("collapsed", !liveOutputOpen);
+      caret.textContent = liveOutputOpen ? "▾" : "▸";
+      if (liveOutputOpen) startPolling(); else stopLiveOutput();
+    });
+    if (liveOutputOpen) startPolling();
+    wrap.appendChild(panel);
+  }
 
   // review notes
   if (t.review_notes) {

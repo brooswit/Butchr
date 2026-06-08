@@ -98,13 +98,8 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
-// On startup, any task left in `running` (e.g. service was killed mid-flight)
-// has lost its watcher. Demote it back to queued so the dispatcher re-runs it.
-export function recoverRunningTasks(): number {
-  const res = db
-    .query(
-      `UPDATE tasks SET status='queued', herdr_pane_id=NULL, idle=0 WHERE status='running'`,
-    )
-    .run();
-  return res.changes;
-}
+// NOTE: there is deliberately no blind "running → queued" recovery here. A task
+// left `running` after a restart still has a live herdr agent whose name is taken;
+// re-queuing it just makes the dispatcher collide on `agent_name_taken`. Startup
+// reconciliation (dispatcher.reconcileRunningTasks, wired in index.ts) instead
+// re-adopts the live agent or rescues a dead one.

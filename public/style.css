@@ -201,6 +201,23 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tasks .id { font-family: var(--mono); font-size: 13px; }
 .tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
+/* history (collapsed terminal-state tasks) */
+.history-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; cursor: pointer;
+  padding: 10px 4px; color: var(--text); font-size: 14px; font-weight: 600;
+  text-align: left; border-bottom: 1px solid var(--border);
+}
+.history-head:hover { color: var(--accent); }
+.history-head .caret { color: var(--muted); font-size: 11px; width: 12px; }
+.history-head .history-title { flex: 0 0 auto; }
+.history-head .history-count {
+  font-size: 11px; color: var(--muted); font-weight: 600;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 1px 7px;
+}
+.history-body { margin-top: 4px; }
+
 /* forms */
 .btn {
   background: var(--accent); color: #fff; border: none; border-radius: var(--radius-md);
@@ -273,6 +290,24 @@ pre.block {
 .diff-file.collapsed .caret { transform: rotate(-90deg); }
 
 .diff-binary { padding: 12px; color: var(--muted); }
+
+/* live output panel */
+.panel.live-output { padding: 0; overflow: hidden; }
+.live-output-head {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px 14px; background: var(--panel-2); border: 0;
+  color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+.live-output-head:hover { background: var(--panel); }
+.live-output-head .caret { color: var(--muted); font-size: 11px; }
+.live-output-head .lo-title { font-weight: 600; font-size: 13px; }
+.live-output-head .lo-hint { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+.live-output-body {
+  margin: 0; border: 0; border-top: 1px solid var(--border); border-radius: 0;
+  max-height: 360px; white-space: pre-wrap;
+}
+.panel.live-output.collapsed .live-output-body { display: none; }
+.panel.live-output.collapsed .live-output-head { border-bottom: 0; }
 
 .dl { display: flex; white-space: pre; }
 .dl .dl-sign {
