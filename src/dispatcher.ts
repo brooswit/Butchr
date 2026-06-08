@@ -34,6 +34,22 @@ function shq(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
+// The agent runs under `script`, so its log is a raw terminal typescript: ANSI
+// escapes, carriage returns, and `script`'s own "Script started/done" banners.
+// Clean it up before showing it to a human as a fallback snapshot.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]/g;
+function sanitizeTypescript(raw: string): string {
+  return raw
+    .replace(ANSI_RE, "")
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .filter((l) => !/^Script (started|done) on /.test(l))
+    .join("\n")
+    .trim();
+}
+
 const dispatching = new Set<string>(); // task ids mid-dispatch
 const watching = new Set<string>(); // task ids with an active watcher
 // Task ids whose watcher has been told to bail WITHOUT moving the task to
@@ -197,17 +213,25 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       .replaceAll("{{MCP_CONFIG}}", mcpConfigFile);
 
     // The agent is interactive and long-lived: it signals completion by calling
-    // the request_review MCP tool, NOT by exiting. We still tee its output to a
-    // log (live in the herdr pane + a snapshot/fallback) and write a `.done`
-    // marker when the process DOES exit — the watcher uses that (plus an herdr
-    // liveness check) only to catch an agent that ended WITHOUT submitting.
+    // the request_review MCP tool, NOT by exiting. We must keep its stdout/stdin
+    // attached to a TTY so its full-screen interface actually renders in the
+    // herdr pane — piping through `tee` would make stdout a pipe, so the agent
+    // detects "not a terminal" and never draws its interactive UI. Instead we run
+    // it under `script`, which allocates a pseudo-terminal for the agent (TTY
+    // preserved → UI renders + input works) while logging everything to a file.
+    //   -q quiet, -f flush after each write (live log), -e exit with the child's
+    //   code, --log-out captures the typescript. SHELL=/bin/bash forces `-c` to
+    //   use bash (the user's login shell may be fish, which can't parse the
+    //   `$(cat ...)` in agentCmd). On exit we write the child's code to `.done`;
+    // the watcher uses that (plus an herdr liveness check) only to catch an agent
+    // that ended WITHOUT submitting.
     const logFile = join(runsDir, `${task.id}.log`);
     const doneFile = join(runsDir, `${task.id}.done`);
     rmSync(logFile, { force: true });
     rmSync(doneFile, { force: true });
     const wrapped =
-      `set -o pipefail; { ${agentCmd} ; } 2>&1 | tee ${shq(logFile)}; ` +
-      `echo "\${PIPESTATUS[0]}" > ${shq(doneFile)}`;
+      `SHELL=/bin/bash script -qfe --log-out ${shq(logFile)} -c ${shq(agentCmd)}; ` +
+      `echo "$?" > ${shq(doneFile)}`;
     const argv = ["bash", "-lc", wrapped];
 
     const started = await herdr.agentStart(
@@ -288,7 +312,7 @@ function spawnWatcher(
     let snapshot = "";
     if (existsSync(logFile)) {
       try {
-        snapshot = readFileSync(logFile, "utf8");
+        snapshot = sanitizeTypescript(readFileSync(logFile, "utf8"));
       } catch {
         /* best effort */
       }

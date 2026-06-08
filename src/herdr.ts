@@ -94,9 +94,10 @@ export async function agentStart(
 
 // NOTE on completion detection: the running herdr destroys a pane the instant a
 // one-shot command exits, so `wait agent-status done` + `pane read` (the spec's
-// approach) can't capture a non-interactive agent's result. butchr instead runs
-// the agent under `tee` (live output still shows in the herdr pane) and observes
-// completion + captures output via filesystem markers — see dispatcher.ts.
+// approach) can't capture an agent's result. butchr instead runs the agent under
+// `script`, which gives it a real PTY (so its interactive UI renders live in the
+// herdr pane) while logging output to a file, and observes completion + captures
+// output via filesystem markers — see dispatcher.ts.
 
 /**
  * Is the agent terminal named `name` still alive? Used by the fallback watcher
