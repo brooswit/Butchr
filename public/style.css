@@ -12,6 +12,7 @@
   --running: #2563eb;
   --idle: #0891b2;
   --review: #d97706;
+  --finalizing: #6366f1;
   --merged: #16a34a;
   --rejected: #dc2626;
   --aborted: #6b7280;
@@ -97,6 +98,7 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 .chip.running { background: var(--running); }
 .chip.idle { background: var(--idle); }
 .chip.review { background: var(--review); }
+.chip.finalizing { background: var(--finalizing); }
 .chip.merged { background: var(--merged); }
 .chip.rejected { background: var(--rejected); }
 .chip.aborted { background: var(--aborted); }
@@ -111,6 +113,7 @@ h2 { font-size: 16px; margin: 28px 0 12px; }
 .count-pill.has-running { border-color: var(--running); color: var(--running); }
 .count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
 .count-pill.has-review { border-color: var(--review); color: var(--review); }
+.count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
 
 /* tasks table */
 .tasks { width: 100%; border-collapse: collapse; margin-top: 8px; }

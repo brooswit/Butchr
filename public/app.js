@@ -42,9 +42,10 @@ function chip(status) {
 function effStatus(t) {
   return t.status === "running" && t.idle ? "idle" : t.status;
 }
-// The agent is live (attachable, abortable) in both running and idle.
+// The agent is live (attachable) in running/idle and during finalizing (it stays
+// up doing its post-merge wrap-up until butchr closes it on idle).
 function isLive(t) {
-  return t.status === "running";
+  return t.status === "running" || t.status === "finalizing";
 }
 
 async function api(method, path, body) {
@@ -268,11 +269,12 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "running", "idle", "review", "merged", "aborted"]
+  const pills = ["queued", "running", "idle", "review", "finalizing", "merged", "aborted"]
     .map((s) => {
       const cls = s === "running" && c[s] ? "count-pill has-running"
         : s === "idle" && c[s] ? "count-pill has-idle"
-        : s === "review" && c[s] ? "count-pill has-review" : "count-pill";
+        : s === "review" && c[s] ? "count-pill has-review"
+        : s === "finalizing" && c[s] ? "count-pill has-finalizing" : "count-pill";
       return `<span class="${cls}">${s} <b>${c[s] || 0}</b></span>`;
     }).join("");
   const card = el("div", { class: "card" });
@@ -352,9 +354,11 @@ function queueLine(tasks) {
   const q = tasks.filter((t) => t.status === "queued").length;
   const r = tasks.filter((t) => t.status === "running" && !t.idle).length;
   const i = tasks.filter((t) => t.status === "running" && t.idle).length;
+  const f = tasks.filter((t) => t.status === "finalizing").length;
   const parts = [];
   if (r) parts.push(`${r} running`);
   if (i) parts.push(`${i} idle`);
+  if (f) parts.push(`${f} finalizing`);
   if (q) parts.push(`${q} queued`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
@@ -401,8 +405,9 @@ async function renderTask(id) {
     headerRight.appendChild(term);
   }
   headerRight.appendChild(el("div", { html: chip(effStatus(t)) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }));
-  // Abort is available from any non-terminal state (queued/running/review).
-  const canAbort = !["merged", "aborted"].includes(t.status);
+  // Abort is available from any non-terminal state EXCEPT finalizing, whose merge
+  // already landed in main (it auto-completes to merged).
+  const canAbort = !["merged", "aborted", "finalizing"].includes(t.status);
   if (canAbort) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
@@ -439,9 +444,10 @@ async function renderTask(id) {
     wrap.appendChild(el("pre", { class: "block", html: esc(t.summary) }));
   }
 
-  // output snapshot
+  // output snapshot — on a merged task this is the agent's post-merge wrap-up
+  // captured during the finalizing phase; otherwise the rescue snapshot.
   if (t.output_snapshot) {
-    wrap.appendChild(el("h2", {}, "Agent output (snapshot)"));
+    wrap.appendChild(el("h2", {}, t.status === "merged" ? "Agent wrap-up" : "Agent output (snapshot)"));
     wrap.appendChild(el("pre", { class: "block", html: esc(t.output_snapshot) }));
   }
 
@@ -491,7 +497,7 @@ async function renderTask(id) {
       ev.target.disabled = true;
       try {
         await api("POST", "/tasks/" + id + "/approve");
-        toast("merged ✓");
+        toast("approved ✓ — merged, agent wrapping up");
         backToDirectory(t.directory_id);
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });
