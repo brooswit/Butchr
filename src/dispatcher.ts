@@ -314,6 +314,69 @@ async function healWorkspace(dir: DirectoryRow): Promise<string | undefined> {
   return ws.workspaceId;
 }
 
+/** The launch decision for a task: how to invoke its agent this dispatch. */
+export type LaunchPlan = {
+  /** True → re-launch the existing Claude session via `--resume` (rework). */
+  isResume: boolean;
+  /** The session id passed to claude: the existing one (resume) or a fresh uuid. */
+  sessionId: string;
+  /** `config.resumeCmd`/`agentCmd` with all placeholders substituted. */
+  agentCmd: string;
+  /**
+   * True when a REWORK task (started_at set) had no usable session_id, so we
+   * fell back to a fresh session and the prior in-session context is LOST. The
+   * caller logs this; the decision itself lives here so it stays testable.
+   */
+  lostContext: boolean;
+};
+
+/**
+ * Decide how to (re-)launch a task's agent and build the fully-substituted agent
+ * command — the single source of truth for the fresh-vs-resume rules that
+ * dispatch() used to inline. Exported so it can be unit-tested directly.
+ *
+ * Rules (mirrors the old inline logic exactly):
+ *  - `started_at` set means the task ran an agent at least once (markRunning
+ *    stamps it via COALESCE and it is NEVER cleared on a reject/conflict
+ *    re-queue), so it is a REWORK that must `--resume` its existing session.
+ *  - A fresh, never-dispatched task has both fields null → fresh `--session-id`.
+ *  - INCONSISTENT STATE: a rework (`started_at` set) with no usable session_id
+ *    has nothing to resume into; fall back to a FRESH session (and the caller
+ *    re-renders the full prompt) rather than `--resume ""`. Flagged via
+ *    `lostContext` so dispatch() can log the lost in-session history.
+ *
+ * Pure except for `crypto.randomUUID()` when a fresh id is needed; all console
+ * side-effects stay in dispatch(), keyed off the returned flags.
+ */
+export function resolveLaunchCommand(
+  task: Pick<TaskRow, "started_at" | "session_id">,
+  promptFile: string,
+  mcpConfigFile: string,
+): LaunchPlan {
+  const ranBefore = !!task.started_at;
+  const sid = task.session_id?.trim();
+  const hasSession = !!sid;
+
+  let isResume: boolean;
+  let sessionId: string;
+  let lostContext = false;
+  if (ranBefore && !hasSession) {
+    isResume = false;
+    sessionId = crypto.randomUUID();
+    lostContext = true;
+  } else {
+    isResume = hasSession;
+    sessionId = sid ?? crypto.randomUUID();
+  }
+
+  const agentCmd = (isResume ? config.resumeCmd : config.agentCmd)
+    .replaceAll("{{PROMPT_FILE}}", promptFile)
+    .replaceAll("{{MCP_CONFIG}}", mcpConfigFile)
+    .replaceAll("{{SESSION_ID}}", sessionId);
+
+  return { isResume, sessionId, agentCmd, lostContext };
+}
+
 async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
   // Hoisted out of the try so the catch (below) can report whether a RESUME
   // (rework re-launch) failed, not just a fresh dispatch — see fix #2.
@@ -326,51 +389,35 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // Ensure the worktree exists (idempotent — handles rejected re-runs).
     const worktree = await git.createWorktree(dir.path, task.id);
 
-    // First launch vs. rework re-launch is decided by whether the task already
-    // has a Claude session id. A fresh task gets a butchr-generated UUID assigned
-    // via `--session-id`; a rejected task (session_id already set) is RESUMED via
-    // `--resume <id>` so the agent re-enters with full prior context.
-    //
-    // `started_at` is the independent invariant: markRunning stamps it (via
-    // COALESCE, so it sticks) the first time an agent actually launches, and it is
-    // NEVER cleared on a reject/conflict re-queue. So `started_at` set means the
-    // task has run an agent at least once → it is a REWORK that MUST resume into
-    // its existing session to keep prior context. A fresh, never-dispatched task
-    // has both fields null.
-    const ranBefore = !!task.started_at;
-    const sid = task.session_id?.trim();
-    const hasSession = !!sid;
+    // First launch vs. rework re-launch, plus the fully-substituted agent
+    // command — all decided by resolveLaunchCommand (the single source of truth
+    // for the fresh-vs-resume rules). The promptFile/mcpConfigFile paths are
+    // deterministic from the task id, so we compute them up front (their contents
+    // are written just below) and hand them in for substitution.
+    const promptFile = join(promptsDir, `${task.id}.md`);
+    const mcpConfigFile = join(mcpDir, `${task.id}.json`);
+    const plan = resolveLaunchCommand(task, promptFile, mcpConfigFile);
+    isResume = plan.isResume;
+    sessionId = plan.sessionId;
+    const agentCmd = plan.agentCmd;
 
-    if (ranBefore && !hasSession) {
-      // INCONSISTENT STATE (fix #1): the task ran before (so a reject/conflict
-      // re-queued it for a `--resume`) but its session_id is missing/empty, so we
-      // have nothing to resume into. A `--resume ""` would either fail to launch
-      // or resume the WRONG session — and renderReworkPrompt would hand the agent
-      // ONLY the review notes with no original task, because it assumes the
-      // session already holds the prompt. The prior turn-by-turn context is
-      // unrecoverable.
-      //
-      // Safer choice: fall back to a FRESH session (new --session-id) AND render
-      // the FULL agent prompt below (renderAgentPrompt re-includes the original
-      // prompt, the context files, AND the accumulated review notes — see
+    if (plan.lostContext) {
+      // INCONSISTENT STATE: the task ran before (a reject/conflict re-queued it
+      // for a `--resume`) but its session_id is missing/empty, so there is nothing
+      // to resume into. resolveLaunchCommand fell back to a FRESH session; we
+      // render the FULL agent prompt below (renderAgentPrompt re-includes the
+      // original prompt, the context files, AND the accumulated review notes — see
       // taskmd.ts), so the new agent has everything except the lost in-session
-      // history. We pick this over failing the dispatch outright because a hard
+      // history. We log loudly rather than failing the dispatch outright: a hard
       // failure would just re-queue the task to hit the SAME broken state every
       // tick forever (a stuck-task loop that never makes progress); a fresh run
-      // lets the work proceed. The lost context is logged loudly so an operator
-      // can see it.
+      // lets the work proceed.
       console.warn(
         `[butchr] task ${task.id} is a rework (started_at=${task.started_at}) but ` +
           `has no session_id to --resume — prior agent context is LOST; falling ` +
           `back to a FRESH session, re-running from the full prompt + review notes`,
       );
-      isResume = false;
-      sessionId = crypto.randomUUID();
-    } else {
-      isResume = hasSession;
-      sessionId = sid ?? crypto.randomUUID();
     }
-
     if (isResume) {
       // fix #3: surface every rework relaunch so an operator can see resumes happen.
       console.log(
@@ -386,11 +433,9 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     const rendered = isResume
       ? renderReworkPrompt(dir.path, doc)
       : renderAgentPrompt(dir.path, doc);
-    const promptFile = join(promptsDir, `${task.id}.md`);
     writeFileSync(promptFile, rendered, "utf8");
 
     // Per-task MCP config pointing the agent at butchr's /mcp/<id> endpoint.
-    const mcpConfigFile = join(mcpDir, `${task.id}.json`);
     writeFileSync(
       mcpConfigFile,
       JSON.stringify({
@@ -403,11 +448,6 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       }),
       "utf8",
     );
-
-    const agentCmd = (isResume ? config.resumeCmd : config.agentCmd)
-      .replaceAll("{{PROMPT_FILE}}", promptFile)
-      .replaceAll("{{MCP_CONFIG}}", mcpConfigFile)
-      .replaceAll("{{SESSION_ID}}", sessionId);
 
     // The agent is interactive: it signals completion by calling the
     // request_review MCP tool (which returns immediately) and then EXITS. We must
