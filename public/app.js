@@ -348,26 +348,16 @@ async function renderDirectory(id) {
     </div>`;
   wrap.appendChild(form);
 
-  // tasks table — split active (queued/running/idle/review/finalizing) from
-  // terminal-state history (merged/aborted/rejected). The active list is the
-  // main focus; history is tucked behind a collapsed toggle so it doesn't bury
-  // the live work. `idle` is a flag on a running task, so it's covered by the
-  // "running" status here.
-  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
-  const history = tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status));
-
-  wrap.appendChild(el("h2", {}, "Tasks"));
-  if (tasks.length === 0) {
-    wrap.appendChild(el("div", { class: "empty" }, "No tasks yet."));
-  } else if (active.length === 0) {
-    wrap.appendChild(el("div", { class: "empty" }, "No active tasks."));
-  } else {
-    wrap.appendChild(tasksTable(active));
-  }
-
-  if (history.length) {
-    wrap.appendChild(historySection(history));
-  }
+  // search + status filter bar. Filter state lives in module-level vars
+  // (taskSearch / statusFilter) so it survives the full re-render the app does
+  // on every SSE event. Typing/toggling rebuilds only the results region below
+  // (not the bar itself), so the search input keeps focus while you type. The
+  // split of active (queued/running/idle/review/finalizing) vs terminal-state
+  // history (merged/aborted/rejected) happens inside renderResults.
+  const results = el("div", { class: "results" });
+  wrap.appendChild(buildFilterBar(tasks, results));
+  wrap.appendChild(results);
+  renderResults(tasks, results);
 
   // danger zone
   const dz = el("div", { class: "row", style: "margin-top:32px" });
@@ -421,29 +411,142 @@ function setHistoryOpen(open) {
   try { localStorage.setItem(HISTORY_KEY, open ? "1" : "0"); } catch (e) { /* ignore */ }
 }
 
-// Collapsible "Finished" section for terminal-state tasks. Collapsed by default;
-// the open/closed state persists in localStorage across reloads and SSE
-// re-renders (which rebuild this node from scratch each time). The body is a
-// compact one-line-per-task summary (id, final status, completed time) — not the
-// full active-task table — so the history stays tucked away and scannable.
-function historySection(tasks) {
-  const open = historyOpen();
+// ---------- task search + status filtering ----------
+// Filter state is kept in memory only, at module scope, so it survives the full
+// re-render render() performs on every SSE event without being torn down. The
+// statuses here are the *effective* statuses (effStatus), so `idle` and
+// `running` filter independently, as do all terminal states.
+const FILTER_STATUSES = ["queued", "running", "idle", "review", "finalizing", "failed", "merged", "aborted", "rejected"];
+let taskSearch = "";          // id substring filter (case-insensitive)
+let statusFilter = new Set(); // selected effStatus values; empty = all
+
+function filterActive() {
+  return taskSearch.trim() !== "" || statusFilter.size > 0;
+}
+function taskMatchesFilter(t) {
+  const q = taskSearch.trim().toLowerCase();
+  if (q && !String(t.id).toLowerCase().includes(q)) return false;
+  if (statusFilter.size && !statusFilter.has(effStatus(t))) return false;
+  return true;
+}
+
+// The filter bar: an id search box plus a row of toggleable status chips (reusing
+// the existing .chip color styling, dimmed when inactive). Handlers mutate the
+// module-level filter state and rebuild ONLY the results region — leaving the bar
+// (and the focused search input) untouched, so live-as-you-type works.
+function buildFilterBar(tasks, results) {
+  const bar = el("div", { class: "filter-bar" });
+
+  const search = el("input", {
+    type: "text", class: "task-search", placeholder: "Filter by task id…",
+    "aria-label": "Filter tasks by id",
+  });
+  search.value = taskSearch;
+  search.addEventListener("input", () => {
+    taskSearch = search.value;
+    renderResults(tasks, results);
+    syncClear();
+  });
+
+  const chips = el("div", { class: "filter-chips" });
+  for (const s of FILTER_STATUSES) {
+    const c = el("button", {
+      type: "button",
+      class: "filter-chip chip " + s + (statusFilter.has(s) ? " active" : ""),
+      "aria-pressed": statusFilter.has(s) ? "true" : "false",
+    }, s);
+    c.addEventListener("click", () => {
+      if (statusFilter.has(s)) statusFilter.delete(s); else statusFilter.add(s);
+      const on = statusFilter.has(s);
+      c.classList.toggle("active", on);
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+      renderResults(tasks, results);
+      syncClear();
+    });
+    chips.appendChild(c);
+  }
+
+  const clear = el("button", { type: "button", class: "filter-clear" }, "Clear filters");
+  clear.addEventListener("click", () => {
+    taskSearch = "";
+    statusFilter.clear();
+    search.value = "";
+    chips.querySelectorAll(".filter-chip").forEach((c) => {
+      c.classList.remove("active");
+      c.setAttribute("aria-pressed", "false");
+    });
+    renderResults(tasks, results);
+    syncClear();
+  });
+  function syncClear() { clear.style.display = filterActive() ? "" : "none"; }
+  syncClear();
+
+  bar.appendChild(search);
+  chips.appendChild(clear);
+  bar.appendChild(chips);
+  return bar;
+}
+
+// Render the active table + Finished section into `container`, applying the
+// current filter. Called on first paint and on every search/chip change. When a
+// filter is active, the Finished section auto-expands if it has matches and its
+// count shows "matches of total" so it's clear the view is filtered.
+function renderResults(tasks, container) {
+  container.innerHTML = "";
+  const filtering = filterActive();
+  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+  const history = tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status));
+  const activeMatch = active.filter(taskMatchesFilter);
+  const historyMatch = history.filter(taskMatchesFilter);
+
+  container.appendChild(el("h2", {}, "Tasks"));
+  if (tasks.length === 0) {
+    container.appendChild(el("div", { class: "empty" }, "No tasks yet."));
+  } else if (activeMatch.length === 0) {
+    container.appendChild(el("div", { class: "empty" },
+      filtering ? "No active tasks match the filter." : "No active tasks."));
+  } else {
+    container.appendChild(tasksTable(activeMatch));
+  }
+
+  if (history.length) {
+    container.appendChild(historySection(historyMatch, filtering, history.length));
+  }
+}
+
+// Collapsible "Finished" section for terminal-state tasks. `tasks` is the already
+// filtered set; `totalCount` is the unfiltered count for the header. Collapsed by
+// default and the open/closed state persists in localStorage across reloads and
+// SSE re-renders (which rebuild this node each time) — EXCEPT while a filter is
+// active, when the section auto-expands if it has matches so they aren't hidden
+// behind the collapse. When filtering, the count reads "<matches> of <total>" to
+// make clear the view is narrowed. The body is a compact one-line-per-task
+// summary (id, final status, completed time), not the full active-task table.
+function historySection(tasks, filtering, totalCount) {
+  const open = filtering ? tasks.length > 0 : historyOpen();
   const sec = el("div", { class: "history" + (open ? " open" : "") , style: "margin-top:24px" });
+  const countLabel = filtering ? `${tasks.length} of ${totalCount}` : String(totalCount);
   const head = el("button", { class: "history-head", type: "button" }, [
     el("span", { class: "caret" }, open ? "▾" : "▸"),
     el("span", { class: "history-title" }, "Finished"),
-    el("span", { class: "history-count" }, String(tasks.length)),
+    el("span", { class: "history-count" }, countLabel),
   ]);
   const body = el("div", { class: "history-body" });
-  if (open) body.appendChild(finishedList(tasks));
+  const fill = (node) => {
+    node.innerHTML = "";
+    if (tasks.length) node.appendChild(finishedList(tasks));
+    else node.appendChild(el("div", { class: "empty" }, "No finished tasks match the filter."));
+  };
+  if (open) fill(body);
 
   head.addEventListener("click", () => {
     const nowOpen = !sec.classList.contains("open");
     sec.classList.toggle("open", nowOpen);
-    setHistoryOpen(nowOpen);
+    // Only persist the collapse preference when not filtering — the filter-driven
+    // auto-expand is transient and shouldn't overwrite the user's saved choice.
+    if (!filtering) setHistoryOpen(nowOpen);
     head.querySelector(".caret").textContent = nowOpen ? "▾" : "▸";
-    body.innerHTML = "";
-    if (nowOpen) body.appendChild(finishedList(tasks));
+    if (nowOpen) fill(body); else body.innerHTML = "";
   });
 
   sec.appendChild(head);

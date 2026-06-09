@@ -207,6 +207,24 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap;
 }
 
+/* search + status filter bar (directory task views) */
+.filter-bar { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 6px; }
+.task-search { max-width: 340px; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* reuse the filled .chip.<status> colors; dim when the toggle is off */
+.filter-chip {
+  cursor: pointer; border: none; font-family: inherit;
+  opacity: 0.4; transition: opacity 0.12s;
+}
+.filter-chip:hover { opacity: 0.72; }
+.filter-chip.active { opacity: 1; }
+.filter-clear {
+  margin-left: 4px; padding: 2px 4px; font-size: 12px; font-family: inherit;
+  color: var(--muted); background: none; border: none; cursor: pointer;
+  text-decoration: underline;
+}
+.filter-clear:hover { color: var(--text); }
+
 /* history (collapsed terminal-state tasks) */
 .history-head {
   display: flex; align-items: center; gap: 8px; width: 100%;
