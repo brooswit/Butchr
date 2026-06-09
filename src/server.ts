@@ -134,6 +134,17 @@ async function healthResponse(): Promise<Response> {
     }
   }
 
+  // Concurrency snapshot: mirror the dispatcher's cap definition exactly — an
+  // "active" task occupies a dispatch slot (status running | review |
+  // finalizing). Derived from the same status counts above so the numbers stay
+  // consistent with cap behavior and we issue no extra queries. max=0 means
+  // unlimited (see config.maxConcurrent).
+  const concurrency = {
+    max: config.maxConcurrent,
+    active: (tasks.running ?? 0) + (tasks.review ?? 0) + (tasks.finalizing ?? 0),
+    queued: tasks.queued ?? 0,
+  };
+
   // Tick-loop liveness: stale if we've ticked at least once but not within
   // several intervals — meaning the dispatcher loop wedged. A never-ticked
   // loop (lastTickAt === 0) is treated as still-starting, not stalled.
@@ -164,6 +175,7 @@ async function healthResponse(): Promise<Response> {
       staleAfterMs: tickStaleAfterMs,
     },
     tasks,
+    concurrency,
     herdr: { reachable: herdrReachable },
   };
   return json(body, healthy ? 200 : 503);
