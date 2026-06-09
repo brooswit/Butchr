@@ -217,6 +217,138 @@ export async function agentPaneId(name: string): Promise<string | undefined> {
 }
 
 /**
+ * The agent's STABLE `terminal_id`, or undefined if the agent isn't registered.
+ *
+ * Unlike `pane_id`, a herdr `terminal_id` is OPAQUE and does NOT change when
+ * sibling panes close and the positional pane ids renumber. That stability is
+ * what makes it safe to use as the key for re-resolving an agent's current pane
+ * after we close a sibling (see `resolveAgentPane`).
+ */
+export async function agentTerminalId(name: string): Promise<string | undefined> {
+  if (!name) return undefined;
+  const res = await run([bin, "agent", "get", name]);
+  if (!res.ok) return undefined;
+  const text = res.stdout.trim();
+  if (!text) return undefined;
+  let env: Envelope;
+  try {
+    env = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (env.error) return undefined;
+  const r = env.result ?? env;
+  return r.agent?.terminal_id ?? r.terminal_id ?? r.pane?.terminal_id ?? undefined;
+}
+
+/**
+ * The stable `terminal_id` backing a pane, or undefined. Read this BEFORE closing
+ * a pane: `resolveAgentPane` uses the closed pane's terminal id to detect when
+ * herdr has finished renumbering (the terminal disappears from `pane list`).
+ */
+export async function paneTerminalId(paneId: string): Promise<string | undefined> {
+  if (!paneId) return undefined;
+  const res = await run([bin, "pane", "get", paneId]);
+  if (!res.ok) return undefined;
+  const text = res.stdout.trim();
+  if (!text) return undefined;
+  let env: Envelope;
+  try {
+    env = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (env.error) return undefined;
+  const r = env.result ?? env;
+  return r.pane?.terminal_id ?? r.terminal_id ?? undefined;
+}
+
+export type PaneInfo = {
+  paneId: string;
+  terminalId?: string;
+  tabId?: string;
+  workspaceId?: string;
+};
+
+/** List the live panes (optionally scoped to a workspace). [] on any failure. */
+export async function paneList(workspaceId?: string): Promise<PaneInfo[]> {
+  const args = ["pane", "list"];
+  if (workspaceId) args.push("--workspace", workspaceId);
+  const res = await run([bin, ...args]);
+  if (!res.ok) return [];
+  const text = res.stdout.trim();
+  if (!text) return [];
+  let env: Envelope;
+  try {
+    env = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (env.error) return [];
+  const r = env.result ?? env;
+  const panes: any[] = r.panes ?? [];
+  return panes
+    .map((p) => ({
+      paneId: p.pane_id,
+      terminalId: p.terminal_id,
+      tabId: p.tab_id,
+      workspaceId: p.workspace_id,
+    }))
+    .filter((p): p is PaneInfo => !!p.paneId);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Resolve the agent's CURRENT pane id in a way that survives herdr's positional
+ * pane-id RENUMBERING.
+ *
+ * herdr pane ids are POSITIONAL: when we close a task tab's empty root pane, every
+ * higher-numbered pane renumbers down by one. But `pane close` RETURNS BEFORE that
+ * renumber has propagated to herdr's agent->pane mapping, so reading
+ * `agent get <name>`.pane_id (or `agentPaneId`) right after the close yields a
+ * STALE, pre-renumber positional id — recorded permanently, it points at the wrong
+ * or a NONEXISTENT pane (the phantom-pane bug).
+ *
+ * The agent's `terminal_id` is opaque and stable across renumbers, so we key on it
+ * instead: fetch the agent's terminal id once, then poll the live `pane list` and
+ * read the pane_id of the pane whose terminal_id matches — from the same snapshot,
+ * so it is internally consistent. When `closedTerminalId` is given (the husk root
+ * pane we just closed), we wait until that terminal has VANISHED from the list
+ * before trusting a reading: its presence means the close hasn't propagated and the
+ * pane numbering is still mid-renumber.
+ *
+ * Bounded retry (~1.5s). Returns the settled pane id, or undefined if the agent
+ * never registered a live pane (a failed/clobbered start) — the caller treats that
+ * as a failed dispatch rather than recording a bogus id.
+ */
+export async function resolveAgentPane(
+  name: string,
+  closedTerminalId?: string,
+): Promise<string | undefined> {
+  if (!name) return undefined;
+  const terminalId = await agentTerminalId(name);
+  if (!terminalId) return undefined; // agent never registered
+  for (let i = 0; i < 12; i++) {
+    const panes = await paneList();
+    const huskGone =
+      !closedTerminalId || !panes.some((p) => p.terminalId === closedTerminalId);
+    const match = panes.find((p) => p.terminalId === terminalId);
+    // Settled (husk renumber propagated) AND the agent pane is live → its pane_id
+    // in this snapshot is the correct, current one.
+    if (huskGone && match) return match.paneId;
+    await sleep(125);
+  }
+  // Exhausted the window. If we never saw the husk vanish, the close simply never
+  // happened (so no renumber occurred and the agent's current pane_id is still
+  // right); if the agent pane is genuinely gone, the start failed → undefined.
+  const panes = await paneList();
+  return panes.find((p) => p.terminalId === terminalId)?.paneId;
+}
+
+/**
  * Does this error (thrown by `agentStart` / the herdr wrapper) indicate the
  * agent name is already in use? herdr surfaces this as an `agent_name_taken`
  * error code; we match loosely so a reworded message still reconciles.

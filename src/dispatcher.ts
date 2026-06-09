@@ -411,7 +411,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
       async () => {
         const tab = await herdr.tabCreate(workspaceId ?? undefined, worktree, task.id);
         try {
-          const started = await startAgentReconciling(
+          await startAgentReconciling(
             task.id,
             worktree,
             argv,
@@ -421,20 +421,25 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
 
           // `tab create` spawns an empty root shell pane; `agent start --tab` then
           // adds the agent as a SECOND pane. Close that empty pane so the tab holds
-          // only the agent. Closing a sibling renumbers the survivor (positional
-          // ids), so re-resolve the agent's pane by NAME afterwards.
+          // only the agent. Capture the husk's STABLE terminal id FIRST: closing it
+          // renumbers the positional pane ids, and `pane close` returns BEFORE that
+          // renumber propagates, so resolveAgentPane waits for this terminal to
+          // vanish before trusting a re-resolved pane id.
+          let closedTerminalId: string | undefined;
           if (tab.tabId && tab.rootPaneId) {
+            closedTerminalId = await herdr.paneTerminalId(tab.rootPaneId);
             await herdr.paneClose(tab.rootPaneId).catch(() => {});
           }
 
-          // Verify the agent really registered a live pane. If the start failed or
-          // was clobbered, agentExists/agentPaneId come up empty — treat the whole
-          // dispatch as FAILED rather than marking the task running against a pane
-          // that never existed (the phantom-task bug).
-          const realPane = (await herdr.agentPaneId(task.id)) ?? started.paneId;
-          if (!(await herdr.agentExists(task.id))) {
+          // Re-resolve the agent's CURRENT pane by its STABLE terminal id, waiting
+          // out herdr's positional-id renumber. Returns undefined if the agent
+          // never registered a live pane (a failed/clobbered start) — treat the
+          // whole dispatch as FAILED rather than recording a stale/phantom pane id
+          // (the phantom-task bug).
+          const realPane = await herdr.resolveAgentPane(task.id, closedTerminalId);
+          if (!realPane) {
             throw new Error(
-              `agent ${task.id} did not register with herdr after start`,
+              `agent ${task.id} did not register a live pane after start`,
             );
           }
           return { paneId: realPane, tabId: tab.tabId };
