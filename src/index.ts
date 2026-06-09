@@ -2,6 +2,7 @@
 // up clean shutdown. Run with `bun run src/index.ts` (see package.json scripts).
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import { initFileLogging } from "./log.ts";
+import { reapOrphans } from "./reaper.ts";
 import { startServer } from "./server.ts";
 import { recoverFinalizingTasks } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
@@ -35,6 +36,17 @@ async function main(): Promise<void> {
   const finalized = await recoverFinalizingTasks();
   if (finalized > 0) {
     console.log(`[butchr] finalized ${finalized} task(s) left finalizing from a prior run`);
+  }
+
+  // Reap leaked worktrees/branches + herdr husks from tasks that reached a
+  // terminal state (or vanished) but whose filesystem/herdr artifacts survived a
+  // restart. Runs AFTER reconcile + finalize so re-adopted running tasks and
+  // just-finalized ones aren't mistaken for orphans.
+  const { worktrees: reapedWt, husks: reapedHusks } = await reapOrphans(herdrUp);
+  if (reapedWt > 0 || reapedHusks > 0) {
+    console.log(
+      `[butchr] reaped ${reapedWt} orphaned worktree(s), ${reapedHusks} herdr husk(s) on startup`,
+    );
   }
 
   startDispatcher();
