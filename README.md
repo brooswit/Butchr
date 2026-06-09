@@ -100,6 +100,9 @@ bun run start      # or: bun run dev   (watch mode)
 
 Then open the webapp at **http://127.0.0.1:47800**.
 
+> Running this in production? See [OPERATIONS.md](./OPERATIONS.md) for the
+> start/restart/recovery runbook.
+
 ### Crash supervision (keep butchr up)
 
 For an unattended/long-running setup, run butchr under the bundled supervisor so
