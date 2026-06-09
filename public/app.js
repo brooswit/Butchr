@@ -55,6 +55,17 @@ function isLive(t) {
 function hasLivePane(t) {
   return !!t.herdr_pane_id;
 }
+// Compact monospace readout of a task's herdr pane/tab ids, for surfacing next to
+// the Open-terminal control. Returns "" when no pane is allocated (task not yet
+// dispatched or already torn down) — same gate as isLive/hasLivePane, so the ids
+// appear exactly when the terminal button does.
+function herdrIds(t) {
+  if (!t.herdr_pane_id) return "";
+  const pane = `<span class="herdr-id" title="herdr pane id">pane ${esc(t.herdr_pane_id)}</span>`;
+  const tab = t.herdr_tab_id
+    ? `<span class="herdr-id" title="herdr tab id">tab ${esc(t.herdr_tab_id)}</span>` : "";
+  return `<span class="herdr-ids">${pane}${tab}</span>`;
+}
 
 async function api(method, path, body) {
   const res = await fetch("/api" + path, {
@@ -478,7 +489,8 @@ function tasksTable(tasks) {
       <td class="id">${esc(t.id)}</td>
       <td>${chip(effStatus(t))}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
-      <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
+      <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a>${
+        herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
     const tl = tr.querySelector(".term-link");
     if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(t.id); });
     tb.appendChild(tr);
@@ -525,6 +537,8 @@ async function renderTask(id) {
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
     <div class="k">merged</div><div class="v">${esc(t.merged_at || "—")}</div>
+    ${t.herdr_pane_id ? `<div class="k">herdr pane</div><div class="v">${esc(t.herdr_pane_id)}</div>` : ""}
+    ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
   wrap.appendChild(meta);
 

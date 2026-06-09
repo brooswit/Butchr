@@ -194,6 +194,15 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tasks .id { font-family: var(--mono); font-size: 13px; }
 .tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
+/* compact herdr pane/tab id readout next to the Open-terminal control */
+.herdr-ids { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.herdr-ids-row { margin-top: 6px; }
+.herdr-id {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap;
+}
+
 /* history (collapsed terminal-state tasks) */
 .history-head {
   display: flex; align-items: center; gap: 8px; width: 100%;
