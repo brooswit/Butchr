@@ -26,6 +26,7 @@
   --finalizing: #4f46e5; /* indigo-600 (merging) */
   --merged: #006933;     /* green-600 (success) */
   --rejected: #b6073c;   /* red-600 (error) */
+  --failed: #8a1322;     /* red-800 (dispatch give-up — darker than reject) */
   --aborted: #545a62;    /* gray-600 (neutral) */
 
   /* diff add/del — themeable so they read on both light and dark surfaces */
@@ -60,6 +61,7 @@ html[data-theme="dark"] {
   --finalizing: #6366f1; /* indigo, lifted for dark surfaces */
   --merged: #006933;
   --rejected: #b6073c;
+  --failed: #c0263a;     /* red, lifted for dark surfaces */
   --aborted: #545a62;
 
   --diff-add-text: #1ecb6a; /* green-300 */
@@ -169,6 +171,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.finalizing { background: var(--finalizing); }
 .chip.merged { background: var(--merged); }
 .chip.rejected { background: var(--rejected); }
+.chip.failed { background: var(--failed); }
 .chip.aborted { background: var(--aborted); }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
@@ -182,6 +185,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
 .count-pill.has-review { border-color: var(--review); color: var(--review); }
 .count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
+.count-pill.has-failed { border-color: var(--failed); color: var(--failed); }
 
 /* tasks table */
 .tasks { width: 100%; border-collapse: collapse; margin-top: 8px; }

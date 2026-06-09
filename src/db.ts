@@ -74,6 +74,20 @@ ensureColumn("tasks", "session_id", "TEXT");
 // whole tab so the agent dies and the tab disappears regardless of pane churn.
 ensureColumn("tasks", "herdr_tab_id", "TEXT");
 
+// Dispatch retry/backoff bookkeeping. A task whose dispatch() keeps throwing used
+// to re-queue and hot-loop every tick forever, silently. These columns make the
+// retry bounded and visible (see dispatcher.markDispatchFailure + tick gating):
+//   - `dispatch_attempts` counts consecutive FAILED dispatch attempts; reset to 0
+//     on a successful launch (markRunning) and on a fresh re-queue (reject /
+//     reconcile / requeue), so it only ever reflects an unbroken run of failures.
+//   - `last_dispatch_error` is the most recent dispatch failure message, surfaced
+//     for the operator and carried onto a `failed` task.
+//   - `next_dispatch_at` is an ISO timestamp: while set in the FUTURE the task is
+//     waiting out a backoff and the tick loop must NOT dispatch it yet.
+ensureColumn("tasks", "dispatch_attempts", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("tasks", "last_dispatch_error", "TEXT");
+ensureColumn("tasks", "next_dispatch_at", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -87,6 +101,12 @@ export type DirectoryRow = {
 // is no longer produced; the union keeps it only so startup migration can flush
 // any leftover `finalizing` rows from a pre-redesign database (see
 // recoverFinalizingTasks in tasks.ts).
+//
+// `failed` is the dispatch give-up state: a task whose dispatch() failed
+// MAX_DISPATCH_ATTEMPTS times in a row. It is NOT active (the dispatcher stops
+// retrying it) and is terminal-ish — it only leaves via the operator's
+// POST /api/tasks/:id/requeue escape hatch (see tasks.requeueTask), which resets
+// the retry state and puts it back to `queued`.
 export type TaskStatus =
   | "queued"
   | "running"
@@ -94,7 +114,8 @@ export type TaskStatus =
   | "finalizing"
   | "merged"
   | "rejected"
-  | "aborted";
+  | "aborted"
+  | "failed";
 
 export type TaskRow = {
   id: string;
@@ -108,6 +129,9 @@ export type TaskRow = {
   idle: number;
   review_note: string | null;
   summary: string | null;
+  dispatch_attempts: number;
+  last_dispatch_error: string | null;
+  next_dispatch_at: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

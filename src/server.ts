@@ -24,6 +24,7 @@ import {
   getTask,
   listTasks,
   rejectTask,
+  requeueTask,
   taskDiff,
   taskView,
 } from "./tasks.ts";
@@ -312,6 +313,13 @@ route("POST", "/api/tasks/:id/reject", async (req, p) => {
 
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
+});
+
+// Operator escape hatch: revive a task that gave up dispatching (`failed`) — or
+// any other non-terminal stuck state — by clearing its dispatch retry state and
+// re-queuing it for a fresh dispatch.
+route("POST", "/api/tasks/:id/requeue", async (_req, p) => {
+  return json(await requeueTask(p.id!));
 });
 
 // Open a GUI terminal attached to a task's live agent pane. Only `running` tasks

@@ -301,12 +301,13 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "running", "idle", "review", "finalizing", "merged", "aborted"]
+  const pills = ["queued", "running", "idle", "review", "finalizing", "failed", "merged", "aborted"]
     .map((s) => {
       const cls = s === "running" && c[s] ? "count-pill has-running"
         : s === "idle" && c[s] ? "count-pill has-idle"
         : s === "review" && c[s] ? "count-pill has-review"
-        : s === "finalizing" && c[s] ? "count-pill has-finalizing" : "count-pill";
+        : s === "finalizing" && c[s] ? "count-pill has-finalizing"
+        : s === "failed" && c[s] ? "count-pill has-failed" : "count-pill";
       return `<span class="${cls}">${s} <b>${c[s] || 0}</b></span>`;
     }).join("");
   const card = el("div", { class: "card" });

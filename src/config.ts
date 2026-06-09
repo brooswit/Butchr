@@ -57,6 +57,18 @@ export const config = {
   tickMs: envInt("BUTCHR_TICK_MS", 1500),
 
   /**
+   * Bounded dispatch retry with exponential backoff. When dispatch() throws
+   * (workspace heal / worktree / herdr pane setup failed), the task is re-queued
+   * with a growing delay instead of hot-looping every tick. After
+   * `maxDispatchAttempts` consecutive failures it gives up to the `failed` state
+   * (no more retries until the operator re-queues). Backoff for attempt N (1-based)
+   * is `min(dispatchBackoffBaseMs * 2^(N-1), dispatchBackoffCapMs)`.
+   */
+  maxDispatchAttempts: envInt("BUTCHR_MAX_DISPATCH_ATTEMPTS", 5),
+  dispatchBackoffBaseMs: envInt("BUTCHR_DISPATCH_BACKOFF_BASE_MS", 1000),
+  dispatchBackoffCapMs: envInt("BUTCHR_DISPATCH_BACKOFF_CAP_MS", 30000),
+
+  /**
    * Command template run inside a task's worktree to execute the agent for its
    * FIRST attempt. Placeholders, all replaced by the dispatcher:
    *  - `{{PROMPT_FILE}}` → absolute path to the rendered prompt file.

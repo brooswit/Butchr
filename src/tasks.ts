@@ -1,5 +1,6 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
+import { config } from "./config.ts";
 import { db, nowIso } from "./db.ts";
 import type { TaskRow, TaskStatus } from "./db.ts";
 import { HttpError, getDirectory } from "./directories.ts";
@@ -152,8 +153,13 @@ async function requestChanges(
   // otherwise strand an orphan that collides on `agent_name_taken`), and clear the
   // stored tab id since that tab is now gone; the re-dispatch spins up a fresh one.
   await herdr.teardownTask(tabId, id, paneId);
+  // This is a REWORK re-queue (a human reject or a conflict kick-back), NOT a
+  // dispatch failure — it's a fresh intent to run, so clear the dispatch retry
+  // state (attempts / last error / backoff) so prior dispatch failures don't
+  // count against the resume and a stale backoff can't delay it.
   db.query(
-    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0 WHERE id=?`,
+    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0,
+       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(note, id);
   updateTaskMdStatus(dirPath, id, "queued");
 }
@@ -354,9 +360,12 @@ export function markRunning(
   // uuid; a re-launched (rejected) task keeps its existing id, which is exactly
   // the one the dispatcher just `--resume`d. The tab id is the dedicated herdr tab
   // the agent runs in (one tab per task).
+  // A successful launch clears the dispatch retry state: this run got off the
+  // ground, so any earlier consecutive-failure count / backoff / error is stale.
   const res = db.query(
     `UPDATE tasks SET status='running', herdr_pane_id=?, herdr_tab_id=?,
-       session_id=COALESCE(session_id, ?), started_at=COALESCE(started_at, ?)
+       session_id=COALESCE(session_id, ?), started_at=COALESCE(started_at, ?),
+       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL
        WHERE id=? AND status='queued'`,
   ).run(paneId, tabId ?? null, sessionId, nowIso(), id);
   if (res.changes === 0) return; // aborted (or otherwise moved) under us
@@ -460,12 +469,102 @@ export async function backToQueued(id: string): Promise<void> {
   // Close any lingering herdr agent/tab for this task before re-queuing, so a
   // failed dispatch never strands an orphan agent (or its tab) that would later
   // collide on `agent_name_taken`. Re-dispatch creates a fresh tab.
+  //
+  // This is a CLEAN re-queue (fresh intent) — it clears the dispatch retry state
+  // so it never counts as a dispatch failure. A genuine dispatch failure goes
+  // through markDispatchFailure instead, which is what implements the bounded
+  // retry + backoff + give-up.
   const row = getTask(id);
   await herdr.teardownTask(row?.herdr_tab_id, id, row?.herdr_pane_id);
   db.query(
-    `UPDATE tasks SET status='queued', herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
+    `UPDATE tasks SET status='queued', herdr_pane_id=NULL, herdr_tab_id=NULL,
+       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(id);
   emitUpdated(id);
+}
+
+/**
+ * Compute the backoff delay (ms) before the Nth dispatch retry (1-based attempt
+ * count): exponential growth capped at `dispatchBackoffCapMs`. Exported so the
+ * state machine can be unit-tested without spawning real dispatches.
+ *   attempt 1 → base, 2 → base*2, 3 → base*4, … capped at the cap.
+ */
+export function dispatchBackoffMs(attempts: number): number {
+  const exp = config.dispatchBackoffBaseMs * 2 ** Math.max(0, attempts - 1);
+  return Math.min(exp, config.dispatchBackoffCapMs);
+}
+
+/**
+ * Record a DISPATCH failure (dispatch() threw before the agent ever launched) and
+ * decide what happens next — the bounded-retry / backoff / give-up state machine:
+ *
+ *  - Always: increment `dispatch_attempts`, store `last_dispatch_error`, and tear
+ *    down any half-created herdr agent/tab (mirrors the old backToQueued cleanup).
+ *  - Under the cap (`dispatch_attempts < maxDispatchAttempts`): keep status
+ *    `queued` but stamp `next_dispatch_at = now + backoff(attempts)`. The tick
+ *    loop skips the task until that time, so it no longer hot-loops.
+ *  - At/over the cap: move to `failed` and clear `next_dispatch_at`. The
+ *    dispatcher stops retrying; only POST /api/tasks/:id/requeue revives it.
+ *
+ * This is the ONLY path that increments dispatch_attempts. Reject / conflict
+ * kick-back (requestChanges) and the clean backToQueued re-queue reset it instead.
+ */
+export async function markDispatchFailure(id: string, err: string): Promise<void> {
+  const row = getTask(id);
+  if (!row) return;
+  // Free any orphaned herdr agent/tab from the failed start so a retry doesn't
+  // collide on `agent_name_taken`.
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+
+  const attempts = (row.dispatch_attempts ?? 0) + 1;
+  const dir = getDirectory(row.directory_id);
+
+  if (attempts >= config.maxDispatchAttempts) {
+    db.query(
+      `UPDATE tasks SET status='failed', dispatch_attempts=?, last_dispatch_error=?,
+         next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
+    ).run(attempts, err, id);
+    if (dir) updateTaskMdStatus(dir.path, id, "failed");
+    console.error(
+      `[butchr] task ${id} failed to dispatch after ${attempts} attempts: ${err}`,
+    );
+    emitUpdated(id);
+    return;
+  }
+
+  const nextAt = new Date(Date.now() + dispatchBackoffMs(attempts)).toISOString();
+  db.query(
+    `UPDATE tasks SET status='queued', dispatch_attempts=?, last_dispatch_error=?,
+       next_dispatch_at=?, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
+  ).run(attempts, err, nextAt, id);
+  console.warn(
+    `[butchr] dispatch attempt ${attempts}/${config.maxDispatchAttempts} failed ` +
+      `for ${id}; retrying after ${nextAt}: ${err}`,
+  );
+  emitUpdated(id);
+}
+
+/**
+ * Operator escape hatch: revive a `failed` (or otherwise stuck non-terminal) task
+ * by clearing the dispatch retry state and putting it back to `queued`, so the
+ * dispatcher retries it fresh. Refuses genuinely terminal tasks (merged/aborted).
+ */
+export async function requeueTask(id: string): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (row.status === "merged" || row.status === "aborted") {
+    throw new HttpError(409, `task is ${row.status}; cannot re-queue`);
+  }
+  const dir = getDirectory(row.directory_id);
+  // Tear down any lingering agent/tab defensively before a fresh dispatch.
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  db.query(
+    `UPDATE tasks SET status='queued', dispatch_attempts=0, last_dispatch_error=NULL,
+       next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
+  ).run(id);
+  if (dir) updateTaskMdStatus(dir.path, id, "queued");
+  emitUpdated(id);
+  return taskView(id)!;
 }
 
 /**

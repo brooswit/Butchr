@@ -22,7 +22,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, backToQueued, getTask, markReview, markRunning, setIdle } from "./tasks.ts";
+import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -254,14 +254,21 @@ async function tick(): Promise<void> {
     // If herdr is down, do nothing this tick (no error spam — it may come back).
     if (!(await herdr.isUp())) return;
 
+    // Skip tasks waiting out a dispatch backoff: next_dispatch_at set and still in
+    // the future. ISO-8601 timestamps compare correctly as strings, so a simple
+    // `<=` against now selects only tasks whose backoff has elapsed (or that never
+    // failed, next_dispatch_at IS NULL). This is the gate that stops a repeatedly
+    // failing task from hot-looping every tick.
+    const nowStr = new Date().toISOString();
     const rows = db
-      .query<QueuedRow, []>(
+      .query<QueuedRow, [string]>(
         `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN directories d ON d.id = t.directory_id
          WHERE t.status='queued'
+           AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
          ORDER BY t.created_at ASC`,
       )
-      .all();
+      .all(nowStr);
 
     // Dispatch every queued task that isn't already being dispatched/watched —
     // fully concurrent, no cap. The `dispatching`/`watching` sets only guard
@@ -544,17 +551,22 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // fix #2: tag the log with the resume case so a FAILED rework relaunch (e.g.
     // resolveAgentPane returned undefined / the agent never registered a pane,
     // which throws above) is visible as a resume failure rather than blending in
-    // with fresh-dispatch failures. The task is re-queued exactly like a fresh
-    // failure (backToQueued → retried next tick), so the resume path is no longer
-    // a silent gap.
+    // with fresh-dispatch failures.
+    //
+    // Bounded retry: instead of an unconditional re-queue (the old hot-loop),
+    // route through markDispatchFailure, which increments the attempt count, stamps
+    // a backoff in next_dispatch_at (so the tick loop waits before retrying), and
+    // gives up to `failed` after maxDispatchAttempts. last_dispatch_error records
+    // this message for the operator.
+    const msg = (e as Error).message;
     console.error(
       `[butchr] dispatch failed for ${task.id}` +
         (isResume ? ` (resume of session ${sessionId})` : "") +
         `:`,
-      (e as Error).message,
+      msg,
     );
     await herdr.agentDeregister(task.id).catch(() => {});
-    await backToQueued(task.id);
+    await markDispatchFailure(task.id, msg);
   }
 }
 
