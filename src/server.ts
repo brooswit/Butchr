@@ -16,6 +16,7 @@ import { subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
 import * as herdr from "./herdr.ts";
 import { handleMcp } from "./mcp.ts";
+import { getLastReap } from "./reaper.ts";
 import pkg from "../package.json" with { type: "json" };
 import {
   abortTask,
@@ -160,6 +161,11 @@ async function healthResponse(): Promise<Response> {
     herdrReachable = false;
   }
 
+  // Reaper self-heal snapshot: the most recent startup-reap outcome (cheap,
+  // synchronous module read — see reaper.getLastReap). Zeros + null timestamp
+  // until the boot reap runs.
+  const reap = getLastReap();
+
   const healthy = dbOk && tickAlive;
   const body = {
     status: healthy ? "ok" : "degraded",
@@ -174,7 +180,13 @@ async function healthResponse(): Promise<Response> {
       staleAfterMs: tickStaleAfterMs,
     },
     tasks,
+    // Convenience count of tasks that gave up dispatching (status='failed').
+    // The `tasks` map above already includes it via GROUP BY, but surface it
+    // directly so dispatch give-ups are visible at a glance.
+    failedTasks: tasks.failed ?? 0,
     concurrency,
+    // Self-heal visibility: last startup reap of orphaned worktrees + herdr husks.
+    reaper: { lastRunAt: reap.at, worktrees: reap.worktrees, husks: reap.husks },
     herdr: { reachable: herdrReachable },
   };
   return json(body, healthy ? 200 : 503);

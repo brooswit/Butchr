@@ -19,6 +19,17 @@ const git = config.gitBin;
 // transient `finalizing`) is still live and must be left alone.
 const TERMINAL = new Set(["merged", "aborted", "rejected"]);
 
+// Most recent reapOrphans outcome, retained so /health can surface self-heal
+// activity at a glance (see server.healthResponse). `at` is null until the first
+// run completes (reapOrphans runs once on boot — see index.ts).
+export type ReapResult = { worktrees: number; husks: number; at: string | null };
+let lastReap: ReapResult = { worktrees: 0, husks: 0, at: null };
+
+/** The most recent reapOrphans outcome (zeros + null timestamp before first run). */
+export function getLastReap(): ReapResult {
+  return lastReap;
+}
+
 /** Parse the `worktree <path>` lines out of `git worktree list --porcelain`. */
 function parseWorktreePaths(porcelain: string): string[] {
   const paths: string[] = [];
@@ -103,5 +114,6 @@ export async function reapOrphans(
     }
   }
 
+  lastReap = { worktrees, husks, at: new Date().toISOString() };
   return { worktrees, husks };
 }
