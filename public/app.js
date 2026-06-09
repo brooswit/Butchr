@@ -409,19 +409,21 @@ function setHistoryOpen(open) {
   try { localStorage.setItem(HISTORY_KEY, open ? "1" : "0"); } catch (e) { /* ignore */ }
 }
 
-// Collapsible History section for terminal-state tasks. Collapsed by default;
+// Collapsible "Finished" section for terminal-state tasks. Collapsed by default;
 // the open/closed state persists in localStorage across reloads and SSE
-// re-renders (which rebuild this node from scratch each time).
+// re-renders (which rebuild this node from scratch each time). The body is a
+// compact one-line-per-task summary (id, final status, completed time) — not the
+// full active-task table — so the history stays tucked away and scannable.
 function historySection(tasks) {
   const open = historyOpen();
   const sec = el("div", { class: "history" + (open ? " open" : "") , style: "margin-top:24px" });
   const head = el("button", { class: "history-head", type: "button" }, [
     el("span", { class: "caret" }, open ? "▾" : "▸"),
-    el("span", { class: "history-title" }, "History"),
+    el("span", { class: "history-title" }, "Finished"),
     el("span", { class: "history-count" }, String(tasks.length)),
   ]);
   const body = el("div", { class: "history-body" });
-  if (open) body.appendChild(tasksTable(tasks));
+  if (open) body.appendChild(finishedList(tasks));
 
   head.addEventListener("click", () => {
     const nowOpen = !sec.classList.contains("open");
@@ -429,12 +431,36 @@ function historySection(tasks) {
     setHistoryOpen(nowOpen);
     head.querySelector(".caret").textContent = nowOpen ? "▾" : "▸";
     body.innerHTML = "";
-    if (nowOpen) body.appendChild(tasksTable(tasks));
+    if (nowOpen) body.appendChild(finishedList(tasks));
   });
 
   sec.appendChild(head);
   sec.appendChild(body);
   return sec;
+}
+
+// The time a terminal-state task wrapped up: merged tasks report merged_at,
+// aborted/rejected report completed_at. Fall back across both, then created_at.
+function finishedTime(t) {
+  return t.merged_at || t.completed_at || t.created_at;
+}
+
+// Compact one-line-per-task list for finished (terminal) tasks: id, final status
+// chip, and when it completed. Most-recent first. Each row links to the full task
+// detail; no live/terminal affordances (these tasks have no live pane).
+function finishedList(tasks) {
+  const sorted = tasks.slice().sort((a, b) =>
+    new Date(finishedTime(b) || 0).getTime() - new Date(finishedTime(a) || 0).getTime());
+  const list = el("div", { class: "finished-list" });
+  for (const t of sorted) {
+    const row = el("a", { class: "finished-row", href: "#/task/" + esc(t.id) });
+    row.innerHTML = `
+      <span class="fr-id">${esc(t.id)}</span>
+      ${chip(effStatus(t))}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}
+      <span class="fr-when" title="${esc(finishedTime(t) || "")}">${esc(fmtTime(finishedTime(t)))}</span>`;
+    list.appendChild(row);
+  }
+  return list;
 }
 
 function tasksTable(tasks) {

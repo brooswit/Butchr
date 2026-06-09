@@ -211,6 +211,18 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .history-body { margin-top: 4px; }
 
+/* compact one-line-per-task summaries inside the Finished section */
+.finished-list { display: flex; flex-direction: column; }
+.finished-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 10px; border-bottom: 1px solid var(--border);
+  color: var(--text); font-size: 13px;
+}
+.finished-row:last-child { border-bottom: 0; }
+.finished-row:hover { background: var(--panel-2); text-decoration: none; }
+.finished-row .fr-id { font-family: var(--mono); font-size: 13px; flex: 1; word-break: break-all; }
+.finished-row .fr-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
 /* forms */
 .btn {
   background: var(--accent); color: #fff; border: none; border-radius: var(--radius-md);
