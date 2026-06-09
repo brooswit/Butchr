@@ -18,16 +18,107 @@ import {
 } from "./taskmd.ts";
 import { existsSync, readFileSync } from "node:fs";
 
-export type TaskView = TaskRow & {
+// The serialized task object exposes `blocked_by` as a real array of ids (the DB
+// stores it as raw JSON TEXT) plus `deadBlockers`: blockers in a terminal,
+// non-merged state (aborted/rejected/failed) or gone entirely, which will NEVER
+// merge — a blocked task with any dead blocker is stuck until the operator edits
+// its blocked_by set (see setBlockedBy). We Omit the raw column so the array shape
+// wins.
+export type TaskView = Omit<TaskRow, "blocked_by"> & {
   prompt: string;
   context: string[];
   review_notes: string;
+  blocked_by: string[];
+  // The current status of each blocker by id (or "gone" if its row no longer
+  // exists), so the webapp can render the dependency list without extra fetches.
+  blockerStates: Record<string, string>;
+  deadBlockers: string[];
 };
 
 export function getTask(id: string): TaskRow | null {
   return (
     db.query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id) ?? null
   );
+}
+
+// --- task dependencies / blocking ------------------------------------------
+
+/** Terminal states a blocker can be in that mean it will NEVER merge. */
+const DEAD_BLOCKER_STATES = new Set<TaskStatus>(["aborted", "rejected", "failed"]);
+
+/** Parse the JSON-array `blocked_by` column into a clean string[] of task ids. */
+export function parseBlockedBy(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Classify a single blocker by id:
+ *  - "merged"  → satisfied; this dependency is met.
+ *  - "dead"    → terminal non-merged (aborted/rejected/failed) OR no longer exists
+ *                (its directory was unregistered) → it will never merge.
+ *  - "pending" → still in flight (queued/blocked/running/review/finalizing) → may
+ *                still merge.
+ */
+function blockerState(blockerId: string): "merged" | "dead" | "pending" {
+  const b = getTask(blockerId);
+  if (!b) return "dead"; // gone — can never merge
+  if (b.status === "merged") return "merged";
+  if (DEAD_BLOCKER_STATES.has(b.status)) return "dead";
+  return "pending";
+}
+
+/** Are ALL of these blockers merged? (Empty set → trivially eligible.) */
+function allBlockersMerged(ids: string[]): boolean {
+  return ids.every((id) => blockerState(id) === "merged");
+}
+
+/** Blockers (by id) that will never merge — terminal non-merged or gone. */
+function deadBlockerIds(ids: string[]): string[] {
+  return ids.filter((id) => blockerState(id) === "dead");
+}
+
+// Remember which (task, dead-blocker) pairs we've already warned about so the
+// per-tick re-evaluation doesn't spam the log every second for a stuck task.
+const loggedDeadBlockers = new Set<string>();
+function logDeadBlockers(taskId: string, ids: string[]): void {
+  for (const bid of deadBlockerIds(ids)) {
+    const key = `${taskId}:${bid}`;
+    if (loggedDeadBlockers.has(key)) continue;
+    loggedDeadBlockers.add(key);
+    const b = getTask(bid);
+    console.warn(
+      `[butchr] task ${taskId} blocked on ${bid} which is ${b ? b.status : "gone"} ` +
+        `and will never merge; edit blocked_by to proceed`,
+    );
+  }
+}
+
+/**
+ * Would making `taskId` depend on `newBlockers` create a self-block or a
+ * dependency cycle (A blocks B blocks A)? Walks the existing blocked_by graph
+ * from each proposed blocker; only `taskId`'s OWN outgoing edges change, so if any
+ * path from a proposed blocker reaches `taskId` again, the new edge closes a cycle.
+ */
+export function wouldCreateCycle(taskId: string, newBlockers: string[]): boolean {
+  if (newBlockers.includes(taskId)) return true; // self-block
+  const visited = new Set<string>();
+  const stack = [...newBlockers];
+  while (stack.length) {
+    const cur = stack.pop()!;
+    if (cur === taskId) return true;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const row = getTask(cur);
+    if (!row) continue;
+    for (const b of parseBlockedBy(row.blocked_by)) stack.push(b);
+  }
+  return false;
 }
 
 export function listTasks(directoryId: string): TaskRow[] {
@@ -59,7 +150,21 @@ export function taskView(id: string): TaskView | null {
       }
     }
   }
-  return { ...row, prompt, context, review_notes };
+  const blocked_by = parseBlockedBy(row.blocked_by);
+  const blockerStates: Record<string, string> = {};
+  for (const bid of blocked_by) {
+    const b = getTask(bid);
+    blockerStates[bid] = b ? b.status : "gone";
+  }
+  return {
+    ...row,
+    prompt,
+    context,
+    review_notes,
+    blocked_by,
+    blockerStates,
+    deadBlockers: deadBlockerIds(blocked_by),
+  };
 }
 
 function emitUpdated(id: string): void {
@@ -71,6 +176,7 @@ export async function createTask(
   directoryId: string,
   prompt: string,
   context: string[] = [],
+  blockedBy: string[] = [],
 ): Promise<TaskView> {
   const dir = getDirectory(directoryId);
   if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
@@ -78,25 +184,181 @@ export async function createTask(
     throw new HttpError(400, "prompt is required");
   }
 
+  // Normalize + validate the dependency set: every listed blocker must exist.
+  const blockers = normalizeBlockedBy(blockedBy);
+  for (const bid of blockers) {
+    if (!getTask(bid)) throw new HttpError(404, `blocker task not found: ${bid}`);
+  }
+
   const id = uniqueTaskId((cand) => getTask(cand) !== null);
+
+  // Self-block / cycle guard. The id is freshly minted (nothing points at it yet),
+  // so in practice only a self-reference could trip this — but run the full walk
+  // so the rule is enforced uniformly with setBlockedBy.
+  if (wouldCreateCycle(id, blockers)) {
+    throw new HttpError(400, "blocked_by would create a dependency cycle");
+  }
+
   const created = nowIso();
+  // Start `blocked` if any blocker is not yet merged; otherwise `queued` as today
+  // (an empty set or all-merged blockers are immediately eligible to dispatch).
+  const status: TaskStatus = allBlockersMerged(blockers) ? "queued" : "blocked";
 
   // Filesystem artifact first: worktree + task.md. If either fails, no DB row.
   await git.createWorktree(dir.path, id);
   writeTaskMd(
     dir.path,
-    { id, created, status: "queued", context },
+    { id, created, status, context },
     prompt,
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, created_at)
-     VALUES (?, ?, 'queued', ?)`,
-  ).run(id, directoryId, created);
+    `INSERT INTO tasks (id, directory_id, status, blocked_by, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, directoryId, status, JSON.stringify(blockers), created);
+
+  if (status === "blocked") logDeadBlockers(id, blockers);
 
   const view = taskView(id)!;
   publish({ type: "task.created", task: view });
   return view;
+}
+
+/** De-dupe + drop blanks from a blocked_by list, preserving order. */
+function normalizeBlockedBy(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of ids ?? []) {
+    const id = String(raw ?? "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * AUTO-UNBLOCK: if `id` is `blocked` and ALL its blockers have merged, promote it
+ * to `queued` so the dispatcher picks it up. A blocked task with an empty
+ * blocked_by set is trivially eligible. No-op for any non-`blocked` task. Returns
+ * true iff it promoted the task. Called cheaply for every blocked task on each
+ * dispatcher tick (robust to missed events) and again right after any merge for
+ * promptness. If it stays blocked, dead blockers are logged (deduped) so a stuck
+ * dependency is visible.
+ */
+export function reevaluateBlockedTask(id: string): boolean {
+  const row = getTask(id);
+  if (!row || row.status !== "blocked") return false;
+  const ids = parseBlockedBy(row.blocked_by);
+  if (allBlockersMerged(ids)) {
+    // Promote to queued. Clear any stale backoff so it dispatches on the next tick.
+    const res = db
+      .query(
+        `UPDATE tasks SET status='queued', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
+      )
+      .run(id);
+    if (res.changes === 0) return false; // moved under us
+    const dir = getDirectory(row.directory_id);
+    if (dir) updateTaskMdStatus(dir.path, id, "queued");
+    emitUpdated(id);
+    console.log(`[butchr] task ${id} unblocked → queued (all blockers merged)`);
+    return true;
+  }
+  // Still blocked — surface any dead (never-merging) blockers.
+  logDeadBlockers(id, ids);
+  return false;
+}
+
+/** Re-evaluate EVERY blocked task (used after a merge for prompt auto-unblock). */
+export function reevaluateAllBlocked(): void {
+  const rows = db
+    .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked'`)
+    .all();
+  for (const r of rows) reevaluateBlockedTask(r.id);
+}
+
+/**
+ * Replace a task's blocked_by set (operator-driven, any time) and RE-EVALUATE.
+ *
+ * Allowed only on a NON-terminal task (queued/blocked/running/review); rejected
+ * with 409 on merged/aborted/rejected/failed (and the legacy finalizing). Every
+ * new blocker id must exist (404) and the new set must not create a self-block or
+ * cycle (400). After persisting:
+ *  - If it should now be blocked (some blocker not yet merged) and it has a LIVE
+ *    agent (running/idle), KILL-ON-BLOCK: tear the agent down (reuse teardownTask)
+ *    and clear the running/herdr fields like a clean re-queue, but KEEP session_id
+ *    and the worktree so it resumes with full context when it later unblocks. This
+ *    is NOT a dispatch failure (dispatch_attempts/backoff untouched).
+ *  - If all blockers are merged/empty and it was blocked, promote it to queued.
+ */
+export async function setBlockedBy(
+  id: string,
+  blockedBy: string[],
+): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  // Only non-terminal, pre-merge states may have their dependencies edited.
+  const editable = new Set<TaskStatus>(["queued", "blocked", "running", "review"]);
+  if (!editable.has(row.status)) {
+    throw new HttpError(409, `cannot edit blocked_by on a ${row.status} task`);
+  }
+
+  const blockers = normalizeBlockedBy(blockedBy);
+  for (const bid of blockers) {
+    if (!getTask(bid)) throw new HttpError(404, `blocker task not found: ${bid}`);
+  }
+  if (wouldCreateCycle(id, blockers)) {
+    throw new HttpError(400, "blocked_by would create a dependency cycle");
+  }
+
+  // Persist the new dependency set first; the transition below reads it back.
+  db.query(`UPDATE tasks SET blocked_by=? WHERE id=?`).run(
+    JSON.stringify(blockers),
+    id,
+  );
+  // Forget any prior dead-blocker warnings for this task — the set just changed.
+  for (const key of [...loggedDeadBlockers]) {
+    if (key.startsWith(`${id}:`)) loggedDeadBlockers.delete(key);
+  }
+
+  const eligible = allBlockersMerged(blockers);
+  const dir = getDirectory(row.directory_id);
+
+  if (eligible) {
+    // No outstanding blockers. A blocked task becomes eligible → queued; anything
+    // else (queued/running/review) is already past the block, so leave it.
+    if (row.status === "blocked") {
+      db.query(
+        `UPDATE tasks SET status='queued', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
+      ).run(id);
+      if (dir) updateTaskMdStatus(dir.path, id, "queued");
+    }
+    emitUpdated(id);
+    return taskView(id)!;
+  }
+
+  // Should be blocked. If it already is, just refresh the view + dead-blocker log.
+  if (row.status === "blocked") {
+    logDeadBlockers(id, blockers);
+    emitUpdated(id);
+    return taskView(id)!;
+  }
+
+  // Transitioning INTO blocked from queued/running/review.
+  if (row.herdr_pane_id || row.herdr_tab_id) {
+    // KILL-ON-BLOCK: a live agent (running/idle) — tear it down so nothing keeps
+    // running, then clear the running/herdr fields (mirrors backToQueued) while
+    // KEEPING session_id + worktree for a later --resume. NOT a dispatch failure.
+    await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  }
+  db.query(
+    `UPDATE tasks SET status='blocked', herdr_pane_id=NULL, herdr_tab_id=NULL,
+       output_snapshot=NULL, conflict=0, idle=0 WHERE id=?`,
+  ).run(id);
+  if (dir) updateTaskMdStatus(dir.path, id, "blocked");
+  logDeadBlockers(id, blockers);
+  emitUpdated(id);
+  return taskView(id)!;
 }
 
 /** Compute the diff of a task branch vs its directory's default branch. */
@@ -242,10 +504,16 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     // Raced (e.g. aborted) between the merge and here — the branch already landed
     // in main, but the task moved on. Nothing more to do.
     emitUpdated(id);
+    // The branch DID land in main, so any task blocked on it may now be eligible.
+    reevaluateAllBlocked();
     return { task: taskView(id)! };
   }
   updateTaskMdStatus(dir.path, id, "merged");
   emitUpdated(id);
+  // This task just merged — promote any task that was blocked on it (and whose
+  // other blockers are also merged) to queued right away, rather than waiting for
+  // the next dispatcher tick to notice.
+  reevaluateAllBlocked();
   return { task: taskView(id)! };
 }
 

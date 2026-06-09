@@ -22,7 +22,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, setIdle } from "./tasks.ts";
+import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, reevaluateBlockedTask, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -253,6 +253,17 @@ async function tick(): Promise<void> {
   try {
     // If herdr is down, do nothing this tick (no error spam — it may come back).
     if (!(await herdr.isUp())) return;
+
+    // AUTO-UNBLOCK pass: promote any `blocked` task whose blockers have all merged
+    // to `queued` BEFORE the queued selection below, so a freshly-unblocked task
+    // dispatches in this same tick. This is the robust-to-missed-events backstop
+    // (approveTask also re-evaluates immediately for promptness). Cheap: one query
+    // plus a per-task blocker check; blocked tasks are few.
+    for (const b of db
+      .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked'`)
+      .all()) {
+      reevaluateBlockedTask(b.id);
+    }
 
     // Skip tasks waiting out a dispatch backoff: next_dispatch_at set and still in
     // the future. ISO-8601 timestamps compare correctly as strings, so a simple

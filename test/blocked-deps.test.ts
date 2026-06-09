@@ -1,0 +1,372 @@
+// Tests for butchr's TASK-DEPENDENCY / BLOCKED feature (see db.ts `blocked` status
+// + blocked_by column, tasks.{createTask,setBlockedBy,reevaluateBlockedTask,
+// reevaluateAllBlocked,wouldCreateCycle}, and the dispatcher's auto-unblock pass).
+//
+// Mostly pure / in-process: no real claude or herdr is spawned. As in the other
+// test files, BUTCHR_HERDR_BIN points at `true` so every herdr probe
+// (teardownTask et al.) is a harmless no-op — so the kill-on-block test asserts
+// the OBSERVABLE effect (agent torn down → pane/tab cleared, status=blocked,
+// session_id KEPT) rather than spying on the no-op teardown call.
+//
+// createTask exercises the REAL function (worktree + task.md + DB row), so we set
+// up an actual throwaway git repo with one commit for `git worktree add` to work.
+//
+// What this exercises (mapped to the spec's required cases):
+//   1. create-with-unmerged-blocker            -> blocked
+//   2. create-with-all-merged-blockers         -> queued
+//   3. auto-unblock when the last blocker merges
+//   4. update blocked_by re-evaluates (block a queued task; unblock a blocked one)
+//   5. blocking a running task tears down its agent + KEEPS session_id (no dispatch fail)
+//   6. dead-blocker stays blocked (and is surfaced as a deadBlocker)
+//   7. cycle / self-block rejected (4xx)
+//   8. dispatcher never selects a `blocked` task for dispatch
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+let DATA_DIR: string;
+let REPO_ROOT: string;
+// Distinct directory id — the db/config singletons are shared across test files,
+// so a unique dir keeps this file's rows from colliding with another file's.
+const DIR_ID = "blocked-dir";
+
+let tasksMod: typeof import("../src/tasks.ts");
+let dbMod: typeof import("../src/db.ts");
+let taskmdMod: typeof import("../src/taskmd.ts");
+
+beforeAll(async () => {
+  DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-blocked-data-"));
+  REPO_ROOT = mkdtempSync(join(tmpdir(), "butchr-blocked-repo-"));
+
+  process.env.BUTCHR_DATA_DIR = DATA_DIR;
+  process.env.BUTCHR_DB = join(DATA_DIR, "test.db");
+  process.env.BUTCHR_LOG_FILE = "";
+  process.env.BUTCHR_HERDR_BIN = "true";
+
+  // A real git repo with one commit so createTask's `git worktree add -b` works.
+  const g = (args: string[]) =>
+    execFileSync("git", ["-C", REPO_ROOT, ...args], { stdio: "ignore" });
+  execFileSync("git", ["init", "-q", REPO_ROOT], { stdio: "ignore" });
+  g(["config", "user.email", "test@butchr.local"]);
+  g(["config", "user.name", "butchr test"]);
+  g(["commit", "--allow-empty", "-q", "-m", "init"]);
+
+  dbMod = await import("../src/db.ts");
+  taskmdMod = await import("../src/taskmd.ts");
+  tasksMod = await import("../src/tasks.ts");
+
+  dbMod.db
+    .query(
+      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+    )
+    .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
+});
+
+afterAll(() => {
+  rmSync(DATA_DIR, { recursive: true, force: true });
+  rmSync(REPO_ROOT, { recursive: true, force: true });
+});
+
+/** Seed a bare DB-row task (no worktree) with an explicit status + blocked_by. */
+function seed(opts: {
+  id: string;
+  status: string;
+  sessionId?: string | null;
+  blockedBy?: string[];
+  paneId?: string | null;
+  tabId?: string | null;
+  attempts?: number;
+}): string {
+  const created = dbMod.nowIso();
+  dbMod.db
+    .query(
+      `INSERT INTO tasks (id, directory_id, status, session_id, blocked_by,
+         herdr_pane_id, herdr_tab_id, dispatch_attempts, started_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      opts.id,
+      DIR_ID,
+      opts.status,
+      opts.sessionId ?? null,
+      opts.blockedBy ? JSON.stringify(opts.blockedBy) : null,
+      opts.paneId ?? null,
+      opts.tabId ?? null,
+      opts.attempts ?? 0,
+      // started_at set when it has ever run (running/review), so resume rules hold.
+      opts.status === "running" || opts.status === "review" ? created : null,
+      created,
+    );
+  taskmdMod.writeTaskMd(
+    REPO_ROOT,
+    { id: opts.id, created, status: opts.status as any, context: [] },
+    `Work for ${opts.id}.`,
+  );
+  taskmdMod.updateTaskMdStatus(REPO_ROOT, opts.id, opts.status as any);
+  return opts.id;
+}
+
+function row(id: string) {
+  return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;
+}
+
+function setStatus(id: string, status: string) {
+  dbMod.db.query(`UPDATE tasks SET status=? WHERE id=?`).run(status, id);
+}
+
+describe("createTask with blocked_by", () => {
+  test("create-with-unmerged-blocker -> blocked", async () => {
+    const blocker = seed({ id: "c-blk-running", status: "running" });
+    const view = await tasksMod.createTask(DIR_ID, "do the thing", [], [blocker]);
+    expect(view.status).toBe("blocked");
+    expect(view.blocked_by).toEqual([blocker]);
+    expect(row(view.id).status).toBe("blocked");
+    // task.md reflects the blocked start.
+    expect(taskmdMod.readTaskMd(REPO_ROOT, view.id).meta.status).toBe("blocked");
+  });
+
+  test("create-with-all-merged-blockers -> queued", async () => {
+    const blocker = seed({ id: "c-blk-merged", status: "merged" });
+    const view = await tasksMod.createTask(DIR_ID, "do the thing", [], [blocker]);
+    expect(view.status).toBe("queued");
+    expect(view.blocked_by).toEqual([blocker]);
+    expect(row(view.id).status).toBe("queued");
+  });
+
+  test("empty blocked_by starts queued, as today", async () => {
+    const view = await tasksMod.createTask(DIR_ID, "plain task", [], []);
+    expect(view.status).toBe("queued");
+    expect(view.blocked_by).toEqual([]);
+  });
+
+  test("unknown blocker id is rejected (404)", async () => {
+    let err: any;
+    try {
+      await tasksMod.createTask(DIR_ID, "x", [], ["no-such-blocker"]);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.status).toBe(404);
+  });
+});
+
+describe("auto-unblock", () => {
+  test("becomes queued exactly when the LAST blocker merges", () => {
+    const b1 = seed({ id: "au-b1", status: "merged" });
+    const b2 = seed({ id: "au-b2", status: "running" });
+    const t = seed({ id: "au-task", status: "blocked", blockedBy: [b1, b2] });
+
+    // One blocker still unmerged → stays blocked.
+    expect(tasksMod.reevaluateBlockedTask(t)).toBe(false);
+    expect(row(t).status).toBe("blocked");
+
+    // Last blocker merges → the post-merge hook promotes it to queued.
+    setStatus(b2, "merged");
+    tasksMod.reevaluateAllBlocked();
+    expect(row(t).status).toBe("queued");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, t).meta.status).toBe("queued");
+  });
+
+  test("a blocked task with an EMPTY blocked_by set is immediately eligible", () => {
+    const t = seed({ id: "au-empty", status: "blocked", blockedBy: [] });
+    expect(tasksMod.reevaluateBlockedTask(t)).toBe(true);
+    expect(row(t).status).toBe("queued");
+  });
+
+  test("reevaluate is a no-op for a non-blocked task", () => {
+    const t = seed({ id: "au-running", status: "running" });
+    expect(tasksMod.reevaluateBlockedTask(t)).toBe(false);
+    expect(row(t).status).toBe("running");
+  });
+});
+
+describe("setBlockedBy re-evaluation", () => {
+  test("blocks a QUEUED task when given an unmerged blocker", async () => {
+    const blocker = seed({ id: "sb-blocker", status: "queued" });
+    const t = seed({ id: "sb-queued", status: "queued" });
+
+    const view = await tasksMod.setBlockedBy(t, [blocker]);
+    expect(view.status).toBe("blocked");
+    expect(view.blocked_by).toEqual([blocker]);
+    expect(row(t).status).toBe("blocked");
+  });
+
+  test("unblocks a BLOCKED task when its set is cleared", async () => {
+    const blocker = seed({ id: "sb-drop-blocker", status: "running" });
+    const t = seed({ id: "sb-blocked", status: "blocked", blockedBy: [blocker] });
+
+    const view = await tasksMod.setBlockedBy(t, []);
+    expect(view.status).toBe("queued");
+    expect(view.blocked_by).toEqual([]);
+    expect(row(t).status).toBe("queued");
+  });
+
+  test("unblocks a BLOCKED task when the replacement blocker is already merged", async () => {
+    const dead = seed({ id: "sb-old", status: "running" });
+    const done = seed({ id: "sb-new-merged", status: "merged" });
+    const t = seed({ id: "sb-swap", status: "blocked", blockedBy: [dead] });
+
+    const view = await tasksMod.setBlockedBy(t, [done]);
+    expect(view.status).toBe("queued");
+    expect(view.blocked_by).toEqual([done]);
+  });
+
+  test("rejects editing a terminal task (409)", async () => {
+    for (const status of ["merged", "aborted", "rejected", "failed"]) {
+      const blocker = seed({ id: `sb-t-blk-${status}`, status: "running" });
+      const t = seed({ id: `sb-terminal-${status}`, status });
+      let err: any;
+      try {
+        await tasksMod.setBlockedBy(t, [blocker]);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeDefined();
+      expect(err.status).toBe(409);
+      expect(row(t).status).toBe(status); // unchanged
+    }
+  });
+
+  test("404s on an unknown blocker id", async () => {
+    const t = seed({ id: "sb-badblk", status: "queued" });
+    let err: any;
+    try {
+      await tasksMod.setBlockedBy(t, ["ghost"]);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.status).toBe(404);
+  });
+});
+
+describe("kill-on-block", () => {
+  test("blocking a RUNNING task tears down its agent + KEEPS session_id, no dispatch failure", async () => {
+    const blocker = seed({ id: "kob-blocker", status: "running" });
+    const SESSION = "kob-session-1111-2222";
+    const t = seed({
+      id: "kob-running",
+      status: "running",
+      sessionId: SESSION,
+      paneId: "pane-9",
+      tabId: "tab-9",
+      attempts: 0,
+    });
+    const startedAtBefore = row(t).started_at;
+
+    const view = await tasksMod.setBlockedBy(t, [blocker]);
+
+    expect(view.status).toBe("blocked");
+    const r = row(t);
+    // Agent torn down: herdr pane/tab cleared (teardownTask ran — a no-op under the
+    // `true` herdr stub — and the running fields were cleared like a clean re-queue).
+    expect(r.herdr_pane_id).toBeNull();
+    expect(r.herdr_tab_id).toBeNull();
+    // KEEP session_id + the worktree context (started_at) so it resumes on unblock.
+    expect(r.session_id).toBe(SESSION);
+    expect(r.started_at).toBe(startedAtBefore);
+    // NOT counted as a dispatch failure.
+    expect(r.dispatch_attempts).toBe(0);
+    expect(r.next_dispatch_at).toBeNull();
+    expect(taskmdMod.readTaskMd(REPO_ROOT, t).meta.status).toBe("blocked");
+  });
+});
+
+describe("dead blockers", () => {
+  for (const deadState of ["aborted", "rejected", "failed"]) {
+    test(`a ${deadState} blocker keeps the task blocked and is surfaced as a deadBlocker`, () => {
+      const blocker = seed({ id: `dead-${deadState}-blk`, status: deadState });
+      const t = seed({
+        id: `dead-${deadState}-task`,
+        status: "blocked",
+        blockedBy: [blocker],
+      });
+      // Never auto-proceeds — the required task will never merge.
+      expect(tasksMod.reevaluateBlockedTask(t)).toBe(false);
+      expect(row(t).status).toBe("blocked");
+      // Surfaced for the webapp.
+      const view = tasksMod.taskView(t)!;
+      expect(view.deadBlockers).toContain(blocker);
+      expect(view.blockerStates[blocker]).toBe(deadState);
+    });
+  }
+
+  test("operator escape hatch: dropping the dead blocker unblocks it", async () => {
+    const dead = seed({ id: "dead-escape-blk", status: "aborted" });
+    const t = seed({ id: "dead-escape-task", status: "blocked", blockedBy: [dead] });
+    const view = await tasksMod.setBlockedBy(t, []);
+    expect(view.status).toBe("queued");
+  });
+});
+
+describe("cycle / self-block guard", () => {
+  test("self-block on create is rejected (wouldCreateCycle)", () => {
+    // createTask mints a fresh id so a real self-reference can't be supplied; assert
+    // the guard primitive directly plus the practical create/update paths below.
+    expect(tasksMod.wouldCreateCycle("A", ["A"])).toBe(true);
+  });
+
+  test("setBlockedBy self-block is rejected (400)", async () => {
+    const t = seed({ id: "cyc-self", status: "queued" });
+    let err: any;
+    try {
+      await tasksMod.setBlockedBy(t, [t]);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.status).toBe(400);
+  });
+
+  test("setBlockedBy that would close a cycle (A->B->A) is rejected (400)", async () => {
+    const a = seed({ id: "cyc-A", status: "blocked" });
+    const b = seed({ id: "cyc-B", status: "queued" });
+    // A depends on B.
+    await tasksMod.setBlockedBy(a, [b]);
+    // Now make B depend on A → closes the cycle → reject.
+    let err: any;
+    try {
+      await tasksMod.setBlockedBy(b, [a]);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.status).toBe(400);
+    // B's set was not persisted.
+    expect(tasksMod.parseBlockedBy(row(b).blocked_by)).toEqual([]);
+  });
+
+  test("wouldCreateCycle walks transitive edges", () => {
+    // A->B->C exists; making C depend on A would cycle.
+    seed({ id: "tc-A", status: "blocked", blockedBy: ["tc-B"] });
+    seed({ id: "tc-B", status: "blocked", blockedBy: ["tc-C"] });
+    seed({ id: "tc-C", status: "queued" });
+    expect(tasksMod.wouldCreateCycle("tc-C", ["tc-A"])).toBe(true);
+    // A sibling dependency that doesn't reach back is fine.
+    seed({ id: "tc-D", status: "queued" });
+    expect(tasksMod.wouldCreateCycle("tc-C", ["tc-D"])).toBe(false);
+  });
+});
+
+describe("dispatcher never dispatches a blocked task", () => {
+  test("a `blocked` task is excluded from the tick's queued selection", () => {
+    seed({ id: "disp-blocked", status: "blocked", blockedBy: ["disp-x"] });
+    seed({ id: "disp-queued", status: "queued" });
+
+    // Mirror the dispatcher tick's selection predicate exactly (status='queued').
+    const now = new Date().toISOString();
+    const eligible = dbMod.db
+      .query<{ id: string }, [string]>(
+        `SELECT id FROM tasks
+           WHERE status='queued' AND (next_dispatch_at IS NULL OR next_dispatch_at <= ?)`,
+      )
+      .all(now)
+      .map((r) => r.id);
+
+    expect(eligible).toContain("disp-queued");
+    expect(eligible).not.toContain("disp-blocked");
+  });
+});

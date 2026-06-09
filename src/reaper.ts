@@ -15,8 +15,10 @@ import * as herdr from "./herdr.ts";
 const git = config.gitBin;
 
 // A task in one of these states is DONE — its worktree/branch/herdr pane are
-// safe to reap. Everything else (queued/running/review, plus the legacy
-// transient `finalizing`) is still live and must be left alone.
+// safe to reap. Everything else (queued/blocked/running/review, plus the legacy
+// transient `finalizing`) is still live and must be left alone. In particular
+// `blocked` is a pre-dispatch WAITING state, not terminal: its worktree (and the
+// session it will resume into) must survive until its blockers merge.
 const TERMINAL = new Set(["merged", "aborted", "rejected"]);
 
 // Most recent reapOrphans outcome, retained so /health can surface self-heal

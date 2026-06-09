@@ -88,6 +88,16 @@ ensureColumn("tasks", "dispatch_attempts", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("tasks", "last_dispatch_error", "TEXT");
 ensureColumn("tasks", "next_dispatch_at", "TEXT");
 
+// `blocked_by` is a JSON-array TEXT column holding the ids of the tasks this task
+// is BLOCKED ON (its dependency set). A task with any not-yet-merged blocker sits
+// in status='blocked' (a pre-dispatch waiting state — no agent runs) until every
+// blocker has merged, at which point it is promoted to 'queued' and dispatches
+// normally. NULL / "[]" means no dependencies. We use a JSON column (not a join
+// table) to stay consistent with the additive single-column migration pattern
+// above. See tasks.ts (parseBlockedBy / reevaluateBlockedTask / setBlockedBy) and
+// the dispatcher tick's auto-unblock pass.
+ensureColumn("tasks", "blocked_by", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -107,8 +117,16 @@ export type DirectoryRow = {
 // retrying it) and is terminal-ish — it only leaves via the operator's
 // POST /api/tasks/:id/requeue escape hatch (see tasks.requeueTask), which resets
 // the retry state and puts it back to `queued`.
+//
+// `blocked` is a pre-dispatch WAITING state: the task has one or more blocker
+// tasks (see `blocked_by`) that have not all merged yet. It behaves like `queued`
+// EXCEPT the dispatcher never launches an agent for it; it is promoted to `queued`
+// the moment every blocker has merged (auto-unblock — see the dispatcher tick and
+// tasks.reevaluateBlockedTask). It is non-terminal and groups with active/pending
+// work in the webapp; the reaper must NOT treat it as terminal.
 export type TaskStatus =
   | "queued"
+  | "blocked"
   | "running"
   | "review"
   | "finalizing"
@@ -132,6 +150,9 @@ export type TaskRow = {
   dispatch_attempts: number;
   last_dispatch_error: string | null;
   next_dispatch_at: string | null;
+  // Raw JSON-array TEXT of blocker task ids (or null). Parsed via
+  // tasks.parseBlockedBy; surfaced as a real string[] on the serialized TaskView.
+  blocked_by: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

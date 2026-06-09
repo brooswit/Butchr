@@ -26,6 +26,7 @@ import {
   listTasks,
   rejectTask,
   requeueTask,
+  setBlockedBy,
   taskDiff,
   taskView,
 } from "./tasks.ts";
@@ -285,7 +286,14 @@ route("GET", "/api/directories/:id/tasks", async (_req, p) => {
 
 route("POST", "/api/directories/:id/tasks", async (req, p) => {
   const body = await readJson(req);
-  const view = await createTask(p.id!, body.prompt, body.context ?? []);
+  // Optional blocked_by: [taskId,...] — the task starts `blocked` until every
+  // listed blocker has merged (validated + cycle-checked inside createTask).
+  const view = await createTask(
+    p.id!,
+    body.prompt,
+    body.context ?? [],
+    body.blocked_by ?? [],
+  );
   return json(view, 201);
 });
 
@@ -326,6 +334,18 @@ route("POST", "/api/tasks/:id/reject", async (req, p) => {
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
 });
+
+// Replace a task's dependency set (its blocked_by). Allowed on any NON-terminal
+// task (queued/blocked/running/review); 409 on merged/aborted/rejected/failed.
+// After updating it RE-EVALUATES: a now-satisfiable task moves toward queued, and
+// a newly-blocked task with a live agent is killed-on-block (see tasks.setBlockedBy).
+// Both PUT and POST are accepted for convenience.
+async function blockedByHandler(req: Request, p: Record<string, string>): Promise<Response> {
+  const body = await readJson(req);
+  return json(await setBlockedBy(p.id!, body.blocked_by ?? []));
+}
+route("PUT", "/api/tasks/:id/blocked_by", blockedByHandler);
+route("POST", "/api/tasks/:id/blocked_by", blockedByHandler);
 
 // Operator escape hatch: revive a task that gave up dispatching (`failed`) — or
 // any other non-terminal stuck state — by clearing its dispatch retry state and

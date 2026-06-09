@@ -301,9 +301,10 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "running", "idle", "review", "finalizing", "failed", "merged", "aborted"]
+  const pills = ["queued", "blocked", "running", "idle", "review", "finalizing", "failed", "merged", "aborted"]
     .map((s) => {
-      const cls = s === "running" && c[s] ? "count-pill has-running"
+      const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
+        : s === "running" && c[s] ? "count-pill has-running"
         : s === "idle" && c[s] ? "count-pill has-idle"
         : s === "review" && c[s] ? "count-pill has-review"
         : s === "finalizing" && c[s] ? "count-pill has-finalizing"
@@ -388,6 +389,7 @@ async function renderDirectory(id) {
 
 function queueLine(tasks) {
   const q = tasks.filter((t) => t.status === "queued").length;
+  const b = tasks.filter((t) => t.status === "blocked").length;
   const r = tasks.filter((t) => t.status === "running" && !t.idle).length;
   const i = tasks.filter((t) => t.status === "running" && t.idle).length;
   const f = tasks.filter((t) => t.status === "finalizing").length;
@@ -396,12 +398,14 @@ function queueLine(tasks) {
   if (i) parts.push(`${i} idle`);
   if (f) parts.push(`${f} finalizing`);
   if (q) parts.push(`${q} queued`);
+  if (b) parts.push(`${b} blocked`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
 // Lifecycle statuses still in flight — these stay in the main directory list.
 // Everything else (merged, aborted, rejected) is terminal and lives in History.
-const ACTIVE_STATUSES = ["queued", "running", "review", "finalizing"];
+// `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
+const ACTIVE_STATUSES = ["queued", "blocked", "running", "review", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
 
 function historyOpen() {
@@ -416,7 +420,7 @@ function setHistoryOpen(open) {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["queued", "running", "idle", "review", "finalizing", "failed", "merged", "aborted", "rejected"];
+const FILTER_STATUSES = ["queued", "blocked", "running", "idle", "review", "finalizing", "failed", "merged", "aborted", "rejected"];
 let taskSearch = "";          // id substring filter (case-insensitive)
 let statusFilter = new Set(); // selected effStatus values; empty = all
 
@@ -645,6 +649,32 @@ async function renderTask(id) {
     ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
   wrap.appendChild(meta);
+
+  // blocked-by — what this task is waiting on. Shown whenever the task has a
+  // dependency set, with each blocker's current status; dead blockers (terminal,
+  // never-merging) are flagged so a stuck `blocked` task is obvious. The list of
+  // blocker statuses comes back on the task view (blockerStates), computed below.
+  if (Array.isArray(t.blocked_by) && t.blocked_by.length) {
+    const dead = new Set(t.deadBlockers || []);
+    const panel = el("div", { class: "panel blocked-panel" });
+    const head = t.status === "blocked"
+      ? "Blocked — waiting on:"
+      : "Depends on:";
+    panel.appendChild(el("h2", { style: "margin-top:0" }, head));
+    const list = el("div", { class: "blockers" });
+    for (const bid of t.blocked_by) {
+      const st = (t.blockerStates && t.blockerStates[bid]) || "unknown";
+      const isDead = dead.has(bid);
+      const row = el("div", { class: "blocker-row" + (isDead ? " dead" : "") });
+      row.innerHTML = `
+        <a class="bk-id" href="#/task/${esc(bid)}">${esc(bid)}</a>
+        ${chip(st)}
+        ${isDead ? '<span class="bk-dead">will never merge — edit blocked_by to proceed</span>' : ""}`;
+      list.appendChild(row);
+    }
+    panel.appendChild(list);
+    wrap.appendChild(panel);
+  }
 
   // prompt
   wrap.appendChild(el("h2", {}, "Prompt"));

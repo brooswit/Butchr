@@ -20,6 +20,7 @@
 
   /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible */
   --queued: #6c727a;     /* gray-500 (neutral) */
+  --blocked: #7c3aed;    /* violet-600 (waiting on dependencies) */
   --running: #425eff;    /* blue-500 */
   --idle: #0e7490;       /* cyan-700 (running but quiet) */
   --review: #a35901;     /* brand-orange-dark (warning) */
@@ -55,6 +56,7 @@ html[data-theme="dark"] {
   --accent-2: #7084ff; /* blue-400 (interactive text, dark) */
 
   --queued: #6c727a;
+  --blocked: #9466f0;    /* violet, lifted for dark surfaces */
   --running: #425eff;
   --idle: #22a7c2;       /* cyan, lifted for dark surfaces */
   --review: #a35901;
@@ -165,6 +167,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   color: #fff;
 }
 .chip.queued { background: var(--queued); }
+.chip.blocked { background: var(--blocked); }
 .chip.running { background: var(--running); }
 .chip.idle { background: var(--idle); }
 .chip.review { background: var(--review); }
@@ -181,11 +184,28 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   padding: 2px 7px;
 }
 .count-pill b { color: var(--text); }
+.count-pill.has-blocked { border-color: var(--blocked); color: var(--blocked); }
 .count-pill.has-running { border-color: var(--running); color: var(--running); }
 .count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
 .count-pill.has-review { border-color: var(--review); color: var(--review); }
 .count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
 .count-pill.has-failed { border-color: var(--failed); color: var(--failed); }
+
+/* blocked-by list (task detail) — one row per blocker: id, its status chip, and
+   a "will never merge" flag for dead blockers. */
+.blockers { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.blocker-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.blocker-row.dead { border-color: var(--rejected); }
+.blocker-row .bk-id { font-family: var(--mono); }
+.blocker-row .bk-dead {
+  font-size: 11px; color: var(--rejected); font-weight: 600; margin-left: auto;
+}
+.panel.blocked-panel { border-left: 3px solid var(--blocked); }
+.panel.blocked-panel h2 { color: var(--blocked); }
 
 /* tasks table */
 .tasks { width: 100%; border-collapse: collapse; margin-top: 8px; }
