@@ -7,12 +7,13 @@
 // non-blocking request_review MCP tool, which moves the task to `review` in the
 // DB and lets the agent exit — no live process is held waiting for a human).
 //
-// Concurrency model: fully concurrent. Every queued task runs as soon as it is
-// seen — there is no per-directory "one at a time" limit. Worktree isolation
-// keeps tasks safe at the filesystem level (each is its own git worktree on its
-// own branch). The `dispatching`/`watching` sets (both keyed by task id) guard
-// against double-dispatching the same task across overlapping ticks. An optional
-// global cap (config.maxConcurrent) bounds the total running count.
+// Concurrency model: fully concurrent, uncapped. Every queued task runs as soon
+// as it is seen — there is no per-directory "one at a time" limit and no global
+// cap on the number of simultaneous tasks. Worktree isolation keeps tasks safe at
+// the filesystem level (each is its own git worktree on its own branch), and one
+// herdr tab per task keeps them from crowding the workspace. The
+// `dispatching`/`watching` sets (both keyed by task id) guard against
+// double-dispatching the same task across overlapping ticks.
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
@@ -148,12 +149,6 @@ type QueuedRow = TaskRow & {
 let lastTickAt = 0; // ms epoch of the most recent tick; 0 = not yet ticked
 let tickCount = 0;
 
-// Last number of cap-deferred (still-queued) tasks we logged, so the
-// concurrency-cap message is emitted only when the waiting count CHANGES rather
-// than on every tick. Reset to 0 whenever nothing is waiting, so the next time
-// the cap defers work it logs afresh.
-let lastWaitingLogged = 0;
-
 /** Snapshot of dispatcher liveness for the health endpoint. */
 export function dispatcherHealth(): { lastTickAt: number; tickCount: number; tickMs: number } {
   return { lastTickAt, tickCount, tickMs: config.tickMs };
@@ -259,25 +254,6 @@ async function tick(): Promise<void> {
     // If herdr is down, do nothing this tick (no error spam — it may come back).
     if (!(await herdr.isUp())) return;
 
-    // Optional global cap on simultaneously ACTIVE tasks. 0 = unlimited. An
-    // active task occupies a dispatch slot from launch until it is finally
-    // merged/aborted/rejected: status `running` (idle is `running` + a quiet
-    // flag), `review`, or the legacy `finalizing`. We also add in-flight
-    // dispatches (added to `dispatching` but not yet `status='running'`) so we
-    // never overshoot the cap across overlapping ticks. We do NOT early-return
-    // when budget is exhausted — the loop below still scans the queue so it can
-    // count (and throttle-log) how many tasks are waiting on the cap.
-    let budget = Infinity;
-    if (config.maxConcurrent > 0) {
-      const active = db
-        .query<{ n: number }, []>(
-          `SELECT COUNT(*) AS n FROM tasks
-             WHERE status IN ('running','review','finalizing')`,
-        )
-        .get()!.n;
-      budget = config.maxConcurrent - active - dispatching.size;
-    }
-
     const rows = db
       .query<QueuedRow, []>(
         `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
@@ -287,16 +263,11 @@ async function tick(): Promise<void> {
       )
       .all();
 
-    let waiting = 0; // queued tasks deferred this tick because the cap is full
+    // Dispatch every queued task that isn't already being dispatched/watched —
+    // fully concurrent, no cap. The `dispatching`/`watching` sets only guard
+    // against double-dispatching the same task across overlapping ticks.
     for (const row of rows) {
       if (dispatching.has(row.id) || watching.has(row.id)) continue;
-      if (budget <= 0) {
-        // Cap reached — leave this task queued; a later tick retries it once a
-        // running/review task is merged/aborted/rejected and frees a slot.
-        waiting++;
-        continue;
-      }
-      budget--;
 
       const dir: DirectoryRow = {
         id: row.dir_id,
@@ -310,21 +281,6 @@ async function tick(): Promise<void> {
       dispatching.add(row.id);
       // Fire-and-forget, concurrently; the watcher is spawned inside dispatch().
       dispatch(dir, row).finally(() => dispatching.delete(row.id));
-    }
-
-    // Throttled cap-deferral log: emit only when the waiting count changes, so a
-    // full cap doesn't spam every tick. Reset once nothing is waiting so the next
-    // time the cap defers work it logs afresh.
-    if (waiting > 0) {
-      if (waiting !== lastWaitingLogged) {
-        console.log(
-          `[butchr] concurrency cap (${config.maxConcurrent}) reached; ` +
-            `${waiting} task(s) waiting`,
-        );
-        lastWaitingLogged = waiting;
-      }
-    } else {
-      lastWaitingLogged = 0;
     }
   } finally {
     ticking = false;

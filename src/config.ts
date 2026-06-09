@@ -57,22 +57,6 @@ export const config = {
   tickMs: envInt("BUTCHR_TICK_MS", 1500),
 
   /**
-   * Cap on the total number of simultaneously ACTIVE tasks across all
-   * directories — an active task is one occupying a dispatch slot: `running`
-   * (incl. `idle`, which is `running` plus a quiet flag), `review`, or the
-   * legacy `finalizing`. A task holds its slot from dispatch until it is finally
-   * `merged`/`aborted`/`rejected`; this bounds both the number of live claude
-   * processes AND the pile-up of herdr tabs (including lingering review tabs).
-   *
-   * Default `4`. `0` means unlimited — every queued task is dispatched
-   * immediately. If > 0, once that many tasks are active the dispatcher stops
-   * dispatching and the rest stay `queued`, retried on later ticks until a slot
-   * frees. Hitting the cap NEVER fails a task — it just waits its turn.
-   * Override with BUTCHR_MAX_CONCURRENT.
-   */
-  maxConcurrent: envInt("BUTCHR_MAX_CONCURRENT", 4),
-
-  /**
    * Command template run inside a task's worktree to execute the agent for its
    * FIRST attempt. Placeholders, all replaced by the dispatcher:
    *  - `{{PROMPT_FILE}}` → absolute path to the rendered prompt file.

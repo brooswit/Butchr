@@ -134,13 +134,11 @@ async function healthResponse(): Promise<Response> {
     }
   }
 
-  // Concurrency snapshot: mirror the dispatcher's cap definition exactly — an
-  // "active" task occupies a dispatch slot (status running | review |
-  // finalizing). Derived from the same status counts above so the numbers stay
-  // consistent with cap behavior and we issue no extra queries. max=0 means
-  // unlimited (see config.maxConcurrent).
+  // Activity snapshot: an "active" task is one with a live dispatch footprint
+  // (status running | review | finalizing). Derived from the same status counts
+  // above so we issue no extra queries. Tasks dispatch uncapped — every queued
+  // task is launched as soon as it's seen.
   const concurrency = {
-    max: config.maxConcurrent,
     active: (tasks.running ?? 0) + (tasks.review ?? 0) + (tasks.finalizing ?? 0),
     queued: tasks.queued ?? 0,
   };

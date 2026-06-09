@@ -150,25 +150,6 @@ worktrees manually.
 
 ---
 
-## Concurrency cap
-
-`BUTCHR_MAX_CONCURRENT` bounds the total number of simultaneously **active** tasks
-across all directories. **Default `4`. `0` = unlimited.**
-
-An "active" task is one occupying a dispatch slot: `running` (including `idle`,
-which is just `running` plus a quiet flag), `review`, or the legacy `finalizing`.
-A task **holds its slot from dispatch all the way until it is terminal**
-(`merged` / `aborted` / `rejected`) — crucially, **`review` still counts**, so a
-pile of tasks awaiting human approval can fill every slot and stall new dispatch.
-This bounds both the number of live claude processes and the herdr tab pile-up.
-
-Hitting the cap never fails a task: excess tasks stay `queued` and are retried on
-later ticks until a slot frees. If new tasks aren't starting, check how many are
-sitting in `review` (via `/health` task counts) — approve/abort some, or raise the
-cap.
-
----
-
 ## herdr model
 
 butchr delegates all PTY/session management to herdr, mapped by **task id**:
@@ -202,7 +183,7 @@ any non-terminal state ───────────────────
   (default 60s) with no new agent output, cleared the instant output resumes.
 - **review** — the agent called the `request_review` MCP tool (non-blocking: it
   records the request and the agent exits). Awaiting human approve / reject /
-  abort. **Still holds a concurrency slot.**
+  abort.
 - **merged** — approved → branch merged to the default branch (auto-committing any
   uncommitted worktree changes; fast-forward, else a merge commit), worktree +
   branch removed, pane closed. Terminal.
