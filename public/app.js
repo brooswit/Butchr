@@ -547,6 +547,24 @@ async function renderTask(id) {
   wrap.appendChild(el("h2", {}, "Prompt"));
   wrap.appendChild(el("pre", { class: "block", html: esc(t.prompt || "—") }));
 
+  // failed dispatch — the agent never got off the ground after the dispatcher
+  // exhausted its retries. Surface why (last_dispatch_error) and how many tries
+  // it took, plus a Re-queue action that clears the retry state and dispatches
+  // again. On success the task flips back to `queued` and this panel disappears.
+  if (t.status === "failed") {
+    const n = t.dispatch_attempts || 0;
+    const panel = el("div", { class: "panel failed-panel" });
+    panel.innerHTML = `
+      <h2 style="margin-top:0">Dispatch failed</h2>
+      <p class="muted" style="margin:0 0 10px">Failed after ${n} dispatch attempt${n === 1 ? "" : "s"}. The agent never started.</p>
+      <pre class="block">${esc(t.last_dispatch_error || "(no error recorded)")}</pre>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="requeue">Re-queue</button>
+        <small class="muted">Clears the retry state and dispatches again from scratch.</small>
+      </div>`;
+    wrap.appendChild(panel);
+  }
+
   // live output — best-effort snapshot of the agent's recent terminal output,
   // polled while the panel is open and the task still has a live pane. This is a
   // convenience view; the git diff below stays the source of truth for review.
@@ -630,6 +648,17 @@ async function renderTask(id) {
   }
 
   mount(wrap);
+
+  if (t.status === "failed") {
+    document.getElementById("requeue").addEventListener("click", async (ev) => {
+      ev.target.disabled = true;
+      try {
+        await api("POST", "/tasks/" + id + "/requeue");
+        toast("re-queued ✓");
+        render();
+      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    });
+  }
 
   if (canAbort) {
     document.getElementById("abort").addEventListener("click", async (ev) => {

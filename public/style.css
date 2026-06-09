@@ -267,6 +267,9 @@ label.field .lbl { display: block; font-size: 12px; color: var(--muted); margin-
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 18px; margin-bottom: 18px;
 }
+/* failed-dispatch panel on the task detail view — a red accent edge to flag it */
+.panel.failed-panel { border-left: 3px solid var(--failed); }
+.panel.failed-panel h2 { color: var(--failed); }
 
 .meta-grid { display: grid; grid-template-columns: 120px 1fr; gap: 6px 16px; font-size: 13px; }
 .meta-grid .k { color: var(--muted); }
