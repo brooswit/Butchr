@@ -359,6 +359,10 @@ async function healWorkspace(dir: DirectoryRow): Promise<string | undefined> {
 }
 
 async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
+  // Hoisted out of the try so the catch (below) can report whether a RESUME
+  // (rework re-launch) failed, not just a fresh dispatch — see fix #2.
+  let isResume = false;
+  let sessionId = "";
   try {
     // Heal a missing workspace (herdr restart / manual close).
     const workspaceId = await ensureWorkspace(dir);
@@ -370,8 +374,53 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // has a Claude session id. A fresh task gets a butchr-generated UUID assigned
     // via `--session-id`; a rejected task (session_id already set) is RESUMED via
     // `--resume <id>` so the agent re-enters with full prior context.
-    const isResume = !!task.session_id;
-    const sessionId = task.session_id ?? crypto.randomUUID();
+    //
+    // `started_at` is the independent invariant: markRunning stamps it (via
+    // COALESCE, so it sticks) the first time an agent actually launches, and it is
+    // NEVER cleared on a reject/conflict re-queue. So `started_at` set means the
+    // task has run an agent at least once → it is a REWORK that MUST resume into
+    // its existing session to keep prior context. A fresh, never-dispatched task
+    // has both fields null.
+    const ranBefore = !!task.started_at;
+    const sid = task.session_id?.trim();
+    const hasSession = !!sid;
+
+    if (ranBefore && !hasSession) {
+      // INCONSISTENT STATE (fix #1): the task ran before (so a reject/conflict
+      // re-queued it for a `--resume`) but its session_id is missing/empty, so we
+      // have nothing to resume into. A `--resume ""` would either fail to launch
+      // or resume the WRONG session — and renderReworkPrompt would hand the agent
+      // ONLY the review notes with no original task, because it assumes the
+      // session already holds the prompt. The prior turn-by-turn context is
+      // unrecoverable.
+      //
+      // Safer choice: fall back to a FRESH session (new --session-id) AND render
+      // the FULL agent prompt below (renderAgentPrompt re-includes the original
+      // prompt, the context files, AND the accumulated review notes — see
+      // taskmd.ts), so the new agent has everything except the lost in-session
+      // history. We pick this over failing the dispatch outright because a hard
+      // failure would just re-queue the task to hit the SAME broken state every
+      // tick forever (a stuck-task loop that never makes progress); a fresh run
+      // lets the work proceed. The lost context is logged loudly so an operator
+      // can see it.
+      console.warn(
+        `[butchr] task ${task.id} is a rework (started_at=${task.started_at}) but ` +
+          `has no session_id to --resume — prior agent context is LOST; falling ` +
+          `back to a FRESH session, re-running from the full prompt + review notes`,
+      );
+      isResume = false;
+      sessionId = crypto.randomUUID();
+    } else {
+      isResume = hasSession;
+      sessionId = sid ?? crypto.randomUUID();
+    }
+
+    if (isResume) {
+      // fix #3: surface every rework relaunch so an operator can see resumes happen.
+      console.log(
+        `[butchr] resuming task ${task.id} via --resume ${sessionId} (rework)`,
+      );
+    }
 
     // Render the prompt to a file in butchr's own data dir (never pollute the repo
     // worktree). First launch → the full prompt (context files + prompt). Resume →
@@ -495,7 +544,19 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // was still fresh); a failure BEFORE that section (workspace heal / worktree)
     // created nothing to clean up. A defensive name-based deregister covers the
     // unlikely middle ground without touching stale positional ids.
-    console.error(`[butchr] dispatch failed for ${task.id}:`, (e as Error).message);
+    //
+    // fix #2: tag the log with the resume case so a FAILED rework relaunch (e.g.
+    // resolveAgentPane returned undefined / the agent never registered a pane,
+    // which throws above) is visible as a resume failure rather than blending in
+    // with fresh-dispatch failures. The task is re-queued exactly like a fresh
+    // failure (backToQueued → retried next tick), so the resume path is no longer
+    // a silent gap.
+    console.error(
+      `[butchr] dispatch failed for ${task.id}` +
+        (isResume ? ` (resume of session ${sessionId})` : "") +
+        `:`,
+      (e as Error).message,
+    );
     await herdr.agentDeregister(task.id).catch(() => {});
     await backToQueued(task.id);
   }
