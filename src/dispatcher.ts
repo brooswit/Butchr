@@ -618,6 +618,23 @@ function refreshIdle(taskId: string, logFile: string): void {
   setIdle(taskId, Date.now() - mtimeMs > config.idleMs);
 }
 
+/**
+ * RUNAWAY/STUCK-AGENT decision: has a task been `running` for longer than the
+ * watchdog's max wall-clock without reaching review? Pure so the boundary is
+ * unit-testable without spawning an agent or mocking the clock globally.
+ *
+ *  - `elapsedMs` is how long the task has been in `running` (now - running-since).
+ *  - Returns false when the guard is disabled (`maxRunMs <= 0`).
+ *
+ * The watcher applies this only while the task is STILL `running` (the agent
+ * never called request_review), so a trip means a live-but-stuck agent — caught
+ * even when it keeps emitting output and the idle detector never fires.
+ */
+export function runawayExceeded(elapsedMs: number, maxRunMs: number): boolean {
+  if (maxRunMs <= 0) return false; // guard disabled
+  return elapsedMs > maxRunMs;
+}
+
 function spawnWatcher(
   _dir: DirectoryRow,
   taskId: string,
@@ -633,6 +650,11 @@ function spawnWatcher(
     let timedOut = false;
     let vanished = false;
     let neverStarted = false;
+    // RUNAWAY/STUCK guard: set when the task has been `running` past
+    // config.maxRunMs without the agent submitting (it's alive but looping/stuck).
+    // `runawayMs` records the elapsed time at the trip for the rescue note.
+    let runaway = false;
+    let runawayMs = 0;
     // The agent submits by calling request_review (which moves the task to
     // `review`) and then EXITS. The watcher's job is only to catch an agent that
     // ENDS while still `running` — i.e. it exited/crashed WITHOUT submitting — so
@@ -654,6 +676,20 @@ function spawnWatcher(
       if (Date.now() > deadline) {
         timedOut = true;
         break;
+      }
+      // RUNAWAY/STUCK watchdog: the task is still `running` (the agent never
+      // submitted) but has been so past config.maxRunMs. Unlike the `vanished`/
+      // doneFile paths the agent is still ALIVE — and unlike the idle flag this
+      // fires even while it keeps emitting output. Force-rescue it to review
+      // (below) rather than letting it hold its tab forever. Trips before the
+      // longer agentTimeoutMs by default; disabled when maxRunMs <= 0.
+      {
+        const elapsed = Date.now() - startedAt;
+        if (runawayExceeded(elapsed, config.maxRunMs)) {
+          runaway = true;
+          runawayMs = elapsed;
+          break;
+        }
       }
       const alive = await herdr.agentExists(taskId);
       if (alive) seenAlive = true;
@@ -700,7 +736,15 @@ function spawnWatcher(
       }
     }
     let reason = "the agent exited unexpectedly without calling request_review";
-    if (timedOut) {
+    if (runaway) {
+      const mins = (ms: number) => Math.round(ms / 60000);
+      reason =
+        `the agent exceeded the maximum run time (stuck/runaway): it ran for ` +
+        `~${mins(runawayMs)} min (${Math.round(runawayMs / 1000)}s) in 'running' ` +
+        `without calling request_review, past the ${mins(config.maxRunMs)} min ` +
+        `(BUTCHR_MAX_RUN_MS=${config.maxRunMs}ms) limit — force-reviewed so the ` +
+        `work can be inspected and the tab freed`;
+    } else if (timedOut) {
       reason = "the agent did not finish within the timeout";
     } else if (existsSync(doneFile)) {
       const code = readFileSync(doneFile, "utf8").trim();

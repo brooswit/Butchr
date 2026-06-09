@@ -118,6 +118,22 @@ export const config = {
   agentTimeoutMs: envInt("BUTCHR_AGENT_TIMEOUT_MS", 1000 * 60 * 60),
 
   /**
+   * RUNAWAY/STUCK-AGENT watchdog. Max wall-clock (ms) a task may sit in `running`
+   * — counting from when it (last) entered running — WITHOUT the agent calling
+   * request_review, before the watcher force-rescues it to `review`. This catches
+   * an agent that is still ALIVE and even still emitting output (so the idle
+   * detector never fires) but is looping/stuck and never submits — a task that
+   * would otherwise hold its herdr tab forever. On trip the watcher captures a
+   * snapshot, closes the tab, and moves the task to `review` (NOT abort) with a
+   * "stuck/runaway" note, keeping the human in control. `0` disables the guard.
+   *
+   * Distinct from `agentTimeoutMs`: this is a shorter, separately-tunable cap with
+   * its own rescue reason. With the defaults (45 min here, 60 min there) the
+   * runaway guard trips first; if disabled, agentTimeoutMs is still the backstop.
+   */
+  maxRunMs: envInt("BUTCHR_MAX_RUN_MS", 1000 * 60 * 45),
+
+  /**
    * Grace period (ms) for a freshly-dispatched agent to REGISTER with herdr.
    * herdr registers the agent name the instant `agent start` runs, so this only
    * needs to cover transient lookup lag — but if the agent never appears within
