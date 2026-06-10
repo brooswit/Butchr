@@ -646,6 +646,28 @@ export function runawayExceeded(elapsedMs: number, maxRunMs: number): boolean {
   return elapsedMs > maxRunMs;
 }
 
+/**
+ * EXEC-FAILURE decision: did the agent process FAIL TO LAUNCH rather than run and
+ * exit? A shell reports exit 126 (found but not executable) or 127 (command not
+ * found) when `exec` itself fails — most notably E2BIG, when the launch command's
+ * argv exceeds the kernel's MAX_ARG_STRLEN (~128KB) because too much was inlined
+ * into it, so `claude` never started. Paired with NO captured output (the agent
+ * produced nothing), that is a DISPATCH failure to route through the
+ * retry/backoff/`failed` path — NOT a finished run to masquerade as an empty
+ * review. Pure so the boundary is unit-testable.
+ *
+ *  - `exitCode` is the raw string read from the run's `.done` file (the child's
+ *    exit code). Trimmed here; a missing/blank code is never an exec failure.
+ *  - `hasOutput` is whether the run log captured any agent output; if the agent
+ *    wrote anything it DID start, so this is a normal end (review), not a launch
+ *    failure.
+ */
+export function isExecFailure(exitCode: string, hasOutput: boolean): boolean {
+  if (hasOutput) return false;
+  const code = exitCode.trim();
+  return code === "126" || code === "127";
+}
+
 function spawnWatcher(
   _dir: DirectoryRow,
   taskId: string,
@@ -746,6 +768,46 @@ function spawnWatcher(
         /* best effort */
       }
     }
+
+    // DISPATCH-FAILURE short-circuit: the process exited via the `.done` path
+    // (none of the runaway/timeout/vanished/never-started branches) with an
+    // exec-failure code (126/127) and produced NO output. That means the agent
+    // never actually launched — typically the launch command's argv exceeded
+    // MAX_ARG_STRLEN (E2BIG) so `claude` failed to exec. Routing it through
+    // markDispatchFailure applies the bounded retry/backoff/`failed` state
+    // machine instead of masquerading a failed launch as an empty `review`.
+    if (!runaway && !timedOut && !vanished && !neverStarted && existsSync(doneFile)) {
+      let code = "";
+      try {
+        code = readFileSync(doneFile, "utf8").trim();
+      } catch {
+        /* best effort */
+      }
+      if (isExecFailure(code, snapshot.length > 0)) {
+        // Last-moment abort wins (mirrors the markReview path below).
+        if (abortSignals.has(taskId)) {
+          abortSignals.delete(taskId);
+          watching.delete(taskId);
+          console.log(`[butchr] task ${taskId} watcher aborted`);
+          return;
+        }
+        // markDispatchFailure tears down the herdr tab/pane and increments the
+        // attempt count → backoff (re-queue) or give up to `failed` at the cap.
+        await markDispatchFailure(
+          taskId,
+          `agent failed to launch (exit code ${code}, no output) — the launch ` +
+            `command likely exceeded the argv size limit (E2BIG); routed to ` +
+            `dispatch retry rather than review`,
+        );
+        watching.delete(taskId);
+        console.error(
+          `[butchr] task ${taskId} dispatch failure: agent exited ${code} with no ` +
+            `output (exec failure) — not moved to review`,
+        );
+        return;
+      }
+    }
+
     let reason = "the agent exited unexpectedly without calling request_review";
     if (runaway) {
       const mins = (ms: number) => Math.round(ms / 60000);

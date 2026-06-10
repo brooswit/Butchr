@@ -204,8 +204,16 @@ export function parseTaskMd(raw: string): TaskDoc {
 }
 
 /**
- * Build the full prompt to hand the agent: the contents of each context file
- * (resolved relative to the directory root) prepended to the task prompt.
+ * Build the full prompt to hand the agent: the directory's CTO context, then the
+ * LIST of context-file PATHS to read, then the task prompt.
+ *
+ * We deliberately do NOT inline the context files' bodies. The rendered prompt is
+ * written to disk and then passed to the agent as a single shell argv (the launch
+ * command does `claude ... -- "$(cat <prompt-file>)"`), so a large prompt blows
+ * past the kernel's MAX_ARG_STRLEN (~128KB) limit → exec fails with E2BIG and the
+ * agent never starts. Listing the paths keeps the prompt tiny; the agent reads the
+ * files itself with its own tools (it has the worktree open), which is what it
+ * would do anyway.
  */
 export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
   const parts: string[] = [];
@@ -222,16 +230,16 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
     }
   }
 
-  for (const rel of doc.meta.context) {
-    const abs = join(directoryRoot, rel);
-    if (existsSync(abs)) {
-      try {
-        const contents = readFileSync(abs, "utf8");
-        parts.push(`# Context: ${rel}\n\n\`\`\`\n${contents}\n\`\`\``);
-      } catch {
-        // ignore unreadable context file
-      }
-    }
+  if (doc.meta.context.length) {
+    // List the context-file paths (relative to the repo root) and tell the agent
+    // to read them with its tools — never dump their contents into the prompt.
+    const list = doc.meta.context.map((rel) => `- \`${rel}\``).join("\n");
+    parts.push(
+      `# Context files\n\n` +
+        `The following files contain relevant context for this task. Their paths ` +
+        `are relative to the repository root; READ them with your tools before ` +
+        `starting (do not assume their contents):\n\n${list}`,
+    );
   }
   let body = doc.prompt;
   if (doc.reviewNotes) {
