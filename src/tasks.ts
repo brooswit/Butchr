@@ -1010,7 +1010,10 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   const gate: Gate = await runExclusiveMerge<Gate>(async () => {
     // Capture the default-branch tip BEFORE the ff so we can restore it on RED.
     const priorTip = await git.headSha(dir.path).catch(() => null);
-    const mr = await git.merge(dir.path, id);
+    // Pass the task summary so git.merge can record the CHANGELOG entry + version
+    // bump itself (inside this merge lock, after the rebase) — agents no longer
+    // edit CHANGELOG.md / package.json. See git.finalizeLivingDocs.
+    const mr = await git.merge(dir.path, id, row.summary ?? null);
     if (!mr.ok) return { mr };
     // Merge stuck (ff'd into main). Gate the new tip: build + tests must be GREEN.
     const verify = await verifyDefaultBranch(dir.path);

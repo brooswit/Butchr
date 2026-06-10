@@ -2,6 +2,11 @@
 // is a git repository. Task branches/worktrees are named by task ID.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  bumpPatchVersion,
+  insertUnreleasedEntry,
+  isDocsOnlyDiff,
+} from "./changelog.ts";
 import { config } from "./config.ts";
 import { run, runOrThrow, type ExecResult } from "./exec.ts";
 
@@ -238,6 +243,86 @@ async function collectConflictAndAbort(
 }
 
 /**
+ * Whether the task branch's diff vs `base` touches ONLY docs files (so the
+ * version bump is skipped). Resolved from the committed range `base...taskId`
+ * AFTER the rebase, so it reflects exactly the task's own code changes (not the
+ * CHANGELOG/version edits, which finalizeLivingDocs commits afterward). On any git
+ * error we return false → a normal bump (the safe default — never silently skip).
+ */
+async function taskDiffIsDocsOnly(
+  dir: string,
+  taskId: string,
+  base: string,
+): Promise<boolean> {
+  const res = await run([
+    git, "-C", dir, "diff", "--name-only", `${base}...${taskId}`,
+  ]);
+  if (!res.ok) return false;
+  const files = res.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  return isDocsOnlyDiff(files);
+}
+
+/**
+ * MERGE-TIME LIVING-DOCS BOOKKEEPING: butchr OWNS the CHANGELOG entry + version
+ * bump so concurrent tasks stop colliding on CHANGELOG.md / package.json (agents
+ * no longer edit either). Called from merge() AFTER a clean rebase (so it edits the
+ * up-to-date base content and can't conflict) and BEFORE the fast-forward, in the
+ * worktree where the task branch is checked out — the edits are committed onto the
+ * task branch so they fast-forward onto the base with the rest of the work.
+ *
+ *  - CHANGELOG.md: append an `[Unreleased]` entry derived from the task summary +
+ *    id. The append is the IDEMPOTENCY key — insertUnreleasedEntry returns null
+ *    when this task's marker is already present (a re-merge), in which case we skip
+ *    EVERYTHING (incl. the version bump) so nothing is recorded twice.
+ *  - package.json: patch-bump the version, UNLESS the task's diff is docs-only.
+ *
+ * Everything is best-effort: a repo with no CHANGELOG.md / package.json, or an
+ * unparseable one, simply skips that piece — never failing the merge. The summary
+ * is whatever the agent passed to request_review (may be empty → a generic line).
+ */
+async function finalizeLivingDocs(
+  dir: string,
+  wt: string,
+  taskId: string,
+  base: string,
+  summary: string | null,
+): Promise<void> {
+  let staged = false;
+
+  // CHANGELOG first: it carries the idempotency marker. If the entry is already
+  // present (re-merge) we bail entirely so the version can't double-bump either.
+  const changelogPath = join(wt, "CHANGELOG.md");
+  if (existsSync(changelogPath)) {
+    const updated = insertUnreleasedEntry(
+      readFileSync(changelogPath, "utf8"),
+      summary,
+      taskId,
+    );
+    if (updated === null) return; // already recorded → idempotent no-op
+    writeFileSync(changelogPath, updated, "utf8");
+    await run([git, "-C", wt, "add", "CHANGELOG.md"]);
+    staged = true;
+  }
+
+  // Version: patch-bump unless this task's diff is docs-only.
+  const pkgPath = join(wt, "package.json");
+  if (existsSync(pkgPath) && !(await taskDiffIsDocsOnly(dir, taskId, base))) {
+    const bumped = bumpPatchVersion(readFileSync(pkgPath, "utf8"));
+    if (bumped) {
+      writeFileSync(pkgPath, bumped.text, "utf8");
+      await run([git, "-C", wt, "add", "package.json"]);
+      staged = true;
+    }
+  }
+
+  if (staged) {
+    await run([
+      git, "-C", wt, "commit", "-m", `butchr: changelog + version bump (task ${taskId})`,
+    ]);
+  }
+}
+
+/**
  * Commit any uncommitted worktree changes, then REBASE the task branch onto the
  * current tip of the default branch and fast-forward the default branch to it.
  *
@@ -252,7 +337,11 @@ async function collectConflictAndAbort(
  * base UNTOUCHED) and return conflict=true with the conflicting file paths so the
  * caller can kick the task back to the agent to resolve and re-submit.
  */
-export async function merge(dir: string, taskId: string): Promise<MergeResult> {
+export async function merge(
+  dir: string,
+  taskId: string,
+  summary: string | null = null,
+): Promise<MergeResult> {
   const base = await defaultBranch(dir);
   const wt = worktreePath(dir, taskId);
 
@@ -309,9 +398,19 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
     return { ok: false, conflict, message, conflictFiles };
   }
 
-  // Clean rebase — the task branch is now linear atop base. Capture the base tip
-  // BEFORE the fast-forward: it's the exclusive lower bound of the commits this
-  // task is about to land, recorded so the merge can be reverted later.
+  // Clean rebase — the task branch is now linear atop base. butchr OWNS the
+  // living-docs bookkeeping here (CHANGELOG entry + version bump), committed onto
+  // the task branch so it fast-forwards with the rest of the work. Done AFTER the
+  // rebase so it edits the up-to-date base content and can't collide with a
+  // concurrent task — the whole reason these edits moved off the agents. Idempotent
+  // and best-effort (see finalizeLivingDocs); only when the branch has a worktree.
+  if (existsSync(wt)) {
+    await finalizeLivingDocs(dir, wt, taskId, base, summary);
+  }
+
+  // Capture the base tip BEFORE the fast-forward: it's the exclusive lower bound of
+  // the commits this task is about to land, recorded so the merge can be reverted
+  // later (this range now also covers the changelog/version commit above).
   const baseBefore = await run([git, "-C", dir, "rev-parse", base]);
   // Fast-forward base to it (no merge commit). This cannot conflict; it can only
   // fail if base moved between the rebase and here (callers serialize merges to

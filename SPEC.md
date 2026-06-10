@@ -427,8 +427,8 @@ of racing. Inside the exclusive section:
 1. Capture the default-branch tip (`priorTip`) for a possible revert.
 2. `git.merge` — auto-commit any dangling worktree changes (after a **conflict-marker
    scan** that refuses to merge poisoned content), **rebase** the task branch onto
-   the current base tip, then **fast-forward** the base to it (linear history, no
-   merge commit). Records `baseSha..mergedSha`.
+   the current base tip, **record the living docs** (see below), then **fast-forward**
+   the base to it (linear history, no merge commit). Records `baseSha..mergedSha`.
 3. If the ff stuck, run the **post-merge verify gate** (`verifyDefaultBranch` →
    `BUTCHR_VERIFY_CMD` in the repo **root**). On **RED**, `git.resetHard` the default
    branch back to `priorTip` — undoing the merge so a broken commit never sits on
@@ -455,6 +455,37 @@ Outcomes (`ApproveOutcome`):
   An empty `BUTCHR_VERIFY_CMD` disables the
   verify gate (every clean merge is accepted). A non-conflict merge failure sets the
   `conflict` flag + a note and surfaces 409.
+
+### Merge-time living docs (CHANGELOG + version owned by butchr)
+
+butchr records the **CHANGELOG `[Unreleased]` entry** and the **package.json version
+bump** itself, at merge — agents **do not** edit either file. This removes a
+concurrency hot spot: when every task hand-edited `CHANGELOG.md` (Unreleased) and
+bumped `package.json`, every task touched the same two files and they **all** collided
+at merge, each needing an auto-resolve pass. The bookkeeping now happens once, in the
+right place: `git.merge` calls `finalizeLivingDocs` **after the clean rebase and before
+the fast-forward**, inside the global merge lock, so the edits land on the *up-to-date*
+base content (never conflicting) and two merges can't race the same lines. The pure
+text transforms live in **`src/changelog.ts`** (unit-tested independently):
+
+- **CHANGELOG.** `insertUnreleasedEntry` appends a bullet derived from the task
+  **summary** (the optional `request_review` summary; a generic *"Changes from task
+  &lt;id&gt;"* if absent) plus the task id, filed under `### Changed` in `[Unreleased]`
+  (creating that group if missing). The id is stamped as a `(task <id>)` marker that
+  is the **idempotency key**: a re-merge whose marker is already present is a no-op
+  (and short-circuits the version bump too, so nothing is recorded twice).
+- **Version.** `bumpPatchVersion` **patch**-bumps `package.json` (the simple per-task
+  default; release-time minor/major cuts stay manual — see CONTRIBUTING §6), **skipped
+  for a docs-only diff** (`isDocsOnlyDiff` over the task's `base...taskId` file list —
+  `*.md`/`*.mdx`/`*.txt` or anything under `docs/`).
+
+Both edits are committed onto the task branch as a single `butchr: changelog + version
+bump (task <id>)` commit, so they fast-forward onto the base with the rest of the work
+and fall inside the `baseSha..mergedSha` rollback range. Everything is best-effort: a
+repo with no `CHANGELOG.md` / `package.json`, or an unparseable one, simply skips that
+piece — never failing the merge. **SPEC.md is unchanged by this flow** — it is not
+append-only, is edited surgically, and rarely collides, so it stays a manual living-doc
+edit (CONTRIBUTING §6a).
 
 ### Auto-rebase on unblock / dispatch
 

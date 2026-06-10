@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **butchr now records the CHANGELOG entry + version bump at merge — agents no
+  longer hand-edit `CHANGELOG.md` / `package.json`.** Under the old living-docs
+  convention every task appended its own `[Unreleased]` bullet and bumped the
+  version, so under concurrency every task touched those same two files and they
+  **all** collided at merge (each needing an auto-resolve pass). The bookkeeping
+  now happens once, in `git.merge` (`finalizeLivingDocs`), **inside the serialized
+  merge lock and after the rebase** — so the edits land on the up-to-date base and
+  two merges can't race the same lines. butchr appends an `[Unreleased]` → `###
+  Changed` entry derived from the task's **`request_review` summary** + id (stamped
+  with a `(task <id>)` idempotency marker so a re-merge never double-adds) and
+  **patch-bumps** `package.json`, skipping the bump for a **docs-only** diff. The
+  pure transforms live in the new dependency-free `src/changelog.ts` (unit-tested).
+  **SPEC.md stays a manual living-doc edit** (it is not append-only and rarely
+  collides). Contributors now just **write a clear task summary**; see
+  [CONTRIBUTING §6](./CONTRIBUTING.md#6-living-docs-update-on-every-change) and
+  [SPEC.md §4](./SPEC.md#4-review--merge).
+
 ### Added
 - **Rough task-duration estimates (ETA).** butchr now forecasts how long a task is
   likely to take, built from its **own tracked history** — a small, dependency-free
