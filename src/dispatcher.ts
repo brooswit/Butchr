@@ -279,13 +279,19 @@ export async function reconcileRunningTasks(
 
 /**
  * The tick's NEW-DISPATCH gate: the `queued` tasks eligible to launch an agent
- * right now, oldest-first. Returns an EMPTY list when dispatch is PAUSED, which is
- * how maintenance mode stops new work without touching anything in flight.
+ * right now, highest-PRIORITY first then oldest-first. Returns an EMPTY list when
+ * dispatch is PAUSED, which is how maintenance mode stops new work without touching
+ * anything in flight.
  *
  * Selection (when not paused): status='queued' AND the dispatch backoff has
  * elapsed (next_dispatch_at IS NULL or <= now — ISO-8601 strings compare
- * correctly), so a repeatedly-failing task can't hot-loop. Exported so the pause
- * gate is exercised directly in tests (the same function the tick calls).
+ * correctly), so a repeatedly-failing task can't hot-loop. ORDERED BY
+ * `priority DESC, created_at ASC`: a higher-priority task JUMPS the queue ahead of
+ * older lower-priority ones, and tasks at the same priority stay FIFO (oldest
+ * first) — so per-task priority lets an urgent task dispatch sooner without
+ * disturbing the FIFO default (priority 0 for every task that never set one).
+ * Exported so the pause + ordering gates are exercised directly in tests (the same
+ * function the tick calls).
  */
 export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
   if (paused) return [];
@@ -295,7 +301,7 @@ export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
          FROM tasks t JOIN directories d ON d.id = t.directory_id
          WHERE t.status='queued'
            AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
-         ORDER BY t.created_at ASC`,
+         ORDER BY t.priority DESC, t.created_at ASC`,
     )
     .all(nowStr);
 }

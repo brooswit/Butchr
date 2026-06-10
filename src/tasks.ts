@@ -486,6 +486,26 @@ export function validateModel(model: unknown): string | null {
   return m;
 }
 
+/**
+ * Validate + normalize an optional per-task dispatch priority. Returns the integer
+ * priority, defaulting to 0 (the baseline FIFO order) when unset/blank. Accepts a
+ * number or a numeric string (the CLI/HTTP body may carry either); rejects (400)
+ * anything that isn't a finite integer. Higher = dispatched sooner; negatives are
+ * allowed (later than the default). See the `priority` column in db.ts and
+ * dispatcher.selectQueuedForDispatch.
+ */
+export function validatePriority(priority: unknown): number {
+  if (priority === undefined || priority === null || priority === "") return 0;
+  const n = typeof priority === "number" ? priority : Number(priority);
+  if (!Number.isInteger(n)) {
+    throw new HttpError(
+      400,
+      "priority must be an integer (higher = dispatched sooner; default 0)",
+    );
+  }
+  return n;
+}
+
 export async function createTask(
   directoryId: string,
   prompt: string,
@@ -494,6 +514,7 @@ export async function createTask(
   kind: TaskKind = "task",
   model: string | null = null,
   tags: string[] = [],
+  priority: number | string | null = 0,
 ): Promise<TaskView> {
   const dir = getDirectory(directoryId);
   if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
@@ -503,6 +524,7 @@ export async function createTask(
   const taskModel = validateModel(model);
   // Validate + normalize the organizational labels (trim/dedupe/length-cap).
   const taskTags = validateTags(tags);
+  const taskPriority = validatePriority(priority);
 
   // Normalize + validate the dependency set: every listed blocker must exist.
   const blockers = normalizeBlockedBy(blockedBy);
@@ -533,8 +555,8 @@ export async function createTask(
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, priority, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     directoryId,
@@ -543,6 +565,7 @@ export async function createTask(
     kind,
     taskModel,
     JSON.stringify(taskTags),
+    taskPriority,
     created,
   );
   recordTaskEvent(
@@ -557,6 +580,24 @@ export async function createTask(
   const view = taskView(id)!;
   publish({ type: "task.created", task: view });
   return view;
+}
+
+/**
+ * Update a task's dispatch PRIORITY (higher = dispatched sooner; see the `priority`
+ * column in db.ts and dispatcher.selectQueuedForDispatch). The value is validated
+ * the same way as at creation (integer; defaults to 0 when unset/blank). 404 if the
+ * task is gone. Priority only affects the order `queued` tasks dispatch in, so a
+ * bump on a running/terminal task is accepted but inert — we don't status-gate it so
+ * an operator can pre-set the priority of a `blocked` task before it is unblocked.
+ * Emits a `task.updated` so the webapp reflects the new value live.
+ */
+export function setPriority(id: string, priority: number | string | null): TaskView {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  const p = validatePriority(priority);
+  db.query(`UPDATE tasks SET priority=? WHERE id=?`).run(p, id);
+  emitUpdated(id);
+  return taskView(id)!;
 }
 
 /** De-dupe + drop blanks from a blocked_by list, preserving order. */

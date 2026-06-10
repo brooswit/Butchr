@@ -269,6 +269,16 @@ ensureColumn("tasks", "path_type", "TEXT");
 // front matter (taskmd.ts).
 ensureColumn("tasks", "tags", "TEXT");
 
+// PER-TASK DISPATCH PRIORITY. Higher = dispatched sooner: the dispatcher's queued
+// selection orders by `priority DESC, created_at ASC`, so a high-priority task
+// JUMPS the queue ahead of older lower-priority ones while ties stay FIFO (see
+// dispatcher.selectQueuedForDispatch). Default 0 (the baseline every existing row
+// backfills to); a negative value pushes a task LATER than the default. Set at
+// creation (API/CLI/webapp) and updatable any time via POST /api/tasks/:id/priority
+// (tasks.setPriority). Orthogonal to `status` — it only affects the order `queued`
+// tasks dispatch in; it is ignored once a task is running/terminal.
+ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -385,6 +395,10 @@ export type TaskRow = {
   // task for its rough duration estimate. NULL until/unless a footprint was captured.
   diff_lines: number | null;
   path_type: string | null;
+  // PER-TASK DISPATCH PRIORITY (see the ensureColumn block above): higher dispatches
+  // sooner; the queued selection orders by `priority DESC, created_at ASC`. Default
+  // 0. Surfaced on TaskView via the `...row` spread (no extra plumbing in taskView).
+  priority: number;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

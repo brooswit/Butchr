@@ -70,6 +70,9 @@ function taskChips(t, { plan = false, rolledBack = false } = {}) {
   return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
     + chip(effStatus(t))
     + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
+    // A non-zero dispatch priority jumps the queue — flag it so its order is visible
+    // (priority 0 is the silent FIFO default, shown on no card).
+    + (Number(t.priority) ? ` <span class="chip priority" title="dispatch priority — higher runs sooner">prio ${esc(String(t.priority))}</span>` : "")
     + (rolledBack && t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : "");
 }
 // Renders a task's organizational LABELS as a row of neutral chips (distinct from
@@ -686,6 +689,10 @@ function openNewTaskModal(directoryId) {
       <span class="lbl">tags (optional) — comma-separated labels for organizing/filtering</span>
       <input type="text" id="nt-tags" placeholder="e.g. webapp, core, docs" />
     </label>
+    <label class="field" style="margin-bottom:0">
+      <span class="lbl">priority (optional) — higher dispatches sooner; default 0</span>
+      <input type="number" step="1" id="nt-priority" placeholder="0" />
+    </label>
     <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
       <input type="checkbox" id="nt-plan" />
       <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
@@ -706,6 +713,7 @@ function openNewTaskModal(directoryId) {
   const blockedEl = body.querySelector("#nt-blocked");
   const modelEl = body.querySelector("#nt-model");
   const tagsEl = body.querySelector("#nt-tags");
+  const priorityEl = body.querySelector("#nt-priority");
   const planEl = body.querySelector("#nt-plan");
   const tplEl = body.querySelector("#nt-template");
   const tplHintEl = body.querySelector("#nt-tpl-hint");
@@ -748,10 +756,19 @@ function openNewTaskModal(directoryId) {
     // Optional tags — split the comma-separated list into trimmed, non-empty labels
     // (the backend de-dupes + validates).
     const tags = tagsEl.value.split(",").map((s) => s.trim()).filter(Boolean);
+    // Optional priority — higher dispatches sooner; blank defaults to 0. Reject a
+    // non-integer here so the operator gets immediate feedback (the server also
+    // re-validates).
+    const priorityRaw = priorityEl.value.trim();
+    let priority = 0;
+    if (priorityRaw) {
+      priority = Number(priorityRaw);
+      if (!Number.isInteger(priority)) { showErr("Priority must be an integer."); priorityEl.focus(); return; }
+    }
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags });
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority });
       toast(kind === "plan" ? "plan task created" : "task created");
       close();
       render();
@@ -1780,6 +1797,7 @@ async function renderTask(id) {
   meta.innerHTML = `<div class="meta-grid">
     <div class="k">status</div><div class="v">${esc(effStatus(t))}</div>
     ${Array.isArray(t.tags) && t.tags.length ? `<div class="k">tags</div><div class="v">${tagChips(t)}</div>` : ""}
+    <div class="k">priority</div><div class="v">${esc(String(t.priority ?? 0))}</div>
     <div class="k">created</div><div class="v">${esc(t.created_at || "—")}</div>
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>

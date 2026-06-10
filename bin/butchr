@@ -31,6 +31,7 @@ COMMANDS
   new <dir> -m <prompt>           Create a task in directory <dir> (id or path).
       [--blocked-by id,id]          Start it blocked on the given task ids.
       [--tag a,b]                   Attach organizational labels (comma-separated).
+      [--priority N]                Dispatch priority (higher = sooner; default 0).
       [--template <name>]           Create from a template instead of -m; fill its
       [--var key=val ...]             {{placeholders}} with repeatable --var pairs.
   templates                       List the built-in task templates + placeholders.
@@ -39,6 +40,7 @@ COMMANDS
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
+  priority <id> <N>               Set a task's dispatch priority (higher = sooner).
   selftest [--dir <id|path>]      Smoke-test the FULL lifecycle with a throwaway
      [--merge] [--timeout <sec>]    probe in the sandbox (dispatch→review→cleanup).
                                     --merge also approves+merges then rolls it back.
@@ -59,7 +61,7 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template", "--timeout", "--search", "--set"]);
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set"]);
 
 // Boolean flags: present → true, consume no following token.
 const BOOLEAN_FLAGS = new Set(["--merge", "--clear"]);
@@ -119,6 +121,13 @@ function parseVars(list) {
     out[String(entry).slice(0, eq).trim()] = String(entry).slice(eq + 1);
   }
   return out;
+}
+
+/** Parse a dispatch-priority argument into an integer (the server re-validates). */
+function parsePriority(raw) {
+  const n = Number(raw);
+  if (!Number.isInteger(n)) fail(`priority must be an integer, got "${raw}"`);
+  return n;
 }
 
 // ---- HTTP -----------------------------------------------------------------
@@ -349,6 +358,8 @@ async function cmdNew(positionals, flags) {
   const blockedBy = parseIdList(flags["blocked-by"]);
   const tags = parseIdList(flags.tag);
   const reqBody = { blocked_by: blockedBy, tags };
+  // Optional dispatch priority — higher dispatches sooner; omit to default to 0.
+  if (flags.priority !== undefined) reqBody.priority = parsePriority(flags.priority);
   if (flags.template) {
     // Create FROM a built-in template: the server renders its body with the given
     // --var key=value pairs substituted into the {{placeholders}}. Any unset
@@ -475,6 +486,19 @@ async function cmdBlock(positionals, flags) {
   }
   const onStr = blockedBy.length ? blockedBy.join(", ") : "(cleared)";
   process.stdout.write(`${id} blocked_by = ${onStr} → ${t.status}\n`);
+}
+
+async function cmdPriority(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("priority: missing <id>");
+  if (positionals[1] === undefined) fail("priority: missing <N> (the integer priority)");
+  const priority = parsePriority(positionals[1]);
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/priority`, { priority });
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  process.stdout.write(`${id} priority = ${t.priority} (${t.status})\n`);
 }
 
 // ---- offline DB snapshot / restore ----------------------------------------
@@ -605,6 +629,8 @@ async function main() {
       return cmdRequeue(positionals, flags);
     case "block":
       return cmdBlock(positionals, flags);
+    case "priority":
+      return cmdPriority(positionals, flags);
     case "selftest":
       return cmdSelftest(flags);
     case "backups":

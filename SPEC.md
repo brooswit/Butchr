@@ -266,11 +266,13 @@ wall of split panes in one tab. `tabCreate` is best-effort — on failure it ret
 4. **Auto-merge backstop:** if enabled, re-checks every `review` task with
    `ci_status='pass'` and `auto_merged=0` (deduped + serialized downstream).
 5. Selects `queued` tasks whose `next_dispatch_at` is null or in the past (ISO
-   strings compare correctly), oldest-first, and dispatches each that isn't already
-   `dispatching`/`watching` — concurrently, no cap. The `dispatching`/`watching`
-   sets (keyed by task id) prevent double-dispatch across overlapping ticks. This
-   selection runs through `selectQueuedForDispatch`, which returns **nothing while
-   dispatch is paused** (see below), so no new agent starts.
+   strings compare correctly), ordered by **`priority DESC, created_at ASC`** — a
+   higher-`priority` task jumps the queue ahead of older lower-priority ones, and
+   ties stay FIFO (oldest first; every task defaults to priority `0`). Dispatches
+   each that isn't already `dispatching`/`watching` — concurrently, no cap. The
+   `dispatching`/`watching` sets (keyed by task id) prevent double-dispatch across
+   overlapping ticks. This selection runs through `selectQueuedForDispatch`, which
+   returns **nothing while dispatch is paused** (see below), so no new agent starts.
 
 ### Pause / maintenance mode (drain-only)
 
@@ -779,7 +781,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | `?q=` (optional) | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks`/`tags` as arrays plus precomputed `blockerStates`/`deadBlockers`. `?q=` is a case-insensitive FULL-TEXT SEARCH (server-side, so huge prompts never ship to the client): only tasks whose prompt (from `task.md`), `summary`, review notes (`review_note` + the `task.md` Review Notes), or id contain `q` are returned. A blank/absent `q` returns the full list and reads no `task.md`; a non-blank `q` reads each task's `task.md` to scan its prompt. 404 if directory gone. |
-| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), template name (404), `vars` shape (400), prompt required (400). |
+| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, priority?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `priority` is an integer (higher = dispatched sooner; default 0). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), priority integer (400), template name (404), `vars` shape (400), prompt required (400). |
 | `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks`/`tags` + `estimate`, the rough p50–p90 duration estimate — see §10). 404 if gone. |
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |
 | `GET` | `/api/tasks/:id/estimate` | — | `{ single, chain }` — the rough duration estimate (§10): `single` is the task's own p50–p90 range (same object as `TaskView.estimate`), `chain` the critical-path total across its dependency chain (a plan's sub-tasks, or this task's blockers) or `null` when there's nothing to chain. 404 if gone. |
@@ -790,6 +792,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `POST` | `/api/tasks/:id/reject` | `{ note }` | `TaskView` (`→ queued` for resume). 409 if not in review; 400 if note blank. |
 | `POST` | `/api/tasks/:id/abort` | — | `TaskView` (`→ aborted`). 409 if already merged/aborted. |
 | `PUT` / `POST` | `/api/tasks/:id/blocked_by` | `{ blocked_by:[id,…] }` | `TaskView` — replaces + re-evaluates the dep set (auto-unblock / kill-on-block). 409 on terminal tasks; 404 unknown blocker; 400 cycle. |
+| `POST` | `/api/tasks/:id/priority` | `{ priority }` | `TaskView` — sets the task's dispatch priority (integer; higher = dispatched sooner; default 0). 404 if gone; 400 if not an integer. Accepted on any status but only affects `queued` dispatch order. |
 | `POST` | `/api/tasks/:id/requeue` | `{}` | `TaskView` (`→ queued`, retry state cleared). 409 if merged/aborted. |
 | `POST` | `/api/tasks/:id/rollback` | `{}` | `TaskView` (stays `merged`, stamped `rolled_back_at`). 409 if not merged / no recorded range / revert conflict. |
 | `POST` | `/api/tasks/:id/terminal` | — | `{ ok, emulator?, command }` — opens a GUI terminal attached to the live pane. 409 if no live pane; 503 (with the manual command) if no emulator. |
@@ -851,14 +854,15 @@ server (a DB restore can't go through a live server — see §5).
 | `dashboard` | `GET /api/dashboard` — per-directory active / review / needs-attention / failed table + totals |
 | `gate <dir> [--set "<cmd>"] [--clear]` | `PATCH /api/directories/:id` (set/clear the gate command) or `GET /api/dashboard` (no flag → show the effective command); accepts an id or path |
 | `ls [--dir <id>] [--status <s>] [--tag a,b] [--search <text>]` | `GET /api/directories(/:id/tasks)` — compact id/status/CI/tags table; `idle` shows `status*`; `--dir` accepts an id or path; `--status` filters client-side; `--tag` keeps tasks carrying ANY of the given labels; `--search` is a server-side full-text filter (`?q=`) over each task's prompt/summary/review notes/id |
-| `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels) |
-| `new <dir> --template <name> [--var k=v …] [--blocked-by …] [--tag …]` | `POST /api/directories/:id/tasks` with `{ template, vars }` instead of `-m` — create from a built-in template, filling its `{{placeholders}}` with repeatable `--var key=value` pairs (server-rendered; un-supplied markers stay visible) |
+| `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b] [--priority N]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels; `--priority` sets the dispatch priority, higher = sooner) |
+| `new <dir> --template <name> [--var k=v …] [--blocked-by …] [--tag …] [--priority N]` | `POST /api/directories/:id/tasks` with `{ template, vars }` instead of `-m` — create from a built-in template, filling its `{{placeholders}}` with repeatable `--var key=value` pairs (server-rendered; un-supplied markers stay visible) |
 | `templates` | `GET /api/templates` — list the built-in templates as a `name`/`placeholders`/`description` table |
 | `show <id>` | `GET /api/tasks/:id` — status, CI, tags, summary, review notes, blockers, dispatch/revert errors |
 | `approve <id>` | `POST …/approve` (reports merged / conflict-sent-back / reverted-on-red) |
 | `reject <id> -m <note>` | `POST …/reject` |
 | `requeue <id>` | `POST …/requeue` |
 | `block <id> --on id,id` | `PUT …/blocked_by` (`--on ''` clears) |
+| `priority <id> <N>` | `POST …/priority` (set the dispatch priority; higher = sooner) |
 | `selftest [--dir <id\|path>] [--merge] [--timeout <sec>]` | composes existing routes (`GET /api/directories`, `POST …/tasks`, `GET …/tasks/:id`, `POST …/approve`, `…/rollback`, `…/abort`) into an end-to-end **smoke test** — see [§5 Self-test](#self-test-smoke-harness) |
 | `backups` | **offline** — lists DB snapshots in `BUTCHR_BACKUP_DIR` (newest first) via `src/backup.ts`; no server call |
 | `restore <file\|latest> [--force]` | **offline** — restores `BUTCHR_DB` from a snapshot (saves the current db aside first). Refuses if a server answers on `BUTCHR_URL` unless `--force`; stop butchr first (§5) |
@@ -884,15 +888,16 @@ hash-routed and SSE-driven. Views/features:
   collapsible history section, and a **new-task modal** (an optional **template**
   picker — `GET /api/templates` — that fills the prompt textarea with a recipe's
   body and hints which `{{placeholders}}` to complete, plus prompt, context-file
-  selector, blocked-by, model, **tags**; the modal submits the completed prompt to
-  the plain create endpoint). Tags render as neutral chips on the task
-  rows, finished list, and board cards. Graph nodes that gate dependents carry an
+  selector, blocked-by, model, **tags**, **priority**; the modal submits the completed
+  prompt to the plain create endpoint). Tags render as neutral chips on the task
+  rows, finished list, and board cards; a non-zero **priority** shows as a `prio N`
+  chip across those same views. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
   dependents).
 - **Task detail** — status/CI/**conformance**/summary (the CI badge and an advisory
   **spec-conformance** badge — green *conforms* / amber *concern: <reason>* — sit
   above the diff in the review panel; a `concern` warns on approve but never blocks),
-  a **tags** row in the meta grid, the rendered **diff** (`/api/tasks/:id/diff`,
+  a **tags** row and a **priority** row in the meta grid, the rendered **diff** (`/api/tasks/:id/diff`,
   parsed into per-file cards with **dependency-free syntax highlighting** — a small
   inline tokenizer colors TS/JS/JSON/CSS keywords/strings/comments/numbers — and a
   line-number gutter; in review, clicking a line's gutter attaches an **inline
@@ -1024,6 +1029,7 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `cost_usd` | REAL | **always null** — a deliberate placeholder. The transcript carries no dollar cost and butchr ships no pricing table, so it does not fabricate one. |
 | `diff_lines` | INTEGER | final changed-line count (added + deleted vs the default branch) captured on the review transition; the SIZE-bucket signal for duration estimates (§10). Null until/unless captured. |
 | `path_type` | TEXT | coarse path-based type of the changed files (`docs`/`webapp`/`core`/`mixed`), captured alongside `diff_lines`; the TYPE-bucket signal for estimates (§10). Null until/unless captured. |
+| `priority` | INTEGER (`0`) | dispatch priority — **higher = dispatched sooner**. The queued selection orders by `priority DESC, created_at ASC`, so an urgent task jumps the queue while ties stay FIFO (§3 *The tick loop*). Set at creation and updatable via `POST /api/tasks/:id/priority`; orthogonal to `status` (only affects `queued` dispatch order). |
 | `created_at` | TEXT | ISO creation time. |
 | `started_at` | TEXT | first `running` transition (never cleared). |
 | `completed_at` | TEXT | `running→review` transition. |

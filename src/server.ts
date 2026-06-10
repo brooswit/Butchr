@@ -31,6 +31,7 @@ import {
   requeueTask,
   rollbackTask,
   setBlockedBy,
+  setPriority,
   taskChainEstimate,
   taskDiff,
   taskEstimate,
@@ -513,6 +514,8 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   const prompt = body.template
     ? renderTemplate(body.template, body.vars)
     : body.prompt;
+  // Optional priority: an integer (higher = dispatched sooner; default 0) that lets
+  // an urgent task jump the dispatch queue. Validated inside createTask.
   const view = await createTask(
     p.id!,
     prompt,
@@ -521,6 +524,7 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
     kind,
     body.model ?? null,
     body.tags ?? [],
+    body.priority ?? 0,
   );
   return json(view, 201);
 });
@@ -624,6 +628,16 @@ async function blockedByHandler(req: Request, p: Record<string, string>): Promis
 }
 route("PUT", "/api/tasks/:id/blocked_by", blockedByHandler);
 route("POST", "/api/tasks/:id/blocked_by", blockedByHandler);
+
+// Update a task's dispatch PRIORITY (higher = dispatched sooner; default 0). Lets
+// an urgent queued task jump ahead of older lower-priority ones — the dispatcher
+// orders queued tasks by `priority DESC, created_at ASC` (see
+// dispatcher.selectQueuedForDispatch). 404 if the task is gone; 400 if priority
+// isn't an integer.
+route("POST", "/api/tasks/:id/priority", async (req, p) => {
+  const body = await readJson(req);
+  return json(setPriority(p.id!, body.priority));
+});
 
 // Operator escape hatch: revive a task that gave up dispatching (`failed`) — or
 // any other non-terminal stuck state — by clearing its dispatch retry state and
