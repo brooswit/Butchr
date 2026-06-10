@@ -28,7 +28,9 @@ import {
   requeueTask,
   rollbackTask,
   setBlockedBy,
+  taskChainEstimate,
   taskDiff,
+  taskEstimate,
   taskView,
 } from "./tasks.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
@@ -454,6 +456,16 @@ route("GET", "/api/tasks/:id", async (_req, p) => {
 route("GET", "/api/tasks/:id/diff", async (_req, p) => {
   const d = await taskDiff(p.id!);
   return json({ diff: d });
+});
+
+// ROUGH duration estimate for a task (see src/estimate.ts): a loose p50–p90 range
+// derived from butchr's own history, with the sample size — never a promise.
+// `single` is the task's own estimate (also carried on TaskView); `chain` is the
+// critical-path total across its dependency chain (a plan's sub-tasks, or this
+// task's blockers), or null when there's nothing to chain. 404 if the task is gone.
+route("GET", "/api/tasks/:id/estimate", async (_req, p) => {
+  if (!getTask(p.id!)) throw new HttpError(404, "task not found");
+  return json({ single: taskEstimate(p.id!), chain: taskChainEstimate(p.id!) });
 });
 
 // Per-task AUDIT TIMELINE: the ordered log of this task's status transitions

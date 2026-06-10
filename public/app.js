@@ -1132,6 +1132,35 @@ function costLabel(t) {
   return typeof t.cost_usd === "number" ? `$${t.cost_usd.toFixed(4)}` : "— (not tracked)";
 }
 
+// ROUGH duration estimate, rendered as a loose p50–p90 RANGE with its sample size —
+// deliberately hedged ("~", "rough"), never a promise. Prefers the to-merge range,
+// falling back to to-review; says "insufficient data" when history is too thin.
+// Numbers are formatted via fmtDuration; the bucket/basis annotation is escaped.
+function fmtEstimate(est) {
+  if (!est) return "—";
+  if (est.insufficient) {
+    return `insufficient data <span class="muted">· not enough history yet</span>`;
+  }
+  const r = est.toMerge || est.toReview;
+  if (!r) return `insufficient data <span class="muted">· not enough history yet</span>`;
+  const label = est.toMerge ? "to merge" : "to review";
+  const bucket = est.basis === "overall" ? "all tasks" : `${est.bucket} ${est.basis}`;
+  return `est ~${fmtDuration(r.p50Ms)}–${fmtDuration(r.p90Ms)} `
+    + `<span class="muted">· ${label} · n=${est.n} · ${esc(bucket)} · rough</span>`;
+}
+
+// Critical-path estimate across a task's dependency chain (a plan's sub-tasks, or a
+// blocked task's blockers). Returns null when there's nothing pending to chain.
+function fmtChain(chain) {
+  if (!chain || chain.taskCount === 0 || chain.p50Ms == null) return null;
+  const n = chain.taskCount;
+  const partial = chain.insufficient
+    ? ' <span class="muted">· partial — some tasks lack history</span>'
+    : "";
+  return `est ~${fmtDuration(chain.p50Ms)}–${fmtDuration(chain.p90Ms)} `
+    + `<span class="muted">· critical path across ${n} task${n === 1 ? "" : "s"} · rough</span>${partial}`;
+}
+
 // ---------- agent transcript panel state ----------
 // The transcript is large and read straight off disk, so we fetch it lazily (only
 // on first open) and page it. `transcriptOpen` persists the open/closed choice
@@ -1292,6 +1321,7 @@ async function renderTask(id) {
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
     <div class="k">merged</div><div class="v">${esc(t.merged_at || "—")}</div>
+    ${t.estimate ? `<div class="k">est. duration</div><div class="v">${fmtEstimate(t.estimate)}</div>` : ""}
     <div class="k">model</div><div class="v">${esc(modelLabel(t))}</div>
     <div class="k">tokens</div><div class="v">${tokensLabel(t)}</div>
     <div class="k">cost</div><div class="v">${esc(costLabel(t))}</div>
@@ -1300,6 +1330,13 @@ async function renderTask(id) {
     ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
   wrap.appendChild(meta);
+
+  // Rough critical-path estimate across this task's dependency chain (plan
+  // sub-tasks, or a blocked task's blockers). Best-effort — a fetch failure or a
+  // null chain just omits the line. The task's OWN estimate already rides on
+  // t.estimate (shown in the meta grid above).
+  const estData = await api("GET", "/tasks/" + id + "/estimate").catch(() => null);
+  const chainLine = estData ? fmtChain(estData.chain) : null;
 
   // audit timeline — the task's status-transition history (best-effort: a fetch
   // failure just omits the panel rather than breaking the detail view).
@@ -1318,6 +1355,7 @@ async function renderTask(id) {
       ? "Blocked — waiting on:"
       : "Depends on:";
     panel.appendChild(el("h2", { style: "margin-top:0" }, head));
+    if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
     const list = el("div", { class: "blockers" });
     for (const bid of t.blocked_by) {
       const st = (t.blockerStates && t.blockerStates[bid]) || "unknown";
@@ -1340,6 +1378,7 @@ async function renderTask(id) {
     const panel = el("div", { class: "panel spawned-panel" });
     panel.appendChild(el("h2", { style: "margin-top:0" },
       `Spawned ${t.spawned_subtasks.length} sub-task${t.spawned_subtasks.length === 1 ? "" : "s"}`));
+    if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
     const list = el("div", { class: "blockers" });
     for (const sid of t.spawned_subtasks) {
       const row = el("div", { class: "blocker-row" });

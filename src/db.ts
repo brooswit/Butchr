@@ -212,6 +212,20 @@ ensureColumn("tasks", "usage_cache_read_tokens", "INTEGER");
 ensureColumn("tasks", "usage_cache_creation_tokens", "INTEGER");
 ensureColumn("tasks", "cost_usd", "REAL");
 
+// DURATION-ESTIMATE FOOTPRINT. Two cheap signals captured WHEN A TASK ENTERS REVIEW
+// (while its worktree still exists), used to bucket the task for the rough
+// duration-estimate model (see src/estimate.ts):
+//   - `diff_lines` is the task's final changed-line count (added + deleted vs the
+//     default branch, from git.diffStat) → its SIZE bucket (small/medium/large).
+//   - `path_type` is a coarse path-based TYPE ('docs'/'webapp'/'core'/'mixed')
+//     derived from the changed file set (estimate.classifyPathType).
+// Both are NULL for tasks that never reached review / predate this feature; such
+// tasks only feed the overall-pool estimate, never a size/type bucket. Captured by
+// tasks.captureDiffFootprint (best-effort, re-captured on each review transition so
+// a rework's final footprint wins). Orthogonal to `status`. See SPEC.md §10.
+ensureColumn("tasks", "diff_lines", "INTEGER");
+ensureColumn("tasks", "path_type", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -307,6 +321,12 @@ export type TaskRow = {
   usage_cache_read_tokens: number | null;
   usage_cache_creation_tokens: number | null;
   cost_usd: number | null;
+  // DURATION-ESTIMATE FOOTPRINT (see the ensureColumn block above + src/estimate.ts):
+  // `diff_lines` is the final changed-line count and `path_type` the coarse
+  // path-based type, both captured on the review transition and used to bucket the
+  // task for its rough duration estimate. NULL until/unless a footprint was captured.
+  diff_lines: number | null;
+  path_type: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -406,6 +426,31 @@ export function metricRows(): MetricRow[] {
     .query<MetricRow, []>(
       `SELECT status, started_at, completed_at, merged_at,
               conflict, auto_merged, revert_reason, ci_status
+         FROM tasks`,
+    )
+    .all();
+}
+
+// ---- DURATION ESTIMATES (raw rows for the estimator) ----------------------
+// The columns the estimate model reads (see src/estimate.ts). `blocked_by` comes
+// back as the raw JSON-array TEXT; the caller (tasks.estimateInputRows) parses it
+// into a string[] before handing rows to the pure estimator.
+export type EstimateRowRaw = {
+  id: string;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  merged_at: string | null;
+  diff_lines: number | null;
+  path_type: string | null;
+  blocked_by: string | null;
+};
+
+export function estimateRows(): EstimateRowRaw[] {
+  return db
+    .query<EstimateRowRaw, []>(
+      `SELECT id, status, started_at, completed_at, merged_at,
+              diff_lines, path_type, blocked_by
          FROM tasks`,
     )
     .all();

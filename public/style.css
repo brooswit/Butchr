@@ -279,6 +279,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .panel.blocked-panel { border-left: 3px solid var(--blocked); }
 .panel.blocked-panel h2 { color: var(--blocked); }
 
+/* rough critical-path duration estimate shown atop a blocked / spawned panel. */
+.chain-est { font-size: 13px; margin: -2px 0 8px; }
+
 /* audit timeline (task detail) — a compact vertical list of status transitions.
    Each event has a status-colored dot on a connecting rail, the transition chips,
    a relative timestamp, and the note explaining the move. */

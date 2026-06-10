@@ -1,8 +1,15 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { config } from "./config.ts";
-import { db, nowIso, recordTaskEvent } from "./db.ts";
+import { db, estimateRows, nowIso, recordTaskEvent } from "./db.ts";
 import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
+import {
+  classifyPathType,
+  computeEstimateStats,
+  estimateChain,
+  estimateTask,
+} from "./estimate.ts";
+import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
 import { HttpError, getDirectory } from "./directories.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
@@ -39,7 +46,73 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks"> & {
   // exists), so the webapp can render the dependency list without extra fetches.
   blockerStates: Record<string, string>;
   deadBlockers: string[];
+  // ROUGH duration estimate for this task as a p50–p90 range with its sample size
+  // (see src/estimate.ts). null on a terminal task (merged/aborted/failed) — a
+  // forward estimate is only meaningful for work still ahead. The webapp renders it
+  // as a loose forecast (e.g. "est ~12–30m, n=8"), never a promise.
+  estimate: Estimate | null;
 };
+
+// --- DURATION ESTIMATES (rough, history-derived) ---------------------------
+
+/** Terminal states that don't get a forward duration estimate (work is done). */
+const ESTIMATE_TERMINAL = new Set<TaskStatus>(["merged", "aborted", "failed"]);
+
+/**
+ * Assemble the estimator's input rows from the tasks table (parsing the raw
+ * blocked_by JSON column into a clean id array). The pure estimate model in
+ * src/estimate.ts consumes these — kept out of estimate.ts so that module stays
+ * DB-free and unit-testable against synthetic rows.
+ */
+export function estimateInputRows(): EstimateRow[] {
+  return estimateRows().map((r) => ({
+    id: r.id,
+    status: r.status,
+    started_at: r.started_at,
+    completed_at: r.completed_at,
+    merged_at: r.merged_at,
+    diff_lines: r.diff_lines,
+    path_type: r.path_type,
+    blocked_by: parseBlockedBy(r.blocked_by),
+  }));
+}
+
+/**
+ * The rough p50–p90 estimate for a single task (or null for a terminal task / a
+ * missing row). Recomputes the bucket distributions from current history each call;
+ * the dataset is small (a single-user harness) so this stays a cheap in-memory pass,
+ * matching how /api/metrics aggregates on demand.
+ */
+export function taskEstimate(id: string): Estimate | null {
+  const row = getTask(id);
+  if (!row || ESTIMATE_TERMINAL.has(row.status)) return null;
+  const rows = estimateInputRows();
+  const stats = computeEstimateStats(rows);
+  const self = rows.find((r) => r.id === id);
+  if (!self) return null;
+  return estimateTask(self, stats);
+}
+
+/**
+ * The critical-path estimate for a task's dependency chain: for a PLAN task, the
+ * longest path across its spawned sub-tasks; for an ordinary task, the path to its
+ * own merge through its blockers. Returns null when there's nothing to chain (a
+ * plain task with no blockers — its single estimate already covers it) or the task
+ * is gone.
+ */
+export function taskChainEstimate(id: string): ChainEstimate | null {
+  const row = getTask(id);
+  if (!row) return null;
+  const rows = estimateInputRows();
+  const stats = computeEstimateStats(rows);
+  if (row.kind === "plan") {
+    const subs = parseBlockedBy(row.spawned_subtasks);
+    if (subs.length === 0) return null;
+    return estimateChain(subs, rows, stats);
+  }
+  if (parseBlockedBy(row.blocked_by).length === 0) return null;
+  return estimateChain([id], rows, stats);
+}
 
 export function getTask(id: string): TaskRow | null {
   return (
@@ -171,6 +244,7 @@ export function taskView(id: string): TaskView | null {
     spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
     blockerStates,
     deadBlockers: deadBlockerIds(blocked_by),
+    estimate: taskEstimate(id),
   };
 }
 
@@ -1171,6 +1245,35 @@ export function captureSessionUsage(id: string): void {
   emitUpdated(id);
 }
 
+/**
+ * Capture the task's change FOOTPRINT (final changed-line count + a coarse
+ * path-based type) for the duration-estimate buckets — see src/estimate.ts. Called
+ * on a genuine running→review transition, WHILE the worktree still exists (it is
+ * discarded at merge). Best-effort and side-effect-free on failure: no worktree, no
+ * dir, or a git error leaves the columns untouched. Re-captured on each review
+ * transition so a rework's final footprint overwrites an earlier one. Only writes
+ * while the task is still in `review` so a task that merged/aborted under us isn't
+ * resurrected. Fire-and-forget (the estimate is advisory; review never blocks on it).
+ */
+export async function captureDiffFootprint(id: string): Promise<void> {
+  const row = getTask(id);
+  if (!row) return;
+  const dir = getDirectory(row.directory_id);
+  if (!dir) return;
+  if (!existsSync(git.worktreePath(dir.path, id))) return;
+  let stat: git.DiffStat;
+  try {
+    stat = await git.diffStat(dir.path, id);
+  } catch {
+    return; // best-effort — leave the columns as they were
+  }
+  const pathType = classifyPathType(stat.files);
+  db.query(
+    `UPDATE tasks SET diff_lines=?, path_type=? WHERE id=? AND status='review'`,
+  ).run(stat.changedLines, pathType, id);
+  emitUpdated(id);
+}
+
 export function markReview(id: string, snapshot: string): void {
   // Guard on status='running' so a task aborted while its agent was finishing
   // isn't resurrected into 'review' after abortTask parked it as terminal. This is
@@ -1190,6 +1293,9 @@ export function markReview(id: string, snapshot: string): void {
   emitUpdated(id);
   // Capture the session's token usage / model now that the agent has finished.
   captureSessionUsage(id);
+  // Capture the change footprint (size + path type) for duration estimates while the
+  // worktree still exists. Fire-and-forget — advisory, never blocks the transition.
+  void captureDiffFootprint(id);
   // CI GATE: this is a genuine running→review transition (guarded above), so kick
   // off the build/test job for the task's worktree. Fire-and-forget — review must
   // not block on CI.
@@ -1239,6 +1345,10 @@ export function markReviewFromAgent(
   // Capture the session's token usage / model now that the agent has finished this
   // turn (re-read each call so a rework's added turns are reflected too).
   captureSessionUsage(id);
+  // Capture the change footprint (size + path type) for duration estimates while the
+  // worktree still exists, but only on a genuine running→review transition (not a
+  // duplicate request_review). Fire-and-forget — advisory, never blocks the handshake.
+  if (row.status === "running") void captureDiffFootprint(id);
   // CI GATE: only run on a genuine running→review transition. A duplicate
   // request_review call (review→review) shouldn't re-run the build/test job. Fire-
   // and-forget so the (already non-blocking) request_review handshake stays instant.

@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Rough task-duration estimates (ETA).** butchr now forecasts how long a task is
+  likely to take, built from its **own tracked history** — a small, dependency-free
+  heuristic (no ML). Every estimate is a **loose p50–p90 range with its sample size**
+  (e.g. *"est ~12–30m, n=8"*), explicitly hedged and **never a hard promise**; when
+  history is too thin it says **"insufficient data"** rather than guess. Completed
+  tasks are bucketed by a cheap signal captured on the review transition — a **size**
+  bucket from the final diff line-count (small/medium/large) and a path-based **type**
+  (docs/webapp/core/mixed) — and per-bucket **P50/P90** of the started→review and
+  started→merge durations drive the forecast (a queued task with only a prompt falls
+  back to the overall median). For a dependency **chain**, butchr estimates the
+  **critical path** (longest `blocked_by` path, `max()` across parallel branches) so a
+  plan shows an approximate total. Surfaced on the **task-detail** page (an *est.
+  duration* row plus a critical-path line on the blocked-by / spawned-sub-tasks
+  panels), on **`TaskView.estimate`**, and via a new **`GET /api/tasks/:id/estimate`**
+  endpoint (`{ single, chain }`). Two new nullable task columns (`diff_lines`,
+  `path_type`) record the captured footprint. See [SPEC.md §10](./SPEC.md#10-duration-estimates-rough).
+- **`BUTCHR_ALLOWED_ORIGINS`** — comma-separated list of extra browser origins
+  permitted to make state-changing `/api` requests, on top of the derived loopback
+  origins, for the CSRF / DNS-rebinding guard above.
+- **`docs/CLEANUP.md`** — a prioritized code-quality / DRY audit of the merged
+  tree: each finding names the smell (with `file:function`), why it matters, and a
+  specific refactor scoped as an independent follow-up task, ranked by value/effort
+  and flagged for same-file sequencing. Report only — no code changes.
+
 ### Changed
 - **`exec.run()` gained an optional `timeoutMs` bound** (internal). The shared
   "shell out, never throw" helper can now kill a subprocess that exceeds a
@@ -63,15 +88,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator CLI, the per-task MCP server, `curl`) send no `Origin` and pass through
   untouched. This is localhost CSRF/rebinding hardening, **not** authentication —
   there are still no tokens, logins, or users (a separate future concern).
-
-### Added
-- **`BUTCHR_ALLOWED_ORIGINS`** — comma-separated list of extra browser origins
-  permitted to make state-changing `/api` requests, on top of the derived loopback
-  origins, for the CSRF / DNS-rebinding guard above.
-- **`docs/CLEANUP.md`** — a prioritized code-quality / DRY audit of the merged
-  tree: each finding names the smell (with `file:function`), why it matters, and a
-  specific refactor scoped as an independent follow-up task, ranked by value/effort
-  and flagged for same-file sequencing. Report only — no code changes.
 
 ## [0.9.2] - 2026-06-10
 

@@ -39,6 +39,7 @@ terminal/PTY/agent-session management to herdr.
 7. [Data model](#7-data-model)
 8. [Configuration](#8-configuration)
 9. [On-disk layout](#9-on-disk-layout)
+10. [Duration estimates (rough)](#10-duration-estimates-rough)
 
 ---
 
@@ -610,8 +611,9 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | — | `TaskRow[]` (newest first). 404 if directory gone. |
 | `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model? }` | `201` `TaskView`. `kind:"plan"` → plan task. Validates blockers exist (404), cycle (400), model (400), prompt required (400). |
-| `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks`). 404 if gone. |
+| `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks` + `estimate`, the rough p50–p90 duration estimate — see §10). 404 if gone. |
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |
+| `GET` | `/api/tasks/:id/estimate` | — | `{ single, chain }` — the rough duration estimate (§10): `single` is the task's own p50–p90 range (same object as `TaskView.estimate`), `chain` the critical-path total across its dependency chain (a plan's sub-tasks, or this task's blockers) or `null` when there's nothing to chain. 404 if gone. |
 | `GET` | `/api/tasks/:id/events` | — | `TaskEventRow[]` — the status-transition audit timeline, oldest→newest. 404 if gone. |
 | `GET` | `/api/tasks/:id/output` | — | `{ output }` — best-effort live agent terminal text (`herdr agent read`); `""` once the pane is gone. |
 | `GET` | `/api/tasks/:id/transcript` | `?offset=&limit=` | `{ turns, total, offset, limit, hasMore }` — the agent's session transcript parsed into ordered, role-labelled items (prose / thinking / tool-call name+brief-args / truncated tool-result); best-effort `turns:[]` when there's no session/transcript. `limit` clamped 1..500 (default 200). 404 if the task is gone. |
@@ -695,11 +697,13 @@ hash-routed and SSE-driven. Views/features:
   selector, blocked-by, model).
 - **Task detail** — status/CI/summary, the rendered **diff** (`/api/tasks/:id/diff`,
   parsed + highlighted), the **timeline** (`/api/tasks/:id/events`), model/tokens/
-  cost labels, live output, a collapsible **Agent transcript** panel
-  (`/api/tasks/:id/transcript`, lazily fetched + paged: role-labelled prose,
-  thinking, compact tool calls + truncated results, monospace + read-only),
-  approve/reject/abort/requeue/rollback controls, and an **Open terminal** button
-  (running tasks).
+  cost labels, a rough **duration estimate** (an *est. duration* row from
+  `TaskView.estimate` plus a critical-path line on the blocked-by / spawned panels
+  from `/api/tasks/:id/estimate` — see §10), live output, a collapsible **Agent
+  transcript** panel (`/api/tasks/:id/transcript`, lazily fetched + paged:
+  role-labelled prose, thinking, compact tool calls + truncated results, monospace +
+  read-only), approve/reject/abort/requeue/rollback controls, and an **Open
+  terminal** button (running tasks).
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
   and the conflict/revert/CI-pass/auto-merge rates.
 - **Chrome** — light/dark theme toggle (persisted, applied pre-paint), a live
@@ -805,6 +809,8 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `usage_cache_read_tokens` | INTEGER | cumulative cache-read tokens. |
 | `usage_cache_creation_tokens` | INTEGER | cumulative cache-creation tokens. |
 | `cost_usd` | REAL | **always null** — a deliberate placeholder. The transcript carries no dollar cost and butchr ships no pricing table, so it does not fabricate one. |
+| `diff_lines` | INTEGER | final changed-line count (added + deleted vs the default branch) captured on the review transition; the SIZE-bucket signal for duration estimates (§10). Null until/unless captured. |
+| `path_type` | TEXT | coarse path-based type of the changed files (`docs`/`webapp`/`core`/`mixed`), captured alongside `diff_lines`; the TYPE-bucket signal for estimates (§10). Null until/unless captured. |
 | `created_at` | TEXT | ISO creation time. |
 | `started_at` | TEXT | first `running` transition (never cleared). |
 | `completed_at` | TEXT | `running→review` transition. |
@@ -896,3 +902,61 @@ files would blow `MAX_ARG_STRLEN` → E2BIG); the agent reads the files itself.
 (+ rotations), `prompts/<id>.md` (rendered prompts), `runs/<id>.log` + `<id>.done`
 (PTY run log + exit marker), `mcp/<id>.json` (per-task MCP config), `ask/<id>.q.md`
 (transient CTO question files).
+
+---
+
+## 10. Duration estimates (rough)
+
+butchr derives a **rough, history-based forecast** of how long a task will take and
+surfaces it as a **loose p50–p90 range with its sample size** — never a hard
+promise. The model is a small, dependency-free **heuristic (no ML)** in
+`src/estimate.ts`, kept **pure** (no DB / git / clock) like `db.computeMetrics`, so
+it is unit-tested against synthetic rows (`test/estimate.test.ts`). The service
+layer (`tasks.ts`) assembles its input rows from the tasks table and exposes the
+result on `TaskView.estimate` and `GET /api/tasks/:id/estimate`.
+
+**Signals (captured once, on the review transition).** When a task enters `review`,
+`tasks.captureDiffFootprint` records two cheap signals **while the worktree still
+exists** (it's discarded at merge): the final changed-line count (`diff_lines`, from
+`git.diffStat`) and a coarse path-based type (`path_type` ∈
+`docs`/`webapp`/`core`/`mixed`, from `estimate.classifyPathType`). It's
+best-effort, fire-and-forget (review never blocks on it) and re-captured on each
+review transition, so a rework's final footprint wins. Tasks that never reached
+review — or that predate this feature — leave both NULL and only feed the overall
+pool.
+
+**Buckets + distributions (`computeEstimateStats`).** From the timestamps of
+historical tasks it measures two running durations — **started→review**
+(`started_at`→`completed_at`) and **started→merge** (`started_at`→`merged_at`),
+mirroring the metrics module — and computes **P50 + P90** (nearest-rank) and a
+sample count for each bucket. Tasks are bucketed by **size** (small ≤ 30 changed
+lines, medium ≤ 150, else large) and by **type** (the `path_type`), plus an
+**overall** pool. A row feeds a size/type bucket only if it recorded that footprint.
+
+**A single task's estimate (`estimateTask`).** Picks the most specific bucket that
+clears `MIN_SAMPLES` (3) — its **size** bucket, then its **type** bucket — and
+otherwise falls back to the **overall** pool. A queued task that has only a prompt
+(no footprint yet) goes straight to overall. The headline range is the
+**started→merge** distribution (falling back to started→review); the result carries
+`{ basis, bucket, toReview, toMerge, n, insufficient }`. When even the overall pool
+has fewer than `MIN_SAMPLES` samples it is flagged **`insufficient`** so the UI shows
+"insufficient data" rather than a fabricated number.
+
+**A dependency chain's estimate (`estimateChain`).** For a plan task (over its
+spawned sub-tasks) or a blocked task (over its blockers) it estimates the **critical
+path**: each task's finish = its own started→merge duration **plus the max finish
+across its blockers**, so parallel branches take the `max()` and the total is the
+longest chain. Already-merged tasks contribute 0 (and aren't counted); a pending
+task with no usable estimate contributes 0 but flips `insufficient`, so a chain total
+is a floor, not a promise. It is cycle-guarded and memoized. p50 and p90 are summed
+along their own longest paths.
+
+**Surfaced** on the task-detail page (an *est. duration* row in the metadata grid,
+plus a critical-path line atop the blocked-by / spawned-sub-tasks panel) and over the
+API as above. Estimates ride on the same SSE `task.updated` events as the rest of
+`TaskView`, so they track live.
+
+**Caveats (deliberate).** The size/type buckets only have samples from tasks that
+recorded a footprint; durations are wall-clock and include any queue / idle / rework
+time; and the whole thing is a *rough forecast off a small history*, not an SLA —
+which is why every surface hedges ("~", "rough") and shows the sample size.
