@@ -146,6 +146,16 @@ async function healthResponse(): Promise<Response> {
     queued: tasks.queued ?? 0,
   };
 
+  // Operator pull-signal: tasks that need a human's eyes right now — ones waiting
+  // in `review` and ones that gave up dispatching (`failed`). The webapp turns this
+  // into a tab-title badge + header indicator so the operator gets pulled in rather
+  // than polling. Derived from the status counts above; no extra query.
+  const needsAttention = {
+    review: tasks.review ?? 0,
+    failed: tasks.failed ?? 0,
+    total: (tasks.review ?? 0) + (tasks.failed ?? 0),
+  };
+
   // Tick-loop liveness: stale if we've ticked at least once but not within
   // several intervals — meaning the dispatcher loop wedged. A never-ticked
   // loop (lastTickAt === 0) is treated as still-starting, not stalled.
@@ -186,6 +196,7 @@ async function healthResponse(): Promise<Response> {
     // directly so dispatch give-ups are visible at a glance.
     failedTasks: tasks.failed ?? 0,
     concurrency,
+    needsAttention,
     // Self-heal visibility: last startup reap of orphaned worktrees + herdr husks.
     reaper: { lastRunAt: reap.at, worktrees: reap.worktrees, husks: reap.husks },
     herdr: { reachable: herdrReachable },

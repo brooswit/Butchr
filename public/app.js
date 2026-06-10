@@ -982,6 +982,82 @@ function wireDiff(box) {
   });
 }
 
+// ---------- needs-attention signal ----------
+// A live pull-signal so the operator gets drawn in instead of polling: GET /health
+// reports needsAttention { review, failed, total } and we reflect it as a tab-title
+// badge ("(2) butchr") plus a header indicator that links to the dashboard (whose
+// directory cards highlight the review/failed counts). When permitted, a Web
+// Notification fires as a task NEWLY enters review/failed. Refreshed on boot and on
+// every SSE event, so it tracks without a reload.
+const BASE_TITLE = "butchr";
+let lastAttention = null; // { review, failed, total } from the previous poll
+
+function applyTitleBadge(total) {
+  const badge = total > 0 ? `(${total}) ` : "";
+  const wanted = badge + BASE_TITLE;
+  if (document.title !== wanted) document.title = wanted;
+}
+
+function applyAttentionIndicator(na) {
+  const node = document.getElementById("attention");
+  if (!node) return;
+  if (!na || na.total <= 0) {
+    node.hidden = true;
+    node.textContent = "";
+    return;
+  }
+  const parts = [];
+  if (na.review) parts.push(`${na.review} review`);
+  if (na.failed) parts.push(`${na.failed} failed`);
+  node.textContent = String(na.total);
+  node.title = "Needs attention: " + parts.join(", ");
+  node.hidden = false;
+}
+
+// Fire a desktop notification when a task NEWLY enters review/failed (count went
+// up since the last poll). Fully gated on granted permission, so it's silent until
+// the operator opts in by clicking the header indicator (see wireAttention).
+function maybeNotify(na) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (!lastAttention) return; // first poll — establish a baseline, don't alert
+  const newReview = na.review - lastAttention.review;
+  const newFailed = na.failed - lastAttention.failed;
+  if (newReview <= 0 && newFailed <= 0) return;
+  const bits = [];
+  if (newReview > 0) bits.push(`${newReview} ready for review`);
+  if (newFailed > 0) bits.push(`${newFailed} failed to dispatch`);
+  try {
+    new Notification("butchr — needs attention", { body: bits.join(", "), tag: "butchr-attention" });
+  } catch (e) { /* notifications unavailable — ignore */ }
+}
+
+async function updateAttention() {
+  let na;
+  try {
+    const health = await api("GET", "/health");
+    na = health && health.needsAttention;
+  } catch (e) {
+    return; // transient (e.g. degraded /health 503) — keep the last badge
+  }
+  if (!na) return;
+  applyTitleBadge(na.total);
+  applyAttentionIndicator(na);
+  maybeNotify(na);
+  lastAttention = { review: na.review, failed: na.failed, total: na.total };
+}
+
+// Clicking the header indicator opts into desktop notifications (requestPermission
+// needs a user gesture) on its way to the dashboard. The href handles navigation.
+function wireAttention() {
+  const node = document.getElementById("attention");
+  if (!node) return;
+  node.addEventListener("click", () => {
+    if ("Notification" in window && Notification.permission === "default") {
+      try { Notification.requestPermission(); } catch (e) { /* ignore */ }
+    }
+  });
+}
+
 // ---------- SSE live updates ----------
 function connectSSE() {
   const conn = document.getElementById("conn");
@@ -999,6 +1075,9 @@ function connectSSE() {
     // Re-render the current view on any relevant change. Cheap enough for a
     // single-operator local tool.
     refreshSoon();
+    // Refresh the needs-attention signal (tab badge + header indicator) too, so it
+    // tracks review/failed transitions live regardless of which page is open.
+    updateAttention();
   };
 }
 
@@ -1038,5 +1117,7 @@ function setupTheme() {
 // ---------- boot ----------
 window.addEventListener("hashchange", render);
 setupTheme();
+wireAttention();
+updateAttention();
 render();
 connectSSE();
