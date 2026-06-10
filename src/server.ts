@@ -58,6 +58,101 @@ async function readJson(req: Request): Promise<any> {
   }
 }
 
+// ---- CSRF / DNS-rebinding guard -------------------------------------------
+// butchr binds to loopback, but a malicious web page the operator merely VISITS
+// can still make their BROWSER send forged state-changing requests to
+// http://127.0.0.1:<port>/api/... — a cross-site POST, or a DNS-rebinding name
+// that resolves to loopback — which would let that page create/approve/abort
+// tasks. This is a small CENTRAL guard (NOT authentication, NO tokens/sessions)
+// that blocks those browser-driven forgeries while leaving every NON-browser
+// caller untouched:
+//
+//   (1) Browsers ALWAYS attach an `Origin` header to cross-site state-changing
+//       fetches. For POST/PUT/DELETE/PATCH, if an `Origin` is present and is NOT
+//       one of butchr's own origins, reject with 403. The webapp is same-origin,
+//       so its `Origin` matches the allowlist and passes.
+//   (2) A request with NO `Origin` (the operator CLI, the per-task MCP server,
+//       curl, server-to-server) is ALLOWED — it is not a browser cross-site
+//       request, so there is no forgery to block.
+//   (3) DNS-rebinding hardening: the request's `Host` must be a loopback /
+//       configured name. A rebound attacker domain pointed at 127.0.0.1 carries a
+//       foreign `Host` even when same-origin (so it has no cross-site `Origin`).
+//
+// Allowlist = http://127.0.0.1:<port>, http://localhost:<port>, http://[::1]:<port>,
+// http://<config.host>:<port>, plus any BUTCHR_ALLOWED_ORIGINS entries. GET reads
+// and the SSE stream are never state-changing, so they are never gated.
+const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
+
+function stripTrailingSlash(s: string): string {
+  return s.replace(/\/+$/, "");
+}
+
+const ALLOWED_ORIGINS: ReadonlySet<string> = (() => {
+  const { host, port } = config;
+  const set = new Set<string>([
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+    `http://[::1]:${port}`,
+    `http://${host}:${port}`,
+  ]);
+  for (const o of config.allowedOrigins) set.add(stripTrailingSlash(o));
+  return set;
+})();
+
+const ALLOWED_HOSTNAMES: ReadonlySet<string> = (() => {
+  const set = new Set<string>(["127.0.0.1", "localhost", "::1", "[::1]", config.host]);
+  for (const o of config.allowedOrigins) {
+    try {
+      set.add(new URL(o).hostname);
+    } catch {
+      /* ignore a malformed allowlist entry */
+    }
+  }
+  return set;
+})();
+
+/**
+ * Central CSRF / DNS-rebinding guard for state-changing `/api` requests. Returns a
+ * 403 `Response` to REJECT, or `null` to ALLOW. Read requests (GET/HEAD/OPTIONS)
+ * and any request with no cross-site `Origin` and a loopback `Host` pass through.
+ * Exported so the rules can be unit-tested without standing up the HTTP server.
+ */
+export function csrfGuard(req: Request, url: URL): Response | null {
+  if (!STATE_CHANGING_METHODS.has(req.method)) return null;
+
+  // (1)+(2): browsers send `Origin` on cross-site state-changing fetches; a
+  // present-but-foreign Origin is a forgery, a missing Origin is a non-browser
+  // caller (CLI/MCP/curl) and is allowed.
+  const origin = req.headers.get("origin");
+  if (origin !== null && !ALLOWED_ORIGINS.has(stripTrailingSlash(origin))) {
+    return json(
+      {
+        error:
+          `forbidden: cross-origin ${req.method} from Origin '${origin}' is rejected. ` +
+          `butchr only accepts same-origin browser requests on loopback ` +
+          `(CSRF / DNS-rebinding hardening, NOT authentication). ` +
+          `Set BUTCHR_ALLOWED_ORIGINS to permit additional origins.`,
+      },
+      403,
+    );
+  }
+
+  // (3): DNS-rebinding — the Host must resolve to a loopback / configured name.
+  const hostname = url.hostname;
+  if (hostname && !ALLOWED_HOSTNAMES.has(hostname)) {
+    return json(
+      {
+        error:
+          `forbidden: unexpected Host '${hostname}' for a ${req.method} request — ` +
+          `expected a loopback name (CSRF / DNS-rebinding hardening). ` +
+          `Set BUTCHR_ALLOWED_ORIGINS if this host is intended.`,
+      },
+      403,
+    );
+  }
+  return null;
+}
+
 // ---- SSE ----
 function sseResponse(): Response {
   let unsub: () => void = () => {};
@@ -510,6 +605,11 @@ export function startServer(): void {
       }
 
       if (pathname.startsWith("/api/")) {
+        // CSRF / DNS-rebinding guard: reject forged cross-site state-changing
+        // browser requests before they reach any handler (no-Origin CLI/MCP/curl
+        // and same-origin webapp requests pass through). See csrfGuard above.
+        const blocked = csrfGuard(req, url);
+        if (blocked) return blocked;
         for (const r of routes) {
           if (r.method !== req.method) continue;
           const m = r.pattern.exec(pathname);

@@ -38,6 +38,22 @@ export const config = {
   host: env("BUTCHR_HOST", "127.0.0.1"),
   port: envInt("BUTCHR_PORT", 47800),
 
+  /**
+   * EXTRA browser origins allowed to make state-changing (`POST`/`PUT`/`DELETE`/
+   * `PATCH`) `/api` requests, on top of butchr's own derived origins
+   * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`,
+   * `http://<host>:<port>`). Comma-separated list of full origins, e.g.
+   * `http://192.168.1.5:47800`. This feeds the CSRF / DNS-rebinding guard in
+   * server.ts: a state-changing request whose `Origin` header is present but not
+   * in the allowlist is rejected with 403. Each entry's hostname is also accepted
+   * in the `Host` header (the DNS-rebinding check). Requests with NO `Origin`
+   * (the operator CLI, the per-task MCP server, curl, server-to-server) are always
+   * allowed — they are not browser cross-site requests. This is localhost CSRF /
+   * rebinding hardening, NOT authentication. Empty (default) → only the derived
+   * loopback origins are accepted.
+   */
+  allowedOrigins: envList("BUTCHR_ALLOWED_ORIGINS", []),
+
   /** butchr's own state directory + SQLite path. */
   dataDir,
   dbPath: env("BUTCHR_DB", join(dataDir, "butchr.db")),

@@ -17,8 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet. New work goes here — see the
-[living-docs convention](./CONTRIBUTING.md#6-living-docs-update-on-every-change)._
+### Security
+- **CSRF / DNS-rebinding guard on the web API.** butchr binds to loopback, but a
+  web page the operator merely visits could make their browser send forged
+  cross-site requests to `http://127.0.0.1:<port>/api/...` (cross-site `POST` or a
+  DNS-rebinding name) and create / approve / abort tasks. A small central guard
+  now rejects state-changing (`POST`/`PUT`/`DELETE`/`PATCH`) `/api` requests whose
+  `Origin` header is present but does not match butchr's own origins (or whose
+  `Host` is not a loopback / configured name) with a clear `403`. The same-origin
+  webapp, `GET` reads, and the SSE stream are unaffected; non-browser callers (the
+  operator CLI, the per-task MCP server, `curl`) send no `Origin` and pass through
+  untouched. This is localhost CSRF/rebinding hardening, **not** authentication —
+  there are still no tokens, logins, or users (a separate future concern).
+
+### Added
+- **`BUTCHR_ALLOWED_ORIGINS`** — comma-separated list of extra browser origins
+  permitted to make state-changing `/api` requests, on top of the derived loopback
+  origins, for the CSRF / DNS-rebinding guard above.
 
 ## [0.9.2] - 2026-06-10
 

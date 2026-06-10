@@ -593,7 +593,10 @@ keeping `BUTCHR_LOG_KEEP` (3) rotated files. Best-effort — logging never throw
 All under `Bun.serve` (`src/server.ts`); JSON in/out. Errors are
 `{ "error": "<message>" }` with an HTTP status (`HttpError` carries the status;
 anything else → 500). A trailing slash is tolerated; unknown `/api/*` → 404; all
-other paths fall through to static serving (SPA fallback to `index.html`).
+other paths fall through to static serving (SPA fallback to `index.html`). Every
+`/api/*` request first passes the **CSRF / DNS-rebinding guard** (§6.6): a forged
+cross-origin state-changing browser request is rejected `403` before it reaches a
+handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
@@ -706,6 +709,47 @@ hash-routed and SSE-driven. Views/features:
   (`POST /api/pause` / `/api/resume`) so the operator can enter drain-only
   maintenance mode and see it at a glance.
 
+### 6.6 CSRF / DNS-rebinding guard
+
+butchr binds to **loopback** (`127.0.0.1`), but loopback is **not** a trust
+boundary against the operator's own browser: any web page the operator merely
+visits can make their browser send forged requests to
+`http://127.0.0.1:<port>/api/...` — a cross-site `POST`, or a DNS-rebinding name
+that resolves to loopback — which without a guard would let a malicious page
+create / approve / abort tasks. A small **central guard** in `src/server.ts`
+(`csrfGuard`, applied to every `/api/*` request before routing) blocks those
+browser-driven forgeries while leaving non-browser callers untouched:
+
+- **Origin check (state-changing methods only — `POST`/`PUT`/`DELETE`/`PATCH`).**
+  Browsers always attach an `Origin` header to cross-site state-changing fetches.
+  If an `Origin` is **present** and is **not** one of butchr's own origins, the
+  request is rejected **`403`** with a clear `{ "error": … }` message. The webapp
+  is same-origin, so its `Origin` matches and passes.
+- **No-Origin requests are allowed.** A request with **no** `Origin` header — the
+  operator CLI (`bin/butchr`), the per-task MCP server, `curl`, server-to-server —
+  is not a browser cross-site request and passes through.
+- **DNS-rebinding (Host) check.** For state-changing methods the request's `Host`
+  must be a loopback / configured name; a rebound attacker domain pointed at
+  `127.0.0.1` carries a foreign `Host` (even same-origin, so no cross-site
+  `Origin`) and is rejected `403`.
+- **Reads and the SSE stream are never gated** — `GET` requests (`/api/...` and
+  `GET /api/events`) pass regardless of `Origin`/`Host`, so the webapp's reads and
+  the live stream are unaffected.
+
+**Allowlist** = the derived loopback origins `http://127.0.0.1:<port>`,
+`http://localhost:<port>`, `http://[::1]:<port>`, `http://<BUTCHR_HOST>:<port>`,
+plus any entries in **`BUTCHR_ALLOWED_ORIGINS`** (§8) — each allowlisted entry's
+hostname is also accepted by the Host check.
+
+> **Scope / limits.** This is **CSRF / DNS-rebinding hardening for a localhost
+> tool, NOT authentication.** It assumes the single-operator, trusted-host model
+> the rest of butchr assumes: there are **no tokens, no login, no sessions or
+> users**, and a non-browser client that omits the `Origin` header still has full
+> API access (by design — that is how the CLI and MCP server call in). It defends
+> only against the operator's browser being turned into a confused deputy by a
+> third-party web page; it is **not** a defense against a hostile local process or
+> a multi-tenant host. Real authn/authz is a separate, future concern.
+
 ---
 
 ## 7. Data model
@@ -796,6 +840,7 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 |---------|---------|---------|
 | `BUTCHR_HOST` | `127.0.0.1` | HTTP bind host (`0.0.0.0` → agents still dial loopback for MCP). |
 | `BUTCHR_PORT` | `47800` | HTTP port (REST + webapp + SSE + MCP). |
+| `BUTCHR_ALLOWED_ORIGINS` | _(empty)_ | comma-separated EXTRA browser origins allowed to make state-changing `/api` requests, on top of the derived loopback origins. Feeds the CSRF / DNS-rebinding guard (§6.6). |
 | `BUTCHR_DATA_DIR` | `~/.local/share/butchr` | butchr's own state directory. |
 | `BUTCHR_DB` | `<data>/butchr.db` | SQLite path. |
 | `BUTCHR_LOG_FILE` | `<data>/butchr.log` | persistent log sink (empty disables file logging). |
