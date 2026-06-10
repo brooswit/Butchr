@@ -845,6 +845,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `GET` | `/api/dashboard` | — | cross-project rollup: `{ directories:[{ id, path, label, gate_cmd, effective_gate_cmd, counts, active, review, failed, needsAttention }], totals:{ directories, active, review, failed, needsAttention } }`. Per directory: `active` = queued+blocked+running+idle+finalizing; `review`; `failed`; `needsAttention` = review+failed (the operator pull-signal). `effective_gate_cmd` is the directory's own `gate_cmd` or the default. Read-only. |
 | `GET` | `/api/directories` | — | `DirectoryView[]` (rows + `counts` by status, with `idle` peeled out of `running`). |
 | `GET` | `/api/templates` | — | `TemplateView[]` — the built-in task **templates** (recipes): each `{ name, description, body, placeholders }`, where `body` carries `{{placeholder}}` markers and `placeholders` lists their distinct names (first-seen order). Static built-ins from `src/templates.ts` (`feature`, `refactor-extract`, `webapp-panel`, `add-endpoint`, `rollback`). |
+| `POST` | `/api/expand-brief` | `{ brief, directory }` | `{ prompt }` — **BRIEF → EXPAND**: turns the operator's one-line `brief` into a proper, concrete, scoped task prompt **grounded in the target repo** by running a headless, READ-ONLY claude (`Read`/`Grep`/`Glob` over the repo — `config.expandBriefCmd`, reusing the spec-conformance reviewer's recipe; see `src/expand.ts`). `directory` is the registered directory's id (or its absolute path); the expander runs with that repo as cwd. The webapp drops `prompt` into the new-task prompt textarea for the operator to review/edit before Create. 400 on a blank brief; 404 on an unknown directory; 502 if expansion failed (spawn/timeout/empty — the operator keeps the brief and can retry or write the prompt by hand). Set `BUTCHR_EXPAND_BRIEF_CMD` empty to disable (→ 502). |
 | `POST` | `/api/directories` | `{ path, label?, gate_cmd? }` | `201` `DirectoryView`. `gate_cmd` sets the per-directory build/test gate command (omit/null → default; `""` → disable). 400 if not a git repo or `gate_cmd` isn't a string; 409 if already registered; 502 if the herdr workspace can't be created. |
 | `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
@@ -968,11 +969,18 @@ hash-routed and SSE-driven. Views/features:
   search** box that drives the server-side `?q=` filter over prompt/summary/review
   notes/id — re-fetching the list as you type — plus client-side status chips and a
   second row of **tag chips**, ANY-match), a queue line, a
-  collapsible history section, and a **new-task modal** (an optional **template**
-  picker — `GET /api/templates` — that fills the prompt textarea with a recipe's
-  body and hints which `{{placeholders}}` to complete, plus prompt, context-file
-  selector, blocked-by, model, **tags**, **priority**; the modal submits the completed
-  prompt to the plain create endpoint). Tags render as neutral chips on the task
+  collapsible history section, and a **new-task modal** redesigned for **low-effort
+  creation**: the default surface is just a one-line **idea** box with an **Expand**
+  button (or an optional **template** picker — `GET /api/templates` — that fills the
+  prompt textarea with a recipe's body and hints which `{{placeholders}}` to complete)
+  → the **prompt** textarea → Create. **Expand** (`POST /api/expand-brief`) runs the
+  headless read-only claude over the repo to turn the idea into a proper, grounded task
+  prompt, dropped into the prompt textarea for the operator to review/edit (a spinner
+  runs while it works; on error the brief is kept with a message). The manual
+  "write your own prompt" path stays. The five less-common knobs — **blocked-by**,
+  **model**, **tags**, **priority**, and the **plan** / **plan-preview** toggles — are
+  collapsed behind an **Advanced** disclosure (closed by default). The modal submits
+  the completed prompt to the plain create endpoint. Tags render as neutral chips on the task
   rows, finished list, and board cards; a non-zero **priority** shows as a `prio N`
   chip across those same views. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
@@ -1192,6 +1200,8 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_CONFORMANCE_CMD` | `claude -p --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | read-only, non-recursing reviewer for the **spec-conformance gate** (does the diff satisfy the prompt?), run via `bash -lc` in the task's worktree. Placeholder: `{{PROMPT_FILE}}`. **Empty disables** the gate. |
 | `BUTCHR_CONFORMANCE_TIMEOUT_MS` | `120000` | max wait for the conformance reviewer before it's killed (→ null verdict). |
 | `BUTCHR_CONFORMANCE_MAX_DIFF_BYTES` | `60000` | cap on the git diff fed to the conformance reviewer (larger diffs are truncated with a marker). |
+| `BUTCHR_EXPAND_BRIEF_CMD` | `claude -p --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | read-only, non-recursing **brief expander** for `POST /api/expand-brief` (one-line idea → repo-grounded task prompt), run via `bash -lc` in the target repo. Placeholder: `{{PROMPT_FILE}}`. **Empty disables** expansion (the endpoint 502s). |
+| `BUTCHR_EXPAND_BRIEF_TIMEOUT_MS` | `120000` | max wait for the brief expander before it's killed (→ expansion failure). |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command. Else auto-detect kitty/konsole/alacritty/xfce4-terminal/xterm/gnome-terminal/x-terminal-emulator (needs `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ---

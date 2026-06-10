@@ -852,6 +852,21 @@ pre.block {
 }
 .modal .m-foot .hint { flex: 1; font-size: 12px; color: var(--muted); }
 
+/* New-task modal: brief→expand hint + Advanced disclosure. */
+label.field .hint.err { color: var(--rejected); }
+.btn.loading { opacity: 0.75; cursor: progress; }
+.adv { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+.adv-head {
+  display: flex; align-items: center; gap: 7px;
+  background: none; border: none; cursor: pointer; padding: 2px 0;
+  color: var(--muted); font-size: 13px; font-weight: 600;
+}
+.adv-head:hover { color: var(--text); }
+.adv-head .caret { font-size: 11px; width: 12px; }
+.adv-body { display: none; margin-top: 10px; }
+.adv-body .field { margin-top: 10px; }
+.adv.open .adv-body { display: block; }
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--panel-2); border: 1px solid var(--border); color: var(--text);

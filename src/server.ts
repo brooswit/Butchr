@@ -11,6 +11,7 @@ import {
   HttpError,
   dashboard,
   getDirectory,
+  getDirectoryByPath,
   listDirectories,
   registerDirectory,
   unregisterDirectory,
@@ -18,6 +19,7 @@ import {
 } from "./directories.ts";
 import { publish, subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
+import { expandBrief } from "./expand.ts";
 import * as herdr from "./herdr.ts";
 import { handleMcp } from "./mcp.ts";
 import { getLastReap } from "./reaper.ts";
@@ -467,6 +469,24 @@ route("GET", "/api/directories", async () => json(listDirectories()));
 // CLI `templates` command and the webapp new-task picker list. Each entry carries
 // its `{{placeholder}}` names so a caller knows what to fill. See src/templates.ts.
 route("GET", "/api/templates", async () => json(listTemplates()));
+
+// BRIEF → EXPAND. Turns the operator's one-line IDEA into a proper, concrete, scoped
+// task prompt grounded in the target repo, by running a headless, READ-ONLY claude
+// (Read/Grep/Glob over the repo — see config.expandBriefCmd / src/expand.ts) that
+// reuses the spec-conformance reviewer's recipe. Body `{ brief, directory }`:
+// `directory` is the registered directory's id (or its absolute path); the expander
+// runs with that repo as cwd. Returns `{ prompt }` — the expanded text the webapp
+// drops into the new-task prompt textarea for the operator to review/edit before
+// Create. 400 on a blank brief, 404 on an unknown directory, 502 if expansion failed.
+route("POST", "/api/expand-brief", async (req) => {
+  const body = await readJson(req);
+  // Resolve the directory by id first (what the webapp sends), then by path, so a
+  // caller can pass either. The repo root is the expander's cwd.
+  const dir = getDirectory(body.directory) ?? getDirectoryByPath(body.directory ?? "");
+  if (!dir) throw new HttpError(404, "directory not found");
+  const prompt = await expandBrief(body.brief, dir.path);
+  return json({ prompt });
+});
 
 route("POST", "/api/directories", async (req) => {
   const body = await readJson(req);

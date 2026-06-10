@@ -259,6 +259,29 @@ export const config = {
   conformanceMaxDiffBytes: envInt("BUTCHR_CONFORMANCE_MAX_DIFF_BYTES", 60000),
 
   /**
+   * BRIEF → EXPAND. Powers the webapp's low-effort new-task flow: the operator types a
+   * one-line IDEA and `POST /api/expand-brief` runs this command to turn it into a
+   * proper, concrete, scoped task prompt grounded in the target repo. It REUSES the
+   * conformance reviewer's headless, read-only, non-recursing claude recipe:
+   *  - `-p` runs headless and prints the expanded prompt to stdout, then exits.
+   *  - `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` makes it
+   *    read-only (no Write/Edit/Bash) so it can inspect the repo (SPEC.md / code) but
+   *    never mutate it, and auto-resolves tool requests without a human prompt.
+   *  - NO `--mcp-config` / `--dangerously-skip-permissions`: no recursion into butchr.
+   * The single `{{PROMPT_FILE}}` placeholder is replaced with a temp file holding the
+   * rendered expand prompt (avoiding shell-escaping). Run via `bash -lc`, cwd = the
+   * target repo. Set it EMPTY to DISABLE expansion (the endpoint then 502s and the
+   * operator writes the prompt by hand). See src/expand.ts.
+   */
+  expandBriefCmd: env(
+    "BUTCHR_EXPAND_BRIEF_CMD",
+    "claude -p --permission-mode dontAsk " +
+      '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"',
+  ),
+  /** Max wall-clock (ms) the brief expander may run before it's killed (→ failure). */
+  expandBriefTimeoutMs: envInt("BUTCHR_EXPAND_BRIEF_TIMEOUT_MS", 120000),
+
+  /**
    * AUTO-MERGE green, low-risk tasks (opt-in; DEFAULT OFF). When enabled, a task
    * in `review` whose CI gate settled to `pass` and which qualifies as LOW-RISK is
    * approved + merged AUTOMATICALLY — running the SAME approve path a human would,

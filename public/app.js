@@ -747,13 +747,28 @@ function openGateModal(dir) {
 }
 
 // ---------- new-task modal ----------
-// Inline modal for creating a task: a required prompt plus an optional
-// comma-separated blocked_by list (task ids this task waits on). Submits to the
-// existing create endpoint; the new task surfaces via the SSE-driven re-render.
-// Context is intentionally left empty (the agent reads files itself).
+// Inline modal for creating a task, redesigned for LOW-EFFORT creation. The default
+// surface is just: a one-line IDEA (with an Expand button) or a template → the prompt
+// textarea → Create. The operator gives ideas, not full specs, so "Expand" runs a
+// headless read-only claude over the repo (POST /api/expand-brief) to turn the idea
+// into a proper, grounded task prompt dropped into the textarea for review/edit. The
+// manual "write your own prompt" path and the template dropdown both still work.
+//
+// The five less-common knobs (blocked_by, model, tags, priority, plan / plan-preview)
+// are collapsed behind an "Advanced" disclosure (closed by default). Context is
+// intentionally left empty (the agent reads files itself). Submits to the existing
+// create endpoint; the new task surfaces via the SSE-driven re-render.
 function openNewTaskModal(directoryId) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
+    <label class="field" style="margin-bottom:8px">
+      <span class="lbl">idea — a one-line brief; Expand grounds it in the repo into a full prompt</span>
+      <div class="row" style="gap:8px; align-items:stretch">
+        <input type="text" id="nt-brief" placeholder="e.g. add a dark-mode toggle to the header" style="flex:1" />
+        <button type="button" class="btn ghost" id="nt-expand" style="white-space:nowrap">Expand ✨</button>
+      </div>
+      <span class="hint" id="nt-brief-hint"></span>
+    </label>
     <label class="field" style="margin-bottom:8px">
       <span class="lbl">template (optional) — fills the prompt with a recipe to complete</span>
       <select id="nt-template"><option value="">— none (write your own prompt) —</option></select>
@@ -761,32 +776,37 @@ function openNewTaskModal(directoryId) {
     </label>
     <label class="field">
       <span class="lbl">prompt</span>
-      <textarea id="nt-prompt" placeholder="Describe the work for the agent…"></textarea>
+      <textarea id="nt-prompt" placeholder="Describe the work for the agent — or type an idea above and Expand it…"></textarea>
     </label>
-    <label class="field" style="margin-bottom:0">
-      <span class="lbl">blocked by (optional) — comma-separated task ids</span>
-      <input type="text" id="nt-blocked" placeholder="e.g. snug-crag-ffae, wise-crag-b403" />
-    </label>
-    <label class="field" style="margin-bottom:0">
-      <span class="lbl">model (optional) — blank uses the default</span>
-      <input type="text" id="nt-model" placeholder="e.g. opus, sonnet, haiku, or claude-opus-4-8" />
-    </label>
-    <label class="field" style="margin-bottom:0">
-      <span class="lbl">tags (optional) — comma-separated labels for organizing/filtering</span>
-      <input type="text" id="nt-tags" placeholder="e.g. webapp, core, docs" />
-    </label>
-    <label class="field" style="margin-bottom:0">
-      <span class="lbl">priority (optional) — higher dispatches sooner; default 0</span>
-      <input type="number" step="1" id="nt-priority" placeholder="0" />
-    </label>
-    <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
-      <input type="checkbox" id="nt-plan" />
-      <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
-    </label>
-    <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
-      <input type="checkbox" id="nt-plan-preview" />
-      <span class="lbl" style="margin:0">Plan-preview — the agent proposes a plan and pauses for your approval before writing code</span>
-    </label>`;
+    <div class="adv" id="nt-adv">
+      <button type="button" class="adv-head" id="nt-adv-head"><span class="caret">▸</span><span>Advanced</span></button>
+      <div class="adv-body" id="nt-adv-body">
+        <label class="field" style="margin-bottom:0">
+          <span class="lbl">blocked by (optional) — comma-separated task ids</span>
+          <input type="text" id="nt-blocked" placeholder="e.g. snug-crag-ffae, wise-crag-b403" />
+        </label>
+        <label class="field" style="margin-bottom:0">
+          <span class="lbl">model (optional) — blank uses the default</span>
+          <input type="text" id="nt-model" placeholder="e.g. opus, sonnet, haiku, or claude-opus-4-8" />
+        </label>
+        <label class="field" style="margin-bottom:0">
+          <span class="lbl">tags (optional) — comma-separated labels for organizing/filtering</span>
+          <input type="text" id="nt-tags" placeholder="e.g. webapp, core, docs" />
+        </label>
+        <label class="field" style="margin-bottom:0">
+          <span class="lbl">priority (optional) — higher dispatches sooner; default 0</span>
+          <input type="number" step="1" id="nt-priority" placeholder="0" />
+        </label>
+        <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
+          <input type="checkbox" id="nt-plan" />
+          <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
+        </label>
+        <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
+          <input type="checkbox" id="nt-plan-preview" />
+          <span class="lbl" style="margin:0">Plan-preview — the agent proposes a plan and pauses for your approval before writing code</span>
+        </label>
+      </div>
+    </div>`;
 
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
@@ -799,6 +819,18 @@ function openNewTaskModal(directoryId) {
   const { close } = openModal({ title: "New task", body, footer: foot });
   cancel.addEventListener("click", close);
 
+  // Advanced disclosure — collapsed by default so the default modal is just
+  // idea/template → prompt → Create.
+  const advEl = body.querySelector("#nt-adv");
+  const advHead = body.querySelector("#nt-adv-head");
+  advHead.addEventListener("click", () => {
+    const open = advEl.classList.toggle("open");
+    advHead.querySelector(".caret").textContent = open ? "▾" : "▸";
+  });
+
+  const briefEl = body.querySelector("#nt-brief");
+  const expandBtn = body.querySelector("#nt-expand");
+  const briefHintEl = body.querySelector("#nt-brief-hint");
   const promptEl = body.querySelector("#nt-prompt");
   const blockedEl = body.querySelector("#nt-blocked");
   const modelEl = body.querySelector("#nt-model");
@@ -808,7 +840,43 @@ function openNewTaskModal(directoryId) {
   const planPreviewEl = body.querySelector("#nt-plan-preview");
   const tplEl = body.querySelector("#nt-template");
   const tplHintEl = body.querySelector("#nt-tpl-hint");
-  promptEl.focus();
+  // The idea box is the primary low-effort entry point, so start focus there.
+  briefEl.focus();
+
+  function showBriefHint(msg, isErr) {
+    briefHintEl.textContent = msg || "";
+    briefHintEl.classList.toggle("err", !!isErr);
+  }
+
+  // BRIEF → EXPAND. Turn the one-line idea into a proper, repo-grounded task prompt via
+  // the headless read-only claude behind POST /api/expand-brief, then drop the result
+  // into the prompt textarea for the operator to review/edit. A spinner runs while it
+  // works; on error the brief is left intact with a message so the operator can retry
+  // or just write the prompt by hand.
+  async function expand() {
+    const brief = briefEl.value.trim();
+    if (!brief) { showBriefHint("Type a one-line idea first.", true); briefEl.focus(); return; }
+    const prior = expandBtn.textContent;
+    expandBtn.disabled = true; expandBtn.classList.add("loading");
+    expandBtn.textContent = "Expanding…";
+    showBriefHint("Reading the repo and drafting a prompt…");
+    try {
+      const r = await api("POST", "/expand-brief", { brief, directory: directoryId });
+      promptEl.value = r.prompt || "";
+      showBriefHint("Expanded — review and edit the prompt below, then Create.");
+      promptEl.focus();
+    } catch (e) {
+      showBriefHint(e.message || "could not expand the brief", true);
+    } finally {
+      expandBtn.disabled = false; expandBtn.classList.remove("loading");
+      expandBtn.textContent = prior;
+    }
+  }
+  expandBtn.addEventListener("click", expand);
+  // Enter in the single-line idea box expands (rather than submitting nothing).
+  briefEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); expand(); }
+  });
 
   // Load the built-in templates and populate the picker. Selecting one fills the
   // prompt textarea with its body (placeholders intact) so the operator completes
