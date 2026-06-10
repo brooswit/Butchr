@@ -72,6 +72,18 @@ function taskChips(t, { plan = false, rolledBack = false } = {}) {
     + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
     + (rolledBack && t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : "");
 }
+// Renders a task's organizational LABELS as a row of neutral chips (distinct from
+// the colored status chips), as an HTML string. Returns "" when the task has no
+// tags so callers can drop it in unconditionally. Tags are free-form operator
+// labels set at creation — purely for filtering/organizing the list.
+function tagChips(t) {
+  const tags = Array.isArray(t.tags) ? t.tags : [];
+  if (!tags.length) return "";
+  return `<span class="tag-chips">${tags
+    .map((g) => `<span class="chip tag">${esc(g)}</span>`)
+    .join("")}</span>`;
+}
+
 // The agent is live (attachable) whenever it has a herdr pane: running/idle, while
 // blocked on the request_review handshake in `review`, and during `finalizing` (its
 // post-merge wrap-up) until butchr closes the pane. Gating on herdr_pane_id mirrors
@@ -547,6 +559,10 @@ function openNewTaskModal(directoryId) {
       <span class="lbl">model (optional) — blank uses the default</span>
       <input type="text" id="nt-model" placeholder="e.g. opus, sonnet, haiku, or claude-opus-4-8" />
     </label>
+    <label class="field" style="margin-bottom:0">
+      <span class="lbl">tags (optional) — comma-separated labels for organizing/filtering</span>
+      <input type="text" id="nt-tags" placeholder="e.g. webapp, core, docs" />
+    </label>
     <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
       <input type="checkbox" id="nt-plan" />
       <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
@@ -566,6 +582,7 @@ function openNewTaskModal(directoryId) {
   const promptEl = body.querySelector("#nt-prompt");
   const blockedEl = body.querySelector("#nt-blocked");
   const modelEl = body.querySelector("#nt-model");
+  const tagsEl = body.querySelector("#nt-tags");
   const planEl = body.querySelector("#nt-plan");
   promptEl.focus();
 
@@ -579,10 +596,13 @@ function openNewTaskModal(directoryId) {
     const kind = planEl.checked ? "plan" : "task";
     // Optional model — omit when blank so the backend defaults it.
     const model = modelEl.value.trim() || null;
+    // Optional tags — split the comma-separated list into trimmed, non-empty labels
+    // (the backend de-dupes + validates).
+    const tags = tagsEl.value.split(",").map((s) => s.trim()).filter(Boolean);
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model });
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags });
       toast(kind === "plan" ? "plan task created" : "task created");
       close();
       render();
@@ -641,15 +661,28 @@ function historyOpen() {
 const FILTER_STATUSES = ["queued", "blocked", "running", "idle", "review", "finalizing", "failed", "merged", "aborted", "rejected"];
 let taskSearch = "";          // id substring filter (case-insensitive)
 let statusFilter = new Set(); // selected effStatus values; empty = all
+let tagFilter = new Set();    // selected tags; empty = all (ANY-match when non-empty)
 
 function filterActive() {
-  return taskSearch.trim() !== "" || statusFilter.size > 0;
+  return taskSearch.trim() !== "" || statusFilter.size > 0 || tagFilter.size > 0;
 }
 function taskMatchesFilter(t) {
   const q = taskSearch.trim().toLowerCase();
   if (q && !String(t.id).toLowerCase().includes(q)) return false;
   if (statusFilter.size && !statusFilter.has(effStatus(t))) return false;
+  // Tag filter is ANY-match: keep a task if it carries at least one selected tag.
+  if (tagFilter.size) {
+    const tags = Array.isArray(t.tags) ? t.tags : [];
+    if (!tags.some((g) => tagFilter.has(g))) return false;
+  }
   return true;
+}
+
+// The distinct set of tags across the directory's tasks, sorted, for the filter bar.
+function allTags(tasks) {
+  const set = new Set();
+  for (const t of tasks) for (const g of (Array.isArray(t.tags) ? t.tags : [])) set.add(g);
+  return [...set].sort();
 }
 
 // The filter bar: an id search box plus a row of toggleable status chips (reusing
@@ -692,8 +725,13 @@ function buildFilterBar(tasks, results) {
   clear.addEventListener("click", () => {
     taskSearch = "";
     statusFilter.clear();
+    tagFilter.clear();
     search.value = "";
     chips.querySelectorAll(".filter-chip").forEach((c) => {
+      c.classList.remove("active");
+      c.setAttribute("aria-pressed", "false");
+    });
+    if (tagRow) tagRow.querySelectorAll(".filter-chip").forEach((c) => {
       c.classList.remove("active");
       c.setAttribute("aria-pressed", "false");
     });
@@ -701,11 +739,40 @@ function buildFilterBar(tasks, results) {
     syncClear();
   });
   function syncClear() { clear.style.display = filterActive() ? "" : "none"; }
-  syncClear();
 
   bar.appendChild(search);
   chips.appendChild(clear);
   bar.appendChild(chips);
+
+  // Second chip row: one toggleable chip per distinct tag in this directory (ANY
+  // match). Only shown when the directory has any tagged tasks. A stale selection
+  // (a tag whose last task left the set) is harmlessly ignored — it just matches
+  // nothing — and is dropped here so the bar reflects the live tag universe.
+  const tags = allTags(tasks);
+  for (const g of [...tagFilter]) if (!tags.includes(g)) tagFilter.delete(g);
+  let tagRow = null;
+  if (tags.length) {
+    tagRow = el("div", { class: "filter-chips filter-tags" });
+    tagRow.appendChild(el("span", { class: "filter-tags-label muted" }, "tags"));
+    for (const g of tags) {
+      const c = el("button", {
+        type: "button",
+        class: "filter-chip chip tag" + (tagFilter.has(g) ? " active" : ""),
+        "aria-pressed": tagFilter.has(g) ? "true" : "false",
+      }, g);
+      c.addEventListener("click", () => {
+        if (tagFilter.has(g)) tagFilter.delete(g); else tagFilter.add(g);
+        const on = tagFilter.has(g);
+        c.classList.toggle("active", on);
+        c.setAttribute("aria-pressed", on ? "true" : "false");
+        renderResults(tasks, results);
+        syncClear();
+      });
+      tagRow.appendChild(c);
+    }
+    bar.appendChild(tagRow);
+  }
+  syncClear();
   return bar;
 }
 
@@ -794,7 +861,7 @@ function finishedList(tasks) {
     const row = el("a", { class: "finished-row", href: "#/task/" + esc(t.id) });
     row.innerHTML = `
       <span class="fr-id">${esc(t.id)}</span>
-      ${taskChips(t)}
+      ${taskChips(t)}${tagChips(t)}
       <span class="fr-when" title="${esc(finishedTime(t) || "")}">${esc(fmtTime(finishedTime(t)))}</span>`;
     list.appendChild(row);
   }
@@ -814,7 +881,7 @@ function tasksTable(tasks) {
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
       <td class="id">${esc(t.id)}</td>
-      <td>${taskChips(t)}</td>
+      <td>${taskChips(t)}${tagChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a>${
         herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
@@ -1129,7 +1196,8 @@ function boardCard(t, lane, byId) {
     <div class="bc-meta">
       <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
       ${termLink ? `<span class="bc-term">${termLink}</span>` : ""}
-    </div>`;
+    </div>
+    ${tagChips(t) ? `<div class="bc-tags">${tagChips(t)}</div>` : ""}`;
 
   if (lane.key === "blocked") {
     const ids = t.blocked_by || [];
@@ -1494,6 +1562,7 @@ async function renderTask(id) {
   const meta = el("div", { class: "panel" });
   meta.innerHTML = `<div class="meta-grid">
     <div class="k">status</div><div class="v">${esc(effStatus(t))}</div>
+    ${Array.isArray(t.tags) && t.tags.length ? `<div class="k">tags</div><div class="v">${tagChips(t)}</div>` : ""}
     <div class="k">created</div><div class="v">${esc(t.created_at || "—")}</div>
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>

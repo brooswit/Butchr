@@ -34,11 +34,14 @@ import { existsSync, readFileSync } from "node:fs";
 // merge — a blocked task with any dead blocker is stuck until the operator edits
 // its blocked_by set (see setBlockedBy). We Omit the raw column so the array shape
 // wins.
-export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks"> & {
+export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks" | "tags"> & {
   prompt: string;
   context: string[];
   review_notes: string;
   blocked_by: string[];
+  // Free-form organizational labels (the DB stores them as raw JSON TEXT). Empty
+  // array when none. Set at creation; the webapp + CLI filter on them. See `tags`.
+  tags: string[];
   // For a PLAN task, the ids of the sub-tasks it decomposed the request into (empty
   // for ordinary tasks / a plan that hasn't proposed yet). See proposeSubtasks.
   spawned_subtasks: string[];
@@ -137,6 +140,51 @@ export function parseBlockedBy(raw: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Parse the `tags` JSON-array TEXT column into a clean string[]. Identically shaped
+ * to blocked_by, but kept as its own name so the LABEL semantics are explicit at the
+ * call sites (and so a future tag-specific normalization has one place to live).
+ */
+export function parseTags(raw: string | null): string[] {
+  return parseBlockedBy(raw);
+}
+
+/**
+ * Normalize a free-form tag list for storage: coerce each entry to a trimmed string,
+ * drop blanks, and de-duplicate while preserving order. Defensive about input — a
+ * non-array (or undefined) yields []. Used by createTask so a stored tag set is always
+ * a clean array of non-empty strings.
+ */
+export function normalizeTags(tags: unknown): string[] {
+  if (!Array.isArray(tags)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of tags) {
+    const t = String(raw ?? "").trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Validate the optional `tags` field from an API body, then normalize it. Tags must
+ * be an array of strings (each ≤ 40 chars); anything else is a 400. Returns the
+ * cleaned set (trimmed, de-duped, blanks dropped). Absent/null → [].
+ */
+export function validateTags(tags: unknown): string[] {
+  if (tags === undefined || tags === null) return [];
+  if (!Array.isArray(tags) || tags.some((t) => typeof t !== "string")) {
+    throw new HttpError(400, "tags must be an array of strings");
+  }
+  const normalized = normalizeTags(tags);
+  if (normalized.some((t) => t.length > 40)) {
+    throw new HttpError(400, "each tag must be 40 characters or fewer");
+  }
+  return normalized;
 }
 
 /**
@@ -253,6 +301,7 @@ export function taskView(id: string): TaskView | null {
     context,
     review_notes,
     blocked_by,
+    tags: parseTags(row.tags),
     spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
     blockerStates: blockerStatesOf(blocked_by),
     deadBlockers: deadBlockerIds(blocked_by),
@@ -285,6 +334,7 @@ export function taskListView(directoryId: string): TaskListView[] {
     return {
       ...row,
       blocked_by,
+      tags: parseTags(row.tags),
       spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
       blockerStates: blockerStatesOf(blocked_by),
       deadBlockers: deadBlockerIds(blocked_by),
@@ -404,6 +454,7 @@ export async function createTask(
   blockedBy: string[] = [],
   kind: TaskKind = "task",
   model: string | null = null,
+  tags: string[] = [],
 ): Promise<TaskView> {
   const dir = getDirectory(directoryId);
   if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
@@ -411,6 +462,8 @@ export async function createTask(
     throw new HttpError(400, "prompt is required");
   }
   const taskModel = validateModel(model);
+  // Validate + normalize the organizational labels (trim/dedupe/length-cap).
+  const taskTags = validateTags(tags);
 
   // Normalize + validate the dependency set: every listed blocker must exist.
   const blockers = normalizeBlockedBy(blockedBy);
@@ -436,14 +489,23 @@ export async function createTask(
   await git.createWorktree(dir.path, id);
   writeTaskMd(
     dir.path,
-    { id, created, status, context, kind, model: taskModel },
+    { id, created, status, context, kind, model: taskModel, tags: taskTags },
     prompt,
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, directoryId, status, JSON.stringify(blockers), kind, taskModel, created);
+    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    directoryId,
+    status,
+    JSON.stringify(blockers),
+    kind,
+    taskModel,
+    JSON.stringify(taskTags),
+    created,
+  );
   recordTaskEvent(
     id,
     null,

@@ -22,6 +22,10 @@ export type TaskMeta = {
   // requested at creation and threaded into the agent launch (db.ts `model` column).
   // Absent/empty means "default" — no --model flag. Round-tripped in the front matter.
   model?: string | null;
+  // Optional free-form organizational LABELS attached at creation (db.ts `tags`
+  // column). Round-tripped in the front matter as a YAML list. Absent reads back as
+  // [] — existing task.md files (which carry no `tags:` line) parse unchanged.
+  tags?: string[];
 };
 
 export type TaskDoc = {
@@ -124,6 +128,12 @@ function serializeFrontMatter(meta: TaskMeta): string {
   // Only emit a model line when one was requested — an unset model omits it and
   // parses back as null (the default), keeping existing task.md files unchanged.
   if (meta.model) lines.push(`model: ${meta.model}`);
+  // Only emit a tags line when the task has labels — an empty/absent set omits it
+  // and parses back as [], keeping existing task.md files unchanged.
+  if (meta.tags && meta.tags.length) {
+    lines.push("tags:");
+    for (const t of meta.tags) lines.push(`  - ${t}`);
+  }
   if (meta.context.length === 0) {
     lines.push("context: []");
   } else {
@@ -201,6 +211,7 @@ export function parseTaskMd(raw: string): TaskDoc {
     context: [],
     kind: "task",
     model: null,
+    tags: [],
   };
 
   let rest = raw;
@@ -208,15 +219,20 @@ export function parseTaskMd(raw: string): TaskDoc {
   if (fm) {
     rest = raw.slice(fm[0].length);
     const fmLines = fm[1]!.split("\n");
-    let inContext = false;
+    // `context` and `tags` are both multi-line YAML lists; track which (if any) we're
+    // currently accumulating `- item` lines into.
+    let inList: "context" | "tags" | null = null;
+    // Parse an inline list `[a, b]` into a clean string array.
+    const inline = (val: string): string[] =>
+      val.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean);
     for (const line of fmLines) {
-      const ctxItem = line.match(/^\s*-\s+(.*)$/);
-      if (inContext && ctxItem) {
-        const v = ctxItem[1]!.trim();
-        if (v) meta.context.push(v);
+      const item = line.match(/^\s*-\s+(.*)$/);
+      if (inList && item) {
+        const v = item[1]!.trim();
+        if (v) (inList === "context" ? meta.context : meta.tags!).push(v);
         continue;
       }
-      inContext = false;
+      inList = null;
       const kv = line.match(/^(\w+):\s*(.*)$/);
       if (!kv) continue;
       const key = kv[1]!;
@@ -226,17 +242,12 @@ export function parseTaskMd(raw: string): TaskDoc {
       else if (key === "status") meta.status = (val as TaskStatus) || "queued";
       else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
       else if (key === "model") meta.model = val || null;
-      else if (key === "context") {
-        if (val === "" ) inContext = true;
-        else if (val === "[]") meta.context = [];
-        // inline list `context: [a, b]` support
-        else if (val.startsWith("[")) {
-          meta.context = val
-            .replace(/^\[|\]$/g, "")
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-        }
+      else if (key === "context" || key === "tags") {
+        const target: "context" | "tags" = key;
+        if (val === "") inList = target;
+        else if (val === "[]") meta[target] = [];
+        // inline list `context: [a, b]` / `tags: [a, b]` support
+        else if (val.startsWith("[")) meta[target] = inline(val);
       }
     }
   }

@@ -248,6 +248,20 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* `plan` is a task KIND, not a lifecycle status — a decomposition task that spawns
    sub-tasks. Reuse the review/info hue so it reads as an informational badge. */
 .chip.plan { background: var(--review); }
+/* `tag` is a free-form organizational LABEL, not a status — render it as a neutral
+   outlined pill (no uppercase, accent text) so it reads distinctly from the colored
+   status chips. */
+.chip.tag {
+  background: var(--panel-2);
+  color: var(--accent-2);
+  border: 1px solid var(--border);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+/* Inline cluster of tag chips shown next to a task's status/id across the views. */
+.tag-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 4px; vertical-align: middle; }
+.bc-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
@@ -378,6 +392,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   text-decoration: underline;
 }
 .filter-clear:hover { color: var(--text); }
+/* second filter row: toggleable tag chips (ANY-match). The leading label sets them
+   apart from the status row above. */
+.filter-tags-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-right: 2px; }
 
 /* history (collapsed terminal-state tasks) */
 .history-head {

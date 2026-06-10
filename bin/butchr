@@ -18,10 +18,12 @@ USAGE
 
 COMMANDS
   health                          Server health snapshot (exit 1 if degraded).
-  ls [--dir <id>] [--status <s>]  List tasks as a compact id/status/ci table.
+  ls [--dir <id>] [--status <s>]  List tasks as a compact id/status/ci/tags table.
+     [--tag a,b]                    Keep only tasks carrying any of the given tags.
   new <dir> -m <prompt>           Create a task in directory <dir> (id or path).
       [--blocked-by id,id]          Start it blocked on the given task ids.
-  show <id>                       Task detail: status, ci, summary, review notes.
+      [--tag a,b]                   Attach organizational labels (comma-separated).
+  show <id>                       Task detail: status, ci, tags, summary, notes.
   approve <id>                    Approve a task in review (merges its branch).
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
@@ -39,7 +41,7 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on"]);
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag"]);
 
 function parseArgs(argv) {
   const positionals = [];
@@ -212,6 +214,12 @@ async function cmdLs(flags) {
     tasks.push(...list);
   }
   if (flags.status) tasks = tasks.filter((t) => t.status === flags.status);
+  // --tag a,b keeps tasks carrying ANY of the given labels (OR semantics), matching
+  // the webapp's tag filter. An empty --tag '' is a no-op.
+  const wantTags = parseIdList(flags.tag);
+  if (wantTags.length) {
+    tasks = tasks.filter((t) => Array.isArray(t.tags) && t.tags.some((g) => wantTags.includes(g)));
+  }
   if (flags.json) {
     printJson(tasks);
     return;
@@ -221,6 +229,7 @@ async function cmdLs(flags) {
       { header: "ID", get: (t) => t.id },
       { header: "STATUS", get: (t) => (t.idle ? `${t.status}*` : t.status) },
       { header: "CI", get: (t) => ciBadge(t) },
+      { header: "TAGS", get: (t) => (t.tags && t.tags.length ? t.tags.join(",") : "-") },
     ]) + "\n",
   );
 }
@@ -232,9 +241,11 @@ async function cmdNew(positionals, flags) {
   if (!prompt) fail("new: missing -m <prompt>");
   const dirId = await resolveDirectoryId(dir);
   const blockedBy = parseIdList(flags["blocked-by"]);
+  const tags = parseIdList(flags.tag);
   const task = await api("POST", `/api/directories/${encodeURIComponent(dirId)}/tasks`, {
     prompt,
     blocked_by: blockedBy,
+    tags,
   });
   if (flags.json) {
     printJson(task);
@@ -257,6 +268,7 @@ async function cmdShow(positionals, flags) {
     `status:    ${t.status}${t.idle ? " (idle)" : ""}${t.conflict ? " (conflict)" : ""}`,
     `ci:        ${ciBadge(t)}`,
   ];
+  if (t.tags && t.tags.length) lines.push(`tags:      ${t.tags.join(", ")}`);
   if (t.blocked_by && t.blocked_by.length) {
     lines.push(`blocked_by: ${t.blocked_by.join(", ")}`);
     if (t.deadBlockers && t.deadBlockers.length) {

@@ -226,6 +226,18 @@ ensureColumn("tasks", "cost_usd", "REAL");
 ensureColumn("tasks", "diff_lines", "INTEGER");
 ensureColumn("tasks", "path_type", "TEXT");
 
+// `tags` is a JSON-array TEXT column holding a task's free-form LABELS — short
+// strings the operator attaches at creation to organize a growing task list
+// (e.g. "webapp", "core", "docs", "spike"). Purely organizational: nothing in the
+// dispatch/review/merge machinery reads them; they exist to be filtered on (the
+// webapp filter bar + the CLI `ls --tag`) and shown as chips. Settable only at
+// creation for now. NULL / "[]" means no tags. A JSON column (not a join table)
+// keeps it consistent with the additive single-column pattern used by `blocked_by`
+// / `spawned_subtasks` above. See tasks.ts (parseTags / normalizeTags) — surfaced
+// as a real string[] on the serialized TaskView, and round-tripped in task.md's
+// front matter (taskmd.ts).
+ensureColumn("tasks", "tags", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -288,6 +300,10 @@ export type TaskRow = {
   // Raw JSON-array TEXT of blocker task ids (or null). Parsed via
   // tasks.parseBlockedBy; surfaced as a real string[] on the serialized TaskView.
   blocked_by: string | null;
+  // Raw JSON-array TEXT of free-form organizational LABELS (or null). Parsed via
+  // tasks.parseTags; surfaced as a real string[] on the serialized TaskView. Set
+  // at creation; filtered on in the webapp + CLI. See the `tags` column comment.
+  tags: string | null;
   // CI GATE: build/test outcome captured on the review transition (see tasks.ts).
   // `ci_status` is 'running' | 'pass' | 'fail' | null; `ci_summary` carries a short
   // badge label on its first line plus an output tail. Surfaced on TaskView via the

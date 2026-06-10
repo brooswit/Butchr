@@ -435,6 +435,8 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   const kind = body.kind === "plan" ? "plan" : "task";
   // Optional model: an alias (opus/sonnet/haiku/fable) or full id, threaded into the
   // agent launch. Unset → claude's current default. Validated inside createTask.
+  // Optional tags: an array of free-form organizational labels (validated +
+  // normalized inside createTask) for filtering the task list.
   const view = await createTask(
     p.id!,
     body.prompt,
@@ -442,6 +444,7 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
     body.blocked_by ?? [],
     kind,
     body.model ?? null,
+    body.tags ?? [],
   );
   return json(view, 201);
 });
