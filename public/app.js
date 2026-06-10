@@ -97,6 +97,64 @@ function herdrIds(t) {
   return `<span class="herdr-ids">${pane}${tab}</span>`;
 }
 
+// ---------- collapsible panel ----------
+// Shared scaffold for the caret (▾ open / ▸ closed) + clickable head + toggle-body
+// pattern behind the Finished, CI-output, transcript, and live-output panels —
+// the one thing those four copied identically: the caret glyph, the open/closed
+// CSS-class flip, and (optionally) persisting the choice to localStorage. Each
+// panel keeps its own `body` node and its own body-fill / lazy-load / poll logic,
+// plugged in via `onToggle(open)` (fired on every user toggle) and re-applied by
+// the caller after construction.
+//
+// State is one CSS class on the panel. By default that class is `collapsed` and is
+// present when CLOSED (the panel convention); set `stateMeansOpen` for the inverted
+// Finished section, whose `open` class is present when OPEN. `meta` is the trailing
+// hint/count span. Returns { panel, head, caret, setOpen }; `setOpen(next, persist?)`
+// flips state programmatically.
+//
+// The diff-file cards deliberately do NOT use this: their caret is a static glyph
+// rotated by CSS (`.diff-file.collapsed .caret`), not flipped in JS, so routing
+// them through here would require a style.css change.
+function collapsible({
+  title = "",
+  titleClass,
+  meta,
+  metaClass,
+  body,
+  open = false,
+  panelClass = "",
+  headClass = "",
+  stateClass = "collapsed",
+  stateMeansOpen = false,
+  persistKey,
+  onToggle,
+} = {}) {
+  let isOpen = open;
+  const caret = el("span", { class: "caret" }, isOpen ? "▾" : "▸");
+  const headKids = [caret];
+  if (title) headKids.push(el("span", titleClass ? { class: titleClass } : {}, title));
+  if (meta != null) headKids.push(el("span", metaClass ? { class: metaClass } : {}, meta));
+  const head = el("button", { class: headClass, type: "button" }, headKids);
+  const panel = el("div", { class: panelClass }, body ? [head, body] : [head]);
+
+  const apply = () => {
+    panel.classList.toggle(stateClass, stateMeansOpen ? isOpen : !isOpen);
+    caret.textContent = isOpen ? "▾" : "▸";
+  };
+  apply();
+
+  const setOpen = (next, persist = true) => {
+    isOpen = next;
+    apply();
+    if (persist && persistKey) {
+      try { localStorage.setItem(persistKey, next ? "1" : "0"); } catch (e) { /* ignore */ }
+    }
+    if (onToggle) onToggle(next);
+  };
+  head.addEventListener("click", () => setOpen(!isOpen));
+  return { panel, head, caret, setOpen };
+}
+
 async function api(method, path, body) {
   const res = await fetch("/api" + path, {
     method,
@@ -574,9 +632,6 @@ function setDirView(v) {
 function historyOpen() {
   try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch (e) { return false; }
 }
-function setHistoryOpen(open) {
-  try { localStorage.setItem(HISTORY_KEY, open ? "1" : "0"); } catch (e) { /* ignore */ }
-}
 
 // ---------- task search + status filtering ----------
 // Filter state is kept in memory only, at module scope, so it survives the full
@@ -691,34 +746,35 @@ function renderResults(tasks, container) {
 // summary (id, final status, completed time), not the full active-task table.
 function historySection(tasks, filtering, totalCount) {
   const open = filtering ? tasks.length > 0 : historyOpen();
-  const sec = el("div", { class: "history" + (open ? " open" : "") , style: "margin-top:24px" });
   const countLabel = filtering ? `${tasks.length} of ${totalCount}` : String(totalCount);
-  const head = el("button", { class: "history-head", type: "button" }, [
-    el("span", { class: "caret" }, open ? "▾" : "▸"),
-    el("span", { class: "history-title" }, "Finished"),
-    el("span", { class: "history-count" }, countLabel),
-  ]);
   const body = el("div", { class: "history-body" });
   const fill = (node) => {
     node.innerHTML = "";
     if (tasks.length) node.appendChild(finishedList(tasks));
     else node.appendChild(el("div", { class: "empty" }, "No finished tasks match the filter."));
   };
-  if (open) fill(body);
 
-  head.addEventListener("click", () => {
-    const nowOpen = !sec.classList.contains("open");
-    sec.classList.toggle("open", nowOpen);
+  const { panel } = collapsible({
+    title: "Finished",
+    titleClass: "history-title",
+    meta: countLabel,
+    metaClass: "history-count",
+    body,
+    open,
+    panelClass: "history",
+    headClass: "history-head",
+    // The Finished section's state class is `open` (present when expanded), the
+    // inverse of the panel default.
+    stateClass: "open",
+    stateMeansOpen: true,
     // Only persist the collapse preference when not filtering — the filter-driven
     // auto-expand is transient and shouldn't overwrite the user's saved choice.
-    if (!filtering) setHistoryOpen(nowOpen);
-    head.querySelector(".caret").textContent = nowOpen ? "▾" : "▸";
-    if (nowOpen) fill(body); else body.innerHTML = "";
+    persistKey: filtering ? undefined : HISTORY_KEY,
+    onToggle: (nowOpen) => { if (nowOpen) fill(body); else body.innerHTML = ""; },
   });
-
-  sec.appendChild(head);
-  sec.appendChild(body);
-  return sec;
+  panel.setAttribute("style", "margin-top:24px");
+  if (open) fill(body);
+  return panel;
 }
 
 // The time a terminal-state task wrapped up: merged tasks report merged_at,
@@ -1094,16 +1150,14 @@ function ciBadge(t) {
   // Collapsible output tail (only when CI has settled with detail to show).
   if (detail && status !== "running") {
     const pre = el("pre", { class: "block ci-detail-body" }, detail);
-    const caret = el("span", { class: "caret" }, "▸");
-    const toggle = el("button", { class: "ci-detail-toggle", type: "button" }, [
-      caret, el("span", {}, "output"),
-    ]);
-    const det = el("div", { class: "ci-detail collapsed" }, [toggle, pre]);
-    toggle.addEventListener("click", () => {
-      const open = det.classList.toggle("collapsed");
-      caret.textContent = open ? "▸" : "▾";
+    const { panel } = collapsible({
+      title: "output",
+      body: pre,
+      open: false,
+      panelClass: "ci-detail",
+      headClass: "ci-detail-toggle",
     });
-    wrap.appendChild(det);
+    wrap.appendChild(panel);
   }
   return wrap;
 }
@@ -1243,15 +1297,7 @@ function renderTranscriptPanel(id) {
     transcriptState.loading = false;
   }
 
-  const caret = el("span", { class: "caret" }, transcriptOpen ? "▾" : "▸");
-  const head = el("button", { class: "transcript-head", type: "button" }, [
-    caret,
-    el("span", { class: "ts-title" }, "Agent transcript"),
-    el("span", { class: "ts-hint" }, "what the agent did · read-only"),
-  ]);
   const body = el("div", { class: "transcript-body" });
-  const panel = el("div",
-    { class: "panel transcript" + (transcriptOpen ? "" : " collapsed") }, [head, body]);
 
   const renderBody = () => {
     body.innerHTML = "";
@@ -1292,12 +1338,20 @@ function renderTranscriptPanel(id) {
     }
   };
 
-  head.addEventListener("click", () => {
-    transcriptOpen = !transcriptOpen;
-    panel.classList.toggle("collapsed", !transcriptOpen);
-    caret.textContent = transcriptOpen ? "▾" : "▸";
-    if (transcriptOpen && !transcriptState.loaded && !transcriptState.loading) load();
-    else renderBody();
+  const { panel } = collapsible({
+    title: "Agent transcript",
+    titleClass: "ts-title",
+    meta: "what the agent did · read-only",
+    metaClass: "ts-hint",
+    body,
+    open: transcriptOpen,
+    panelClass: "panel transcript",
+    headClass: "transcript-head",
+    onToggle: (open) => {
+      transcriptOpen = open;
+      if (open && !transcriptState.loaded && !transcriptState.loading) load();
+      else renderBody();
+    },
   });
 
   if (transcriptOpen) {
@@ -1468,14 +1522,6 @@ async function renderTask(id) {
     if (liveOutputCacheId !== t.id) { liveOutputCache = ""; liveOutputCacheId = t.id; }
     const pre = el("pre", { class: "block live-output-body" },
       liveOutputCache || "loading recent output…");
-    const caret = el("span", { class: "caret" }, liveOutputOpen ? "▾" : "▸");
-    const head = el("button", { class: "live-output-head", type: "button" }, [
-      caret,
-      el("span", { class: "lo-title" }, "Live output"),
-      el("span", { class: "lo-hint" }, "best-effort · updates every few seconds"),
-    ]);
-    const panel = el("div", { class: "panel live-output" + (liveOutputOpen ? "" : " collapsed") },
-      [head, pre]);
 
     const poll = async () => {
       try {
@@ -1490,11 +1536,19 @@ async function renderTask(id) {
     };
     const startPolling = () => { stopLiveOutput(); poll(); liveOutputTimer = setInterval(poll, 2500); };
 
-    head.addEventListener("click", () => {
-      liveOutputOpen = !liveOutputOpen;
-      panel.classList.toggle("collapsed", !liveOutputOpen);
-      caret.textContent = liveOutputOpen ? "▾" : "▸";
-      if (liveOutputOpen) startPolling(); else stopLiveOutput();
+    const { panel } = collapsible({
+      title: "Live output",
+      titleClass: "lo-title",
+      meta: "best-effort · updates every few seconds",
+      metaClass: "lo-hint",
+      body: pre,
+      open: liveOutputOpen,
+      panelClass: "panel live-output",
+      headClass: "live-output-head",
+      onToggle: (open) => {
+        liveOutputOpen = open;
+        if (open) startPolling(); else stopLiveOutput();
+      },
     });
     if (liveOutputOpen) startPolling();
     wrap.appendChild(panel);

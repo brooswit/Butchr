@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and flagged for same-file sequencing. Report only — no code changes.
 
 ### Changed
+- **Internal: collapsible webapp panels now share one `collapsible()` helper**
+  (`public/app.js`). The caret (▾ open / ▸ closed) + clickable head + toggle-body
+  pattern was copied across the Finished section, the CI-output detail, the agent
+  transcript, and the live-output panel — each re-wiring its own caret-glyph flip,
+  open/closed class toggle, and localStorage persistence. That mechanic now lives
+  once in `collapsible({ title, meta, body, open, persistKey, onToggle, … })`; each
+  panel keeps its own body-fill / lazy-load / poll logic and just plugs in. No
+  behavior change — the same panels open, close, persist, and lazy-load exactly as
+  before (the diff-file cards keep their CSS-rotated caret and are intentionally
+  left out). (CLEANUP C6).
 - **The CI gate and the post-merge verify gate now share one build+test gate
   runner** (`src/gate.ts` `runGate`). The two gates had each re-implemented "spawn a
   build/test command in a cwd, bound it, collect combined output" and **drifted**: the
