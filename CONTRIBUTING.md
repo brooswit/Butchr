@@ -14,6 +14,9 @@ This doc is the **how to hack on it** companion to the two reference docs:
 - **[OPERATIONS.md](./OPERATIONS.md)** — running, restarting, and recovering a
   live butchr (supervisor, systemd, health, self-heal). Read it when you need to
   drive a running instance.
+- **[CHANGELOG.md](./CHANGELOG.md)** — the release history (Keep a Changelog). You
+  add to its `[Unreleased]` section on **every** change — that rule, and the rest
+  of the living-docs convention, is [§6](#6-living-docs-update-on-every-change).
 
 ---
 
@@ -31,7 +34,7 @@ delegated to **herdr**.
   herdr TUI) — required for *dispatch* to make progress. butchr starts fine
   without it and resumes dispatch automatically once herdr is reachable, but no
   task moves past `queued` while herdr is down. You can run, build, type-check,
-  and `bun test` without a live herdr (tests stub it out — see §6).
+  and `bun test` without a live herdr (tests stub it out — see §5).
 
 **Run it** from the repo root:
 
@@ -225,7 +228,56 @@ to exactly `bun build src/index.ts --target bun --outfile /dev/null && bun test`
 
 ---
 
-## 6. Contribution workflow
+## 6. Living docs: update on every change
+
+> **The golden rule of contributing to butchr: docs are part of the change, not a
+> follow-up.** A code change is not "done" until the living docs move with it. The
+> CI/verify gates only check that it builds and tests pass — keeping the docs
+> honest is on you, and a reviewer will send a change back for skipping it.
+
+butchr keeps three living artifacts in lockstep with the code. **Every change**
+that touches behavior, architecture, an interface, config, or the data model
+**must** do all three of the following **in the same change**:
+
+**(a) Update [SPEC.md](./SPEC.md) to reflect the new/changed behavior.** SPEC.md is
+a **living design doc**, not a one-time write-up — it is meant to describe butchr
+*as it actually exists in the tree right now*. When you add, change, or remove
+behavior, an endpoint, an SSE event, an MCP tool, a `BUTCHR_*` config var, a DB
+column, or a state-machine transition, edit the matching section of SPEC.md so it
+never lags the code. There are pointers throughout §4 ("How to add things") to the
+exact SPEC.md table for each kind of change (route → §6.1, config → §8, column →
+§7, webapp → §6.5). Pure-internal refactors that change no observable behavior
+don't need a SPEC edit — but if in doubt, update it.
+
+**(b) Add a [CHANGELOG.md](./CHANGELOG.md) entry under `[Unreleased]`.** The
+changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/): put a
+short, user-facing bullet under the `[Unreleased]` heading at the top, grouped by
+type — **Added** (new features), **Changed** (changes to existing behavior),
+**Deprecated**, **Removed**, **Fixed** (bug fixes), **Security**. Write for the
+reader of the release notes, not the diff: *what changed and why it matters*, not
+which files you touched. One change can produce one or several bullets. Create the
+missing type sub-heading under `[Unreleased]` if it isn't there yet.
+
+**(c) Bump the `version` in [package.json](./package.json) per
+[SemVer](https://semver.org/) when releasing.** Day-to-day changes just accumulate
+under `[Unreleased]`; **at release time** you (1) rename `[Unreleased]` to the new
+`[x.y.z] - YYYY-MM-DD` heading, (2) start a fresh empty `[Unreleased]` above it,
+and (3) set `package.json` `version` to the same `x.y.z`. Pick the bump by impact
+while the project is **pre-1.0** (`0.y.z`): a backwards-incompatible
+interface/config/data-model change bumps the **minor** (`0.y`), and a
+backwards-compatible feature or fix bumps the **patch** (`0.y.z`). The reserved
+`major` bump to `1.0.0` is the future "interfaces are now stable" promise. You do
+**not** need to hand-edit any code for the version — `/health` reads
+`package.json` at import, so bumping the file is enough for the API to report the
+new version.
+
+Keep all three honest and the repo stays self-describing: SPEC.md answers *how it
+works now*, CHANGELOG.md answers *what changed and when*, and the version answers
+*which surface you're on*.
+
+---
+
+## 7. Contribution workflow
 
 butchr work is organized as **tasks** (see SPEC.md) — each task is a git worktree
 on its own branch, and the agent working it submits for review via the
@@ -235,10 +287,11 @@ on its own branch, and the agent working it submits for review via the
    /dev/null` **and** `bun test` (§5). The **CI gate** runs these in the task's
    worktree on submission and writes an advisory pass/fail badge; it does not
    hard-block, but a red badge is a signal to fix before merge.
-2. **Update SPEC.md (and CHANGELOG/version where the project tracks them) in the
-   same change.** SPEC.md is the living design doc — if you change behavior,
-   config, the data model, or an interface, reflect it there so the docs never
-   lag the code.
+2. **Move the living docs in the same change** — this is mandatory, see
+   [§6](#6-living-docs-update-on-every-change): update **SPEC.md** to reflect any
+   new/changed behavior, add a **CHANGELOG.md** `[Unreleased]` entry, and **bump
+   the version** per semver when releasing. A change that doesn't carry its docs
+   gets sent back.
 3. **Review → merge.** A reviewer approves or requests changes. On **approve**,
    butchr rebases the branch onto the current default tip and **fast-forwards**
    (linear history), then runs the **post-merge verify gate**
@@ -260,7 +313,7 @@ machinery and [OPERATIONS.md](./OPERATIONS.md) for driving a live instance.
 
 ---
 
-## 7. Gotchas
+## 8. Gotchas
 
 - **Don't inline big context into the agent prompt / don't pass huge prompts.**
   The rendered prompt is handed to the agent as a single shell argv via
