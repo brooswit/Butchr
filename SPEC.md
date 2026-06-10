@@ -734,7 +734,8 @@ hash-routed and SSE-driven. Views/features:
 - **Directory view** — its tasks with three layouts (list/table, **board** by
   lane, and a dependency **graph** via `graphLevels`), a filter bar, a queue line,
   a collapsible history section, and a **new-task modal** (prompt, context-file
-  selector, blocked-by, model).
+  selector, blocked-by, model). Graph nodes that gate dependents carry an inline
+  **sub-tree merge-progress bar** (merged fraction of their transitive dependents).
 - **Task detail** — status/CI/summary, the rendered **diff** (`/api/tasks/:id/diff`,
   parsed + highlighted), the **timeline** (`/api/tasks/:id/events`), model/tokens/
   cost labels, a rough **duration estimate** (an *est. duration* row from
@@ -742,8 +743,11 @@ hash-routed and SSE-driven. Views/features:
   from `/api/tasks/:id/estimate` — see §10), live output, a collapsible **Agent
   transcript** panel (`/api/tasks/:id/transcript`, lazily fetched + paged:
   role-labelled prose, thinking, compact tool calls + truncated results, monospace +
-  read-only), approve/reject/abort/requeue/rollback controls, and an **Open
-  terminal** button (running tasks).
+  read-only), a **sub-task progress rollup** (for a task that gates dependents: an
+  "N/M merged" fraction, a progress bar, and the direct children with their live
+  statuses — computed client-side from the directory's task list, so no extra API
+  field), approve/reject/abort/requeue/rollback controls, and an **Open terminal**
+  button (running tasks).
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
   and the conflict/revert/CI-pass/auto-merge rates.
 - **Chrome** — light/dark theme toggle (persisted, applied pre-paint), a live

@@ -282,6 +282,23 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* rough critical-path duration estimate shown atop a blocked / spawned panel. */
 .chain-est { font-size: 13px; margin: -2px 0 8px; }
 
+/* sub-task progress rollup (task detail) — a task that gates dependents shows how
+   far its sub-tree has merged: an "N/M merged" fraction, a progress bar, and the
+   direct children (reusing the .blockers / .blocker-row list styling). */
+.panel.rollup-panel { border-left: 3px solid var(--merged); }
+.panel.rollup-panel h2 { color: var(--merged); }
+.rollup-summary { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.rollup-frac { font-weight: 600; }
+.rollup-bar {
+  height: 8px; margin: 8px 0 4px;
+  background: var(--border); border-radius: 999px; overflow: hidden;
+}
+.rollup-bar-fill {
+  height: 100%; background: var(--merged); border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.rollup-nested { font-size: 12px; margin-bottom: 2px; }
+
 /* audit timeline (task detail) — a compact vertical list of status transitions.
    Each event has a status-colored dot on a connecting rail, the transition chips,
    a relative timestamp, and the note explaining the move. */
@@ -432,6 +449,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   letter-spacing: 0.04em; text-transform: uppercase;
   text-anchor: middle; dominant-baseline: middle; pointer-events: none;
 }
+/* sub-tree merge-progress bar drawn inside nodes that gate dependents */
+.tg-node .tg-prog-track { fill: rgba(0, 0, 0, 0.28); }
+.tg-node .tg-prog-fill { fill: rgba(255, 255, 255, 0.92); }
 .tg-node.queued .tg-rect { fill: var(--queued); }
 .tg-node.blocked .tg-rect { fill: var(--blocked); }
 .tg-node.running .tg-rect { fill: var(--running); }

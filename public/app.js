@@ -858,6 +858,37 @@ function buildViewToggle(repaint) {
   return bar;
 }
 
+// Reverse the blocked_by edges into a dependents map: blocker id → [ids of tasks
+// that list it in their blocked_by]. Used to walk a plan's sub-task graph the
+// other way (from a gating task down to what it gates) for the progress rollup and
+// the graph-node annotations. Purely client-side from the already-fetched list.
+function reverseDeps(tasks) {
+  const m = new Map();
+  for (const t of tasks) {
+    for (const b of (t.blocked_by || [])) {
+      if (!m.has(b)) m.set(b, []);
+      m.get(b).push(t.id);
+    }
+  }
+  return m;
+}
+
+// The transitive set of task ids a given task GATES — every task that lists it
+// (directly or through a chain) in blocked_by. BFS over the reversed edges; the
+// `seen` set both collects the result and guards against a stray cycle. The root
+// itself is excluded.
+function gatedSubtree(rootId, dependentsOf) {
+  const seen = new Set();
+  const queue = [...(dependentsOf.get(rootId) || [])];
+  while (queue.length) {
+    const id = queue.shift();
+    if (id === rootId || seen.has(id)) continue;
+    seen.add(id);
+    for (const d of (dependentsOf.get(id) || [])) if (!seen.has(d)) queue.push(d);
+  }
+  return seen;
+}
+
 // Assign each node a column (level) = longest blocker-chain depth, so blockers sit
 // strictly left of the tasks they block (a layered topological layout). Roots
 // (no in-graph blockers) land at level 0. The backend forbids dependency cycles,
@@ -891,6 +922,9 @@ function graphLevels(nodeIds, edges) {
 function renderGraph(tasks) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+  // Reversed edges over the WHOLE list (not just the graphed subset) so a node's
+  // sub-tree progress counts dependents that have already merged off the graph.
+  const dependentsOf = reverseDeps(tasks);
 
   // Node set: every non-terminal task, plus any of their blockers that exist in
   // this directory (so each edge has a node to land on — a merged blocker shows up
@@ -968,15 +1002,33 @@ function renderGraph(tasks) {
     const t = byId.get(id);
     const p = pos.get(id);
     const st = effStatus(t);
+    // Sub-tree this node gates: how many of its transitive dependents have merged.
+    // Nodes that gate nothing get no bar and keep the plain two-line layout.
+    const subIds = gatedSubtree(id, dependentsOf);
+    const subTotal = subIds.size;
+    let subMerged = 0;
+    for (const sid of subIds) if ((byId.get(sid) || {}).status === "merged") subMerged++;
+    const prog = subTotal ? ` · ${subMerged}/${subTotal} merged` : "";
+    // When a bar is present the two text lines shift up to make room for it.
+    const idY = NH / 2 - (subTotal ? 5 : 3);
+    const stY = NH / 2 + (subTotal ? 8 : 11);
     const g = svg("g", {
       class: "tg-node " + st, transform: `translate(${p.x},${p.y})`,
-      tabindex: "0", role: "link", "aria-label": `${id} — ${st}`,
+      tabindex: "0", role: "link", "aria-label": `${id} — ${st}${prog}`,
     });
-    g.appendChild(svg("title", {}, `${id} · ${st}${t.kind === "plan" ? " · plan" : ""}`));
+    g.appendChild(svg("title", {}, `${id} · ${st}${t.kind === "plan" ? " · plan" : ""}${prog}`));
     g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
-    g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: NH / 2 - 3 }, id));
-    g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: NH / 2 + 11 },
+    g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: idY }, id));
+    g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY },
       st + (t.kind === "plan" ? " · plan" : "")));
+    if (subTotal) {
+      const bw = NW - 16;
+      g.appendChild(svg("rect", { class: "tg-prog-track", x: 8, y: NH - 5, width: bw, height: 3, rx: 1.5 }));
+      g.appendChild(svg("rect", {
+        class: "tg-prog-fill", x: 8, y: NH - 5, height: 3, rx: 1.5,
+        width: Math.round((bw * subMerged) / subTotal),
+      }));
+    }
     const go = () => { location.hash = "#/task/" + id; };
     g.addEventListener("click", go);
     g.addEventListener("keydown", (ev) => {
@@ -1347,6 +1399,57 @@ function renderTranscriptPanel(id) {
   return panel;
 }
 
+// Sub-task PROGRESS ROLLUP — for a task that GATES others (its id appears in their
+// blocked_by, e.g. the children a plan decomposed into), summarize how far the
+// dependent sub-tree has landed. Walks the reversed edges of the directory's task
+// list (no extra API field needed) to find the transitive sub-tree, then counts the
+// merged ones. Returns null when the task gates nothing, so a leaf task shows no
+// rollup. `direct` is the immediate dependents (for the per-child status list);
+// `total`/`merged` cover the whole transitive sub-tree.
+function dependentRollup(rootId, tasks) {
+  const dependentsOf = reverseDeps(tasks);
+  const directIds = dependentsOf.get(rootId) || [];
+  if (directIds.length === 0) return null;
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const subtree = [...gatedSubtree(rootId, dependentsOf)].map((sid) => byId.get(sid)).filter(Boolean);
+  const direct = directIds.map((did) => byId.get(did)).filter(Boolean);
+  const merged = subtree.filter((t) => t.status === "merged").length;
+  return { direct, total: subtree.length, merged };
+}
+
+// Render the sub-task progress rollup panel: "N/M merged", a progress bar, and the
+// direct dependents with their live statuses (so a plan's progress reads at a
+// glance). Live-updates for free — the task page re-renders on every SSE event.
+// Returns null when there's nothing to roll up.
+function rollupPanel(rollup) {
+  if (!rollup) return null;
+  const { direct, total, merged } = rollup;
+  const pct = total ? Math.round((merged / total) * 100) : 0;
+  const panel = el("div", { class: "panel rollup-panel" });
+  panel.appendChild(el("h2", { style: "margin-top:0" }, "Sub-task progress"));
+  panel.appendChild(el("div", { class: "rollup-summary" }, [
+    el("span", { class: "rollup-frac" }, `${merged}/${total} merged`),
+    el("span", { class: "rollup-pct muted" }, `${pct}%`),
+  ]));
+  panel.appendChild(el("div", { class: "rollup-bar", role: "progressbar",
+    "aria-valuenow": String(merged), "aria-valuemin": "0", "aria-valuemax": String(total) }, [
+    el("div", { class: "rollup-bar-fill", style: `width:${pct}%` }),
+  ]));
+  const nested = total - direct.length;
+  if (nested > 0) {
+    panel.appendChild(el("div", { class: "rollup-nested muted" },
+      `${direct.length} direct · +${nested} nested sub-task${nested === 1 ? "" : "s"}`));
+  }
+  const list = el("div", { class: "blockers" });
+  for (const c of direct) {
+    const row = el("div", { class: "blocker-row" });
+    row.innerHTML = `<a class="bk-id" href="#/task/${esc(c.id)}">${esc(c.id)}</a>${chip(effStatus(c))}`;
+    list.appendChild(row);
+  }
+  panel.appendChild(list);
+  return panel;
+}
+
 async function renderTask(id) {
   const t = await api("GET", "/tasks/" + id);
   const dirs = await api("GET", "/directories");
@@ -1462,6 +1565,16 @@ async function renderTask(id) {
     panel.appendChild(list);
     wrap.appendChild(panel);
   }
+
+  // sub-task progress rollup — if this task GATES others (its id is in their
+  // blocked_by), summarize how far the dependent sub-tree has merged: a fraction, a
+  // progress bar, and the direct children with their statuses. Computed purely
+  // client-side from the directory's task list (no extra API field); best-effort —
+  // a fetch failure just omits the panel — and nothing renders for a task with no
+  // dependents. Re-fetched on each render so it live-updates via the SSE re-render.
+  const siblings = await api("GET", "/directories/" + t.directory_id + "/tasks").catch(() => null);
+  const rollup = siblings ? dependentRollup(t.id, siblings) : null;
+  if (rollup) wrap.appendChild(rollupPanel(rollup));
 
   // prompt
   wrap.appendChild(el("h2", {}, "Prompt"));
