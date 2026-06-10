@@ -260,6 +260,154 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   };
 }
 
+/**
+ * Whether the task branch is BEHIND the default branch — i.e. the current
+ * default-branch tip is NOT already contained in the task branch. A freshly
+ * created worktree branches from the current default HEAD, so it is up to date
+ * and this returns false; it returns true only for a branch cut from a STALE
+ * default tip (e.g. a chained/blocked task whose worktree was created before its
+ * blockers merged). Used as the cheap, lock-free gate in front of the (serialized)
+ * pre-dispatch rebase so up-to-date branches never pay for the merge queue.
+ */
+export async function isBehindDefault(dir: string, taskId: string): Promise<boolean> {
+  const base = await defaultBranch(dir);
+  // `merge-base --is-ancestor <base> <taskId>` exits 0 iff base is an ancestor of
+  // (or equal to) the task branch — meaning the branch already contains the tip.
+  const anc = await run([
+    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
+  ]);
+  return !anc.ok;
+}
+
+export type RebaseResult = {
+  // The branch is safely based on the current default tip after this call (either
+  // it was moved cleanly, or it already was up to date, or we deliberately left a
+  // dirty worktree untouched). false only on a conflict or a hard git error.
+  ok: boolean;
+  // True iff the branch base was actually moved (reset or rebased) this call.
+  rebased: boolean;
+  // True iff a rebase hit a conflict; the rebase was aborted, so the branch +
+  // worktree are left CLEAN on their ORIGINAL base (nothing clobbered).
+  conflict: boolean;
+  // True iff we skipped because the worktree had uncommitted changes we must not
+  // clobber — left as-is for the merge-time rebase (which commits first) to handle.
+  skippedDirty: boolean;
+  message: string;
+  conflictFiles: string[];
+};
+
+/**
+ * AUTO-REBASE a task branch onto the CURRENT default-branch tip, before its agent
+ * runs. Closes the chained-task conflict gap: a branch cut from a stale default
+ * HEAD (before its blockers merged) would otherwise only collide at the final
+ * merge. By bringing it up to the tip up front, the agent works on the merged
+ * state and a collision surfaces now (as a conflict the caller can route to the
+ * agent) instead of at merge time.
+ *
+ * Safety (never clobber uncommitted work — mirrors how merge() guards its tree):
+ *   - No worktree, or already up to date          → no-op (ok, rebased=false).
+ *   - Uncommitted changes in the worktree         → SKIP (skippedDirty); the
+ *     merge-time rebase, which commits first, integrates the base later.
+ *   - No commits beyond base (never really started, e.g. a fresh/blocked task on a
+ *     stale base) → hard-reset the branch onto the tip (a clean fresh start).
+ *   - Has commits → REBASE them onto the tip. On CONFLICT, abort (branch + worktree
+ *     left CLEAN on the original base, default branch UNTOUCHED) and report the
+ *     conflicting files so the caller can hand resolution to the agent.
+ *
+ * Reads the default branch but never moves it; callers serialize this through the
+ * merge queue so it can't race a concurrent merge advancing the default ref.
+ */
+export async function rebaseOntoDefault(
+  dir: string,
+  taskId: string,
+): Promise<RebaseResult> {
+  const base = await defaultBranch(dir);
+  const wt = worktreePath(dir, taskId);
+  const noop = (over: Partial<RebaseResult> = {}): RebaseResult => ({
+    ok: true,
+    rebased: false,
+    conflict: false,
+    skippedDirty: false,
+    message: "",
+    conflictFiles: [],
+    ...over,
+  });
+
+  // No worktree yet → nothing to rebase (createWorktree branches a fresh one from
+  // the current tip when it makes one).
+  if (!existsSync(wt)) return noop();
+
+  // Already contains the current default tip → nothing to do.
+  const anc = await run([
+    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
+  ]);
+  if (anc.ok) return noop();
+
+  // CAUTION: never clobber uncommitted worktree changes. If the agent left dirty
+  // state, skip the pre-dispatch rebase entirely and let the merge-time rebase
+  // (which auto-commits first) integrate the base later.
+  const st = await run([git, "-C", wt, "status", "--porcelain"]);
+  if (st.ok && st.stdout.trim().length > 0) {
+    return noop({
+      skippedDirty: true,
+      message: `skipped rebase of ${taskId}: uncommitted changes in worktree`,
+    });
+  }
+
+  // Count commits unique to the task branch. Zero → it never advanced past its
+  // (now stale) creation base, so there is no real work: hard-reset it onto the
+  // current tip for a clean fresh start atop the merged blockers.
+  const count = await run([
+    git, "-C", dir, "rev-list", "--count", `${base}..${taskId}`,
+  ]);
+  const hasCommits = count.ok && parseInt(count.stdout.trim(), 10) > 0;
+
+  if (!hasCommits) {
+    const reset = await run([git, "-C", wt, "reset", "--hard", base]);
+    if (reset.ok) {
+      return noop({ rebased: true, message: `reset ${taskId} onto ${base}` });
+    }
+    return {
+      ok: false,
+      rebased: false,
+      conflict: false,
+      skippedDirty: false,
+      message: (reset.stderr || reset.stdout).trim() || `reset ${taskId} onto ${base} failed`,
+      conflictFiles: [],
+    };
+  }
+
+  // Has real commits — rebase them onto the current tip. Run in the worktree where
+  // the task branch is checked out.
+  const rb = await run([git, "-C", wt, "rebase", base]);
+  if (rb.ok) {
+    return noop({ rebased: true, message: `rebased ${taskId} onto ${base}` });
+  }
+
+  // Conflict (or other rebase failure). Collect the unmerged files before aborting.
+  const unmerged = await run([
+    git, "-C", wt, "diff", "--name-only", "--diff-filter=U",
+  ]);
+  let conflictFiles = unmerged.ok
+    ? unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+    : [];
+  if (conflictFiles.length === 0) {
+    conflictFiles = parseConflictFiles(rb.stdout + "\n" + rb.stderr);
+  }
+  // Abort so the branch + worktree are left CLEAN on their original base.
+  await run([git, "-C", wt, "rebase", "--abort"]);
+  const combined = rb.stdout + "\n" + rb.stderr;
+  const conflict = /conflict/i.test(combined) || conflictFiles.length > 0;
+  return {
+    ok: false,
+    rebased: false,
+    conflict,
+    skippedDirty: false,
+    message: (rb.stderr || rb.stdout).trim() || `rebase onto ${base} failed`,
+    conflictFiles,
+  };
+}
+
 /** Current commit SHA of HEAD at `dir` (the default-branch tip when run at the repo root). */
 export async function headSha(dir: string): Promise<string> {
   const res = await run([git, "-C", dir, "rev-parse", "HEAD"]);

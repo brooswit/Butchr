@@ -22,7 +22,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, reevaluateBlockedTask, setIdle } from "./tasks.ts";
+import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, prepareBranchForDispatch, reevaluateBlockedTask, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -406,6 +406,28 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
 
     // Ensure the worktree exists (idempotent — handles rejected re-runs).
     const worktree = await git.createWorktree(dir.path, task.id);
+
+    // AUTO-REBASE onto the current default tip BEFORE the agent runs, so a branch
+    // cut from a stale default HEAD (a chained/blocked task created before its
+    // blockers merged) never works on a stale base and only collides at final
+    // merge. Clean rebase/reset → proceed on the fresh base. A CONFLICT is NOT
+    // silently launched on a blind base: prepareBranchForDispatch records a
+    // conflict-resolution note (read by the resumed agent), and we proceed to
+    // launch so the agent integrates the base with fresh context (aborting here
+    // would just re-conflict next tick and loop).
+    const prep = await prepareBranchForDispatch(task.id);
+    if (prep.conflict) {
+      console.warn(
+        `[butchr] task ${task.id}: branch was behind the default tip and the ` +
+          `auto-rebase CONFLICTS — launching the agent with a conflict-resolution ` +
+          `note so it integrates the base (not silently dispatched on a stale base)`,
+      );
+    } else if (prep.rebased) {
+      console.log(
+        `[butchr] task ${task.id}: auto-rebased branch onto the current default ` +
+          `tip before dispatch`,
+      );
+    }
 
     // First launch vs. rework re-launch, plus the fully-substituted agent
     // command — all decided by resolveLaunchCommand (the single source of truth

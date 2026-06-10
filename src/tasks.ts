@@ -463,6 +463,81 @@ function buildConflictNotes(
   ].join("\n");
 }
 
+/** Outcome of the pre-dispatch auto-rebase (see prepareBranchForDispatch). */
+export type BranchPrep = {
+  // The branch is safely based on the current default tip (clean rebase/reset, an
+  // up-to-date branch, or a deliberately-untouched dirty worktree). On a conflict
+  // this is false but dispatch still proceeds — see below.
+  ok: boolean;
+  // True iff the branch base was actually moved this call.
+  rebased: boolean;
+  // True iff the auto-rebase conflicted: we did NOT silently launch on a blind
+  // base — an actionable conflict note was recorded so the (re-launched) agent
+  // integrates the base and resolves with fresh context, rather than letting the
+  // collision surface only at the final merge.
+  conflict: boolean;
+};
+
+/**
+ * AUTO-REBASE before an agent runs. The dispatcher calls this for EVERY task right
+ * before launching its agent (fresh, freshly-unblocked, or rework), closing the
+ * chained-task conflict gap: a branch cut from a STALE default HEAD (before its
+ * blockers merged) would otherwise only collide at the final merge, even though
+ * the chain ran the task AFTER its blockers merged. By bringing the branch up to
+ * the current default tip up front, the agent works on the merged state.
+ *
+ * Delegates the actual git work to git.rebaseOntoDefault (up-to-date / dirty →
+ * no-op; no commits → reset onto the tip; has commits → rebase onto the tip). The
+ * rebase is serialized through the global merge queue so it can't race a merge
+ * advancing the default ref, but only AFTER a cheap lock-free isBehindDefault
+ * check so the overwhelmingly common up-to-date branch never touches the queue.
+ *
+ * On a rebase CONFLICT we route it through the same channel reject / merge-conflict
+ * use: append an actionable conflict note to task.md + review_note so the agent
+ * resolves it (the dispatch is a `--resume`, since only a task with commits can
+ * conflict and such a task has already run). Dispatch then proceeds to LAUNCH the
+ * agent with that note rather than aborting (which would just re-conflict on the
+ * next tick and loop) — the agent integrates the base and re-submits, and the
+ * merge-time rebase is then clean. Returns the outcome for logging/tests.
+ */
+export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> {
+  const row = getTask(id);
+  if (!row) return { ok: true, rebased: false, conflict: false };
+  const dir = getDirectory(row.directory_id);
+  if (!dir) return { ok: true, rebased: false, conflict: false };
+
+  // Cheap, lock-free gate: a freshly-created worktree already contains the tip, so
+  // skip the merge queue entirely for it (the common case).
+  if (!(await git.isBehindDefault(dir.path, id))) {
+    return { ok: true, rebased: false, conflict: false };
+  }
+
+  // Behind the tip → do the move under the merge queue so it can't interleave with
+  // a concurrent merge advancing the default ref (rebaseOntoDefault re-checks the
+  // ancestor relationship inside, since the tip may have advanced before we ran).
+  const res = await runExclusiveMerge(() => git.rebaseOntoDefault(dir.path, id));
+
+  if (res.conflict) {
+    const base = await git.defaultBranch(dir.path);
+    const note = buildConflictNotes(id, base, res.conflictFiles, res.message);
+    // Surface it (NOT a silent dispatch): record the note in task.md (the resumed
+    // agent reads it via renderReworkPrompt) and in review_note for the UI.
+    appendRejection(dir.path, id, note, nowIso());
+    db.query(`UPDATE tasks SET review_note=? WHERE id=?`).run(note, id);
+    emitUpdated(id);
+    return { ok: false, rebased: false, conflict: true };
+  }
+  if (!res.ok) {
+    // Hard git error (not a conflict). Leave the branch as-is and let dispatch
+    // proceed — the merge-time rebase gate still protects the default branch.
+    console.warn(
+      `[butchr] pre-dispatch rebase of ${id} failed (non-conflict): ${res.message}`,
+    );
+    return { ok: false, rebased: false, conflict: false };
+  }
+  return { ok: true, rebased: res.rebased, conflict: false };
+}
+
 export async function approveTask(id: string): Promise<ApproveOutcome> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
