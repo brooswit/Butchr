@@ -1048,6 +1048,149 @@ export async function triggerCi(id: string): Promise<void> {
     .run(result.status, summary, id);
   if (res.changes === 0) return;
   emitUpdated(id);
+
+  // AUTO-MERGE HOOK: CI just settled to 'pass' on a still-in-review task. If
+  // auto-merge is enabled and the task is low-risk, run the same approve+merge a
+  // human would (post-merge verify still gates main). Fire-and-forget so CI never
+  // blocks on the merge; the dispatcher tick re-checks as a backstop.
+  if (result.status === "pass") void maybeAutoMerge(id);
+}
+
+// --- AUTO-MERGE: land green, low-risk tasks without a human -----------------
+//
+// When enabled (config.autoMergeEnabled, DEFAULT OFF), a task sitting in `review`
+// whose CI gate settled to 'pass' and which qualifies as LOW-RISK is approved +
+// merged AUTOMATICALLY via the SAME approveTask path a human uses — so the
+// post-merge verify gate still guards main and races still go through the global
+// merge queue. Non-qualifying tasks wait for human review exactly as before.
+
+/** In-flight auto-merge evaluations, keyed by task id, so the CI hook and the
+ * dispatcher-tick backstop can't both drive approveTask for the same task at once
+ * (belt-and-suspenders on top of approveTask's status guards + the merge queue). */
+const autoMerging = new Set<string>();
+
+/**
+ * Does a changed file qualify under the allowlist? An allowlist entry is either:
+ *  - a PREFIX ending in `/` (e.g. `public/`, `test/`) → matches any file under it;
+ *  - a `*.ext` glob (e.g. `*.md`) → matches TOP-LEVEL files with that extension
+ *    only (no slash in the path), per the spec's "top-level *.md"; or
+ *  - a plain path → matches that exact file or anything beneath it as a dir.
+ */
+function fileAllowed(file: string, allowlist: string[]): boolean {
+  const f = file.replace(/^\.\//, "");
+  for (const raw of allowlist) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    if (entry.endsWith("/")) {
+      if (f.startsWith(entry)) return true;
+    } else if (entry.startsWith("*.")) {
+      const ext = entry.slice(1); // ".md"
+      if (!f.includes("/") && f.endsWith(ext)) return true;
+    } else if (f === entry || f.startsWith(entry + "/")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Pure LOW-RISK decision (no I/O) so the boundary is unit-testable. A change is
+ * low-risk iff ALL of:
+ *  (a) every changed file is under the allowlist, AND
+ *  (b) the total changed-line count is within the threshold, AND
+ *  (c) there is at least one changed file (an empty diff isn't something to
+ *      auto-land).
+ * Conflict (c-in-spec) is enforced separately by maybeAutoMerge / approveTask: a
+ * merge conflict routes back to the agent and never lands on main.
+ */
+export function isLowRiskChange(
+  files: string[],
+  changedLines: number,
+  opts: { allowlist: string[]; maxChangedLines: number },
+): boolean {
+  if (files.length === 0) return false;
+  if (changedLines > opts.maxChangedLines) return false;
+  return files.every((f) => fileAllowed(f, opts.allowlist));
+}
+
+/**
+ * Evaluate a `review` task for auto-merge and, if it qualifies, run the human
+ * approve+merge path. Returns true iff it actually auto-merged. Safe to call
+ * repeatedly / concurrently — it no-ops unless the task is still in `review` with
+ * ci_status='pass', and dedupes concurrent evaluations via `autoMerging`.
+ *
+ * It deliberately does NOT special-case conflicts itself: approveTask already
+ * sends a conflicting merge back to the agent (conflictSentBack) instead of
+ * landing it, so a conflict never auto-merges. We only stamp `auto_merged` + log
+ * when a merge actually succeeded.
+ */
+export async function maybeAutoMerge(id: string): Promise<boolean> {
+  if (!config.autoMergeEnabled) return false;
+  if (autoMerging.has(id)) return false;
+
+  const row = getTask(id);
+  if (!row) return false;
+  if (row.status !== "review") return false;
+  if (row.ci_status !== "pass") return false;
+  if (row.conflict) return false; // already-known conflict → human handles it
+  if (row.auto_merged) return false; // already auto-merged (defensive)
+
+  const dir = getDirectory(row.directory_id);
+  if (!dir) return false;
+
+  // Footprint check (a + b). On any git error, bail safely (leave for a human).
+  let stat: git.DiffStat;
+  try {
+    stat = await git.diffStat(dir.path, id);
+  } catch (e) {
+    console.warn(`[butchr] auto-merge: diffStat failed for ${id}: ${(e as Error).message}`);
+    return false;
+  }
+  if (
+    !isLowRiskChange(stat.files, stat.changedLines, {
+      allowlist: config.autoMergeAllowlist,
+      maxChangedLines: config.autoMergeMaxChangedLines,
+    })
+  ) {
+    return false;
+  }
+
+  autoMerging.add(id);
+  try {
+    console.log(
+      `[butchr] auto-merging task ${id}: CI green + low-risk ` +
+        `(${stat.files.length} file(s), ${stat.changedLines} changed line(s) ` +
+        `<= ${config.autoMergeMaxChangedLines}); running the approve+merge path`,
+    );
+    const outcome = await approveTask(id);
+    // Only a genuine merge counts. A conflict kicked back to the agent
+    // (conflictSentBack) or a post-merge-verify revert (revertedOnRed) did NOT land.
+    if (outcome.conflictSentBack || outcome.revertedOnRed) {
+      console.log(
+        `[butchr] auto-merge of ${id} did NOT land ` +
+          (outcome.conflictSentBack
+            ? "(merge conflict — sent back to the agent)"
+            : "(post-merge verify failed — reverted off main)"),
+      );
+      return false;
+    }
+    if (outcome.task.status === "merged") {
+      // Stamp the auto-merged flag on the now-merged row (it survives — merged
+      // tasks keep their row) so the webapp can distinguish auto- from human-merges.
+      db.query(`UPDATE tasks SET auto_merged=1 WHERE id=?`).run(id);
+      emitUpdated(id);
+      console.log(`[butchr] task ${id} AUTO-MERGED (CI green + low-risk)`);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    // approveTask can throw on an unusual/unsafe merge failure (e.g. non-conflict).
+    // Don't crash the caller — leave the task in review for a human.
+    console.warn(`[butchr] auto-merge of ${id} failed: ${(e as Error).message}`);
+    return false;
+  } finally {
+    autoMerging.delete(id);
+  }
 }
 
 /**

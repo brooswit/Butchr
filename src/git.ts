@@ -100,6 +100,64 @@ export async function diff(dir: string, taskId: string): Promise<string> {
   return out;
 }
 
+/** A task branch's change footprint vs the default branch: which files changed
+ * and how many lines (added + deleted) total. Used by the AUTO-MERGE low-risk
+ * gate (see tasks.maybeAutoMerge / isLowRiskChange). */
+export type DiffStat = {
+  /** Changed file paths, relative to the repo root (deduped union of committed
+   * + uncommitted changes). */
+  files: string[];
+  /** Total changed lines = added + deleted across all files. Binary files count
+   * toward `files` but contribute 0 lines (git reports `-` for them). */
+  changedLines: number;
+};
+
+/** Parse `git diff --numstat` output, accumulating files + line totals into `acc`. */
+function accumulateNumstat(
+  output: string,
+  files: Set<string>,
+  counts: { lines: number },
+): void {
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Format: `<added>\t<deleted>\t<path>` (added/deleted are `-` for binary).
+    const m = trimmed.match(/^(-|\d+)\t(-|\d+)\t(.+)$/);
+    if (!m) continue;
+    const added = m[1] === "-" ? 0 : parseInt(m[1]!, 10);
+    const deleted = m[2] === "-" ? 0 : parseInt(m[2]!, 10);
+    counts.lines += added + deleted;
+    files.add(m[3]!);
+  }
+}
+
+/**
+ * Compute a task branch's change footprint vs the default branch: the set of
+ * changed files and the total changed-line count. Mirrors diff()'s two-part view
+ * (committed commits `base...taskId` PLUS any uncommitted worktree changes) so the
+ * low-risk gate sees exactly what would merge. Files are deduped across the two
+ * sources; line counts are summed (a file edited in a commit and again uncommitted
+ * counts both, which only ever OVER-estimates size — safe for a low-risk ceiling).
+ */
+export async function diffStat(dir: string, taskId: string): Promise<DiffStat> {
+  const base = await defaultBranch(dir);
+  const files = new Set<string>();
+  const counts = { lines: 0 };
+
+  const committed = await run([
+    git, "-C", dir, "diff", "--numstat", `${base}...${taskId}`,
+  ]);
+  if (committed.ok) accumulateNumstat(committed.stdout, files, counts);
+
+  const wt = worktreePath(dir, taskId);
+  if (existsSync(wt)) {
+    const uncommitted = await run([git, "-C", wt, "diff", "--numstat", "HEAD"]);
+    if (uncommitted.ok) accumulateNumstat(uncommitted.stdout, files, counts);
+  }
+
+  return { files: [...files], changedLines: counts.lines };
+}
+
 export type MergeResult = {
   ok: boolean;
   conflict: boolean;

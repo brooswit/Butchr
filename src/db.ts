@@ -124,6 +124,13 @@ ensureColumn("tasks", "ci_summary", "TEXT");
 // pre-merge, in-worktree, advisory review badge.
 ensureColumn("tasks", "revert_reason", "TEXT");
 
+// AUTO-MERGE bookkeeping. Set to 1 when butchr auto-approved + merged this task
+// (CI-green + low-risk) instead of a human approving it — see config.autoMergeEnabled
+// and tasks.maybeAutoMerge. Orthogonal to `status`: it records HOW a merged task
+// landed (auto vs human), and the webapp can badge auto-merged tasks. Only ever set
+// once a merge actually succeeds (a conflict/revert never sets it).
+ensureColumn("tasks", "auto_merged", "INTEGER NOT NULL DEFAULT 0");
+
 // One-click rollback bookkeeping. When a task merges, we record the SHAs that
 // bracket the commits it landed on the default branch so the merge can later be
 // reverted precisely:
@@ -209,6 +216,9 @@ export type TaskRow = {
   merge_base_sha: string | null;
   merged_sha: string | null;
   rolled_back_at: string | null;
+  // AUTO-MERGE: 1 when butchr auto-merged this task (CI-green + low-risk), else 0.
+  // Surfaced on TaskView via the `...row` spread. See tasks.maybeAutoMerge.
+  auto_merged: number;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

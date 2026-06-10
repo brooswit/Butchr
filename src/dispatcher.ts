@@ -22,7 +22,7 @@ import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, prepareBranchForDispatch, reevaluateBlockedTask, setIdle } from "./tasks.ts";
+import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -263,6 +263,22 @@ async function tick(): Promise<void> {
       .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked'`)
       .all()) {
       reevaluateBlockedTask(b.id);
+    }
+
+    // AUTO-MERGE backstop: re-check every `review` task whose CI settled to 'pass'.
+    // The primary trigger is the CI-completion hook (tasks.triggerCi), but this
+    // catches missed events / a restart that lost the in-process hook. No-op unless
+    // auto-merge is enabled and the task qualifies as low-risk; concurrent runs are
+    // deduped inside maybeAutoMerge and serialized through the global merge queue.
+    if (config.autoMergeEnabled) {
+      for (const r of db
+        .query<{ id: string }, []>(
+          `SELECT id FROM tasks WHERE status='review' AND ci_status='pass' AND auto_merged=0`,
+        )
+        .all()) {
+        // Fire-and-forget — the tick must not block on a merge.
+        void maybeAutoMerge(r.id);
+      }
     }
 
     // Skip tasks waiting out a dispatch backoff: next_dispatch_at set and still in

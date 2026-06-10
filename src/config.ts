@@ -16,6 +16,19 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function envBool(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined || v.length === 0) return fallback;
+  return /^(1|true|yes|on)$/i.test(v.trim());
+}
+
+/** Parse a comma-separated env list (trimmed, blanks dropped); fallback if unset. */
+function envList(name: string, fallback: string[]): string[] {
+  const v = process.env[name];
+  if (!v || !v.trim()) return fallback;
+  return v.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 // Where butchr keeps its own state (the SQLite db). This is distinct from the
 // per-directory `.butchr/` folders that live inside each registered repo.
 const dataDir = env("BUTCHR_DATA_DIR", join(home, ".local", "share", "butchr"));
@@ -200,6 +213,35 @@ export const config = {
 
   /** Max time (ms) to wait for a CTO `ask` answer before killing it. */
   askTimeoutMs: envInt("BUTCHR_ASK_TIMEOUT_MS", 120000),
+
+  /**
+   * AUTO-MERGE green, low-risk tasks (opt-in; DEFAULT OFF). When enabled, a task
+   * in `review` whose CI gate settled to `pass` and which qualifies as LOW-RISK is
+   * approved + merged AUTOMATICALLY — running the SAME approve path a human would,
+   * so the post-merge verify gate (config.verifyCmd) still guards main. A task that
+   * does NOT qualify waits for human review exactly as before. See
+   * tasks.maybeAutoMerge / isLowRiskChange.
+   *
+   * LOW-RISK = all three:
+   *  (a) every changed file is under `autoMergeAllowlist` (path prefixes like
+   *      `public/`/`test/`/`docs/`, plus a `*.md` entry that matches TOP-LEVEL
+   *      markdown files), AND
+   *  (b) total changed lines (added+deleted across the diff) <=
+   *      `autoMergeMaxChangedLines`, AND
+   *  (c) no merge conflict (a conflict routes back to the agent via the normal
+   *      approve path and never lands on main).
+   *
+   * A CI-fail or a non-qualifying diff never auto-merges. All three are
+   * env-overridable; BUTCHR_AUTO_MERGE_ALLOWLIST is a comma-separated list.
+   */
+  autoMergeEnabled: envBool("BUTCHR_AUTO_MERGE", false),
+  autoMergeAllowlist: envList("BUTCHR_AUTO_MERGE_ALLOWLIST", [
+    "public/",
+    "test/",
+    "docs/",
+    "*.md",
+  ]),
+  autoMergeMaxChangedLines: envInt("BUTCHR_AUTO_MERGE_MAX_LINES", 150),
 
   /**
    * How long (ms) a running agent's log can go with no new output before the
