@@ -188,6 +188,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.rejected { background: var(--rejected); }
 .chip.failed { background: var(--failed); }
 .chip.aborted { background: var(--aborted); }
+/* Rollback isn't a lifecycle status — it's a flag on a still-`merged` task whose
+   commits were reverted off the default branch. Reuse the warning/aborted hue. */
+.chip.rolled-back { background: var(--aborted); }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {

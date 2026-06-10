@@ -726,13 +726,26 @@ async function renderTask(id) {
     term.addEventListener("click", () => openTaskTerminal(t.id, term));
     headerRight.appendChild(term);
   }
-  headerRight.appendChild(el("div", { html: chip(effStatus(t)) + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "") }));
+  headerRight.appendChild(el("div", {
+    html: chip(effStatus(t))
+      + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
+      + (t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : ""),
+  }));
   // Abort is available from any non-terminal state EXCEPT finalizing, whose merge
   // already landed in main (it auto-completes to merged).
   const canAbort = !["merged", "aborted", "finalizing"].includes(t.status);
   if (canAbort) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
+  }
+  // Roll back: revert an already-merged task's commits off the default branch.
+  // Offered only for a merged task that hasn't already been rolled back and whose
+  // merge range was recorded (older merges have no range and can't be reverted
+  // automatically — the backend 409s, but we also hide the button for them).
+  const canRollback = t.status === "merged" && !t.rolled_back_at
+    && !!t.merge_base_sha && !!t.merged_sha && t.merge_base_sha !== t.merged_sha;
+  if (canRollback) {
+    headerRight.appendChild(el("button", { class: "btn ghost danger-outline", id: "rollback" }, "Roll back"));
   }
   wrap.appendChild(el("div", { class: "row between" }, [
     el("h1", { html: `<span style="font-family:var(--mono)">${esc(t.id)}</span>` }),
@@ -747,6 +760,7 @@ async function renderTask(id) {
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
     <div class="k">merged</div><div class="v">${esc(t.merged_at || "—")}</div>
+    ${t.rolled_back_at ? `<div class="k">rolled back</div><div class="v">${esc(t.rolled_back_at)}</div>` : ""}
     ${t.herdr_pane_id ? `<div class="k">herdr pane</div><div class="v">${esc(t.herdr_pane_id)}</div>` : ""}
     ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
@@ -926,6 +940,22 @@ async function renderTask(id) {
       try {
         await api("POST", "/tasks/" + id + "/abort");
         toast("task aborted");
+        render();
+      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    });
+  }
+
+  if (canRollback) {
+    document.getElementById("rollback").addEventListener("click", async (ev) => {
+      if (!confirm(
+        "Roll back this merged task? Its commits are reverted off the default branch "
+        + "with new revert commits. If the revert conflicts with later changes it is "
+        + "aborted cleanly and you'll need to revert manually.",
+      )) return;
+      ev.target.disabled = true;
+      try {
+        await api("POST", "/tasks/" + id + "/rollback");
+        toast("rolled back ✓ — commits reverted on the default branch");
         render();
       } catch (e) { toast(e.message, true); ev.target.disabled = false; }
     });

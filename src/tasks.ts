@@ -579,9 +579,9 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   await git.cleanup(dir.path, id).catch(() => {});
   const res = db.query(
     `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
-       output_snapshot=?, merged_at=COALESCE(merged_at, ?)
+       output_snapshot=?, merge_base_sha=?, merged_sha=?, merged_at=COALESCE(merged_at, ?)
        WHERE id=? AND status='review'`,
-  ).run(snapshot || null, nowIso(), id);
+  ).run(snapshot || null, result.baseSha ?? null, result.mergedSha ?? null, nowIso(), id);
   if (res.changes === 0) {
     // Raced (e.g. aborted) between the merge and here — the branch already landed
     // in main, but the task moved on. Nothing more to do.
@@ -597,6 +597,62 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   // the next dispatcher tick to notice.
   reevaluateAllBlocked();
   return { task: taskView(id)! };
+}
+
+/**
+ * ONE-CLICK ROLLBACK: revert an already-merged task's commits off the default
+ * branch. Only a `merged` task that hasn't already been rolled back qualifies,
+ * and only if its merge range (merge_base_sha..merged_sha) was recorded — tasks
+ * merged before rollback support have no range and are refused (409).
+ *
+ * The actual `git revert` is serialized through the SAME global merge queue as
+ * approveTask, so a rollback can't race a concurrent merge into the default
+ * branch. On a clean revert we stamp `rolled_back_at` (the task STAYS `merged` —
+ * its branch did land; we just appended revert commits). On a revert conflict (or
+ * any other failure) git leaves the tree clean and we surface a 409 with a clear
+ * message instead of leaving anything half-applied.
+ */
+export async function rollbackTask(id: string): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (row.status !== "merged") {
+    throw new HttpError(409, `only a merged task can be rolled back (status=${row.status})`);
+  }
+  if (row.rolled_back_at) {
+    throw new HttpError(409, "task has already been rolled back");
+  }
+  if (!row.merge_base_sha || !row.merged_sha) {
+    throw new HttpError(
+      409,
+      "no merge commit recorded for this task; it cannot be rolled back automatically (merged before rollback support)",
+    );
+  }
+  if (row.merge_base_sha === row.merged_sha) {
+    throw new HttpError(409, "task landed no commits; nothing to roll back");
+  }
+  const dir = getDirectory(row.directory_id);
+  if (!dir) throw new HttpError(404, "directory not found");
+
+  // Serialize through the global merge queue so the revert can't interleave with
+  // a concurrent approve/merge rebasing onto the same default branch.
+  const result = await runExclusiveMerge(() =>
+    git.revertCommits(dir.path, row.merge_base_sha!, row.merged_sha!),
+  );
+  if (!result.ok) {
+    const detail = result.conflict
+      ? `reverting the merge conflicts with later changes on the default branch — ` +
+        `resolve it manually (the working tree was left clean). ${result.message}`
+      : result.message;
+    throw new HttpError(409, `rollback failed: ${detail}`);
+  }
+
+  db.query(`UPDATE tasks SET rolled_back_at=? WHERE id=? AND status='merged'`).run(
+    nowIso(),
+    id,
+  );
+  console.log(`[butchr] task ${id} rolled back (reverted ${row.merge_base_sha}..${row.merged_sha})`);
+  emitUpdated(id);
+  return taskView(id)!;
 }
 
 /**

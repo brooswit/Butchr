@@ -107,6 +107,13 @@ export type MergeResult = {
   // On a content conflict, the files git reported as conflicting (parsed from
   // its output). Empty if none could be parsed.
   conflictFiles: string[];
+  // On a SUCCESSFUL merge, the SHAs bracketing the commits this task contributed
+  // to the default branch: `baseSha` is the base tip BEFORE the fast-forward
+  // (the exclusive lower bound) and `mergedSha` is the new tip AFTER it (the
+  // inclusive upper bound). Recorded by the caller so the task can later be rolled
+  // back by reverting exactly this range (see revertCommits / tasks.rollbackTask).
+  baseSha?: string;
+  mergedSha?: string;
 };
 
 /**
@@ -226,12 +233,24 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
     };
   }
 
-  // Clean rebase — the task branch is now linear atop base. Fast-forward base to
-  // it (no merge commit). This cannot conflict; it can only fail if base moved
-  // between the rebase and here (callers serialize merges to prevent that).
+  // Clean rebase — the task branch is now linear atop base. Capture the base tip
+  // BEFORE the fast-forward: it's the exclusive lower bound of the commits this
+  // task is about to land, recorded so the merge can be reverted later.
+  const baseBefore = await run([git, "-C", dir, "rev-parse", base]);
+  // Fast-forward base to it (no merge commit). This cannot conflict; it can only
+  // fail if base moved between the rebase and here (callers serialize merges to
+  // prevent that).
   const ff = await run([git, "-C", dir, "merge", "--ff-only", taskId]);
   if (ff.ok) {
-    return { ok: true, conflict: false, message: ff.stdout.trim(), conflictFiles: [] };
+    const after = await run([git, "-C", dir, "rev-parse", base]);
+    return {
+      ok: true,
+      conflict: false,
+      message: ff.stdout.trim(),
+      conflictFiles: [],
+      baseSha: baseBefore.ok ? baseBefore.stdout.trim() : undefined,
+      mergedSha: after.ok ? after.stdout.trim() : undefined,
+    };
   }
   return {
     ok: false,
@@ -260,6 +279,60 @@ export async function headSha(dir: string): Promise<string> {
  */
 export async function resetHard(dir: string, sha: string): Promise<void> {
   await runOrThrow([git, "-C", dir, "reset", "--hard", sha]);
+}
+
+export type RevertResult = {
+  ok: boolean;
+  // True when the revert couldn't apply cleanly because the reverted commits
+  // conflict with later changes on the default branch (git left markers, which we
+  // then abort away). The caller surfaces this distinctly so the operator knows a
+  // manual revert is needed rather than something being broken.
+  conflict: boolean;
+  message: string;
+  // On success, the new default-branch tip after the revert commit(s).
+  revertedSha?: string;
+};
+
+/**
+ * Roll back a previously-merged task by reverting the commits it contributed —
+ * the range `(fromSha, toSha]` (fromSha exclusive, toSha inclusive) — as fresh
+ * revert commits on the default branch. Runs at `dir`, where the default branch
+ * is checked out, so the revert commits land directly on it.
+ *
+ * On a clean revert: returns ok=true with the new tip. On conflict (or any other
+ * failure): aborts the in-progress revert so the working tree + index are left
+ * CLEAN — never a half-applied revert or stray conflict markers — and returns
+ * ok=false with `conflict` set when git reported a content conflict.
+ */
+export async function revertCommits(
+  dir: string,
+  fromSha: string,
+  toSha: string,
+): Promise<RevertResult> {
+  const res = await run([
+    git, "-C", dir, "revert", "--no-edit", `${fromSha}..${toSha}`,
+  ]);
+  if (!res.ok) {
+    const combined = `${res.stdout}\n${res.stderr}`;
+    const conflict = /conflict/i.test(combined);
+    // Abort any in-progress revert so the tree is left clean. If no revert was
+    // actually started (e.g. an empty range), `--abort` is a harmless no-op.
+    await run([git, "-C", dir, "revert", "--abort"]);
+    return {
+      ok: false,
+      conflict,
+      message:
+        (res.stderr || res.stdout).trim() ||
+        `revert of ${fromSha}..${toSha} failed`,
+    };
+  }
+  const tip = await run([git, "-C", dir, "rev-parse", "HEAD"]);
+  return {
+    ok: true,
+    conflict: false,
+    message: res.stdout.trim(),
+    revertedSha: tip.ok ? tip.stdout.trim() : undefined,
+  };
 }
 
 /** Remove the worktree and delete the task branch (post-merge cleanup). */

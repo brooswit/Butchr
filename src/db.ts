@@ -124,6 +124,21 @@ ensureColumn("tasks", "ci_summary", "TEXT");
 // pre-merge, in-worktree, advisory review badge.
 ensureColumn("tasks", "revert_reason", "TEXT");
 
+// One-click rollback bookkeeping. When a task merges, we record the SHAs that
+// bracket the commits it landed on the default branch so the merge can later be
+// reverted precisely:
+//   - `merge_base_sha` is the base tip BEFORE the fast-forward (exclusive lower
+//     bound); `merged_sha` is the new tip AFTER it (inclusive upper bound). The
+//     task's commits are exactly `merge_base_sha..merged_sha`.
+//   - `rolled_back_at` is an ISO timestamp set when the operator rolls the task
+//     back (POST /api/tasks/:id/rollback): the task stays `merged` (its branch
+//     did land) but is flagged as undone via revert commits on the default branch.
+// Tasks merged before this feature have NULL SHAs and cannot be rolled back
+// automatically (see tasks.rollbackTask).
+ensureColumn("tasks", "merge_base_sha", "TEXT");
+ensureColumn("tasks", "merged_sha", "TEXT");
+ensureColumn("tasks", "rolled_back_at", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -188,6 +203,12 @@ export type TaskRow = {
   // `...row` spread (no extra plumbing in taskView).
   ci_status: string | null;
   ci_summary: string | null;
+  // Rollback bookkeeping (see the ensureColumn block above): the SHAs bracketing
+  // the commits this task landed (`merge_base_sha..merged_sha`) and the time the
+  // task was rolled back, if ever.
+  merge_base_sha: string | null;
+  merged_sha: string | null;
+  rolled_back_at: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

@@ -26,6 +26,7 @@ import {
   listTasks,
   rejectTask,
   requeueTask,
+  rollbackTask,
   setBlockedBy,
   taskDiff,
   taskView,
@@ -366,6 +367,14 @@ route("POST", "/api/tasks/:id/blocked_by", blockedByHandler);
 // re-queuing it for a fresh dispatch.
 route("POST", "/api/tasks/:id/requeue", async (_req, p) => {
   return json(await requeueTask(p.id!));
+});
+
+// One-click rollback: revert an already-merged task's commits off the default
+// branch. Only valid for a `merged` task whose merge range was recorded; surfaces
+// a 409 with a clear message on a revert conflict (tree left clean). Serialized
+// through the same merge queue as approve (see tasks.rollbackTask).
+route("POST", "/api/tasks/:id/rollback", async (_req, p) => {
+  return json(await rollbackTask(p.id!));
 });
 
 // Open a GUI terminal attached to a task's live agent pane. Only `running` tasks
