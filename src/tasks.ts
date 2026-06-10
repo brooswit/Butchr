@@ -1,6 +1,7 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { config } from "./config.ts";
+import { triggerConformance } from "./conformance.ts";
 import { db, estimateRows, nowIso, recordTaskEvent } from "./db.ts";
 import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import {
@@ -1523,6 +1524,9 @@ export function markReview(id: string, snapshot: string): void {
   // off the build/test job for the task's worktree. Fire-and-forget — review must
   // not block on CI.
   void triggerCi(id);
+  // SPEC-CONFORMANCE GATE: judge whether the diff satisfies the prompt. Orthogonal to
+  // CI (which only proves it builds/tests). Fire-and-forget — review never blocks on it.
+  void triggerConformance(id);
 }
 
 /**
@@ -1576,6 +1580,10 @@ export function markReviewFromAgent(
   // request_review call (review→review) shouldn't re-run the build/test job. Fire-
   // and-forget so the (already non-blocking) request_review handshake stays instant.
   if (row.status === "running") void triggerCi(id);
+  // SPEC-CONFORMANCE GATE: same trigger discipline — only on a genuine running→review
+  // transition (not a duplicate request_review), fire-and-forget. Judges whether the
+  // diff satisfies the prompt; orthogonal to CI.
+  if (row.status === "running") void triggerConformance(id);
   return "ok";
 }
 

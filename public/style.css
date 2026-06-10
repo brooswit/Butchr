@@ -765,6 +765,20 @@ small.muted { font-size: 12px; }
 .ci-detail.collapsed .ci-detail-body { display: none; }
 .ci-detail-body { margin-top: 8px; max-height: 320px; overflow: auto; }
 
+/* SPEC-CONFORMANCE badge — shown next to the CI badge in the review panel. */
+.conf-gate { display: inline-flex; margin-left: 10px; }
+.conf-badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; font-weight: 600;
+  padding: 5px 12px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); color: #fff;
+  max-width: 520px;
+}
+.conf-badge.pass { background: var(--merged); border-color: var(--merged); }
+/* Amber/warning — advisory, distinct from CI's red fail. */
+.conf-badge.concern { background: #b8860b; border-color: #b8860b; }
+.conf-badge.checking { background: var(--running); border-color: var(--running); }
+
 /* ---- metrics view ---- */
 /* number cards grid */
 .metrics-cards {

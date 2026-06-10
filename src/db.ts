@@ -140,6 +140,24 @@ ensureColumn("tasks", "blocked_by", "TEXT");
 ensureColumn("tasks", "ci_status", "TEXT");
 ensureColumn("tasks", "ci_summary", "TEXT");
 
+// SPEC-CONFORMANCE GATE bookkeeping. When a task enters `review`, butchr also runs
+// an advisory read-only reviewer (a headless Claude — see src/conformance.ts) that
+// judges whether the task's DIFF actually SATISFIES its PROMPT (complete + on-spec),
+// so half-implemented / off-spec work is flagged before a human reads the diff. CI
+// proves the task BUILDS + tests pass; this proves it did WHAT WAS ASKED — a
+// complementary, orthogonal signal recorded here:
+//   - `conformance_status` is 'checking' while the reviewer is in flight, then 'pass'
+//     (conforms) or 'concern' (partial/off-spec/incomplete) once it settles; NULL
+//     means it never ran or couldn't (no worktree, the gate disabled, a spawn error,
+//     or an unparseable verdict — best-effort). Orthogonal to `status` — only ever
+//     meaningful while status='review', like `ci_status`/`conflict`.
+//   - `conformance_summary` is the reviewer's short reason naming any missing /
+//     incomplete / off-spec parts (empty/"conforms" on a pass).
+// ADVISORY ONLY — it never hard-blocks approval (mirrors the CI-fail warning). See
+// tasks.ts (the triggerConformance hook in markReview / markReviewFromAgent).
+ensureColumn("tasks", "conformance_status", "TEXT");
+ensureColumn("tasks", "conformance_summary", "TEXT");
+
 // `revert_reason` records WHY a task's merge was auto-reverted off the default
 // branch: the post-merge verify gate (build + tests) came back RED, so the merge
 // was undone (git reset to the pre-merge tip) and the task flagged. It holds the
@@ -310,6 +328,13 @@ export type TaskRow = {
   // `...row` spread (no extra plumbing in taskView).
   ci_status: string | null;
   ci_summary: string | null;
+  // SPEC-CONFORMANCE GATE: advisory verdict on whether the diff satisfies the prompt,
+  // captured on the review transition (see the ensureColumn block above +
+  // src/conformance.ts). `conformance_status` is 'checking' | 'pass' | 'concern' | null;
+  // `conformance_summary` carries the reviewer's short reason. Surfaced on TaskView via
+  // the `...row` spread (no extra plumbing in taskView), like ci_status/ci_summary.
+  conformance_status: string | null;
+  conformance_summary: string | null;
   // Rollback bookkeeping (see the ensureColumn block above): the SHAs bracketing
   // the commits this task landed (`merge_base_sha..merged_sha`) and the time the
   // task was rolled back, if ever.

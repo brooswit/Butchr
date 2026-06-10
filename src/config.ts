@@ -236,6 +236,38 @@ export const config = {
   askTimeoutMs: envInt("BUTCHR_ASK_TIMEOUT_MS", 120000),
 
   /**
+   * SPEC-CONFORMANCE REVIEW GATE. When a task enters `review`, butchr asynchronously
+   * runs a READ-ONLY reviewer that judges whether the task's DIFF actually SATISFIES
+   * its PROMPT (complete + on-spec) and writes an advisory `conformance_status` /
+   * `conformance_summary` badge for the review panel. This reuses the SAME headless,
+   * read-only, non-recursing claude mechanism as the CTO `ask` (see ctoCmd / src/cto.ts):
+   *  - `-p` runs headless and prints the verdict to stdout, then exits.
+   *  - `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` makes it
+   *    read-only (no Write/Edit/Bash) so it can inspect the worktree but never mutate
+   *    it, and auto-resolves tool requests without a human prompt.
+   *  - NO `--mcp-config` / `--dangerously-skip-permissions`: it can't reach butchr's
+   *    own tools, so there's no recursion.
+   * The single `{{PROMPT_FILE}}` placeholder is replaced with a temp file holding the
+   * rendered review prompt (task prompt + capped diff + agent summary), avoiding any
+   * shell-escaping. Run via `bash -lc`, cwd = the task's worktree. Like the CI gate
+   * this is ADVISORY (it never hard-blocks approval) and best-effort (a failure or an
+   * unparseable verdict leaves conformance NULL). Set it EMPTY to DISABLE the gate.
+   */
+  conformanceCmd: env(
+    "BUTCHR_CONFORMANCE_CMD",
+    "claude -p --permission-mode dontAsk " +
+      '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"',
+  ),
+  /** Max wall-clock (ms) the conformance reviewer may run before it's killed (→ NULL verdict). */
+  conformanceTimeoutMs: envInt("BUTCHR_CONFORMANCE_TIMEOUT_MS", 120000),
+  /**
+   * Cap (bytes) on the git diff fed to the conformance reviewer, so a huge diff can't
+   * blow the prompt argv limit or the model's context. A larger diff is truncated with
+   * a marker; the reviewer can still Read/Grep the worktree for anything elided.
+   */
+  conformanceMaxDiffBytes: envInt("BUTCHR_CONFORMANCE_MAX_DIFF_BYTES", 60000),
+
+  /**
    * AUTO-MERGE green, low-risk tasks (opt-in; DEFAULT OFF). When enabled, a task
    * in `review` whose CI gate settled to `pass` and which qualifies as LOW-RISK is
    * approved + merged AUTOMATICALLY — running the SAME approve path a human would,

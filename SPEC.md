@@ -186,6 +186,10 @@ meaningful within its owning status and is cleared as the task moves on:
   (set by `approveTask` on an unusual merge error).
 - **`ci_status` / `ci_summary`** (on `review`) — the advisory CI gate result
   (`running` | `pass` | `fail` | null) plus a badge label + output tail.
+- **`conformance_status` / `conformance_summary`** (on `review`) — the advisory
+  **spec-conformance** gate result (`checking` | `pass` | `concern` | null) plus the
+  reviewer's short reason. Whether the diff actually *satisfies the prompt* (complete +
+  on-spec), orthogonal to CI's build/test signal.
 - **`revert_reason`** (on `failed`) — failing build/test output when a merge was
   auto-reverted off main. Its presence is what the UI keys on to render a "reverted
   from main" panel (distinct from a dispatch failure).
@@ -416,6 +420,38 @@ pass on any retry wins. The runner is overridable in tests (`setCiRunner`); task
 with no worktree skip CI (leaving `ci_status` null). The CI gate is **advisory** — it does
 not hard-block approval — but it gates **auto-merge** and on a `pass` fires the
 auto-merge hook.
+
+### Spec-conformance gate (pre-merge, advisory)
+
+CI proves a task **builds and its tests pass** — it does **not** prove the task did
+**what was asked**. (We hit exactly this: a task reached review CI-green but was
+half-implemented; only a manual diff-read caught it.) The **spec-conformance gate**
+closes that hole with a second, orthogonal signal. On the same genuine
+`running → review` transition, `triggerConformance` (`src/conformance.ts`) runs a
+**read-only reviewer** that judges whether the task's **diff actually satisfies its
+prompt** (complete + on-spec), fire-and-forget — review never blocks on it.
+
+The reviewer reuses the **same headless, read-only, non-recursing claude** mechanism
+as the CTO `ask` (`BUTCHR_CONFORMANCE_CMD`, defaulting to `claude -p
+--permission-mode dontAsk --allowedTools "Read Grep Glob"`), run via `bash -lc` in
+the task's **worktree** so it can `Read`/`Grep`/`Glob` beyond the diff but mutate
+nothing. It is fed a rendered prompt (the task prompt + the **capped** git diff —
+`BUTCHR_CONFORMANCE_MAX_DIFF_BYTES`, default 60 KB — + the agent summary) via a temp
+file and asked for a one-line JSON verdict `{"conforms": "yes"|"partial"|"no",
+"reason": …}`. The verdict is parsed and persisted as a badge:
+`conformance_status` (`checking` → `pass` when *yes*, `concern` when *partial*/*no*)
++ `conformance_summary` (the reviewer's reason naming any missing / incomplete /
+off-spec parts).
+
+It is **bounded**: a single pass (no retries), the diff capped before it's sent, and
+**best-effort** — a disabled gate (empty `BUTCHR_CONFORMANCE_CMD`), a missing
+worktree, a spawn/timeout failure (`BUTCHR_CONFORMANCE_TIMEOUT_MS`, default 120 s),
+or an unparseable verdict all leave `conformance_status` **null**. The runner is
+overridable in tests (`setConformanceRunner`). Like the CI gate it is **advisory** —
+a `concern` **never hard-blocks** approval; the webapp warns on approve (mirroring
+the CI-fail warning) but lets the operator proceed. A result is only written back
+while the task is still in `review` (a task that merged/aborted under the in-flight
+review isn't resurrected).
 
 ### Approve → global merge queue → post-merge verify
 
@@ -739,9 +775,11 @@ hash-routed and SSE-driven. Views/features:
   rows, finished list, and board cards. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
   dependents).
-- **Task detail** — status/CI/summary, a **tags** row in the meta grid, the rendered
-  **diff** (`/api/tasks/:id/diff`, parsed + highlighted), the **timeline**
-  (`/api/tasks/:id/events`), model/tokens/
+- **Task detail** — status/CI/**conformance**/summary (the CI badge and an advisory
+  **spec-conformance** badge — green *conforms* / amber *concern: <reason>* — sit
+  above the diff in the review panel; a `concern` warns on approve but never blocks),
+  a **tags** row in the meta grid, the rendered **diff** (`/api/tasks/:id/diff`,
+  parsed + highlighted), the **timeline** (`/api/tasks/:id/events`), model/tokens/
   cost labels, a rough **duration estimate** (an *est. duration* row from
   `TaskView.estimate` plus a critical-path line on the blocked-by / spawned panels
   from `/api/tasks/:id/estimate` — see §10), live output, a collapsible **Agent
@@ -842,6 +880,8 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `idle` | INTEGER | flag: a `running` agent gone quiet. |
 | `ci_status` | TEXT | CI gate: `running`/`pass`/`fail`/null. |
 | `ci_summary` | TEXT | CI badge label + output tail. |
+| `conformance_status` | TEXT | spec-conformance gate: `checking`/`pass`/`concern`/null (does the diff satisfy the prompt?). |
+| `conformance_summary` | TEXT | the reviewer's short reason (missing/incomplete/off-spec parts; `conforms` on a pass). |
 | `dispatch_attempts` | INTEGER | consecutive failed dispatch attempts (reset on success/clean re-queue). |
 | `last_dispatch_error` | TEXT | most recent dispatch failure message. |
 | `next_dispatch_at` | TEXT | ISO backoff gate: don't dispatch before this. |
@@ -923,6 +963,9 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_CTO_CMD` | `claude -p {{CTO_SESSION}} --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{QUESTION_FILE}})"` | read-only, non-recursing CTO command for `ask`. Placeholders: `{{QUESTION_FILE}}`, `{{CTO_SESSION}}`. |
 | `BUTCHR_CTO_SESSION_ID` | _(empty)_ | optional CTO session to `--resume … --fork-session` so the CTO inherits prior context. |
 | `BUTCHR_ASK_TIMEOUT_MS` | `120000` | max wait for a CTO `ask` answer before it's killed. |
+| `BUTCHR_CONFORMANCE_CMD` | `claude -p --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | read-only, non-recursing reviewer for the **spec-conformance gate** (does the diff satisfy the prompt?), run via `bash -lc` in the task's worktree. Placeholder: `{{PROMPT_FILE}}`. **Empty disables** the gate. |
+| `BUTCHR_CONFORMANCE_TIMEOUT_MS` | `120000` | max wait for the conformance reviewer before it's killed (→ null verdict). |
+| `BUTCHR_CONFORMANCE_MAX_DIFF_BYTES` | `60000` | cap on the git diff fed to the conformance reviewer (larger diffs are truncated with a marker). |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command. Else auto-detect kitty/konsole/alacritty/xfce4-terminal/xterm/gnome-terminal/x-terminal-emulator (needs `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ---

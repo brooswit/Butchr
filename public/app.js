@@ -1268,6 +1268,36 @@ function ciBadge(t) {
   return wrap;
 }
 
+// SPEC-CONFORMANCE badge for the review panel, shown next to the CI badge.
+// conformance_status: 'checking' shows a spinner; 'pass' shows a green "conforms";
+// 'concern' shows an amber "concern: <reason>" (the reviewer's reason in
+// conformance_summary); null/absent renders nothing (best-effort — it may not run).
+// Whereas CI proves the change builds + tests pass, this judges whether the diff
+// actually did what the task asked — an orthogonal, advisory signal.
+function conformanceBadge(t) {
+  const status = t.conformance_status || null;
+  if (!status) return null; // not run / couldn't run — show nothing
+  const reason = (t.conformance_summary || "").trim();
+  let badge;
+  if (status === "checking") {
+    badge = el("span", { class: "conf-badge checking" }, [
+      el("span", { class: "ci-spinner" }),
+      el("span", {}, "conformance…"),
+    ]);
+  } else if (status === "pass") {
+    badge = el("span", { class: "conf-badge pass", title: reason || "conforms" }, "✓ conforms");
+  } else {
+    // 'concern' — amber, with the reviewer's reason inline (truncated) + full on hover.
+    const short = reason.length > 140 ? reason.slice(0, 140) + "…" : reason;
+    badge = el(
+      "span",
+      { class: "conf-badge concern", title: reason || "concern" },
+      "⚠ concern" + (short ? ": " + short : ""),
+    );
+  }
+  return el("span", { class: "conf-gate" }, [badge]);
+}
+
 // ---------- task detail / review ----------
 // Compact vertical AUDIT TIMELINE of a task's status transitions (oldest → newest):
 // one row per change with the transition (from → to chips) and the short note that
@@ -1753,6 +1783,10 @@ async function renderTask(id) {
     // runs in the task's worktree on the review transition; updates live via the
     // SSE-driven re-render when CI flips running→pass/fail.
     wrap.appendChild(ciBadge(t));
+    // SPEC-CONFORMANCE badge — next to the CI badge. Reflects the read-only reviewer
+    // that judges whether the diff satisfies the prompt; null when it didn't run.
+    const confBadge = conformanceBadge(t);
+    if (confBadge) wrap.appendChild(confBadge);
 
     wrap.appendChild(el("h2", {}, "Diff vs main"));
     const diffBox = el("div", { class: "diffview" }, [el("div", { class: "meta" }, "loading diff…")]);
@@ -1813,6 +1847,12 @@ async function renderTask(id) {
       if (t.ci_status === "fail") {
         const label = (t.ci_summary || "CI failed").split("\n")[0].trim();
         if (!confirm(`CI failed (${label}). Approve and merge anyway?`)) return;
+      }
+      // SPEC-CONFORMANCE gate is likewise advisory: warn on a flagged concern (the
+      // diff may not fully implement the prompt) but let the operator proceed.
+      if (t.conformance_status === "concern") {
+        const why = (t.conformance_summary || "").trim();
+        if (!confirm(`Conformance concern${why ? `: ${why}` : ""}. Approve and merge anyway?`)) return;
       }
       action(ev.target, async () => {
         const r = await api("POST", "/tasks/" + id + "/approve");
