@@ -387,10 +387,31 @@ function backToDirectory(directoryId) {
 
 // ---------- dashboard ----------
 async function renderDashboard() {
-  const dirs = await api("GET", "/directories");
+  // The cross-project dashboard rollup: per-directory active/review/needs-attention/
+  // failed counts + totals + each directory's effective gate command. `directories`
+  // entries carry the same `counts` map dirCard expects, plus the aggregate buckets.
+  const data = await api("GET", "/dashboard");
+  const dirs = data.directories;
+  const totals = data.totals;
   const wrap = el("div");
   wrap.appendChild(el("h1", {}, "Directories"));
   wrap.appendChild(el("div", { class: "crumbs" }, "registered workspaces · " + dirs.length));
+
+  // Cross-project summary: the four operator-facing buckets aggregated across every
+  // registered directory, so "what needs my eyes anywhere" reads at a glance.
+  if (dirs.length) {
+    const sum = el("div", { class: "dash-summary" });
+    const stat = (label, n, cls) =>
+      el("div", { class: "dash-stat" + (cls ? " " + cls : "") + (n ? " nonzero" : "") }, [
+        el("span", { class: "ds-num" }, String(n)),
+        el("span", { class: "ds-label" }, label),
+      ]);
+    sum.appendChild(stat("active", totals.active));
+    sum.appendChild(stat("in review", totals.review, "review"));
+    sum.appendChild(stat("need attention", totals.needsAttention, "attn"));
+    sum.appendChild(stat("failed", totals.failed, "failed"));
+    wrap.appendChild(sum);
+  }
 
   // add-directory form
   const form = el("div", { class: "panel" });
@@ -409,7 +430,11 @@ async function renderDashboard() {
         <input type="text" id="dlabel" placeholder="defaults to dir name" />
       </label>
       <button class="btn" id="add-dir">Register</button>
-    </div>`;
+    </div>
+    <label class="field" style="margin:10px 0 0">
+      <span class="lbl">build/test gate command (optional) — blank uses the default; runs in CI + post-merge verify</span>
+      <input type="text" id="dgate" placeholder="e.g. npm run build && npm test" />
+    </label>`;
   wrap.appendChild(form);
 
   if (dirs.length === 0) {
@@ -437,9 +462,14 @@ async function renderDashboard() {
   document.getElementById("add-dir").addEventListener("click", async () => {
     const path = document.getElementById("dpath").value.trim();
     const label = document.getElementById("dlabel").value.trim();
+    // Optional per-directory gate command — omit when blank so the backend keeps
+    // the default (NULL) rather than disabling the gate with an empty string.
+    const gate = document.getElementById("dgate").value.trim();
     if (!path) return toast("path is required", true);
     try {
-      await api("POST", "/directories", { path, label: label || undefined });
+      await api("POST", "/directories", {
+        path, label: label || undefined, gate_cmd: gate || undefined,
+      });
       toast("directory registered");
       render();
     } catch (e) { toast(e.message, true); }
@@ -458,10 +488,23 @@ function dirCard(d) {
         : s === "failed" && c[s] ? "count-pill has-failed" : "count-pill";
       return `<span class="${cls}">${s} <b>${c[s] || 0}</b></span>`;
     }).join("");
+  // Aggregate bucket badges (active / review / needs-attention / failed) when the
+  // card comes from the dashboard rollup (those fields are absent on a plain
+  // DirectoryView, so the row is simply omitted there). needs-attention/failed light
+  // up only when non-zero so a quiet directory stays visually calm.
+  const buckets = typeof d.active === "number"
+    ? `<div class="dir-buckets">
+        <span class="dir-bucket">active <b>${d.active}</b></span>
+        <span class="dir-bucket${d.review ? " review" : ""}">review <b>${d.review}</b></span>
+        <span class="dir-bucket${d.needsAttention ? " attn" : ""}">attention <b>${d.needsAttention}</b></span>
+        <span class="dir-bucket${d.failed ? " failed" : ""}">failed <b>${d.failed}</b></span>
+      </div>`
+    : "";
   const card = el("div", { class: "card" });
   card.innerHTML = `
     <div class="title">${esc(d.label || d.path)}</div>
     <div class="path">${esc(d.path)}</div>
+    ${buckets}
     <div class="counts">${pills}</div>`;
   card.style.cursor = "pointer";
   card.addEventListener("click", () => (location.hash = "#/dir/" + d.id));
@@ -470,13 +513,15 @@ function dirCard(d) {
 
 // ---------- directory view ----------
 async function renderDirectory(id) {
-  const [dirs, tasks] = await Promise.all([
-    api("GET", "/directories"),
+  // Pull the directory from the dashboard rollup (it carries the effective gate
+  // command + override state the gate panel needs) alongside its task list.
+  const [dash, tasks] = await Promise.all([
+    api("GET", "/dashboard"),
     // Carry the active full-text search so it survives SSE-driven re-renders; the
     // server filters by `?q=` (see searchParam / buildFilterBar).
     api("GET", "/directories/" + id + "/tasks" + searchParam()),
   ]);
-  const dir = dirs.find((x) => x.id === id);
+  const dir = dash.directories.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "directory not found"));
 
   const wrap = el("div");
@@ -525,6 +570,11 @@ async function renderDirectory(id) {
   wrap.appendChild(body);
   paintBody();
 
+  // build/test gate command panel — the command both the CI gate (in-worktree) and
+  // the post-merge verify gate run for this directory. Shows the effective command +
+  // whether it's a per-directory override or the default, with an inline editor.
+  wrap.appendChild(gatePanel(dir));
+
   // danger zone
   const dz = el("div", { class: "row", style: "margin-top:32px" });
   const del = el("button", { class: "btn ghost" }, "Unregister directory");
@@ -540,6 +590,71 @@ async function renderDirectory(id) {
   wrap.appendChild(dz);
 
   mount(wrap);
+}
+
+// ---------- per-directory build/test gate panel ----------
+// `dir` is a dashboard directory entry (has gate_cmd + effective_gate_cmd). Renders
+// the effective command, flags whether it's a per-directory override or the default,
+// and offers an Edit button that opens the gate editor modal.
+function gatePanel(dir) {
+  const overridden = dir.gate_cmd !== null;
+  const disabled = dir.gate_cmd === "";
+  const panel = el("div", { class: "panel", style: "margin-top:28px" });
+  const head = el("div", { class: "row between", style: "align-items:center" });
+  head.appendChild(el("h2", { style: "margin:0" }, "Build / test gate"));
+  const edit = el("button", { class: "btn ghost" }, "Edit");
+  edit.addEventListener("click", () => openGateModal(dir));
+  head.appendChild(edit);
+  panel.appendChild(head);
+  panel.appendChild(el("small", { class: "muted", style: "display:block;margin:6px 0 10px" },
+    "Run in CI (the task worktree, on review) and by the post-merge verify gate (the repo root, after a merge — RED auto-reverts)."));
+  const cmdText = disabled ? "(gate disabled for this directory)" : (dir.effective_gate_cmd || "(none)");
+  panel.appendChild(el("pre", { class: "gate-cmd" + (disabled ? " disabled" : "") }, cmdText));
+  panel.appendChild(el("small", { class: "muted" },
+    overridden
+      ? (disabled ? "Per-directory override: the gate is disabled." : "Per-directory override.")
+      : "Using the default gate (no per-directory override)."));
+  return panel;
+}
+
+// Editor for a directory's gate command. A textarea (prefilled with the effective
+// command) plus three actions: Save the typed command (an empty save DISABLES the
+// gate), or "Use default" to clear the override (revert to config.verifyCmd). Maps
+// to PATCH /api/directories/:id.
+function openGateModal(dir) {
+  const body = el("div", { class: "m-body" });
+  body.innerHTML = `
+    <label class="field" style="margin-bottom:6px">
+      <span class="lbl">build/test gate command — run via <code>bash -lc</code> in the repo</span>
+      <textarea id="gate-cmd" class="gate-textarea" placeholder="e.g. npm run build && npm test"></textarea>
+    </label>
+    <small class="hint muted">Save an empty command to DISABLE the gate for this directory. "Use default" reverts to the global default command.</small>`;
+  const ta = body.querySelector("#gate-cmd");
+  ta.value = dir.gate_cmd !== null ? dir.gate_cmd : (dir.effective_gate_cmd || "");
+
+  const foot = el("div", { class: "m-foot" });
+  const useDefault = el("button", { class: "btn ghost" }, "Use default");
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  const save = el("button", { class: "btn" }, "Save command");
+  foot.appendChild(useDefault);
+  foot.appendChild(cancel);
+  foot.appendChild(save);
+
+  const { close } = openModal({ title: "Build / test gate", body, footer: foot });
+  cancel.addEventListener("click", close);
+  ta.focus();
+
+  const patch = async (btn, gate_cmd, msg) => {
+    btn.disabled = true;
+    try {
+      await api("PATCH", "/directories/" + dir.id, { gate_cmd });
+      toast(msg);
+      close();
+      render();
+    } catch (e) { toast(e.message, true); btn.disabled = false; }
+  };
+  save.addEventListener("click", () => patch(save, ta.value, "gate command updated"));
+  useDefault.addEventListener("click", () => patch(useDefault, null, "reverted to the default gate"));
 }
 
 // ---------- new-task modal ----------

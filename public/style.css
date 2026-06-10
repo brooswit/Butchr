@@ -288,6 +288,51 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
 .count-pill.has-failed { border-color: var(--failed); color: var(--failed); }
 
+/* cross-project dashboard summary — the four operator buckets aggregated across all
+   registered directories. */
+.dash-summary {
+  display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 20px;
+}
+.dash-stat {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  min-width: 96px; padding: 12px 16px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.dash-stat .ds-num { font-size: 22px; font-weight: 700; color: var(--text); }
+.dash-stat .ds-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.dash-stat.review.nonzero { border-color: var(--review); }
+.dash-stat.review.nonzero .ds-num { color: var(--review); }
+.dash-stat.attn.nonzero { border-color: var(--review); }
+.dash-stat.attn.nonzero .ds-num { color: var(--review); }
+.dash-stat.failed.nonzero { border-color: var(--failed); }
+.dash-stat.failed.nonzero .ds-num { color: var(--failed); }
+
+/* per-directory aggregate buckets on a dashboard card. */
+.dir-buckets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.dir-bucket {
+  font-size: 11px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 2px 7px;
+}
+.dir-bucket b { color: var(--text); }
+.dir-bucket.review { border-color: var(--review); color: var(--review); }
+.dir-bucket.attn { border-color: var(--review); color: var(--review); }
+.dir-bucket.failed { border-color: var(--failed); color: var(--failed); }
+
+/* per-directory build/test gate command panel + editor (directory view). */
+.gate-cmd {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 10px 12px; margin: 0 0 6px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.gate-cmd.disabled { color: var(--muted); font-style: italic; }
+.gate-textarea {
+  width: 100%; min-height: 70px; resize: vertical;
+  font-family: var(--mono); font-size: 12px;
+}
+
 /* blocked-by list (task detail) — one row per blocker: id, its status chip, and
    a "will never merge" flag for dead blockers. */
 .blockers { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }

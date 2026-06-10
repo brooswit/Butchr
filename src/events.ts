@@ -5,6 +5,9 @@ export type ButchrEvent =
   | { type: "task.updated"; task: unknown }
   | { type: "task.deleted"; id: string }
   | { type: "directory.created"; directory: unknown }
+  // A directory row changed in place (e.g. its per-directory gate command was
+  // updated) — carries the refreshed DirectoryView so the dashboard reflects it live.
+  | { type: "directory.updated"; directory: unknown }
   | { type: "directory.deleted"; id: string }
   // Dispatcher pause/resume toggled — lets every connected webapp reflect the
   // PAUSED banner + control live (see server POST /api/pause|resume).

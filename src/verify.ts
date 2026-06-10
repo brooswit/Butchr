@@ -17,21 +17,25 @@ export type VerifyResult = {
   skipped?: boolean;
 };
 
-/** The actual gate executor; overridable for tests. `dir` is the repo root. */
-export type VerifyRunner = (dir: string) => Promise<VerifyResult>;
+/**
+ * The actual gate executor; overridable for tests. `dir` is the repo root; `cmd` is
+ * the EFFECTIVE gate command for that directory (the per-directory `gate_cmd` or the
+ * default — resolved by the caller via directories.directoryGateCmd).
+ */
+export type VerifyRunner = (dir: string, cmd: string) => Promise<VerifyResult>;
 
 /**
- * Default runner: a thin layer over the shared gate runner (src/gate.ts) — run
- * `config.verifyCmd` via `bash -lc` in the repo root, bounded by
+ * Default runner: a thin layer over the shared gate runner (src/gate.ts) — run the
+ * directory's gate command via `bash -lc` in the repo root, bounded by
  * `config.verifyTimeoutMs` (a timeout is treated as RED with a verify-specific
- * message). An empty verifyCmd DISABLES the gate (skipped → ok); everything else is
+ * message). An empty command DISABLES the gate (skipped → ok); everything else is
  * the gate runner's spawn + timeout + combined-output, shared with the CI gate.
  */
-const defaultRunner: VerifyRunner = async (dir) => {
-  const cmd = config.verifyCmd.trim();
-  if (!cmd) return { ok: true, output: "", skipped: true };
+const defaultRunner: VerifyRunner = async (dir, cmd) => {
+  const trimmed = cmd.trim();
+  if (!trimmed) return { ok: true, output: "", skipped: true };
 
-  const gate = await runGate(["bash", "-lc", cmd], {
+  const gate = await runGate(["bash", "-lc", trimmed], {
     cwd: dir,
     timeoutMs: config.verifyTimeoutMs,
   });
@@ -53,7 +57,16 @@ export function setVerifyRunner(fn?: VerifyRunner): void {
   runner = fn ?? defaultRunner;
 }
 
-/** Run the post-merge verify gate against the default-branch worktree at `dir`. */
-export function verifyDefaultBranch(dir: string): Promise<VerifyResult> {
-  return runner(dir);
+/**
+ * Run the post-merge verify gate against the default-branch worktree at `dir`,
+ * using the EFFECTIVE gate command `cmd` for that directory (resolved by the caller
+ * via directories.directoryGateCmd — the directory's own `gate_cmd` or the default
+ * `config.verifyCmd`). `cmd` defaults to `config.verifyCmd` so a caller with no
+ * directory in hand still gets the global gate.
+ */
+export function verifyDefaultBranch(
+  dir: string,
+  cmd: string = config.verifyCmd,
+): Promise<VerifyResult> {
+  return runner(dir, cmd);
 }

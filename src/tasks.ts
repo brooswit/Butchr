@@ -11,7 +11,7 @@ import {
   estimateTask,
 } from "./estimate.ts";
 import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
-import { HttpError, getDirectory } from "./directories.ts";
+import { HttpError, directoryGateCmd, getDirectory } from "./directories.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
 import { runGate } from "./gate.ts";
@@ -1116,8 +1116,9 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     // edit CHANGELOG.md / package.json. See git.finalizeLivingDocs.
     const mr = await git.merge(dir.path, id, row.summary ?? null);
     if (!mr.ok) return { mr };
-    // Merge stuck (ff'd into main). Gate the new tip: build + tests must be GREEN.
-    const verify = await verifyDefaultBranch(dir.path);
+    // Merge stuck (ff'd into main). Gate the new tip: the directory's build/test
+    // gate command must be GREEN (its own gate_cmd, or the default config.verifyCmd).
+    const verify = await verifyDefaultBranch(dir.path, directoryGateCmd(dir.id));
     if (verify.ok) return { mr, verify };
     // RED — undo the ff so a broken commit never sits on main. We need the prior
     // tip to reset to; if we somehow failed to capture it, we can't safely revert,
@@ -1641,8 +1642,12 @@ export type CiResult = {
   detail: string;
 };
 
-/** Signature of the function that actually runs build+test for a task's worktree. */
-export type CiRunner = (dirPath: string, taskId: string) => Promise<CiResult>;
+/**
+ * Signature of the function that actually runs the build/test gate for a task's
+ * worktree. `gateCmd` is the directory's EFFECTIVE gate command (its own `gate_cmd`
+ * or the default — resolved by triggerCi via directories.directoryGateCmd).
+ */
+export type CiRunner = (dirPath: string, taskId: string, gateCmd: string) => Promise<CiResult>;
 
 // The active CI runner. Overridable in tests (setCiRunner) so they can exercise
 // the persistence + trigger wiring without spawning a real `bun` build/test.
@@ -1660,48 +1665,37 @@ function ciTail(s: string): string {
   return trimmed.split("\n").slice(-24).join("\n");
 }
 
-/** Pull `N` out of a `bun test` summary line like ` 12 pass` / ` 3 fail`. */
-function parseBunCount(output: string, word: "pass" | "fail"): number {
-  const m = output.match(new RegExp(`(\\d+)\\s+${word}\\b`));
-  return m ? parseInt(m[1]!, 10) : 0;
-}
-
 /**
- * The real CI runner: `bun build … --outfile /dev/null` then `bun test`, both in
- * the task's worktree, each spawned through the shared gate runner (src/gate.ts) so
- * the CI gate and the post-merge verify gate share one bounded spawn — the CI gate
- * inherits the same `config.verifyTimeoutMs` bound verify already had. A non-zero
- * build exit is a build failure; otherwise a non-zero test exit is a test failure
- * (with the count parsed from bun's summary). The build-vs-test distinction + badge
- * counting stays CI-specific (it runs the two commands separately for exactly that).
+ * The real CI runner: run the directory's EFFECTIVE gate command (`gateCmd` — its
+ * own `gate_cmd` or the default `config.verifyCmd`, e.g. butchr's own
+ * `bun build … && bun test`) as a single `bash -lc` invocation IN THE TASK'S
+ * WORKTREE, through the shared gate runner (src/gate.ts) so the CI gate and the
+ * post-merge verify gate share one bounded spawn — the CI gate inherits the same
+ * `config.verifyTimeoutMs` kill-timer. A non-zero exit (or a timeout) is a FAIL with
+ * the output tail; an empty gate command means "no gate configured" → a trivial
+ * pass (the directory opted out, mirroring an empty verify gate). Running the gate
+ * as one command (rather than a hardcoded build-then-test split) is what lets each
+ * directory define its own arbitrary build/test command.
  */
-async function defaultCiRunner(dirPath: string, taskId: string): Promise<CiResult> {
+async function defaultCiRunner(dirPath: string, taskId: string, gateCmd: string): Promise<CiResult> {
+  const cmd = gateCmd.trim();
+  if (!cmd) return { status: "pass", label: "no gate configured", detail: "" };
   const wt = git.worktreePath(dirPath, taskId);
-  const build = await runGate(
-    ["bun", "build", "src/index.ts", "--target", "bun", "--outfile", "/dev/null"],
-    { cwd: wt },
-  );
-  if (!build.ok) {
-    return { status: "fail", label: "build failed", detail: ciTail(build.output) };
-  }
-
-  const test = await runGate(["bun", "test"], { cwd: wt });
-  if (!test.ok) {
-    const failed = parseBunCount(test.output, "fail");
+  const gate = await runGate(["bash", "-lc", cmd], { cwd: wt });
+  if (!gate.ok) {
     return {
       status: "fail",
-      label: failed > 0 ? `${failed} test failures` : "tests failed",
-      detail: ciTail(test.output),
+      label: gate.timedOut ? "gate timed out" : "gate failed",
+      detail: ciTail(gate.output),
     };
   }
-  const passed = parseBunCount(test.output, "pass");
-  return { status: "pass", label: `build + ${passed} tests`, detail: ciTail(test.output) };
+  return { status: "pass", label: "gate passed", detail: ciTail(gate.output) };
 }
 
 /** Run the active CI runner once, converting a runner throw into a fail result. */
-async function runCiOnce(dirPath: string, id: string): Promise<CiResult> {
+async function runCiOnce(dirPath: string, id: string, gateCmd: string): Promise<CiResult> {
   try {
-    return await ciRunner(dirPath, id);
+    return await ciRunner(dirPath, id, gateCmd);
   } catch (e) {
     return { status: "fail", label: "CI error", detail: (e as Error).message };
   }
@@ -1734,7 +1728,10 @@ export async function triggerCi(id: string): Promise<void> {
   db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
   emitUpdated(id);
 
-  let result = await runCiOnce(dir.path, id);
+  // Resolve the directory's effective gate command ONCE for this CI run (own
+  // gate_cmd or the default) and thread it through every (re)run.
+  const gateCmd = directoryGateCmd(dir.id);
+  let result = await runCiOnce(dir.path, id, gateCmd);
   // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
   const retries = Math.max(0, config.ciRetries);
   for (let attempt = 1; attempt <= retries && result.status === "fail"; attempt++) {
@@ -1742,7 +1739,7 @@ export async function triggerCi(id: string): Promise<void> {
       `[butchr] CI gate FAILED for ${id} (${result.label}); ` +
         `retrying (attempt ${attempt}/${retries})`,
     );
-    result = await runCiOnce(dir.path, id);
+    result = await runCiOnce(dir.path, id, gateCmd);
     if (result.status === "pass") {
       console.log(`[butchr] CI gate PASSED for ${id} on retry ${attempt}/${retries}`);
     }

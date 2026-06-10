@@ -79,6 +79,19 @@ function ensureColumn(table: string, column: string, decl: string): void {
   }
 }
 
+// PER-DIRECTORY BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
+// worktree) and the post-merge verify gate (repo root) both need a build/test
+// command to run. Historically both were hardcoded to butchr's OWN commands
+// (`bun build … && bun test`). This column lets each registered directory carry its
+// OWN gate command so other projects (e.g. a 'sandbox' repo) define their own
+// build/test, threaded into both gates. Semantics: NULL means "use the default"
+// (`config.verifyCmd`, which still defaults to butchr's own command — the
+// dogfooding setup); a non-null value (including the empty string, which DISABLES
+// the gate for that directory) is used verbatim. Resolved by
+// directories.directoryGateCmd and run via `bash -lc` in the relevant cwd. Settable
+// at register time and updatable via PATCH /api/directories/:id.
+ensureColumn("directories", "gate_cmd", "TEXT");
+
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
 
@@ -262,6 +275,10 @@ export type DirectoryRow = {
   label: string | null;
   herdr_workspace: string | null;
   herdr_pane: string | null;
+  // Per-directory build/test gate command (see the ensureColumn above). NULL = use
+  // the default (config.verifyCmd); a non-null value (incl. "" to disable) is used
+  // verbatim by both the CI gate and the post-merge verify gate for this directory.
+  gate_cmd: string | null;
   created_at: string;
 };
 

@@ -406,16 +406,20 @@ Code client, so butchr never parks a call).
 
 ### CI gate (pre-merge, in-worktree, advisory)
 
-On a genuine `running → review` transition, `triggerCi` runs **build + test in the
-task's worktree** (`defaultCiRunner`: `bun build … --outfile /dev/null` then
-`bun test`), fire-and-forget — review never blocks on it. Both commands are spawned
-through the **shared gate runner** (`src/gate.ts` `runGate`) that the post-merge
-verify gate also uses, so the two gates can't drift on how they spawn/bound a run:
-each CI command is now **bounded by `BUTCHR_VERIFY_TIMEOUT_MS`** (the same kill-timer
-verify has — a timed-out build/test counts as a FAIL) rather than running unbounded.
-It writes a badge: `ci_status` (`running` → `pass`/`fail`) + `ci_summary` (first line
-a compact label like `build + 12 tests` / `build failed` / `3 test failures`, then an
-output tail). A **FAIL is retried** up to `BUTCHR_CI_RETRIES` times (default 1); a
+On a genuine `running → review` transition, `triggerCi` runs the directory's
+**build/test gate command in the task's worktree**, fire-and-forget — review never
+blocks on it. The command is the directory's **per-directory `gate_cmd`** (or the
+default `BUTCHR_VERIFY_CMD`), resolved via `directories.directoryGateCmd` and run as a
+single `bash -lc` invocation — so each registered repo defines its own build/test
+(butchr's own default is `bun build … && bun test`; another repo sets `npm test`,
+etc.). An empty resolved command means the directory opted out → a trivial pass. It's
+spawned through the **shared gate runner** (`src/gate.ts` `runGate`) that the
+post-merge verify gate also uses, so the two gates can't drift on how they
+spawn/bound a run: the run is **bounded by `BUTCHR_VERIFY_TIMEOUT_MS`** (the same
+kill-timer verify has — a timeout counts as a FAIL). It writes a badge: `ci_status`
+(`running` → `pass`/`fail`) + `ci_summary` (first line a compact label like
+`gate passed` / `gate failed` / `gate timed out`, then an output tail). A **FAIL is
+retried** up to `BUTCHR_CI_RETRIES` times (default 1); a
 pass on any retry wins. The runner is overridable in tests (`setCiRunner`); tasks
 with no worktree skip CI (leaving `ci_status` null). The CI gate is **advisory** — it does
 not hard-block approval — but it gates **auto-merge** and on a `pass` fires the
@@ -465,8 +469,10 @@ of racing. Inside the exclusive section:
    scan** that refuses to merge poisoned content), **rebase** the task branch onto
    the current base tip, **record the living docs** (see below), then **fast-forward**
    the base to it (linear history, no merge commit). Records `baseSha..mergedSha`.
-3. If the ff stuck, run the **post-merge verify gate** (`verifyDefaultBranch` →
-   `BUTCHR_VERIFY_CMD` in the repo **root**). On **RED**, `git.resetHard` the default
+3. If the ff stuck, run the **post-merge verify gate** (`verifyDefaultBranch` → the
+   directory's gate command — its `gate_cmd` or the default `BUTCHR_VERIFY_CMD`,
+   resolved via `directoryGateCmd` so it matches the CI gate — in the repo **root**).
+   On **RED**, `git.resetHard` the default
    branch back to `priorTip` — undoing the merge so a broken commit never sits on
    main. (Because merges are serialized, nothing landed after the ff, so the reset is
    clean.)
@@ -766,9 +772,11 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `POST` | `/api/pause` | `{}` | `{ paused: true }` — pause **new** agent dispatch (drain-only maintenance mode; running/review/idle untouched). Persisted; idempotent. Publishes a `dispatch.paused` SSE event. |
 | `POST` | `/api/resume` | `{}` | `{ paused: false }` — resume normal dispatch. Persisted; idempotent. Publishes a `dispatch.paused` SSE event. |
 | `GET` | `/api/metrics?days=N` | — | `Metrics` aggregate (see below). `days` 1–90, default 14. |
+| `GET` | `/api/dashboard` | — | cross-project rollup: `{ directories:[{ id, path, label, gate_cmd, effective_gate_cmd, counts, active, review, failed, needsAttention }], totals:{ directories, active, review, failed, needsAttention } }`. Per directory: `active` = queued+blocked+running+idle+finalizing; `review`; `failed`; `needsAttention` = review+failed (the operator pull-signal). `effective_gate_cmd` is the directory's own `gate_cmd` or the default. Read-only. |
 | `GET` | `/api/directories` | — | `DirectoryView[]` (rows + `counts` by status, with `idle` peeled out of `running`). |
 | `GET` | `/api/templates` | — | `TemplateView[]` — the built-in task **templates** (recipes): each `{ name, description, body, placeholders }`, where `body` carries `{{placeholder}}` markers and `placeholders` lists their distinct names (first-seen order). Static built-ins from `src/templates.ts` (`feature`, `refactor-extract`, `webapp-panel`, `add-endpoint`). |
-| `POST` | `/api/directories` | `{ path, label? }` | `201` `DirectoryView`. 400 if not a git repo; 409 if already registered; 502 if the herdr workspace can't be created. |
+| `POST` | `/api/directories` | `{ path, label?, gate_cmd? }` | `201` `DirectoryView`. `gate_cmd` sets the per-directory build/test gate command (omit/null → default; `""` → disable). 400 if not a git repo or `gate_cmd` isn't a string; 409 if already registered; 502 if the herdr workspace can't be created. |
+| `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | `?q=` (optional) | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks`/`tags` as arrays plus precomputed `blockerStates`/`deadBlockers`. `?q=` is a case-insensitive FULL-TEXT SEARCH (server-side, so huge prompts never ship to the client): only tasks whose prompt (from `task.md`), `summary`, review notes (`review_note` + the `task.md` Review Notes), or id contain `q` are returned. A blank/absent `q` returns the full list and reads no `task.md`; a non-blank `q` reads each task's `task.md` to scan its prompt. 404 if directory gone. |
 | `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), template name (404), `vars` shape (400), prompt required (400). |
@@ -801,7 +809,8 @@ denominator is 0, distinguishing real-0% from no-data).
 `{type:"hello", now}`, sends a `: keepalive` comment every 25 s, and forwards every
 `ButchrEvent` published by the in-process pub/sub (`src/events.ts`):
 `task.created` / `task.updated` / `task.deleted` (each carrying the `TaskView` or
-id), `directory.created` / `directory.deleted`, and `dispatch.paused`
+id), `directory.created` / `directory.updated` (the refreshed `DirectoryView`, e.g.
+after a gate-command change) / `directory.deleted`, and `dispatch.paused`
 (`{ paused }` — dispatcher pause toggled, so the webapp can reflect the PAUSED
 banner live). The server runs with `idleTimeout: 0` so streams aren't dropped.
 
@@ -839,6 +848,8 @@ server (a DB restore can't go through a live server — see §5).
 | Command | Maps to |
 |---------|---------|
 | `health` | `GET /health` (exit 1 if degraded) |
+| `dashboard` | `GET /api/dashboard` — per-directory active / review / needs-attention / failed table + totals |
+| `gate <dir> [--set "<cmd>"] [--clear]` | `PATCH /api/directories/:id` (set/clear the gate command) or `GET /api/dashboard` (no flag → show the effective command); accepts an id or path |
 | `ls [--dir <id>] [--status <s>] [--tag a,b] [--search <text>]` | `GET /api/directories(/:id/tasks)` — compact id/status/CI/tags table; `idle` shows `status*`; `--dir` accepts an id or path; `--status` filters client-side; `--tag` keeps tasks carrying ANY of the given labels; `--search` is a server-side full-text filter (`?q=`) over each task's prompt/summary/review notes/id |
 | `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels) |
 | `new <dir> --template <name> [--var k=v …] [--blocked-by …] [--tag …]` | `POST /api/directories/:id/tasks` with `{ template, vars }` instead of `-m` — create from a built-in template, filling its `{{placeholders}}` with repeatable `--var key=value` pairs (server-rendered; un-supplied markers stay visible) |
@@ -857,9 +868,15 @@ server (a DB restore can't go through a live server — see §5).
 A vanilla-JS SPA (`app.js`, no framework/build) over `index.html` + `style.css`,
 hash-routed and SSE-driven. Views/features:
 
-- **Directories dashboard** — registered directories with live status counts; a
-  filesystem **picker** (`/api/fs`) to register a repo.
-- **Directory view** — its tasks with three layouts (list/table, **board** by
+- **Directories dashboard** — the cross-project home (`/api/dashboard`): a
+  totals summary (active / in-review / needs-attention / failed across **all**
+  directories) over a card grid, each card showing that directory's four aggregate
+  buckets plus its full status pills and linking into its task list. A filesystem
+  **picker** (`/api/fs`) registers a repo, and the register form takes an optional
+  per-directory **build/test gate command**.
+- **Directory view** — a **build/test gate** panel (the effective gate command, an
+  override/default flag, and an inline editor that `PATCH`es `gate_cmd` — save to
+  set, "Use default" to clear), and its tasks with three layouts (list/table, **board** by
   lane, and a dependency **graph** via `graphLevels`), a filter bar (a **full-text
   search** box that drives the server-side `?q=` filter over prompt/summary/review
   notes/id — re-fetching the list as you type — plus client-side status chips and a
@@ -962,6 +979,7 @@ schema are applied as guarded in-place `ALTER TABLE` migrations (`ensureColumn`)
 | `label` | TEXT | display label (defaults to the basename). |
 | `herdr_workspace` | TEXT | the herdr workspace id for this directory. |
 | `herdr_pane` | TEXT | the workspace's root pane id at creation. |
+| `gate_cmd` | TEXT | per-directory build/test gate command run by BOTH the CI gate (the task worktree) and the post-merge verify gate (the repo root). **NULL** = use the default (`BUTCHR_VERIFY_CMD`, still butchr's own command); a non-null value (incl. `""`, which **disables** the gate for this directory) is used verbatim via `bash -lc`. Set at register time, updatable via `PATCH /api/directories/:id`. Resolved by `directories.directoryGateCmd` — the single point both gates read, so they can't diverge. |
 | `created_at` | TEXT | ISO creation time. |
 
 Deleting a directory **cascades** to its tasks (and their `task_events`).
@@ -1056,7 +1074,7 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_GIT_BIN` | `git` | git binary. |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval. |
 | `BUTCHR_CTO_CONTEXT` | _(empty)_ | optional file seeding a new directory's `.butchr/CTO.md` (else built-in default). |
-| `BUTCHR_VERIFY_CMD` | `bun build src/index.ts --target bun --outfile /dev/null && bun test` | post-merge verify gate, run via `bash -lc` in the repo root. **Empty disables** the gate. |
+| `BUTCHR_VERIFY_CMD` | `bun build src/index.ts --target bun --outfile /dev/null && bun test` | **default** build/test gate command for **both** the CI gate (task worktree) and the post-merge verify gate (repo root), run via `bash -lc`. A directory's own `gate_cmd` (set at register time / via `PATCH /api/directories/:id`) overrides it per-directory; **empty disables** the gate. |
 | `BUTCHR_VERIFY_TIMEOUT_MS` | `600000` (10 min) | timeout (treated as RED/FAIL) for **both** gates that share the gate runner: the post-merge verify gate and each in-worktree CI build/test command. |
 | `BUTCHR_MAX_DISPATCH_ATTEMPTS` | `5` | consecutive dispatch failures before giving up to `failed`. |
 | `BUTCHR_DISPATCH_BACKOFF_BASE_MS` | `1000` | base for `min(base·2^(n-1), cap)` retry backoff. |

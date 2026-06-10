@@ -9,10 +9,12 @@ import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
 import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
+  dashboard,
   getDirectory,
   listDirectories,
   registerDirectory,
   unregisterDirectory,
+  updateDirectoryGateCmd,
 } from "./directories.ts";
 import { publish, subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
@@ -444,6 +446,13 @@ route("GET", "/api/metrics", async (req) => {
   return json(computeMetrics(metricRows(), Date.now(), days));
 });
 
+// CROSS-PROJECT DASHBOARD. A top-level home aggregating every registered directory:
+// per-directory active / review / failed / needs-attention counts, its effective
+// build/test gate command, and a `totals` rollup. Powers the webapp dashboard's
+// summary line + per-card counts and lets a supervisor pull per-directory
+// needs-attention without walking every directory's task list. Read-only.
+route("GET", "/api/dashboard", async () => json(dashboard()));
+
 // Directories
 route("GET", "/api/directories", async () => json(listDirectories()));
 
@@ -454,8 +463,20 @@ route("GET", "/api/templates", async () => json(listTemplates()));
 
 route("POST", "/api/directories", async (req) => {
   const body = await readJson(req);
-  const view = await registerDirectory(body.path, body.label);
+  // Optional gate_cmd: a per-directory build/test gate command set at register time
+  // (omit/null → use the default config.verifyCmd; "" → disable the gate). Validated
+  // inside registerDirectory.
+  const view = await registerDirectory(body.path, body.label, body.gate_cmd);
   return json(view, 201);
+});
+
+// Update a directory's per-directory build/test gate command (the command both the
+// CI gate and the post-merge verify gate run for this directory). Body `{ gate_cmd }`:
+// a string sets it ("" disables the gate); null/omitted CLEARS the override so it
+// falls back to the default config.verifyCmd. 404 if the directory is gone.
+route("PATCH", "/api/directories/:id", async (req, p) => {
+  const body = await readJson(req);
+  return json(updateDirectoryGateCmd(p.id!, body.gate_cmd ?? null));
 });
 
 route("DELETE", "/api/directories/:id", async (_req, p) => {

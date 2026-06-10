@@ -20,6 +20,11 @@ USAGE
 
 COMMANDS
   health                          Server health snapshot (exit 1 if degraded).
+  dashboard                       Cross-project rollup: per-directory active /
+                                    review / needs-attention / failed counts.
+  gate <dir> [--set "<cmd>"]      Show or update a directory's build/test gate
+       [--clear]                    command. --set updates it; --clear reverts to
+                                    the default; no flag prints the effective one.
   ls [--dir <id>] [--status <s>]  List tasks as a compact id/status/ci/tags table.
      [--tag a,b]                    Keep only tasks carrying any of the given tags.
      [--search <text>]              Full-text match on prompt/summary/review notes/id.
@@ -54,10 +59,10 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template", "--timeout", "--search"]);
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template", "--timeout", "--search", "--set"]);
 
 // Boolean flags: present → true, consume no following token.
-const BOOLEAN_FLAGS = new Set(["--merge"]);
+const BOOLEAN_FLAGS = new Set(["--merge", "--clear"]);
 
 function parseArgs(argv) {
   const positionals = [];
@@ -235,6 +240,67 @@ async function cmdHealth(flags) {
   }
   // Non-zero exit when the server reports degraded so scripts can gate on it.
   if (res.status !== 200) process.exit(1);
+}
+
+async function cmdDashboard(flags) {
+  const d = await api("GET", "/api/dashboard");
+  if (flags.json) {
+    printJson(d);
+    return;
+  }
+  if (!d.directories.length) {
+    process.stdout.write("(no directories registered)\n");
+    return;
+  }
+  const out = table(d.directories, [
+    { header: "DIRECTORY", get: (x) => x.label || x.path },
+    { header: "ID", get: (x) => x.id },
+    { header: "ACTIVE", get: (x) => x.active },
+    { header: "REVIEW", get: (x) => x.review },
+    { header: "ATTN", get: (x) => x.needsAttention },
+    { header: "FAILED", get: (x) => x.failed },
+  ]);
+  const t = d.totals;
+  process.stdout.write(
+    out +
+      `\n\ntotals: ${t.directories} dirs · ${t.active} active · ${t.review} review · ` +
+      `${t.needsAttention} need attention · ${t.failed} failed\n`,
+  );
+}
+
+async function cmdGate(positionals, flags) {
+  const dir = positionals[0];
+  if (!dir) fail("gate: missing <dir> (directory id or path)");
+  const dirId = await resolveDirectoryId(dir);
+  // --set and --clear are mutually exclusive; both update the gate command.
+  if (flags.set !== undefined && flags.clear) {
+    fail("gate: pass either --set or --clear, not both");
+  }
+  if (flags.set !== undefined || flags.clear) {
+    const gate_cmd = flags.clear ? null : flags.set;
+    const v = await api("PATCH", `/api/directories/${encodeURIComponent(dirId)}`, { gate_cmd });
+    if (flags.json) {
+      printJson(v);
+      return;
+    }
+    const shown = v.gate_cmd === null ? "(default)" : v.gate_cmd === "" ? "(disabled)" : v.gate_cmd;
+    process.stdout.write(`${dirId} gate_cmd = ${shown}\n`);
+    return;
+  }
+  // No update flag — show the directory's effective gate command (from the dashboard
+  // rollup, which carries both the override and the resolved effective command).
+  const d = await api("GET", "/api/dashboard");
+  const entry = d.directories.find((x) => x.id === dirId);
+  if (flags.json) {
+    printJson(entry || null);
+    return;
+  }
+  if (!entry) fail(`gate: directory ${dirId} not found`);
+  const overridden = entry.gate_cmd !== null;
+  process.stdout.write(
+    `${dirId} gate_cmd: ${entry.effective_gate_cmd || "(disabled)"}` +
+      `${overridden ? "" : "  (default — no per-directory override)"}\n`,
+  );
 }
 
 async function cmdLs(flags) {
@@ -519,6 +585,10 @@ async function main() {
   switch (command) {
     case "health":
       return cmdHealth(flags);
+    case "dashboard":
+      return cmdDashboard(flags);
+    case "gate":
+      return cmdGate(positionals, flags);
     case "ls":
       return cmdLs(flags);
     case "new":

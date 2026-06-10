@@ -71,7 +71,8 @@ function counts(directoryId: string): Record<string, number> {
     )
     .all(directoryId);
   const out: Record<string, number> = {
-    queued: 0, running: 0, idle: 0, review: 0, finalizing: 0, merged: 0, rejected: 0, aborted: 0,
+    queued: 0, blocked: 0, running: 0, idle: 0, review: 0, finalizing: 0,
+    merged: 0, rejected: 0, aborted: 0, failed: 0,
   };
   for (const r of rows) out[r.status] = r.n;
   // `idle` is a flag on running tasks, not a status — peel it out of the running
@@ -109,9 +110,126 @@ export function listDirectories(): DirectoryView[] {
   return rows.map((d) => ({ ...d, counts: counts(d.id) }));
 }
 
+/**
+ * The EFFECTIVE build/test gate command for a directory: its own `gate_cmd` if it
+ * set one (a non-null value, including the empty string which DISABLES the gate),
+ * else the global default `config.verifyCmd` (still butchr's own command by
+ * default). This is the single resolution point for BOTH gates — the in-worktree CI
+ * gate (tasks.triggerCi) and the post-merge verify gate (verify.verifyDefaultBranch)
+ * — so a directory's command can never diverge between them. An unknown id falls
+ * back to the default. Pure read of the directory row + config.
+ */
+export function directoryGateCmd(id: string): string {
+  const dir = getDirectory(id);
+  if (dir && dir.gate_cmd !== null) return dir.gate_cmd;
+  return config.verifyCmd;
+}
+
+/**
+ * Normalize an incoming gate-command value for storage. `undefined`/`null` clears
+ * the override (→ NULL → falls back to the default); a string is stored verbatim
+ * (the empty string is a deliberate "disable the gate for this directory" setting,
+ * mirroring an empty BUTCHR_VERIFY_CMD). Anything else is a 400.
+ */
+function normalizeGateCmd(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw new HttpError(400, "gate_cmd must be a string (or null to use the default)");
+  }
+  return value;
+}
+
+/**
+ * Update (or clear) a directory's per-directory build/test gate command and return
+ * the refreshed view. Pass `null`/`undefined` to clear the override (revert to the
+ * default `config.verifyCmd`); a string (incl. "") sets it. 404 if the directory is
+ * gone. Takes effect on the NEXT gate run for that directory (the next task entering
+ * review, and the next merge's post-merge verify) — nothing in flight is disturbed.
+ */
+export function updateDirectoryGateCmd(id: string, gateCmd: unknown): DirectoryView {
+  const dir = getDirectory(id);
+  if (!dir) throw new HttpError(404, `directory not found: ${id}`);
+  const value = normalizeGateCmd(gateCmd);
+  db.query(`UPDATE directories SET gate_cmd=? WHERE id=?`).run(value, id);
+  const view: DirectoryView = { ...getDirectory(id)!, counts: counts(id) };
+  publish({ type: "directory.updated", directory: view });
+  return view;
+}
+
+/**
+ * Per-directory needs-attention rollup, the projection behind the cross-project
+ * DASHBOARD (GET /api/dashboard). For every registered directory it folds the
+ * per-status `counts` into the four operator-facing buckets the dashboard surfaces,
+ * plus the directory's effective gate command, and accumulates a `totals` row. The
+ * buckets (a task can fall in more than one — `needsAttention` is the operator
+ * pull-signal, deliberately overlapping `review`/`failed`, matching /health):
+ *  - `active`         — in-flight work needing no human: queued + blocked + running
+ *                       + idle + finalizing.
+ *  - `review`         — waiting for a human to review/merge.
+ *  - `failed`         — gave up dispatching / auto-reverted off main.
+ *  - `needsAttention` — review + failed (what to look at right now).
+ */
+export type DashboardDirectory = {
+  id: string;
+  path: string;
+  label: string | null;
+  gate_cmd: string | null;
+  /** The effective gate command (own gate_cmd or the default) — what actually runs. */
+  effective_gate_cmd: string;
+  counts: Record<string, number>;
+  active: number;
+  review: number;
+  failed: number;
+  needsAttention: number;
+};
+
+export type Dashboard = {
+  directories: DashboardDirectory[];
+  totals: {
+    directories: number;
+    active: number;
+    review: number;
+    failed: number;
+    needsAttention: number;
+  };
+};
+
+export function dashboard(): Dashboard {
+  const rows = db
+    .query<DirectoryRow, []>(`SELECT * FROM directories ORDER BY created_at ASC`)
+    .all();
+  const totals = { directories: rows.length, active: 0, review: 0, failed: 0, needsAttention: 0 };
+  const directories = rows.map((d) => {
+    const c = counts(d.id);
+    const active =
+      (c.queued ?? 0) + (c.blocked ?? 0) + (c.running ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
+    const review = c.review ?? 0;
+    const failed = c.failed ?? 0;
+    const needsAttention = review + failed;
+    totals.active += active;
+    totals.review += review;
+    totals.failed += failed;
+    totals.needsAttention += needsAttention;
+    return {
+      id: d.id,
+      path: d.path,
+      label: d.label,
+      gate_cmd: d.gate_cmd,
+      effective_gate_cmd: d.gate_cmd !== null ? d.gate_cmd : config.verifyCmd,
+      counts: c,
+      active,
+      review,
+      failed,
+      needsAttention,
+    };
+  });
+  return { directories, totals };
+}
+
 export async function registerDirectory(
   rawPath: string,
   label?: string,
+  gateCmd?: unknown,
 ): Promise<DirectoryView> {
   const path = resolve(rawPath);
 
@@ -123,6 +241,9 @@ export async function registerDirectory(
   }
 
   const finalLabel = label?.trim() || basename(path);
+  // Optional per-directory build/test gate command, set at register time (NULL =
+  // use the default config.verifyCmd; "" = disable the gate for this directory).
+  const finalGateCmd = normalizeGateCmd(gateCmd);
 
   // Provision the herdr workspace (best effort — directory still usable if the
   // herdr server is briefly down; dispatch will retry).
@@ -148,9 +269,9 @@ export async function registerDirectory(
   const id = generateDirectoryId();
   const created = nowIso();
   db.query(
-    `INSERT INTO directories (id, path, label, herdr_workspace, herdr_pane, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, path, finalLabel, workspaceId, paneId, created);
+    `INSERT INTO directories (id, path, label, herdr_workspace, herdr_pane, gate_cmd, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, path, finalLabel, workspaceId, paneId, finalGateCmd, created);
 
   const row = getDirectory(id)!;
   const view: DirectoryView = { ...row, counts: counts(id) };
