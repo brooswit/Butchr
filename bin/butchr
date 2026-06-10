@@ -31,9 +31,13 @@ COMMANDS
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
+  backups                         List local DB snapshots (newest first). OFFLINE.
+  restore <file|latest> [--force] Restore the DB from a snapshot. OFFLINE — stop
+                                    butchr first; --force skips the running check.
 
 GLOBAL FLAGS
   --json        Print the raw JSON response instead of formatted output.
+  --force       (restore) proceed even if a butchr server appears to be running.
   -h, --help    Show this help.
 
 ENVIRONMENT
@@ -53,6 +57,8 @@ function parseArgs(argv) {
     const tok = argv[i];
     if (tok === "--json") {
       flags.json = true;
+    } else if (tok === "--force") {
+      flags.force = true;
     } else if (tok === "-h" || tok === "--help") {
       flags.help = true;
     } else if (tok === "--var" || tok.startsWith("--var=")) {
@@ -389,6 +395,70 @@ async function cmdBlock(positionals, flags) {
   process.stdout.write(`${id} blocked_by = ${onStr} → ${t.status}\n`);
 }
 
+// ---- offline DB snapshot / restore ----------------------------------------
+// These two are the ONE exception to "thin REST client": a DB restore can't go
+// through the running server (it holds the db open), so they operate directly on
+// the filesystem via the shared logic in src/backup.ts. Importing that module is
+// side-effect-free w.r.t. opening the db (it loads db.ts lazily), so neither
+// command opens the live db.
+
+/** Is a butchr server answering on BASE? Best-effort; false on any error. */
+async function serverRunning() {
+  try {
+    const res = await fetch(BASE + "/health");
+    return res.ok || res.status === 503; // any HTTP answer means it's up
+  } catch {
+    return false;
+  }
+}
+
+async function cmdBackups(flags) {
+  const backup = await import("../src/backup.ts");
+  const list = backup.listBackups();
+  if (flags.json) {
+    printJson(list);
+    return;
+  }
+  if (list.length === 0) {
+    process.stdout.write("(no snapshots found)\n");
+    return;
+  }
+  process.stdout.write(
+    table(list, [
+      { header: "NAME", get: (b) => b.name },
+      { header: "SIZE", get: (b) => `${Math.round(b.size / 1024)}KB` },
+      { header: "MODIFIED", get: (b) => new Date(b.mtimeMs).toISOString() },
+    ]) + "\n",
+  );
+}
+
+async function cmdRestore(positionals, flags) {
+  const target = positionals[0];
+  if (!target) fail("restore: missing <file|latest>");
+  if (!flags.force && (await serverRunning())) {
+    fail(
+      `a butchr server appears to be running at ${BASE} — stop it first ` +
+        `(see OPERATIONS.md "Restart safely"), then re-run, or pass --force.`,
+    );
+  }
+  const backup = await import("../src/backup.ts");
+  let result;
+  try {
+    result = backup.restoreFromBackup(target);
+  } catch (e) {
+    fail(`restore: ${(e && e.message) || String(e)}`);
+  }
+  if (flags.json) {
+    printJson(result);
+    return;
+  }
+  process.stdout.write(
+    `restored ${result.restored}\n  from: ${result.from}\n` +
+      (result.backedUp ? `  previous db saved to: ${result.backedUp}\n` : "") +
+      `Start butchr to pick up the restored database.\n`,
+  );
+}
+
 // ---- entrypoint -----------------------------------------------------------
 
 async function main() {
@@ -420,6 +490,10 @@ async function main() {
       return cmdRequeue(positionals, flags);
     case "block":
       return cmdBlock(positionals, flags);
+    case "backups":
+      return cmdBackups(flags);
+    case "restore":
+      return cmdRestore(positionals, flags);
     default:
       fail(`unknown command: ${command}\nRun 'butchr --help' for usage.`);
   }

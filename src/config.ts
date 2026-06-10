@@ -69,6 +69,24 @@ export const config = {
   /** Number of rotated log files to keep (butchr.log.1 … butchr.log.N). */
   logKeep: envInt("BUTCHR_LOG_KEEP", 3),
 
+  /**
+   * DB SNAPSHOT / BACKUP resilience (see src/backup.ts). The SQLite db is the
+   * source of truth for all task state + history, so butchr takes periodic,
+   * SQLite-safe snapshots (`VACUUM INTO`, not a raw mid-WAL file copy) and one on
+   * clean shutdown, keeping the newest `backupKeep` and pruning older ones. A
+   * damaged db can be rolled back with `butchr restore <file|latest>`.
+   *  - `backupEnabled` master switch (default on). When off, no periodic/shutdown
+   *    snapshots are taken (restore still works on any existing snapshots).
+   *  - `backupDir` where snapshots live (default `<data>/backups`).
+   *  - `backupIntervalMs` periodic snapshot cadence (default 15 min); <=0 disables
+   *    the periodic loop (a shutdown snapshot is still taken if enabled).
+   *  - `backupKeep` how many newest snapshots to retain; <=0 keeps ALL (no prune).
+   */
+  backupEnabled: envBool("BUTCHR_BACKUP_ENABLED", true),
+  backupDir: env("BUTCHR_BACKUP_DIR", join(dataDir, "backups")),
+  backupIntervalMs: envInt("BUTCHR_BACKUP_INTERVAL_MS", 1000 * 60 * 15),
+  backupKeep: envInt("BUTCHR_BACKUP_KEEP", 24),
+
   /** Path to the herdr binary. */
   herdrBin: env("BUTCHR_HERDR_BIN", "herdr"),
 

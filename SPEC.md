@@ -614,6 +614,36 @@ Self-heals artifacts leaked by tasks that reached a **terminal** state
 
 The last reap result (`{worktrees, husks, at}`) is exposed on `/health`.
 
+### DB snapshots + restore (`src/backup.ts`)
+
+The SQLite db is the **source of truth** for all task state + history, so butchr
+keeps **SQLite-safe snapshots** of it for crash/power-loss recovery.
+
+- **How** — snapshots use `VACUUM INTO` (SQLite's online-backup primitive), **not**
+  a raw file copy. With the db in WAL mode a mid-write `cp` would capture a torn
+  page set (committed state split across `butchr.db` and its `-wal` sidecar);
+  `VACUUM INTO` writes a clean, consistent, defragmented **standalone** db file
+  (no sidecars) safe to take while the db is live.
+- **When** — a periodic loop (`startBackupLoop`, wired in `index.ts`) takes one
+  every `BUTCHR_BACKUP_INTERVAL_MS` (default 15 min; first fires after one
+  interval, not at boot), plus **one final snapshot on clean shutdown**
+  (`snapshotOnShutdown`, awaited in the SIGINT/SIGTERM handler).
+- **Where / retention** — files land in `BUTCHR_BACKUP_DIR`
+  (default `<data>/backups/`) named `butchr-<timestamp>.db`. After each snapshot
+  the **newest `BUTCHR_BACKUP_KEEP`** (default 24) are kept and older ones pruned
+  (a `keep` ≤ 0 keeps **all** — never deletes everything). The whole feature is
+  disabled with `BUTCHR_BACKUP_ENABLED=0`.
+- **Restore** — **offline** (a running server holds the db open). Stop butchr, then
+  `butchr restore <file|latest>` (or `bun bin/butchr restore …`): it copies the
+  chosen snapshot over `BUTCHR_DB`, first saving the current db aside to
+  `<db>.pre-restore-<ts>` and removing stale `-wal`/`-shm` sidecars, then you start
+  butchr again. `butchr backups` lists snapshots. These two CLI commands are the
+  one exception to "the CLI is a thin REST client" — restore can't go through the
+  server — so they operate on the filesystem directly via `src/backup.ts` (which is
+  import-side-effect-free w.r.t. opening the db; it loads `db.ts` lazily only when
+  taking a snapshot). `lastSnapshotAt` + a retained-snapshot count are on `/health`.
+  See [OPERATIONS.md](./OPERATIONS.md#db-snapshots--restore) for the runbook.
+
 ### Health endpoint
 
 `GET /health` (alias `GET /api/health`) returns **200** when healthy, **503** when
@@ -624,9 +654,11 @@ dispatch is halted for maintenance; running/review/idle tasks are unaffected), `
 `staleAfterMs` — stale if it has ticked but not within `max(tickMs·5, 10s)`; a
 never-ticked loop is treated as *still starting*, not stalled), `tasks` (counts by
 status), `failedTasks`, `concurrency` (`active` = running+review+finalizing,
-`queued`), `needsAttention` (`review`+`failed`), `reaper` (last boot reap), and
-`herdr.reachable` (**best-effort — does NOT affect the 200/503 verdict**; herdr down
-⇒ tasks stall at `queued` but butchr stays "healthy").
+`queued`), `needsAttention` (`review`+`failed`), `reaper` (last boot reap),
+`backup` (DB-snapshot resilience: `enabled`, `lastSnapshotAt` — null until the
+first snapshot of this run — `count` of retained snapshots, `keep`, `intervalMs`,
+`dir`), and `herdr.reachable` (**best-effort — does NOT affect the 200/503
+verdict**; herdr down ⇒ tasks stall at `queued` but butchr stays "healthy").
 
 ### Supervision (systemd + watchdog)
 
@@ -748,7 +780,9 @@ depend on `kind`:
 A dependency-free REST client (`fetch` only) targeting `http://127.0.0.1:47800`
 (override `BUTCHR_URL`). Each subcommand maps onto exactly one REST route; it adds
 no server logic. Exit non-zero on any API/usage/connection error; `--json` prints
-the raw payload.
+the raw payload. The **two exceptions** are the offline `backups` / `restore`
+commands, which operate on the filesystem via `src/backup.ts` rather than the
+server (a DB restore can't go through a live server — see §5).
 
 | Command | Maps to |
 |---------|---------|
@@ -762,6 +796,8 @@ the raw payload.
 | `reject <id> -m <note>` | `POST …/reject` |
 | `requeue <id>` | `POST …/requeue` |
 | `block <id> --on id,id` | `PUT …/blocked_by` (`--on ''` clears) |
+| `backups` | **offline** — lists DB snapshots in `BUTCHR_BACKUP_DIR` (newest first) via `src/backup.ts`; no server call |
+| `restore <file\|latest> [--force]` | **offline** — restores `BUTCHR_DB` from a snapshot (saves the current db aside first). Refuses if a server answers on `BUTCHR_URL` unless `--force`; stop butchr first (§5) |
 
 ### 6.5 Webapp (`public/`)
 
@@ -953,6 +989,10 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_LOG_FILE` | `<data>/butchr.log` | persistent log sink (empty disables file logging). |
 | `BUTCHR_LOG_MAX_BYTES` | `10485760` (10 MB) | rotate the log past this size (0 disables). |
 | `BUTCHR_LOG_KEEP` | `3` | rotated log files to keep. |
+| `BUTCHR_BACKUP_ENABLED` | `true` | take periodic + on-shutdown DB snapshots (§5 "DB snapshots + restore"). Off ⇒ no snapshots taken (restore still works on existing ones). |
+| `BUTCHR_BACKUP_DIR` | `<data>/backups` | where `VACUUM INTO` snapshots (`butchr-<ts>.db`) are written. |
+| `BUTCHR_BACKUP_INTERVAL_MS` | `900000` (15 min) | periodic snapshot cadence; ≤0 disables the periodic loop (a shutdown snapshot is still taken). |
+| `BUTCHR_BACKUP_KEEP` | `24` | newest snapshots to retain after each snapshot; ≤0 keeps **all** (no prune). |
 | `BUTCHR_HERDR_BIN` | `herdr` | herdr binary. |
 | `BUTCHR_GIT_BIN` | `git` | git binary. |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval. |
@@ -1003,9 +1043,10 @@ rendered agent prompt **lists context-file paths** rather than inlining their bo
 files would blow `MAX_ARG_STRLEN` → E2BIG); the agent reads the files itself.
 
 **butchr state dir** (`~/.local/share/butchr/`): `butchr.db` (+ WAL), `butchr.log`
-(+ rotations), `prompts/<id>.md` (rendered prompts), `runs/<id>.log` + `<id>.done`
-(PTY run log + exit marker), `mcp/<id>.json` (per-task MCP config), `ask/<id>.q.md`
-(transient CTO question files).
+(+ rotations), `backups/butchr-<ts>.db` (DB snapshots — see §5), `prompts/<id>.md`
+(rendered prompts), `runs/<id>.log` + `<id>.done` (PTY run log + exit marker),
+`mcp/<id>.json` (per-task MCP config), `ask/<id>.q.md` (transient CTO question
+files).
 
 ---
 

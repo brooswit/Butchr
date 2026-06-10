@@ -1,5 +1,6 @@
 // butchr entry point. Starts the dispatcher loop and the HTTP server, and wires
 // up clean shutdown. Run with `bun run src/index.ts` (see package.json scripts).
+import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import { initFileLogging } from "./log.ts";
 import { reapOrphans } from "./reaper.ts";
@@ -51,14 +52,25 @@ async function main(): Promise<void> {
 
   startDispatcher();
   startServer();
+  // Periodic, SQLite-safe snapshots of the source-of-truth db (see src/backup.ts)
+  // so a crash/power loss mid-write can be rolled back to the last good copy.
+  startBackupLoop();
 
-  const shutdown = () => {
+  // Clean shutdown: stop the loops, then capture one final snapshot so the very
+  // latest state survives even a deliberate restart. Async so the snapshot
+  // completes before we exit; best-effort (snapshotOnShutdown never throws).
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return; // ignore a second signal mid-shutdown
+    shuttingDown = true;
     console.log("\n[butchr] shutting down…");
     stopDispatcher();
+    stopBackupLoop();
+    await snapshotOnShutdown();
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   // Crash supervision: if anything escapes to the top level, don't limp along in
   // a half-broken state — log it and exit non-zero so the supervisor (see

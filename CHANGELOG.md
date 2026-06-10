@@ -41,6 +41,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [SPEC.md §4](./SPEC.md#4-review--merge).
 
 ### Added
+- **DB snapshots + restore (resilience).** The SQLite database is butchr's source of
+  truth for all task state and history, so it now takes **SQLite-safe snapshots** of
+  it for crash/power-loss recovery. A background loop snapshots the DB every
+  `BUTCHR_BACKUP_INTERVAL_MS` (default 15 min) **and on every clean shutdown**, using
+  `VACUUM INTO` (a consistent online backup — never a torn mid-WAL file copy) to write
+  `backups/butchr-<timestamp>.db` under `BUTCHR_BACKUP_DIR` (default `<data>/backups/`).
+  The newest `BUTCHR_BACKUP_KEEP` (default 24) are retained and older ones pruned; the
+  whole feature is toggled by `BUTCHR_BACKUP_ENABLED` (default on). Recover with two new
+  **offline** CLI commands — `butchr backups` (list snapshots) and
+  `butchr restore <file|latest>` (restore the DB, saving the current one aside to
+  `<db>.pre-restore-<ts>` first; refuses while a server is running unless `--force`).
+  `/health` now reports a `backup` block (`lastSnapshotAt`, retained `count`, `keep`,
+  `intervalMs`, `dir`). Zero new dependencies. See
+  [SPEC.md §5](./SPEC.md#db-snapshots--restore-srcbackupts) and the
+  [OPERATIONS runbook](./OPERATIONS.md#db-snapshots--restore).
 - **Rough task-duration estimates (ETA).** butchr now forecasts how long a task is
   likely to take, built from its **own tracked history** — a small, dependency-free
   heuristic (no ML). Every estimate is a **loose p50–p90 range with its sample size**

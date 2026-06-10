@@ -176,6 +176,62 @@ reaps leaked artifacts.
 
 ---
 
+## DB snapshots & restore
+
+The SQLite DB (`BUTCHR_DB`, default `<data>/butchr.db`) is the **source of truth**
+for all task state + history. butchr guards it with **SQLite-safe snapshots** so a
+crash or power loss mid-write can be rolled back to the last good copy.
+
+**Snapshots happen automatically** (no action needed): a periodic snapshot every
+`BUTCHR_BACKUP_INTERVAL_MS` (default 15 min) **plus one on every clean shutdown**.
+Each uses `VACUUM INTO` (a consistent online backup — **not** a raw file copy that
+would tear a WAL-mode DB), writing `backups/butchr-<timestamp>.db` under
+`BUTCHR_BACKUP_DIR` (default `<data>/backups/`). The newest `BUTCHR_BACKUP_KEEP`
+(default 24) are retained; older ones are pruned. Set `BUTCHR_BACKUP_ENABLED=0` to
+turn the whole thing off.
+
+Check the latest snapshot + retained count on `/health` (the `backup` field):
+
+```sh
+curl -s http://127.0.0.1:47800/health | jq .backup
+# { "enabled": true, "lastSnapshotAt": "2026-06-10T18:15:00.123Z",
+#   "count": 24, "keep": 24, "intervalMs": 900000, "dir": ".../backups" }
+```
+
+**List snapshots:**
+
+```sh
+butchr backups            # or: bun bin/butchr backups
+# NAME                              SIZE   MODIFIED
+# butchr-2026-06-10T18-15-00-123Z.db  64KB   2026-06-10T18:15:00.123Z
+# ...
+```
+
+**Restore** — this is **OFFLINE**: a running server holds the DB open, so you must
+stop butchr first.
+
+```sh
+# 1. Stop butchr (resolve the PID by port — see "Restart safely" above).
+ss -ltnp | grep :47800
+kill <pid>
+
+# 2. Restore from the newest snapshot (or pass a specific file/name).
+butchr restore latest                # newest snapshot in BUTCHR_BACKUP_DIR
+butchr restore butchr-2026-06-10T18-15-00-123Z.db   # a bare name resolves in the backup dir
+butchr restore /path/to/snapshot.db  # or an absolute path
+
+# 3. Start butchr again (Start command above). It re-adopts state on boot.
+```
+
+`restore` copies the chosen snapshot over `BUTCHR_DB`, first saving the current DB
+aside to `<db>.pre-restore-<timestamp>` (so a mistaken restore is itself
+recoverable) and removing stale `-wal`/`-shm` sidecars. It **refuses** if a server
+still answers on `BUTCHR_URL` — pass `--force` to override (only if you're sure
+nothing is using the DB). `backups`/`restore` are the only CLI commands that touch
+the filesystem directly instead of the REST API.
+
+---
+
 ## Build / type check
 
 No separate test step; verify the build compiles and type-checks with:
@@ -210,6 +266,8 @@ butchr approve <id>                    # approve a task in review (merges its br
 butchr reject <id> -m "<note>"         # send a reviewed task back for rework
 butchr requeue <id>                    # re-queue a failed/stuck task for a fresh dispatch
 butchr block <id> --on id,id           # replace blocked_by (use --on '' to clear)
+butchr backups                         # list local DB snapshots (OFFLINE; see below)
+butchr restore <file|latest> [--force] # restore the DB from a snapshot (OFFLINE)
 butchr --help                          # full usage
 ```
 
@@ -217,7 +275,9 @@ Each subcommand maps onto exactly one existing REST route (see the route table i
 `src/server.ts`); the CLI adds no server behavior. `ls` with no `--dir` fans out
 over every registered directory and concatenates their tasks; `--status` filters
 client-side. `approve` reports the merge-couldn't-complete cases too — a conflict
-kicked back to the agent, or a post-merge-verify auto-revert.
+kicked back to the agent, or a post-merge-verify auto-revert. The lone exceptions
+are `backups` / `restore`, which are **offline** filesystem operations (a DB
+restore can't go through a live server) — see "DB snapshots & restore" below.
 
 ```sh
 # Example: open a task, review it, approve.
@@ -252,6 +312,9 @@ Key fields:
   `queued`, check this first.
 - **`tasks`** — counts grouped by status (`queued`, `running`, `review`, `merged`,
   `aborted`, `rejected`, …). A quick at-a-glance of the work pipeline.
+- **`backup`** — DB-snapshot resilience: `enabled`, `lastSnapshotAt` (null until
+  the first snapshot of this run), `count` of retained snapshots, `keep`,
+  `intervalMs`, `dir`. See "DB snapshots & restore" above.
 - `version`, `uptimeSec` — build/version and process uptime.
 
 `healthy = db.ok && tick.alive`. herdr being down alone will **not** trip 503.

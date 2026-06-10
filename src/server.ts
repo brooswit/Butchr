@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
 import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
 import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
@@ -278,6 +279,16 @@ async function healthResponse(): Promise<Response> {
   // until the boot reap runs.
   const reap = getLastReap();
 
+  // DB SNAPSHOT/BACKUP resilience snapshot (see src/backup.ts): when the last
+  // snapshot was taken this run, how many are retained, and the backup dir. Cheap
+  // (one readdir); best-effort — never affects the 200/503 verdict.
+  let backupCount = 0;
+  try {
+    backupCount = listBackups().length;
+  } catch {
+    /* best-effort */
+  }
+
   const healthy = dbOk && tickAlive;
   const body = {
     status: healthy ? "ok" : "degraded",
@@ -305,6 +316,16 @@ async function healthResponse(): Promise<Response> {
     needsAttention,
     // Self-heal visibility: last startup reap of orphaned worktrees + herdr husks.
     reaper: { lastRunAt: reap.at, worktrees: reap.worktrees, husks: reap.husks },
+    // DB snapshot/backup resilience: last snapshot time this run (null until the
+    // first), retained-snapshot count, retention limit, cadence, dir, enabled.
+    backup: {
+      enabled: config.backupEnabled,
+      lastSnapshotAt: getLastSnapshotAt(),
+      count: backupCount,
+      keep: config.backupKeep,
+      intervalMs: config.backupIntervalMs,
+      dir: config.backupDir,
+    },
     herdr: { reachable: herdrReachable },
   };
   return json(body, healthy ? 200 : 503);
