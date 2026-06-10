@@ -6,6 +6,7 @@
 // setVerifyRunner — the revert-on-red decision is then exercised without spawning
 // a real `bun build` / `bun test`.
 import { config } from "./config.ts";
+import { runGate } from "./gate.ts";
 
 export type VerifyResult = {
   /** true → the default-branch tip builds and tests pass (merge stands). */
@@ -20,48 +21,29 @@ export type VerifyResult = {
 export type VerifyRunner = (dir: string) => Promise<VerifyResult>;
 
 /**
- * Default runner: run `config.verifyCmd` via `bash -lc` in the repo root, capture
- * combined output, and time out (treated as RED) after `config.verifyTimeoutMs`.
- * An empty verifyCmd DISABLES the gate (skipped → ok).
+ * Default runner: a thin layer over the shared gate runner (src/gate.ts) — run
+ * `config.verifyCmd` via `bash -lc` in the repo root, bounded by
+ * `config.verifyTimeoutMs` (a timeout is treated as RED with a verify-specific
+ * message). An empty verifyCmd DISABLES the gate (skipped → ok); everything else is
+ * the gate runner's spawn + timeout + combined-output, shared with the CI gate.
  */
 const defaultRunner: VerifyRunner = async (dir) => {
   const cmd = config.verifyCmd.trim();
   if (!cmd) return { ok: true, output: "", skipped: true };
 
-  const proc = Bun.spawn(["bash", "-lc", cmd], {
+  const gate = await runGate(["bash", "-lc", cmd], {
     cwd: dir,
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs: config.verifyTimeoutMs,
   });
-
-  // Bound the run so a hanging build/test can't wedge the merge queue forever.
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      proc.kill();
-    } catch {
-      /* already gone */
-    }
-  }, Math.max(1, config.verifyTimeoutMs));
-
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  clearTimeout(timer);
-
-  const output = [stdout, stderr].filter(Boolean).join("").trim();
-  if (timedOut) {
+  if (gate.timedOut) {
     return {
       ok: false,
       output:
         `verify gate timed out after ${config.verifyTimeoutMs}ms\n` +
-        (output || "(no output captured)"),
+        (gate.output || "(no output captured)"),
     };
   }
-  return { ok: code === 0, output };
+  return { ok: gate.ok, output: gate.output };
 };
 
 let runner: VerifyRunner = defaultRunner;

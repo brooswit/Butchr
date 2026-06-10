@@ -404,12 +404,16 @@ Code client, so butchr never parks a call).
 
 On a genuine `running → review` transition, `triggerCi` runs **build + test in the
 task's worktree** (`defaultCiRunner`: `bun build … --outfile /dev/null` then
-`bun test`), fire-and-forget — review never blocks on it. It writes a badge:
-`ci_status` (`running` → `pass`/`fail`) + `ci_summary` (first line a compact label
-like `build + 12 tests` / `build failed` / `3 test failures`, then an output tail).
-A **FAIL is retried** up to `BUTCHR_CI_RETRIES` times (default 1); a pass on any
-retry wins. The runner is overridable in tests (`setCiRunner`); tasks with no
-worktree skip CI (leaving `ci_status` null). The CI gate is **advisory** — it does
+`bun test`), fire-and-forget — review never blocks on it. Both commands are spawned
+through the **shared gate runner** (`src/gate.ts` `runGate`) that the post-merge
+verify gate also uses, so the two gates can't drift on how they spawn/bound a run:
+each CI command is now **bounded by `BUTCHR_VERIFY_TIMEOUT_MS`** (the same kill-timer
+verify has — a timed-out build/test counts as a FAIL) rather than running unbounded.
+It writes a badge: `ci_status` (`running` → `pass`/`fail`) + `ci_summary` (first line
+a compact label like `build + 12 tests` / `build failed` / `3 test failures`, then an
+output tail). A **FAIL is retried** up to `BUTCHR_CI_RETRIES` times (default 1); a
+pass on any retry wins. The runner is overridable in tests (`setCiRunner`); tasks
+with no worktree skip CI (leaving `ci_status` null). The CI gate is **advisory** — it does
 not hard-block approval — but it gates **auto-merge** and on a `pass` fires the
 auto-merge hook.
 
@@ -857,7 +861,7 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval. |
 | `BUTCHR_CTO_CONTEXT` | _(empty)_ | optional file seeding a new directory's `.butchr/CTO.md` (else built-in default). |
 | `BUTCHR_VERIFY_CMD` | `bun build src/index.ts --target bun --outfile /dev/null && bun test` | post-merge verify gate, run via `bash -lc` in the repo root. **Empty disables** the gate. |
-| `BUTCHR_VERIFY_TIMEOUT_MS` | `600000` (10 min) | verify-gate timeout (treated as RED). |
+| `BUTCHR_VERIFY_TIMEOUT_MS` | `600000` (10 min) | timeout (treated as RED/FAIL) for **both** gates that share the gate runner: the post-merge verify gate and each in-worktree CI build/test command. |
 | `BUTCHR_MAX_DISPATCH_ATTEMPTS` | `5` | consecutive dispatch failures before giving up to `failed`. |
 | `BUTCHR_DISPATCH_BACKOFF_BASE_MS` | `1000` | base for `min(base·2^(n-1), cap)` retry backoff. |
 | `BUTCHR_DISPATCH_BACKOFF_CAP_MS` | `30000` | backoff cap. |

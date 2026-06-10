@@ -13,7 +13,7 @@ import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
 import { HttpError, getDirectory } from "./directories.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
-import { run } from "./exec.ts";
+import { runGate } from "./gate.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
@@ -1501,35 +1501,34 @@ function parseBunCount(output: string, word: "pass" | "fail"): number {
 
 /**
  * The real CI runner: `bun build … --outfile /dev/null` then `bun test`, both in
- * the task's worktree. A non-zero build exit is a build failure; otherwise a
- * non-zero test exit is a test failure (with the count parsed from bun's summary).
+ * the task's worktree, each spawned through the shared gate runner (src/gate.ts) so
+ * the CI gate and the post-merge verify gate share one bounded spawn — the CI gate
+ * inherits the same `config.verifyTimeoutMs` bound verify already had. A non-zero
+ * build exit is a build failure; otherwise a non-zero test exit is a test failure
+ * (with the count parsed from bun's summary). The build-vs-test distinction + badge
+ * counting stays CI-specific (it runs the two commands separately for exactly that).
  */
 async function defaultCiRunner(dirPath: string, taskId: string): Promise<CiResult> {
   const wt = git.worktreePath(dirPath, taskId);
-  const build = await run(
+  const build = await runGate(
     ["bun", "build", "src/index.ts", "--target", "bun", "--outfile", "/dev/null"],
     { cwd: wt },
   );
   if (!build.ok) {
-    return {
-      status: "fail",
-      label: "build failed",
-      detail: ciTail(build.stderr || build.stdout),
-    };
+    return { status: "fail", label: "build failed", detail: ciTail(build.output) };
   }
 
-  const test = await run(["bun", "test"], { cwd: wt });
-  const out = test.stdout + "\n" + test.stderr;
+  const test = await runGate(["bun", "test"], { cwd: wt });
   if (!test.ok) {
-    const failed = parseBunCount(out, "fail");
+    const failed = parseBunCount(test.output, "fail");
     return {
       status: "fail",
       label: failed > 0 ? `${failed} test failures` : "tests failed",
-      detail: ciTail(out),
+      detail: ciTail(test.output),
     };
   }
-  const passed = parseBunCount(out, "pass");
-  return { status: "pass", label: `build + ${passed} tests`, detail: ciTail(out) };
+  const passed = parseBunCount(test.output, "pass");
+  return { status: "pass", label: `build + ${passed} tests`, detail: ciTail(test.output) };
 }
 
 /** Run the active CI runner once, converting a runner throw into a fail result. */

@@ -43,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and flagged for same-file sequencing. Report only — no code changes.
 
 ### Changed
+- **The CI gate and the post-merge verify gate now share one build+test gate
+  runner** (`src/gate.ts` `runGate`). The two gates had each re-implemented "spawn a
+  build/test command in a cwd, bound it, collect combined output" and **drifted**: the
+  in-worktree CI gate had flaky-retries but **no timeout** (an unbounded spawn), while
+  the post-merge verify gate had a timeout but no retry. Both now spawn through the
+  shared `runGate`, so the **CI gate inherits the same `BUTCHR_VERIFY_TIMEOUT_MS`
+  kill-timer** verify already had — a hung `bun build`/`bun test` in the review gate is
+  now bounded (a timed-out command counts as a FAIL) instead of leaking a process. The
+  genuinely-different layers stay where they belong: CI keeps its build-vs-test badge
+  parsing + flaky retry, verify keeps its skip-on-empty + revert-on-RED decision. Pure
+  refactor otherwise — the pass/fail gate decision, retry policy, and revert behavior
+  are unchanged (CLEANUP C3). See [SPEC.md §4](./SPEC.md#4-review--merge) /
+  [§8](./SPEC.md#8-configuration).
 - **Internal: task status transitions now flow through one `setStatus()` helper**
   (`src/tasks.ts`). The four-step transition skeleton — guarded `UPDATE` →
   `recordTaskEvent` (audit) → `updateTaskMdStatus` (mirror to task.md) → `emitUpdated`
