@@ -1,0 +1,371 @@
+#!/usr/bin/env bun
+// butchr — operator CLI for the butchr REST API.
+//
+// A dependency-free REST client (bun/node stdlib `fetch` only). It maps each
+// subcommand onto an existing server route in src/server.ts — it adds NO server
+// logic of its own. Talks to http://127.0.0.1:47800 by default; override with the
+// BUTCHR_URL env var.
+//
+// Exit codes: 0 on success, 1 on any API/usage/connection error (the message is
+// printed to stderr). Pass --json on any command for the raw API payload.
+
+const BASE = (process.env.BUTCHR_URL || "http://127.0.0.1:47800").replace(/\/+$/, "");
+
+const HELP = `butchr — operator CLI for the butchr REST API
+
+USAGE
+  butchr <command> [args] [--json]
+
+COMMANDS
+  health                          Server health snapshot (exit 1 if degraded).
+  ls [--dir <id>] [--status <s>]  List tasks as a compact id/status/ci table.
+  new <dir> -m <prompt>           Create a task in directory <dir> (id or path).
+      [--blocked-by id,id]          Start it blocked on the given task ids.
+  show <id>                       Task detail: status, ci, summary, review notes.
+  approve <id>                    Approve a task in review (merges its branch).
+  reject <id> -m <note>           Send a reviewed task back for rework with a note.
+  requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
+  block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
+
+GLOBAL FLAGS
+  --json        Print the raw JSON response instead of formatted output.
+  -h, --help    Show this help.
+
+ENVIRONMENT
+  BUTCHR_URL    Base URL of the butchr server (default ${BASE}).
+`;
+
+// ---- argument parsing -----------------------------------------------------
+
+// Flags that consume the following token as their value. Everything else is a
+// positional. Also supports the --flag=value form.
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on"]);
+
+function parseArgs(argv) {
+  const positionals = [];
+  const flags = {};
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === "--json") {
+      flags.json = true;
+    } else if (tok === "-h" || tok === "--help") {
+      flags.help = true;
+    } else if (tok.startsWith("--") && tok.includes("=")) {
+      const eq = tok.indexOf("=");
+      flags[tok.slice(2, eq)] = tok.slice(eq + 1);
+    } else if (VALUE_FLAGS.has(tok)) {
+      const val = argv[++i];
+      if (val === undefined) fail(`flag ${tok} needs a value`);
+      // Normalize aliases to a canonical key.
+      const key = tok === "-m" ? "message" : tok.replace(/^--/, "");
+      flags[key] = val;
+    } else if (tok.startsWith("-")) {
+      fail(`unknown flag: ${tok}`);
+    } else {
+      positionals.push(tok);
+    }
+  }
+  return { positionals, flags };
+}
+
+/** Split a comma-separated id list into a clean array (drops blanks). */
+function parseIdList(raw) {
+  if (raw === undefined) return [];
+  return String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// ---- HTTP -----------------------------------------------------------------
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function api(method, path, body) {
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      method,
+      headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new ApiError(
+      `could not reach butchr at ${BASE} — is it running? (${e.message})`,
+    );
+  }
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      data && typeof data === "object" && data.error
+        ? data.error
+        : typeof data === "string" && data
+          ? data
+          : `HTTP ${res.status}`;
+    throw new ApiError(msg, res.status);
+  }
+  return data;
+}
+
+// ---- helpers --------------------------------------------------------------
+
+function fail(msg) {
+  process.stderr.write(`butchr: ${msg}\n`);
+  process.exit(1);
+}
+
+function printJson(data) {
+  process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+}
+
+/** Render an array of objects as a fixed-width column table. */
+function table(rows, columns) {
+  if (rows.length === 0) return "(none)";
+  const widths = columns.map((c) =>
+    Math.max(c.header.length, ...rows.map((r) => String(c.get(r) ?? "").length)),
+  );
+  const line = (cells) =>
+    cells.map((cell, i) => String(cell ?? "").padEnd(widths[i])).join("  ").trimEnd();
+  const out = [line(columns.map((c) => c.header))];
+  for (const r of rows) out.push(line(columns.map((c) => c.get(r))));
+  return out.join("\n");
+}
+
+/** Compact CI badge from a task row: status, or "-" when CI hasn't run. */
+function ciBadge(t) {
+  return t.ci_status ? t.ci_status : "-";
+}
+
+/**
+ * Resolve a directory argument to a registered directory id. Accepts the id
+ * directly, or a filesystem path that matches a registered directory. Errors
+ * (listing what's available) when nothing matches.
+ */
+async function resolveDirectoryId(arg) {
+  const dirs = await api("GET", "/api/directories");
+  const byId = dirs.find((d) => d.id === arg);
+  if (byId) return byId.id;
+  const byPath = dirs.find((d) => d.path === arg);
+  if (byPath) return byPath.id;
+  const known = dirs.map((d) => `  ${d.id}  ${d.path}`).join("\n") || "  (no directories registered)";
+  throw new ApiError(`no registered directory matches "${arg}". Known directories:\n${known}`);
+}
+
+// ---- commands -------------------------------------------------------------
+
+async function cmdHealth(flags) {
+  // Health returns 503 (degraded) without an `error` body, so call fetch directly
+  // and surface the snapshot either way rather than treating 503 as an API error.
+  let res;
+  try {
+    res = await fetch(BASE + "/health");
+  } catch (e) {
+    throw new ApiError(`could not reach butchr at ${BASE} — is it running? (${e.message})`);
+  }
+  const body = await res.json();
+  if (flags.json) {
+    printJson(body);
+  } else {
+    const t = body.tasks || {};
+    const counts = Object.keys(t).length
+      ? Object.entries(t).map(([k, v]) => `${k}=${v}`).join(" ")
+      : "(none)";
+    process.stdout.write(
+      `status:   ${body.status}\n` +
+        `version:  ${body.version}\n` +
+        `uptime:   ${body.uptimeSec}s\n` +
+        `db:       ${body.db?.ok ? "ok" : "DOWN"}\n` +
+        `tick:     ${body.tick?.alive ? "alive" : "STALE"} (count=${body.tick?.count})\n` +
+        `herdr:    ${body.herdr?.reachable ? "reachable" : "unreachable"}\n` +
+        `attention:review=${body.needsAttention?.review ?? 0} failed=${body.needsAttention?.failed ?? 0}\n` +
+        `tasks:    ${counts}\n`,
+    );
+  }
+  // Non-zero exit when the server reports degraded so scripts can gate on it.
+  if (res.status !== 200) process.exit(1);
+}
+
+async function cmdLs(flags) {
+  let dirIds;
+  if (flags.dir) {
+    dirIds = [await resolveDirectoryId(flags.dir)];
+  } else {
+    const dirs = await api("GET", "/api/directories");
+    dirIds = dirs.map((d) => d.id);
+  }
+  let tasks = [];
+  for (const id of dirIds) {
+    const list = await api("GET", `/api/directories/${encodeURIComponent(id)}/tasks`);
+    tasks.push(...list);
+  }
+  if (flags.status) tasks = tasks.filter((t) => t.status === flags.status);
+  if (flags.json) {
+    printJson(tasks);
+    return;
+  }
+  process.stdout.write(
+    table(tasks, [
+      { header: "ID", get: (t) => t.id },
+      { header: "STATUS", get: (t) => (t.idle ? `${t.status}*` : t.status) },
+      { header: "CI", get: (t) => ciBadge(t) },
+    ]) + "\n",
+  );
+}
+
+async function cmdNew(positionals, flags) {
+  const dir = positionals[0];
+  if (!dir) fail("new: missing <dir> (directory id or path)");
+  const prompt = flags.message;
+  if (!prompt) fail("new: missing -m <prompt>");
+  const dirId = await resolveDirectoryId(dir);
+  const blockedBy = parseIdList(flags["blocked-by"]);
+  const task = await api("POST", `/api/directories/${encodeURIComponent(dirId)}/tasks`, {
+    prompt,
+    blocked_by: blockedBy,
+  });
+  if (flags.json) {
+    printJson(task);
+    return;
+  }
+  process.stdout.write(`created ${task.id} (${task.status})\n`);
+}
+
+async function cmdShow(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("show: missing <id>");
+  const t = await api("GET", `/api/tasks/${encodeURIComponent(id)}`);
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  const lines = [
+    `id:        ${t.id}`,
+    `directory: ${t.directory_id}`,
+    `status:    ${t.status}${t.idle ? " (idle)" : ""}${t.conflict ? " (conflict)" : ""}`,
+    `ci:        ${ciBadge(t)}`,
+  ];
+  if (t.blocked_by && t.blocked_by.length) {
+    lines.push(`blocked_by: ${t.blocked_by.join(", ")}`);
+    if (t.deadBlockers && t.deadBlockers.length) {
+      lines.push(`  dead blockers (never merge): ${t.deadBlockers.join(", ")}`);
+    }
+  }
+  if (t.last_dispatch_error) lines.push(`dispatch error: ${t.last_dispatch_error}`);
+  if (t.revert_reason) lines.push(`revert reason: ${t.revert_reason}`);
+  if (t.ci_summary) lines.push(`\nCI:\n${t.ci_summary}`);
+  if (t.summary) lines.push(`\nsummary:\n${t.summary}`);
+  const notes = t.review_notes || t.review_note;
+  if (notes) lines.push(`\nreview notes:\n${notes}`);
+  process.stdout.write(lines.join("\n") + "\n");
+}
+
+async function cmdApprove(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("approve: missing <id>");
+  const r = await api("POST", `/api/tasks/${encodeURIComponent(id)}/approve`, {});
+  if (flags.json) {
+    printJson(r);
+    return;
+  }
+  // approve returns either the task view directly, or {task, conflictSentBack} /
+  // {task, revertedOnRed} when the merge couldn't complete cleanly.
+  if (r.conflictSentBack) {
+    process.stdout.write(`${id}: merge conflict — sent back to the agent for resolution\n`);
+  } else if (r.revertedOnRed) {
+    process.stdout.write(`${id}: merged then AUTO-REVERTED (post-merge verify failed) — now flagged\n`);
+  } else {
+    const task = r.task ?? r;
+    process.stdout.write(`approved ${id} (${task.status})\n`);
+  }
+}
+
+async function cmdReject(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("reject: missing <id>");
+  const note = flags.message;
+  if (!note) fail("reject: missing -m <note>");
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/reject`, { note });
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  process.stdout.write(`rejected ${id} → ${t.status} (agent will resume with your note)\n`);
+}
+
+async function cmdRequeue(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("requeue: missing <id>");
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/requeue`, {});
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  process.stdout.write(`requeued ${id} (${t.status})\n`);
+}
+
+async function cmdBlock(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("block: missing <id>");
+  if (flags.on === undefined) fail("block: missing --on id,id (use --on '' to clear)");
+  const blockedBy = parseIdList(flags.on);
+  const t = await api("PUT", `/api/tasks/${encodeURIComponent(id)}/blocked_by`, {
+    blocked_by: blockedBy,
+  });
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  const onStr = blockedBy.length ? blockedBy.join(", ") : "(cleared)";
+  process.stdout.write(`${id} blocked_by = ${onStr} → ${t.status}\n`);
+}
+
+// ---- entrypoint -----------------------------------------------------------
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const command = argv[0];
+  const { positionals, flags } = parseArgs(argv.slice(1));
+
+  if (!command || command === "-h" || command === "--help" || flags.help) {
+    process.stdout.write(HELP);
+    return;
+  }
+
+  switch (command) {
+    case "health":
+      return cmdHealth(flags);
+    case "ls":
+      return cmdLs(flags);
+    case "new":
+      return cmdNew(positionals, flags);
+    case "show":
+      return cmdShow(positionals, flags);
+    case "approve":
+      return cmdApprove(positionals, flags);
+    case "reject":
+      return cmdReject(positionals, flags);
+    case "requeue":
+      return cmdRequeue(positionals, flags);
+    case "block":
+      return cmdBlock(positionals, flags);
+    default:
+      fail(`unknown command: ${command}\nRun 'butchr --help' for usage.`);
+  }
+}
+
+main().catch((e) => {
+  fail(e instanceof ApiError ? e.message : (e && e.message) || String(e));
+});

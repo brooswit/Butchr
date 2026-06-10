@@ -188,11 +188,54 @@ A clean exit means it builds. Run this before deploying a change.
 
 ---
 
+## CLI (`butchr`)
+
+A dependency-free operator CLI ships in `bin/butchr` — a thin REST client (bun's
+stdlib `fetch`, zero deps) so you can drive butchr from the shell instead of raw
+`curl`. It's wired into `package.json` `bin`, so `bun link` (or installing the
+package) puts a `butchr` on your PATH; otherwise run it in-repo with
+`bun bin/butchr …`.
+
+It targets `http://127.0.0.1:47800` by default — override with **`BUTCHR_URL`**.
+Every command exits **non-zero** on an API/usage/connection error (message to
+stderr), and takes a **`--json`** flag to print the raw API payload.
+
+```sh
+butchr health                          # server health snapshot (exit 1 if degraded)
+butchr ls [--dir <id>] [--status <s>]  # compact id/status/ci table (idle shows status*)
+butchr new <dir> -m "<prompt>"         # create a task; <dir> is a directory id OR path
+        [--blocked-by id,id]           #   start it blocked on those task ids
+butchr show <id>                       # status, ci, summary, review notes, blockers
+butchr approve <id>                    # approve a task in review (merges its branch)
+butchr reject <id> -m "<note>"         # send a reviewed task back for rework
+butchr requeue <id>                    # re-queue a failed/stuck task for a fresh dispatch
+butchr block <id> --on id,id           # replace blocked_by (use --on '' to clear)
+butchr --help                          # full usage
+```
+
+Each subcommand maps onto exactly one existing REST route (see the route table in
+`src/server.ts`); the CLI adds no server behavior. `ls` with no `--dir` fans out
+over every registered directory and concatenates their tasks; `--status` filters
+client-side. `approve` reports the merge-couldn't-complete cases too — a conflict
+kicked back to the agent, or a post-merge-verify auto-revert.
+
+```sh
+# Example: open a task, review it, approve.
+butchr ls --status review
+butchr show <id>
+butchr approve <id>
+```
+
+---
+
 ## Health
 
 ```sh
 curl -s http://127.0.0.1:47800/health | jq
 ```
+
+Or, with the CLI: `butchr health` (exits non-zero when the server reports
+`degraded`).
 
 (Also at `/api/health`.) Returns **200** when healthy, **503** when degraded.
 Key fields:
