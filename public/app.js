@@ -563,7 +563,7 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "blocked", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted"]
+  const pills = ["blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted"]
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
         : s === "running" && c[s] ? "count-pill has-running"
@@ -877,15 +877,15 @@ function queueLine(tasks) {
   if (i) parts.push(`${i} idle`);
   if (aw) parts.push(`${aw} awaiting answer`);
   if (f) parts.push(`${f} finalizing`);
-  if (q) parts.push(`${q} queued`);
   if (b) parts.push(`${b} blocked`);
+  if (q) parts.push(`${q} queued`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
 // Lifecycle statuses still in flight — these stay in the main directory list.
 // Everything else (merged, aborted, rejected) is terminal and lives in History.
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
-const ACTIVE_STATUSES = ["queued", "blocked", "running", "review", "awaiting_input", "finalizing"];
+const ACTIVE_STATUSES = ["blocked", "queued", "running", "review", "awaiting_input", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
 
 // Directory page body mode: the task "List", the pipeline "Board", or the
@@ -912,7 +912,7 @@ function historyOpen() {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["queued", "blocked", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted", "rejected"];
+const FILTER_STATUSES = ["blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted", "rejected"];
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
@@ -1410,8 +1410,10 @@ function renderGraph(tasks) {
 // The board view: the directory's active (in-flight) tasks grouped into lanes in
 // pipeline order — closest-to-landing first — so "what's happening / what's next"
 // reads at a glance. Lanes: Ready to merge (review) · Merging (finalizing, only
-// when present) · In progress (running/idle) · Queued · Blocked (each card shows
-// the blockers it's waiting on and their current status). Terminal-state tasks
+// when present) · In progress (running/idle) · Blocked (each card shows the
+// blockers it's waiting on and their current status) · Queued. Blocked (the
+// planned upcoming work) reads before the ready-to-dispatch Queued lane.
+// Terminal-state tasks
 // (merged/aborted/rejected/failed) aren't part of the pipeline and are omitted —
 // they live in the List view's Finished section. Re-rendered wholesale on every
 // SSE event by the directory view, so it live-updates for free.
@@ -1420,8 +1422,8 @@ const BOARD_LANES = [
   { key: "awaiting_input", title: "Awaiting answer", hint: "awaiting answer", match: (t) => t.status === "awaiting_input" },
   { key: "finalizing", title: "Merging", hint: "merging", match: (t) => t.status === "finalizing" },
   { key: "running", title: "In progress", hint: "running", match: (t) => t.status === "running" },
-  { key: "queued", title: "Queued", hint: "queued", match: (t) => t.status === "queued" },
   { key: "blocked", title: "Blocked", hint: "blocked", match: (t) => t.status === "blocked" },
+  { key: "queued", title: "Queued", hint: "queued", match: (t) => t.status === "queued" },
 ];
 
 function renderBoard(tasks) {
