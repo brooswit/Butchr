@@ -9,6 +9,8 @@
 // Exit codes: 0 on success, 1 on any API/usage/connection error (the message is
 // printed to stderr). Pass --json on any command for the raw API payload.
 
+import { runSelftest } from "../src/selftest.ts";
+
 const BASE = (process.env.BUTCHR_URL || "http://127.0.0.1:47800").replace(/\/+$/, "");
 
 const HELP = `butchr — operator CLI for the butchr REST API
@@ -31,6 +33,9 @@ COMMANDS
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
+  selftest [--dir <id|path>]      Smoke-test the FULL lifecycle with a throwaway
+     [--merge] [--timeout <sec>]    probe in the sandbox (dispatch→review→cleanup).
+                                    --merge also approves+merges then rolls it back.
   backups                         List local DB snapshots (newest first). OFFLINE.
   restore <file|latest> [--force] Restore the DB from a snapshot. OFFLINE — stop
                                     butchr first; --force skips the running check.
@@ -48,7 +53,10 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template"]);
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template", "--timeout"]);
+
+// Boolean flags: present → true, consume no following token.
+const BOOLEAN_FLAGS = new Set(["--merge"]);
 
 function parseArgs(argv) {
   const positionals = [];
@@ -67,6 +75,8 @@ function parseArgs(argv) {
       const val = tok.startsWith("--var=") ? tok.slice("--var=".length) : argv[++i];
       if (val === undefined) fail("flag --var needs a key=value");
       (flags.var ||= []).push(val);
+    } else if (BOOLEAN_FLAGS.has(tok)) {
+      flags[tok.replace(/^--/, "")] = true;
     } else if (tok.startsWith("--") && tok.includes("=")) {
       const eq = tok.indexOf("=");
       flags[tok.slice(2, eq)] = tok.slice(eq + 1);
@@ -459,6 +469,35 @@ async function cmdRestore(positionals, flags) {
   );
 }
 
+async function cmdSelftest(flags) {
+  // Parse --timeout <seconds> into ms (default left to the harness).
+  let timeoutMs;
+  if (flags.timeout !== undefined) {
+    const secs = Number(flags.timeout);
+    if (!Number.isFinite(secs) || secs <= 0) fail("selftest: --timeout must be a positive number of seconds");
+    timeoutMs = Math.floor(secs * 1000);
+  }
+  if (!flags.json) {
+    process.stdout.write(`butchr selftest — driving a throwaway probe through the full lifecycle\n`);
+  }
+  const result = await runSelftest({
+    api,
+    // Stage lines stream live during the (possibly long) wait; suppressed under --json.
+    log: flags.json ? undefined : (msg) => process.stdout.write(msg + "\n"),
+    dir: flags.dir,
+    merge: Boolean(flags.merge),
+    timeoutMs,
+  });
+  if (flags.json) {
+    printJson(result);
+  } else if (result.ok) {
+    process.stdout.write(`\nPASS — the butchr pipeline is healthy end-to-end.\n`);
+  } else {
+    process.stdout.write(`\nFAIL — ${result.error ?? "see the stage table above"}\n`);
+  }
+  if (!result.ok) process.exit(1);
+}
+
 // ---- entrypoint -----------------------------------------------------------
 
 async function main() {
@@ -490,6 +529,8 @@ async function main() {
       return cmdRequeue(positionals, flags);
     case "block":
       return cmdBlock(positionals, flags);
+    case "selftest":
+      return cmdSelftest(flags);
     case "backups":
       return cmdBackups(flags);
     case "restore":

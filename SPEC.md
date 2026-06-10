@@ -686,6 +686,41 @@ boot.
   too. Knobs: `BUTCHR_RESTART_DELAY` (2), `BUTCHR_MAX_RESTARTS` (10),
   `BUTCHR_CRASH_WINDOW` (60). Use the systemd units **or** the script, not both.
 
+### Self-test (smoke harness)
+
+`butchr selftest` (→ `src/selftest.ts:runSelftest`) drives a **throwaway probe
+task** through butchr's FULL lifecycle against the **running** server and reports
+**pass/fail per stage** — so after a restart / recovery / deploy one command
+confirms the whole pipeline (dispatch → herdr → the agent run → the CI gate →
+review → optional merge) actually works end-to-end, rather than discovering
+breakage on the next real task.
+
+It is a **pure REST client** (no server logic; like the rest of `bin/butchr`) that
+composes existing routes:
+
+1. **Resolve** the sandbox: auto-find the registered directory labelled `sandbox`
+   (or whose path basename is `sandbox`), or take `--dir <id|path>`.
+2. **Create** a trivial probe task there (`POST …/tasks`, tagged `selftest`) whose
+   prompt asks for the smallest self-contained change — a pure `selftestPing()`
+   function returning `"pong"` plus a passing `bun:test` — with the `marker` woven
+   into uniquely-named files so repeated/concurrent runs never collide.
+3. **Poll** `GET …/tasks/:id` until it **dispatches** (→ `running`) and reaches
+   **`review`**, recording each stage + its timing; a non-transient status before
+   review (`failed`/`aborted`/`merged`) or crossing the **`--timeout`** (default
+   10 min) fails the run.
+4. With **`--merge`**: approve it, confirm it merges (a conflict-sent-back or a
+   post-merge-verify revert is a failure), exercising the approve → merge-queue →
+   post-merge-verify path.
+5. **Clean up on EVERY exit path** (pass, failure, or timeout) so the sandbox stays
+   clean: a not-yet-merged probe is **aborted** (worktree + branch discarded); a
+   merged probe is **rolled back** (its commits reverted off the default branch). A
+   cleanup failure is itself flagged.
+
+Exit 0 on PASS, 1 on FAIL; `--json` prints the structured `{ ok, taskId, dir,
+stages, error }` result. All time/IO is injected, so the orchestration is
+unit-tested with the API mocked (`test/selftest.test.ts`) — no real claude/herdr
+and no wall-clock waits.
+
 ### Logging
 
 `src/log.ts` tees `console.{log,info,warn,error,debug}` to a **rotating** file
@@ -796,6 +831,7 @@ server (a DB restore can't go through a live server — see §5).
 | `reject <id> -m <note>` | `POST …/reject` |
 | `requeue <id>` | `POST …/requeue` |
 | `block <id> --on id,id` | `PUT …/blocked_by` (`--on ''` clears) |
+| `selftest [--dir <id\|path>] [--merge] [--timeout <sec>]` | composes existing routes (`GET /api/directories`, `POST …/tasks`, `GET …/tasks/:id`, `POST …/approve`, `…/rollback`, `…/abort`) into an end-to-end **smoke test** — see [§5 Self-test](#self-test-smoke-harness) |
 | `backups` | **offline** — lists DB snapshots in `BUTCHR_BACKUP_DIR` (newest first) via `src/backup.ts`; no server call |
 | `restore <file\|latest> [--force]` | **offline** — restores `BUTCHR_DB` from a snapshot (saves the current db aside first). Refuses if a server answers on `BUTCHR_URL` unless `--force`; stop butchr first (§5) |
 
