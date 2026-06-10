@@ -98,6 +98,20 @@ ensureColumn("tasks", "next_dispatch_at", "TEXT");
 // the dispatcher tick's auto-unblock pass.
 ensureColumn("tasks", "blocked_by", "TEXT");
 
+// CI GATE bookkeeping. When a task transitions to `review`, butchr asynchronously
+// runs build + tests in that task's worktree and records the outcome here so the
+// webapp can show a pass/fail badge in the review panel (before the diff):
+//   - `ci_status` is 'running' while the build/test job is in flight, then 'pass'
+//     or 'fail' once it settles; NULL means CI never ran for this task (e.g. it was
+//     rescued to review with no worktree). It is orthogonal to `status` — only ever
+//     meaningful while status='review' — much like `conflict`/`idle`.
+//   - `ci_summary` is a short human-readable summary: the first line is a compact
+//     badge label ("build + N tests" / "build failed" / "K test failures") and the
+//     rest (if any) is a tail of the build/test output for the reviewer.
+// See tasks.ts (triggerCi / runCi, fired from markReview / markReviewFromAgent).
+ensureColumn("tasks", "ci_status", "TEXT");
+ensureColumn("tasks", "ci_summary", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -153,6 +167,12 @@ export type TaskRow = {
   // Raw JSON-array TEXT of blocker task ids (or null). Parsed via
   // tasks.parseBlockedBy; surfaced as a real string[] on the serialized TaskView.
   blocked_by: string | null;
+  // CI GATE: build/test outcome captured on the review transition (see tasks.ts).
+  // `ci_status` is 'running' | 'pass' | 'fail' | null; `ci_summary` carries a short
+  // badge label on its first line plus an output tail. Surfaced on TaskView via the
+  // `...row` spread (no extra plumbing in taskView).
+  ci_status: string | null;
+  ci_summary: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

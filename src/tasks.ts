@@ -6,6 +6,7 @@ import type { TaskRow, TaskStatus } from "./db.ts";
 import { HttpError, getDirectory } from "./directories.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
+import { run } from "./exec.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
@@ -677,6 +678,10 @@ export function markReview(id: string, snapshot: string): void {
     if (dir) updateTaskMdStatus(dir.path, id, "review");
   }
   emitUpdated(id);
+  // CI GATE: this is a genuine running→review transition (guarded above), so kick
+  // off the build/test job for the task's worktree. Fire-and-forget — review must
+  // not block on CI.
+  void triggerCi(id);
 }
 
 /**
@@ -714,7 +719,123 @@ export function markReviewFromAgent(
   const dir = getDirectory(row.directory_id);
   if (dir) updateTaskMdStatus(dir.path, id, "review");
   emitUpdated(id);
+  // CI GATE: only run on a genuine running→review transition. A duplicate
+  // request_review call (review→review) shouldn't re-run the build/test job. Fire-
+  // and-forget so the (already non-blocking) request_review handshake stays instant.
+  if (row.status === "running") void triggerCi(id);
   return "ok";
+}
+
+// --- CI GATE: build + test on the review transition ------------------------
+//
+// When a task enters `review`, butchr asynchronously builds the project and runs
+// its tests IN THE TASK'S WORKTREE, then records a pass/fail badge on the task
+// (ci_status / ci_summary) for the webapp's review panel. This never blocks the
+// review transition and never hard-blocks approval — it's an advisory gate.
+
+/** Outcome of a CI run: a status, a compact badge label, and an output tail. */
+export type CiResult = {
+  status: "pass" | "fail";
+  /** Compact badge label, e.g. "build + 12 tests" / "build failed" / "3 test failures". */
+  label: string;
+  /** Short tail of the build/test output for the reviewer (may be empty). */
+  detail: string;
+};
+
+/** Signature of the function that actually runs build+test for a task's worktree. */
+export type CiRunner = (dirPath: string, taskId: string) => Promise<CiResult>;
+
+// The active CI runner. Overridable in tests (setCiRunner) so they can exercise
+// the persistence + trigger wiring without spawning a real `bun` build/test.
+let ciRunner: CiRunner = defaultCiRunner;
+
+/** Replace the CI runner (tests inject a fake to avoid spawning bun). */
+export function setCiRunner(r: CiRunner): void {
+  ciRunner = r;
+}
+
+/** Keep the last ~24 lines of output as a compact, human-readable tail. */
+function ciTail(s: string): string {
+  const trimmed = s.replace(/\r/g, "").trimEnd();
+  if (!trimmed) return "";
+  return trimmed.split("\n").slice(-24).join("\n");
+}
+
+/** Pull `N` out of a `bun test` summary line like ` 12 pass` / ` 3 fail`. */
+function parseBunCount(output: string, word: "pass" | "fail"): number {
+  const m = output.match(new RegExp(`(\\d+)\\s+${word}\\b`));
+  return m ? parseInt(m[1]!, 10) : 0;
+}
+
+/**
+ * The real CI runner: `bun build … --outfile /dev/null` then `bun test`, both in
+ * the task's worktree. A non-zero build exit is a build failure; otherwise a
+ * non-zero test exit is a test failure (with the count parsed from bun's summary).
+ */
+async function defaultCiRunner(dirPath: string, taskId: string): Promise<CiResult> {
+  const wt = git.worktreePath(dirPath, taskId);
+  const build = await run(
+    ["bun", "build", "src/index.ts", "--target", "bun", "--outfile", "/dev/null"],
+    { cwd: wt },
+  );
+  if (!build.ok) {
+    return {
+      status: "fail",
+      label: "build failed",
+      detail: ciTail(build.stderr || build.stdout),
+    };
+  }
+
+  const test = await run(["bun", "test"], { cwd: wt });
+  const out = test.stdout + "\n" + test.stderr;
+  if (!test.ok) {
+    const failed = parseBunCount(out, "fail");
+    return {
+      status: "fail",
+      label: failed > 0 ? `${failed} test failures` : "tests failed",
+      detail: ciTail(out),
+    };
+  }
+  const passed = parseBunCount(out, "pass");
+  return { status: "pass", label: `build + ${passed} tests`, detail: ciTail(out) };
+}
+
+/**
+ * Run the CI gate for a task that just entered `review`: flip ci_status to
+ * 'running' (emit so the webapp shows a spinner), run build+test via the active
+ * ciRunner, then persist the pass/fail result + summary (emit again). Never
+ * throws — a runner error is recorded as a failed CI rather than crashing the
+ * caller. Skips entirely (leaving ci_status NULL) when the task has no worktree to
+ * build in (e.g. a task rescued to review without one).
+ */
+export async function triggerCi(id: string): Promise<void> {
+  const row = getTask(id);
+  if (!row) return;
+  const dir = getDirectory(row.directory_id);
+  if (!dir) return;
+  // Nothing to build/test — leave CI unset rather than spawning bun in a dir that
+  // isn't there (also what keeps tests that seed worktree-less rows from running
+  // a real build).
+  if (!existsSync(git.worktreePath(dir.path, id))) return;
+
+  db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
+  emitUpdated(id);
+
+  let result: CiResult;
+  try {
+    result = await ciRunner(dir.path, id);
+  } catch (e) {
+    result = { status: "fail", label: "CI error", detail: (e as Error).message };
+  }
+  // First line is the badge label; the rest (if any) is the output tail.
+  const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
+  // Only write back while the task is still in review — if it merged/aborted while
+  // CI ran, don't resurrect stale CI state onto it.
+  const res = db
+    .query(`UPDATE tasks SET ci_status=?, ci_summary=? WHERE id=? AND status='review'`)
+    .run(result.status, summary, id);
+  if (res.changes === 0) return;
+  emitUpdated(id);
 }
 
 /**

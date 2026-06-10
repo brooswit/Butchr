@@ -607,6 +607,51 @@ function tasksTable(tasks) {
   return table;
 }
 
+// CI GATE badge for the review panel. ci_status: 'running' shows a spinner;
+// 'pass'/'fail' show a green/red badge whose label is the first line of ci_summary
+// ("build + N tests" / "build failed" / "K test failures"); anything else (null)
+// is a neutral "not run". The rest of ci_summary (the output tail) is offered as a
+// collapsible detail under the badge so a reviewer can see why CI failed.
+function ciBadge(t) {
+  const status = t.ci_status || null;
+  const summary = t.ci_summary || "";
+  const nl = summary.indexOf("\n");
+  const label = (nl === -1 ? summary : summary.slice(0, nl)).trim();
+  const detail = nl === -1 ? "" : summary.slice(nl).trim();
+
+  const wrap = el("div", { class: "ci-gate" });
+  let badge;
+  if (status === "running") {
+    badge = el("span", { class: "ci-badge running" }, [
+      el("span", { class: "ci-spinner" }),
+      el("span", {}, "CI running…"),
+    ]);
+  } else if (status === "pass") {
+    badge = el("span", { class: "ci-badge pass" }, "✓ " + (label || "build + tests"));
+  } else if (status === "fail") {
+    badge = el("span", { class: "ci-badge fail" }, "✗ " + (label || "build failed"));
+  } else {
+    badge = el("span", { class: "ci-badge none" }, "CI not run");
+  }
+  wrap.appendChild(badge);
+
+  // Collapsible output tail (only when CI has settled with detail to show).
+  if (detail && status !== "running") {
+    const pre = el("pre", { class: "block ci-detail-body" }, detail);
+    const caret = el("span", { class: "caret" }, "▸");
+    const toggle = el("button", { class: "ci-detail-toggle", type: "button" }, [
+      caret, el("span", {}, "output"),
+    ]);
+    const det = el("div", { class: "ci-detail collapsed" }, [toggle, pre]);
+    toggle.addEventListener("click", () => {
+      const open = det.classList.toggle("collapsed");
+      caret.textContent = open ? "▸" : "▾";
+    });
+    wrap.appendChild(det);
+  }
+  return wrap;
+}
+
 // ---------- task detail / review ----------
 async function renderTask(id) {
   const t = await api("GET", "/tasks/" + id);
@@ -758,6 +803,11 @@ async function renderTask(id) {
 
   // diff + review controls (when in review)
   if (t.status === "review") {
+    // CI GATE badge — shown BEFORE the diff. Reflects the build/test job butchr
+    // runs in the task's worktree on the review transition; updates live via the
+    // SSE-driven re-render when CI flips running→pass/fail.
+    wrap.appendChild(ciBadge(t));
+
     wrap.appendChild(el("h2", {}, "Diff vs main"));
     const diffBox = el("div", { class: "diffview" }, [el("div", { class: "meta" }, "loading diff…")]);
     wrap.appendChild(diffBox);
@@ -810,6 +860,12 @@ async function renderTask(id) {
 
   if (t.status === "review") {
     document.getElementById("approve").addEventListener("click", async (ev) => {
+      // CI gate is advisory, not a hard block: warn on a failed build/tests but let
+      // the operator proceed if they confirm.
+      if (t.ci_status === "fail") {
+        const label = (t.ci_summary || "CI failed").split("\n")[0].trim();
+        if (!confirm(`CI failed (${label}). Approve and merge anyway?`)) return;
+      }
       ev.target.disabled = true;
       try {
         const r = await api("POST", "/tasks/" + id + "/approve");

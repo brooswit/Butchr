@@ -434,3 +434,30 @@ pre.block {
 .toast.err { border-color: var(--rejected); color: var(--rejected); }
 .muted { color: var(--muted); }
 small.muted { font-size: 12px; }
+
+/* CI gate badge — shown in the review panel before the diff. */
+.ci-gate { margin: 18px 0 6px; }
+.ci-badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; font-weight: 600;
+  padding: 5px 12px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); color: #fff;
+}
+.ci-badge.pass { background: var(--merged); border-color: var(--merged); }
+.ci-badge.fail { background: var(--rejected); border-color: var(--rejected); }
+.ci-badge.running { background: var(--running); border-color: var(--running); }
+.ci-badge.none { background: transparent; color: var(--muted); }
+.ci-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.4); border-top-color: #fff;
+  animation: ci-spin 0.7s linear infinite;
+}
+@keyframes ci-spin { to { transform: rotate(360deg); } }
+.ci-detail { margin-top: 8px; }
+.ci-detail-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 12px; padding: 0;
+}
+.ci-detail.collapsed .ci-detail-body { display: none; }
+.ci-detail-body { margin-top: 8px; max-height: 320px; overflow: auto; }

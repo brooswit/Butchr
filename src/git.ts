@@ -26,12 +26,21 @@ export async function defaultBranch(dir: string): Promise<string> {
   return "main";
 }
 
+/**
+ * Absolute path to a task's git worktree: <dir>/<taskId>. The single source of
+ * truth for where a task's checkout lives — used by createWorktree/diff/merge here
+ * and by the CI gate (tasks.ts) to run build/tests in the task's tree.
+ */
+export function worktreePath(dir: string, taskId: string): string {
+  return join(dir, taskId);
+}
+
 /** Create a worktree on a new branch <taskId> at <dir>/<taskId>. */
 export async function createWorktree(
   dir: string,
   taskId: string,
 ): Promise<string> {
-  const path = join(dir, taskId);
+  const path = worktreePath(dir, taskId);
   // Locally ignore the worktree dir so it never shows as an untracked/embedded
   // repo (and can't be accidentally `git add`-ed). Uses .git/info/exclude, which
   // is local-only — we never touch the user's tracked .gitignore for this.
@@ -62,7 +71,7 @@ export async function hasChanges(dir: string, taskId: string): Promise<boolean> 
   ]);
   if (res.ok && parseInt(res.stdout.trim(), 10) > 0) return true;
   // Also count uncommitted changes in the worktree (agent may not have committed).
-  const wt = join(dir, taskId);
+  const wt = worktreePath(dir, taskId);
   if (existsSync(wt)) {
     const st = await run([git, "-C", wt, "status", "--porcelain"]);
     if (st.ok && st.stdout.trim().length > 0) return true;
@@ -79,7 +88,7 @@ export async function diff(dir: string, taskId: string): Promise<string> {
   ]);
   let out = committed.ok ? committed.stdout : "";
   // Include uncommitted work in the worktree too.
-  const wt = join(dir, taskId);
+  const wt = worktreePath(dir, taskId);
   if (existsSync(wt)) {
     const uncommitted = await run([git, "-C", wt, "diff", "HEAD"]);
     if (uncommitted.ok && uncommitted.stdout.trim()) {
@@ -146,7 +155,7 @@ function parseConflictFiles(output: string): string[] {
  */
 export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   const base = await defaultBranch(dir);
-  const wt = join(dir, taskId);
+  const wt = worktreePath(dir, taskId);
 
   // Auto-commit any dangling worktree changes so they're part of the rebase.
   if (existsSync(wt)) {
@@ -234,7 +243,7 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
 
 /** Remove the worktree and delete the task branch (post-merge cleanup). */
 export async function cleanup(dir: string, taskId: string): Promise<void> {
-  const path = join(dir, taskId);
+  const path = worktreePath(dir, taskId);
   if (existsSync(path)) {
     await run([git, "-C", dir, "worktree", "remove", "--force", path]);
   }
