@@ -23,7 +23,6 @@ import {
   approveTask,
   createTask,
   getTask,
-  listTasks,
   rejectTask,
   requeueTask,
   rollbackTask,
@@ -31,6 +30,7 @@ import {
   taskChainEstimate,
   taskDiff,
   taskEstimate,
+  taskListView,
   taskView,
 } from "./tasks.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
@@ -423,7 +423,7 @@ route("DELETE", "/api/directories/:id", async (_req, p) => {
 
 route("GET", "/api/directories/:id/tasks", async (_req, p) => {
   if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
-  return json(listTasks(p.id!));
+  return json(taskListView(p.id!));
 });
 
 route("POST", "/api/directories/:id/tasks", async (req, p) => {

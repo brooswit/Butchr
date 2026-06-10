@@ -613,7 +613,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `GET` | `/api/directories` | — | `DirectoryView[]` (rows + `counts` by status, with `idle` peeled out of `running`). |
 | `POST` | `/api/directories` | `{ path, label? }` | `201` `DirectoryView`. 400 if not a git repo; 409 if already registered; 502 if the herdr workspace can't be created. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
-| `GET` | `/api/directories/:id/tasks` | — | `TaskRow[]` (newest first). 404 if directory gone. |
+| `GET` | `/api/directories/:id/tasks` | — | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks` as id arrays plus precomputed `blockerStates`/`deadBlockers`. 404 if directory gone. |
 | `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model? }` | `201` `TaskView`. `kind:"plan"` → plan task. Validates blockers exist (404), cycle (400), model (400), prompt required (400). |
 | `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks` + `estimate`, the rough p50–p90 duration estimate — see §10). 404 if gone. |
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |

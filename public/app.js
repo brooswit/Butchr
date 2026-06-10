@@ -858,20 +858,6 @@ function buildViewToggle(repaint) {
   return bar;
 }
 
-// Parse a blocked_by value into a clean id array. The directory task list returns
-// raw DB rows, where blocked_by is a JSON-array TEXT column (a string, or null);
-// the single-task view already parses it to an array. Accept either shape.
-function blockedByIds(v) {
-  if (Array.isArray(v)) return v.filter((x) => typeof x === "string");
-  if (typeof v === "string" && v) {
-    try {
-      const a = JSON.parse(v);
-      return Array.isArray(a) ? a.filter((x) => typeof x === "string") : [];
-    } catch { return []; }
-  }
-  return [];
-}
-
 // Assign each node a column (level) = longest blocker-chain depth, so blockers sit
 // strictly left of the tasks they block (a layered topological layout). Roots
 // (no in-graph blockers) land at level 0. The backend forbids dependency cycles,
@@ -911,7 +897,7 @@ function renderGraph(tasks) {
   // as a green node, making the dependency's provenance visible).
   const nodeIds = new Set(active.map((t) => t.id));
   for (const t of active) {
-    for (const b of blockedByIds(t.blocked_by)) if (byId.has(b)) nodeIds.add(b);
+    for (const b of (t.blocked_by || [])) if (byId.has(b)) nodeIds.add(b);
   }
 
   if (nodeIds.size === 0) {
@@ -920,7 +906,7 @@ function renderGraph(tasks) {
 
   const edges = [];
   for (const id of nodeIds) {
-    for (const b of blockedByIds(byId.get(id).blocked_by)) {
+    for (const b of (byId.get(id).blocked_by || [])) {
       if (nodeIds.has(b)) edges.push({ from: b, to: id });
     }
   }
@@ -1094,7 +1080,7 @@ function boardCard(t, lane, byId) {
     </div>`;
 
   if (lane.key === "blocked") {
-    const ids = blockedByIds(t.blocked_by);
+    const ids = t.blocked_by || [];
     if (ids.length) {
       const blk = el("div", { class: "bc-blockers" });
       blk.appendChild(el("span", { class: "bc-blk-label muted" }, "blocked by"));

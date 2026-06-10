@@ -162,6 +162,20 @@ function deadBlockerIds(ids: string[]): string[] {
   return ids.filter((id) => blockerState(id) === "dead");
 }
 
+/**
+ * Map each blocker id to its current status ("gone" if its row no longer exists),
+ * for the webapp to render the dependency list without extra fetches. Shared by
+ * taskView and taskListView so the detail and list views report the same status.
+ */
+function blockerStatesOf(ids: string[]): Record<string, string> {
+  const states: Record<string, string> = {};
+  for (const bid of ids) {
+    const b = getTask(bid);
+    states[bid] = b ? b.status : "gone";
+  }
+  return states;
+}
+
 // Remember which (task, dead-blocker) pairs we've already warned about so the
 // per-tick re-evaluation doesn't spam the log every second for a stuck task.
 const loggedDeadBlockers = new Set<string>();
@@ -230,11 +244,6 @@ export function taskView(id: string): TaskView | null {
     }
   }
   const blocked_by = parseBlockedBy(row.blocked_by);
-  const blockerStates: Record<string, string> = {};
-  for (const bid of blocked_by) {
-    const b = getTask(bid);
-    blockerStates[bid] = b ? b.status : "gone";
-  }
   return {
     ...row,
     prompt,
@@ -242,10 +251,42 @@ export function taskView(id: string): TaskView | null {
     review_notes,
     blocked_by,
     spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
-    blockerStates,
+    blockerStates: blockerStatesOf(blocked_by),
     deadBlockers: deadBlockerIds(blocked_by),
     estimate: taskEstimate(id),
   };
+}
+
+// The directory task-list projection: the same parsed/enriched shape taskView
+// returns, MINUS the task.md-derived fields (prompt / context / review_notes) and
+// the per-task duration estimate. The list / board / graph views only need the
+// runtime row plus parsed blocked_by / spawned_subtasks and the server-computed
+// blocker status, so this skips reading every task.md from disk (and the per-row
+// estimate recompute) that the full taskView would do.
+export type TaskListView = Omit<
+  TaskView,
+  "prompt" | "context" | "review_notes" | "estimate"
+>;
+
+/**
+ * List a directory's tasks in the taskView shape (newest first). Per CONTRIBUTING
+ * §3, endpoints return the parsed projection rather than raw rows so the webapp and
+ * CLI consume one consistent shape: blocked_by / spawned_subtasks come back as real
+ * id arrays and each blocker's status is precomputed (blockerStates / deadBlockers).
+ * A lighter sibling of taskView — it does NOT read task.md (no prompt/context
+ * bodies) or compute the duration estimate, neither of which the list views use.
+ */
+export function taskListView(directoryId: string): TaskListView[] {
+  return listTasks(directoryId).map((row) => {
+    const blocked_by = parseBlockedBy(row.blocked_by);
+    return {
+      ...row,
+      blocked_by,
+      spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
+      blockerStates: blockerStatesOf(blocked_by),
+      deadBlockers: deadBlockerIds(blocked_by),
+    };
+  });
 }
 
 function emitUpdated(id: string): void {

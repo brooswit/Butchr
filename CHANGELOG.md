@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and flagged for same-file sequencing. Report only — no code changes.
 
 ### Changed
+- **The directory task-list endpoint now returns the parsed `taskView` shape.**
+  `GET /api/directories/:id/tasks` previously returned raw DB rows, where
+  `blocked_by` / `spawned_subtasks` were JSON-**string** columns and the
+  server-computed blocker status (`blockerStates` / `deadBlockers`) was missing —
+  so it disagreed with the single-task detail route, which returns the parsed
+  shape, and the webapp had to defensively parse *either* form. The list now
+  returns a `TaskListView` per task: the same enriched shape as the detail route,
+  minus the `task.md`-derived `prompt` / `context` / `review_notes` and the
+  duration `estimate` (the list / board / graph views don't need those, so it
+  skips reading every `task.md` from disk). `blocked_by` / `spawned_subtasks` come
+  back as real id arrays and each blocker's status is precomputed. The webapp's
+  dual-shape parsing helper is gone. Pure refactor — every other row field is
+  unchanged and the views render exactly as before (CLEANUP C8). See
+  [SPEC.md §6.1](./SPEC.md#61-rest-api).
 - **Internal: collapsible webapp panels now share one `collapsible()` helper**
   (`public/app.js`). The caret (▾ open / ▸ closed) + clickable head + toggle-body
   pattern was copied across the Finished section, the CI-output detail, the agent
