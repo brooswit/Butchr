@@ -18,8 +18,9 @@
 // MCP server cannot wake an idle Claude Code client, so we never park a call.
 import { join } from "node:path";
 import { askCto } from "./cto.ts";
-import { getDirectory } from "./directories.ts";
-import { getTask, markReviewFromAgent } from "./tasks.ts";
+import { getDirectory, HttpError } from "./directories.ts";
+import { getTask, markReviewFromAgent, proposeSubtasks } from "./tasks.ts";
+import type { SubtaskSpec } from "./tasks.ts";
 
 const REQUEST_REVIEW_TOOL = {
   name: "request_review",
@@ -57,6 +58,59 @@ const ASK_TOOL = {
       },
     },
     required: ["question"],
+    additionalProperties: false,
+  },
+} as const;
+
+// Exposed ONLY for PLAN tasks (kind='plan'). The agent submits its decomposition —
+// an ordered array of sub-task specs whose `blocked_by` reference siblings by INDEX
+// (the ids don't exist yet) — and butchr creates the wired sub-tasks + completes the
+// plan task. Non-blocking, like request_review (see tasks.proposeSubtasks).
+const PROPOSE_SUBTASKS_TOOL = {
+  name: "propose_subtasks",
+  description:
+    "Submit a decomposition of this PLAN task's request into sub-tasks. Returns " +
+    "IMMEDIATELY with the created sub-task ids; after it returns, stop and exit. " +
+    "Pass `subtasks`: an array of { prompt, context?, blocked_by? }. `prompt` is the " +
+    "full instructions for that sub-task's own agent. `context` is an optional list " +
+    "of repo-relative file paths it should read. `blocked_by` is an optional list of " +
+    "INDICES (0-based positions in this same `subtasks` array) of sibling sub-tasks " +
+    "that must merge before this one runs — reference siblings by index, not id (the " +
+    "ids don't exist yet). butchr validates the graph (a cycle/self-reference is " +
+    "rejected), creates the sub-tasks wiring their dependencies, and completes this " +
+    "plan task. Do NOT write code in a plan task.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      subtasks: {
+        type: "array",
+        description: "Ordered sub-task specs the request decomposes into.",
+        items: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "The sub-task's agent prompt." },
+            context: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional repo-relative file paths the sub-task should read.",
+            },
+            blocked_by: {
+              type: "array",
+              items: { type: "integer" },
+              description:
+                "Indices of sibling sub-tasks (in this array) that must merge first.",
+            },
+          },
+          required: ["prompt"],
+          additionalProperties: false,
+        },
+      },
+      summary: {
+        type: "string",
+        description: "Optional short summary of the decomposition.",
+      },
+    },
+    required: ["subtasks"],
     additionalProperties: false,
   },
 } as const;
@@ -146,8 +200,15 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
     case "ping":
       return rpcResult(msg.id, {});
 
-    case "tools/list":
-      return rpcResult(msg.id, { tools: [REQUEST_REVIEW_TOOL, ASK_TOOL] });
+    case "tools/list": {
+      // A PLAN task gets the decomposition tool; an ordinary task gets the review
+      // tool. `ask` is offered to both. (handleMcp already verified the task exists.)
+      const isPlan = getTask(taskId)?.kind === "plan";
+      const tools = isPlan
+        ? [PROPOSE_SUBTASKS_TOOL, ASK_TOOL]
+        : [REQUEST_REVIEW_TOOL, ASK_TOOL];
+      return rpcResult(msg.id, { tools });
+    }
 
     case "tools/call":
       return handleToolCall(taskId, msg);
@@ -167,6 +228,7 @@ async function handleToolCall(
 ): Promise<Response> {
   const name = msg.params?.name;
   if (name === "ask") return handleAsk(taskId, msg);
+  if (name === "propose_subtasks") return handleProposeSubtasks(taskId, msg);
   if (name !== "request_review") {
     return rpcError(msg.id, -32602, `unknown tool: ${name}`);
   }
@@ -193,6 +255,53 @@ async function handleToolCall(
         "reviewer's notes; if it is approved, butchr merges your branch.",
     }),
   );
+}
+
+/**
+ * Handle a `propose_subtasks` tool call (PLAN tasks): validate + create the
+ * decomposition's sub-tasks (wiring blocked_by among them) and complete the plan
+ * task. A validation failure (bad/cyclic graph, blank prompt, wrong task kind)
+ * comes back as an `isError` tool result so the agent sees the message and can
+ * re-propose, rather than crashing the MCP server.
+ */
+async function handleProposeSubtasks(
+  taskId: string,
+  msg: JsonRpcMessage,
+): Promise<Response> {
+  const args = msg.params?.arguments ?? {};
+  const subtasks: unknown = args.subtasks;
+  const summary: string | undefined =
+    typeof args.summary === "string" ? args.summary : undefined;
+
+  if (!Array.isArray(subtasks)) {
+    return rpcResult(
+      msg.id,
+      textResult("`propose_subtasks` requires a `subtasks` array.", true),
+    );
+  }
+
+  try {
+    const { created } = await proposeSubtasks(
+      taskId,
+      subtasks as SubtaskSpec[],
+      summary,
+    );
+    return rpcResult(
+      msg.id,
+      toolResult({
+        status: "decomposed",
+        created,
+        message:
+          `Created ${created.length} sub-task(s): ${created.join(", ")}. The ` +
+          `dependencies were wired and this plan task is complete. You can stop now.`,
+      }),
+    );
+  } catch (e) {
+    // A validation HttpError is a normal "re-propose" signal for the agent; any
+    // other error is reported the same way (never crashes the server).
+    const detail = e instanceof HttpError ? e.message : (e as Error).message;
+    return rpcResult(msg.id, textResult(`Could not create sub-tasks: ${detail}`, true));
+  }
 }
 
 /**

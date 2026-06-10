@@ -6,13 +6,18 @@
 // (zero dependencies). The shape is fixed and simple, so this is safe.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { TaskStatus } from "./db.ts";
+import type { TaskKind, TaskStatus } from "./db.ts";
 
 export type TaskMeta = {
   id: string;
   created: string;
   status: TaskStatus;
   context: string[];
+  // 'task' (default) or 'plan' — a PLAN task decomposes a request into sub-tasks
+  // instead of writing code (see db.ts `kind` + tasks.proposeSubtasks). Stored in
+  // the front matter so renderAgentPrompt can hand a plan task the decomposition
+  // protocol rather than the review protocol. Optional/absent reads back as "task".
+  kind?: TaskKind;
 };
 
 export type TaskDoc = {
@@ -55,6 +60,40 @@ const REVIEW_PROTOCOL = [
   "automatically. After calling `request_review`, stop.",
 ].join("\n");
 
+// Appended to a PLAN task's rendered prompt instead of REVIEW_PROTOCOL. A plan task
+// writes NO code: it analyzes the request and submits a DECOMPOSITION through the
+// butchr MCP `propose_subtasks` tool. butchr validates the proposed graph, creates
+// the sub-tasks (wiring their blocked_by among one another), and completes the plan
+// task. See tasks.proposeSubtasks / mcp.ts.
+const PLAN_PROTOCOL = [
+  "# How to submit your decomposition",
+  "",
+  "This is a **PLAN task**: do NOT write code. Your job is to ANALYZE the request",
+  "above (read the repository with your tools as needed) and break it into an",
+  "ordered set of concrete sub-tasks, then submit them by calling the",
+  "`propose_subtasks` tool provided by the **butchr** MCP server.",
+  "",
+  "Pass `subtasks`: an array where each entry is `{ prompt, context?, blocked_by? }`:",
+  "",
+  "- `prompt` (required): the full instructions for that sub-task's agent — written",
+  "  like a normal butchr task prompt (it will run its own agent in its own worktree).",
+  "- `context` (optional): a list of repo-relative file paths the sub-task should read.",
+  "- `blocked_by` (optional): the INDICES (0-based positions in this same `subtasks`",
+  "  array) of the sibling sub-tasks that must merge BEFORE this one runs. Use this to",
+  "  express ordering/dependencies. Reference siblings by their array index, NOT by id",
+  "  (the ids do not exist yet). A cyclic or self-referential graph is rejected.",
+  "",
+  "You may also pass an optional `summary` describing the decomposition.",
+  "",
+  "`propose_subtasks` returns IMMEDIATELY with the created sub-task ids and records",
+  "them against this plan task; once it returns you should STOP and exit. butchr",
+  "creates the sub-tasks (wiring their dependencies) and completes this plan task.",
+  "",
+  "If anything about the request is ambiguous, use the **butchr** MCP server's `ask`",
+  "tool to put a clarifying question to the CTO before proposing — prefer asking over",
+  "guessing.",
+].join("\n");
+
 /** Absolute path to a task's directory under .butchr/tasks/. */
 export function taskDir(directoryRoot: string, taskId: string): string {
   return join(directoryRoot, ".butchr", "tasks", taskId);
@@ -75,6 +114,9 @@ function serializeFrontMatter(meta: TaskMeta): string {
   lines.push(`id: ${meta.id}`);
   lines.push(`created: ${meta.created}`);
   lines.push(`status: ${meta.status}`);
+  // Only emit a kind line for plan tasks — ordinary tasks omit it and parse back as
+  // the "task" default, keeping existing task.md files unchanged.
+  if (meta.kind === "plan") lines.push(`kind: ${meta.kind}`);
   if (meta.context.length === 0) {
     lines.push("context: []");
   } else {
@@ -150,6 +192,7 @@ export function parseTaskMd(raw: string): TaskDoc {
     created: "",
     status: "queued",
     context: [],
+    kind: "task",
   };
 
   let rest = raw;
@@ -173,6 +216,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       if (key === "id") meta.id = val;
       else if (key === "created") meta.created = val;
       else if (key === "status") meta.status = (val as TaskStatus) || "queued";
+      else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
       else if (key === "context") {
         if (val === "" ) inContext = true;
         else if (val === "[]") meta.context = [];
@@ -246,7 +290,9 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
     body += `\n\n# Review notes from previous attempts\n\n${doc.reviewNotes}\n\nAddress the review notes above in this attempt.`;
   }
   parts.push(body);
-  parts.push(REVIEW_PROTOCOL);
+  // A plan task decomposes the request via propose_subtasks; an ordinary task does
+  // the work and submits via request_review. Hand each the matching protocol.
+  parts.push(doc.meta.kind === "plan" ? PLAN_PROTOCOL : REVIEW_PROTOCOL);
   return parts.join("\n\n---\n\n");
 }
 

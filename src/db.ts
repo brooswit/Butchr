@@ -124,6 +124,19 @@ ensureColumn("tasks", "ci_summary", "TEXT");
 // pre-merge, in-worktree, advisory review badge.
 ensureColumn("tasks", "revert_reason", "TEXT");
 
+// AUTO-DECOMPOSE / PLAN tasks. `kind` distinguishes an ordinary work task ('task',
+// the default) from a PLAN task ('plan'). A plan task runs an agent like any other,
+// but writes NO code: its job is to ANALYZE the request and propose a decomposition
+// into sub-tasks, which it submits through the per-task MCP `propose_subtasks` tool.
+// butchr validates the proposed dependency graph (reusing wouldCreateCycle), creates
+// the sub-tasks (wiring their blocked_by among themselves), records their ids on the
+// plan task in `spawned_subtasks` (a JSON-array TEXT column), and completes the plan
+// task (terminal `merged`, since nothing is merged to a branch). The webapp keys on
+// `kind`/`spawned_subtasks` to badge a plan task and link the sub-tasks it spawned.
+// See tasks.proposeSubtasks / mcp.ts (propose_subtasks) / taskmd.renderAgentPrompt.
+ensureColumn("tasks", "kind", "TEXT NOT NULL DEFAULT 'task'");
+ensureColumn("tasks", "spawned_subtasks", "TEXT");
+
 // AUTO-MERGE bookkeeping. Set to 1 when butchr auto-approved + merged this task
 // (CI-green + low-risk) instead of a human approving it — see config.autoMergeEnabled
 // and tasks.maybeAutoMerge. Orthogonal to `status`: it records HOW a merged task
@@ -172,6 +185,10 @@ export type DirectoryRow = {
 // the moment every blocker has merged (auto-unblock — see the dispatcher tick and
 // tasks.reevaluateBlockedTask). It is non-terminal and groups with active/pending
 // work in the webapp; the reaper must NOT treat it as terminal.
+// A task's KIND: an ordinary work task, or a PLAN task whose job is to decompose a
+// request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks).
+export type TaskKind = "task" | "plan";
+
 export type TaskStatus =
   | "queued"
   | "blocked"
@@ -219,6 +236,12 @@ export type TaskRow = {
   // AUTO-MERGE: 1 when butchr auto-merged this task (CI-green + low-risk), else 0.
   // Surfaced on TaskView via the `...row` spread. See tasks.maybeAutoMerge.
   auto_merged: number;
+  // AUTO-DECOMPOSE: 'task' (default) or 'plan'. A plan task decomposes a request
+  // into sub-tasks. `spawned_subtasks` is the raw JSON-array TEXT of the sub-task
+  // ids a plan task created (null for ordinary tasks / before it ran). Parsed via
+  // tasks.parseBlockedBy and surfaced as a string[] on TaskView. See above.
+  kind: TaskKind;
+  spawned_subtasks: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

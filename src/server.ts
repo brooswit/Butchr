@@ -300,11 +300,15 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   const body = await readJson(req);
   // Optional blocked_by: [taskId,...] — the task starts `blocked` until every
   // listed blocker has merged (validated + cycle-checked inside createTask).
+  // Optional kind: "plan" creates an AUTO-DECOMPOSE task that breaks the request
+  // into sub-tasks via the propose_subtasks MCP tool instead of writing code.
+  const kind = body.kind === "plan" ? "plan" : "task";
   const view = await createTask(
     p.id!,
     body.prompt,
     body.context ?? [],
     body.blocked_by ?? [],
+    kind,
   );
   return json(view, 201);
 });

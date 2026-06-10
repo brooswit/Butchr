@@ -403,6 +403,10 @@ function openNewTaskModal(directoryId) {
     <label class="field" style="margin-bottom:0">
       <span class="lbl">blocked by (optional) — comma-separated task ids</span>
       <input type="text" id="nt-blocked" placeholder="e.g. snug-crag-ffae, wise-crag-b403" />
+    </label>
+    <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
+      <input type="checkbox" id="nt-plan" />
+      <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
     </label>`;
 
   const foot = el("div", { class: "m-foot" });
@@ -421,6 +425,7 @@ function openNewTaskModal(directoryId) {
 
   const promptEl = body.querySelector("#nt-prompt");
   const blockedEl = body.querySelector("#nt-blocked");
+  const planEl = body.querySelector("#nt-plan");
   promptEl.focus();
 
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
@@ -430,11 +435,12 @@ function openNewTaskModal(directoryId) {
     if (!prompt) { showErr("Prompt is required."); promptEl.focus(); return; }
     // Split the comma-separated blocker list into trimmed, non-empty ids.
     const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
+    const kind = planEl.checked ? "plan" : "task";
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by });
-      toast("task created");
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind });
+      toast(kind === "plan" ? "plan task created" : "task created");
       close();
       render();
     } catch (e) {
@@ -727,7 +733,8 @@ async function renderTask(id) {
     headerRight.appendChild(term);
   }
   headerRight.appendChild(el("div", {
-    html: chip(effStatus(t))
+    html: (t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
+      + chip(effStatus(t))
       + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
       + (t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : ""),
   }));
@@ -786,6 +793,23 @@ async function renderTask(id) {
         <a class="bk-id" href="#/task/${esc(bid)}">${esc(bid)}</a>
         ${chip(st)}
         ${isDead ? '<span class="bk-dead">will never merge — edit blocked_by to proceed</span>' : ""}`;
+      list.appendChild(row);
+    }
+    panel.appendChild(list);
+    wrap.appendChild(panel);
+  }
+
+  // spawned sub-tasks — a PLAN task records the sub-tasks it decomposed the request
+  // into (see propose_subtasks). Surface them with links so the operator can follow
+  // the decomposition. Shown whenever the task spawned any.
+  if (Array.isArray(t.spawned_subtasks) && t.spawned_subtasks.length) {
+    const panel = el("div", { class: "panel spawned-panel" });
+    panel.appendChild(el("h2", { style: "margin-top:0" },
+      `Spawned ${t.spawned_subtasks.length} sub-task${t.spawned_subtasks.length === 1 ? "" : "s"}`));
+    const list = el("div", { class: "blockers" });
+    for (const sid of t.spawned_subtasks) {
+      const row = el("div", { class: "blocker-row" });
+      row.innerHTML = `<a class="bk-id" href="#/task/${esc(sid)}">${esc(sid)}</a>`;
       list.appendChild(row);
     }
     panel.appendChild(list);
