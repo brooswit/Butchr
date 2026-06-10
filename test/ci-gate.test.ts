@@ -243,3 +243,97 @@ describe("review-transition trigger", () => {
     expect(row(id).status).toBe("aborted");
   });
 });
+
+describe("flaky-CI retry (config.ciRetries, default 1)", () => {
+  // The config module reads BUTCHR_CI_RETRIES once at import. It's already loaded
+  // (shared singleton across the suite), so mutate the live config object to drive
+  // the retry count deterministically rather than relying on env at import time.
+  let configMod: typeof import("../src/config.ts");
+  let savedRetries: number;
+
+  beforeAll(async () => {
+    configMod = await import("../src/config.ts");
+    savedRetries = configMod.config.ciRetries;
+  });
+  afterAll(() => {
+    configMod.config.ciRetries = savedRetries;
+  });
+
+  /** A runner that returns the given statuses in order, one per invocation. */
+  function sequenceRunner(statuses: Array<"pass" | "fail">) {
+    let i = 0;
+    const calls = { n: 0 };
+    const runner = async () => {
+      calls.n++;
+      const status = statuses[Math.min(i, statuses.length - 1)]!;
+      i++;
+      return {
+        status,
+        label: status === "pass" ? "build + 1 tests" : "1 test failures",
+        detail: status === "pass" ? "1 pass" : "1 fail",
+      };
+    };
+    return { runner, calls };
+  }
+
+  test("fail-then-pass: a retry that passes settles ci_status='pass'", async () => {
+    configMod.config.ciRetries = 1;
+    const id = seed({ id: "ci-retry-pass", status: "review", worktree: true });
+    const { runner, calls } = sequenceRunner(["fail", "pass"]);
+    tasksMod.setCiRunner(runner);
+
+    await tasksMod.triggerCi(id);
+
+    expect(calls.n).toBe(2); // initial run + one retry
+    expect(row(id).ci_status).toBe("pass");
+  });
+
+  test("fail-twice: an exhausted retry settles ci_status='fail'", async () => {
+    configMod.config.ciRetries = 1;
+    const id = seed({ id: "ci-retry-fail", status: "review", worktree: true });
+    const { runner, calls } = sequenceRunner(["fail", "fail"]);
+    tasksMod.setCiRunner(runner);
+
+    await tasksMod.triggerCi(id);
+
+    expect(calls.n).toBe(2); // initial run + one retry, then give up
+    expect(row(id).ci_status).toBe("fail");
+    expect(row(id).ci_summary.split("\n")[0]).toBe("1 test failures");
+  });
+
+  test("a first-run PASS never retries", async () => {
+    configMod.config.ciRetries = 1;
+    const id = seed({ id: "ci-retry-clean", status: "review", worktree: true });
+    const { runner, calls } = sequenceRunner(["pass"]);
+    tasksMod.setCiRunner(runner);
+
+    await tasksMod.triggerCi(id);
+
+    expect(calls.n).toBe(1); // no retry on a green first run
+    expect(row(id).ci_status).toBe("pass");
+  });
+
+  test("ciRetries=0 disables retries — the first FAIL settles immediately", async () => {
+    configMod.config.ciRetries = 0;
+    const id = seed({ id: "ci-retry-off", status: "review", worktree: true });
+    const { runner, calls } = sequenceRunner(["fail", "pass"]);
+    tasksMod.setCiRunner(runner);
+
+    await tasksMod.triggerCi(id);
+
+    expect(calls.n).toBe(1); // no retry; first fail is final
+    expect(row(id).ci_status).toBe("fail");
+  });
+
+  test("ciRetries=2 retries twice — fail,fail,pass settles 'pass'", async () => {
+    configMod.config.ciRetries = 2;
+    const id = seed({ id: "ci-retry-twice", status: "review", worktree: true });
+    const { runner, calls } = sequenceRunner(["fail", "fail", "pass"]);
+    tasksMod.setCiRunner(runner);
+
+    await tasksMod.triggerCi(id);
+
+    expect(calls.n).toBe(3); // initial + two retries
+    expect(row(id).ci_status).toBe("pass");
+  });
+});

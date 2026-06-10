@@ -249,6 +249,16 @@ export const config = {
   autoMergeMaxChangedLines: envInt("BUTCHR_AUTO_MERGE_MAX_LINES", 150),
 
   /**
+   * FLAKY-CI RETRY. When the CI gate's build/test run for a task entering `review`
+   * comes back FAIL, butchr automatically RE-RUNS it up to this many times before
+   * settling ci_status='fail'; a pass on any retry settles 'pass'. This absorbs
+   * flaky/transient build+test failures so a one-off red doesn't stick. Retries are
+   * logged. Default 1 (one retry → up to two total runs); set 0 to disable retries
+   * and settle the first result as-is. See tasks.triggerCi.
+   */
+  ciRetries: envInt("BUTCHR_CI_RETRIES", 1),
+
+  /**
    * How long (ms) a running agent's log can go with no new output before the
    * task is flagged `idle` — claude is alive but nothing is happening in its
    * interactive CLI (waiting on input, blocked, or just quiet). The watcher

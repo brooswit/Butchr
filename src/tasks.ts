@@ -1269,6 +1269,15 @@ async function defaultCiRunner(dirPath: string, taskId: string): Promise<CiResul
   return { status: "pass", label: `build + ${passed} tests`, detail: ciTail(out) };
 }
 
+/** Run the active CI runner once, converting a runner throw into a fail result. */
+async function runCiOnce(dirPath: string, id: string): Promise<CiResult> {
+  try {
+    return await ciRunner(dirPath, id);
+  } catch (e) {
+    return { status: "fail", label: "CI error", detail: (e as Error).message };
+  }
+}
+
 /**
  * Run the CI gate for a task that just entered `review`: flip ci_status to
  * 'running' (emit so the webapp shows a spinner), run build+test via the active
@@ -1276,6 +1285,12 @@ async function defaultCiRunner(dirPath: string, taskId: string): Promise<CiResul
  * throws — a runner error is recorded as a failed CI rather than crashing the
  * caller. Skips entirely (leaving ci_status NULL) when the task has no worktree to
  * build in (e.g. a task rescued to review without one).
+ *
+ * FLAKY-CI RETRY: a FAIL is automatically re-run up to `config.ciRetries` times
+ * (default 1) before it's settled as the task's ci_status — a pass on any retry
+ * wins and settles 'pass'. This absorbs flaky/transient build+test failures.
+ * Retries (and the final settle-on-fail) are logged. ci_status stays 'running'
+ * for the whole retry sequence, so the webapp shows a single spinner throughout.
  */
 export async function triggerCi(id: string): Promise<void> {
   const row = getTask(id);
@@ -1290,11 +1305,24 @@ export async function triggerCi(id: string): Promise<void> {
   db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
   emitUpdated(id);
 
-  let result: CiResult;
-  try {
-    result = await ciRunner(dir.path, id);
-  } catch (e) {
-    result = { status: "fail", label: "CI error", detail: (e as Error).message };
+  let result = await runCiOnce(dir.path, id);
+  // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
+  const retries = Math.max(0, config.ciRetries);
+  for (let attempt = 1; attempt <= retries && result.status === "fail"; attempt++) {
+    console.log(
+      `[butchr] CI gate FAILED for ${id} (${result.label}); ` +
+        `retrying (attempt ${attempt}/${retries})`,
+    );
+    result = await runCiOnce(dir.path, id);
+    if (result.status === "pass") {
+      console.log(`[butchr] CI gate PASSED for ${id} on retry ${attempt}/${retries}`);
+    }
+  }
+  if (result.status === "fail" && retries > 0) {
+    console.log(
+      `[butchr] CI gate settled FAIL for ${id} after ${retries} ` +
+        `retr${retries === 1 ? "y" : "ies"} (${result.label})`,
+    );
   }
   // First line is the badge label; the rest (if any) is the output tail.
   const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
