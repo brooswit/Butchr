@@ -335,19 +335,16 @@ async function renderDirectory(id) {
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path", html: esc(dir.path) }));
 
-  // create-task form
-  const form = el("div", { class: "panel", style: "margin-top:18px" });
-  form.innerHTML = `
-    <h2 style="margin-top:0">New task</h2>
-    <label class="field">
-      <span class="lbl">prompt</span>
-      <textarea id="tprompt" placeholder="Describe the work for the agent…"></textarea>
-    </label>
-    <div class="row between">
-      <small class="muted">Tasks run concurrently, each in its own worktree. ${queueLine(tasks)}</small>
-      <button class="btn" id="add-task">Create task</button>
-    </div>`;
-  wrap.appendChild(form);
+  // create-task launcher — a button that opens the New-task modal (prompt +
+  // optional blocked_by). The modal POSTs to the existing create endpoint; the
+  // resulting task appears via the SSE-driven re-render.
+  const launch = el("div", { class: "row between", style: "margin-top:18px" });
+  launch.appendChild(el("small", { class: "muted" },
+    `Tasks run concurrently, each in its own worktree. ${queueLine(tasks)}`));
+  const newBtn = el("button", { class: "btn", id: "new-task" }, "New task");
+  newBtn.addEventListener("click", () => openNewTaskModal(id));
+  launch.appendChild(newBtn);
+  wrap.appendChild(launch);
 
   // search + status filter bar. Filter state lives in module-level vars
   // (taskSearch / statusFilter) so it survives the full re-render the app does
@@ -375,15 +372,75 @@ async function renderDirectory(id) {
   wrap.appendChild(dz);
 
   mount(wrap);
+}
 
-  document.getElementById("add-task").addEventListener("click", async () => {
-    const prompt = document.getElementById("tprompt").value.trim();
-    if (!prompt) return toast("prompt is required", true);
+// ---------- new-task modal ----------
+// Inline modal for creating a task: a required prompt plus an optional
+// comma-separated blocked_by list (task ids this task waits on). Submits to the
+// existing create endpoint; the new task surfaces via the SSE-driven re-render.
+// Context is intentionally left empty (the agent reads files itself).
+function openNewTaskModal(directoryId) {
+  const backdrop = el("div", { class: "modal-backdrop" });
+  const modal = el("div", { class: "modal" });
+  backdrop.appendChild(modal);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
+  function onKey(e) { if (e.key === "Escape") close(); }
+  document.addEventListener("keydown", onKey);
+
+  const head = el("div", { class: "m-head" });
+  head.appendChild(el("h3", {}, "New task"));
+  const x = el("button", { class: "btn ghost" }, "✕");
+  x.addEventListener("click", close);
+  head.appendChild(x);
+
+  const body = el("div", { class: "m-body" });
+  body.innerHTML = `
+    <label class="field">
+      <span class="lbl">prompt</span>
+      <textarea id="nt-prompt" placeholder="Describe the work for the agent…"></textarea>
+    </label>
+    <label class="field" style="margin-bottom:0">
+      <span class="lbl">blocked by (optional) — comma-separated task ids</span>
+      <input type="text" id="nt-blocked" placeholder="e.g. snug-crag-ffae, wise-crag-b403" />
+    </label>`;
+
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  cancel.addEventListener("click", close);
+  const create = el("button", { class: "btn" }, "Create task");
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(create);
+
+  modal.appendChild(head);
+  modal.appendChild(body);
+  modal.appendChild(foot);
+  document.body.appendChild(backdrop);
+
+  const promptEl = body.querySelector("#nt-prompt");
+  const blockedEl = body.querySelector("#nt-blocked");
+  promptEl.focus();
+
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
+
+  create.addEventListener("click", async () => {
+    const prompt = promptEl.value.trim();
+    if (!prompt) { showErr("Prompt is required."); promptEl.focus(); return; }
+    // Split the comma-separated blocker list into trimmed, non-empty ids.
+    const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
+    showErr("");
+    create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + id + "/tasks", { prompt });
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by });
       toast("task created");
+      close();
       render();
-    } catch (e) { toast(e.message, true); }
+    } catch (e) {
+      showErr(e.message || "could not create task");
+      create.disabled = false; cancel.disabled = false;
+    }
   });
 }
 
