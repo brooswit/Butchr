@@ -191,6 +191,16 @@ describe("auto-rebase: a conflicting rebase is surfaced, not silently dispatched
     expect(note).toContain("README.md");
     expect(note).toContain("Merge conflict");
     expect(note).toContain("request_review");
+    // The gate REBASES, so the resolution guidance must stick under a rebase: it
+    // tells the agent to rebase / reset --soft and explicitly warns AGAINST merging
+    // (a merge commit is discarded by the rebase → the original commit replays and
+    // re-conflicts in a loop). The only mention of `git merge` is the prohibition.
+    expect(note).toContain("git rebase");
+    expect(note).toContain("git reset --soft");
+    expect(note).toContain("Do NOT use `git merge`");
+    // It must not RECOMMEND a merge to resolve — the old note suggested
+    // "(e.g. `git merge <base>` — or rebase …)" as the resolution step.
+    expect(note).not.toContain("e.g. `git merge");
     expect(taskmdMod.readTaskMd(REPO_ROOT, id).reviewNotes).toContain("README.md");
 
     // The rebase was ABORTED: the branch is back on its ORIGINAL commit, the tree

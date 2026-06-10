@@ -140,6 +140,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view renders exactly the same badges and each button behaves exactly as before
   (CLEANUP C5).
 
+### Fixed
+- **Merge-conflict kick-backs no longer thrash review → conflict → review.** When an
+  approve (or a pre-dispatch rebase) hit a merge conflict, the note butchr sent the
+  agent suggested resolving with `git merge <base>`. But butchr's merge gate
+  **rebases** the branch onto the default tip, which discards that merge commit and
+  replays the original conflicting commit — so the task re-conflicted on the next
+  merge and bounced back to review repeatedly. The conflict note now instructs the
+  agent to integrate by **`git rebase <base>`** (resolve + `--continue`) or
+  **`git reset --soft <base>`** then re-commit, and explicitly warns against
+  `git merge`, so the resolution survives the rebasing gate.
+
 ### Security
 - **CSRF / DNS-rebinding guard on the web API.** butchr binds to loopback, but a
   web page the operator merely visits could make their browser send forged

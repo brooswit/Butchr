@@ -447,7 +447,12 @@ Outcomes (`ApproveOutcome`):
   aborted, tree left clean). Instead of dumping it on the human, butchr appends an
   actionable conflict note and **kicks it back to the agent** via `requestChanges`
   (→ `queued`, re-dispatched as a `--resume` so the agent integrates the base and
-  re-submits). (HTTP 200 with a flag.) An empty `BUTCHR_VERIFY_CMD` disables the
+  re-submits). (HTTP 200 with a flag.) Because the merge gate **rebases** the branch
+  onto the default tip (no merge commit), the note instructs the agent to integrate
+  by **`git rebase <base>`** (resolve + `--continue`) or **`git reset --soft <base>`**
+  then re-commit — explicitly **NOT** `git merge <base>`, whose merge commit the
+  rebase would discard, replaying the original commit and re-conflicting in a loop.
+  An empty `BUTCHR_VERIFY_CMD` disables the
   verify gate (every clean merge is accepted). A non-conflict merge failure sets the
   `conflict` flag + a note and surfaces 409.
 
