@@ -60,6 +60,18 @@ function chip(status) {
 function effStatus(t) {
   return t.status === "running" && t.idle ? "idle" : t.status;
 }
+// Renders a task's badge cluster — the status chip plus the optional plan /
+// conflict / rolled-back badges — as an HTML string. Each badge's markup lives
+// here only, so how a chip *looks* can't drift across the views. Which badges a
+// view shows stays the caller's call (History/table stay lean, the detail header
+// shows all), passed via opts; taskChips renders exactly the set requested. The
+// conflict badge is always included when set — every view already shows it.
+function taskChips(t, { plan = false, rolledBack = false } = {}) {
+  return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
+    + chip(effStatus(t))
+    + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
+    + (rolledBack && t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : "");
+}
 // The agent is live (attachable) whenever it has a herdr pane: running/idle, while
 // blocked on the request_review handshake in `review`, and during `finalizing` (its
 // post-merge wrap-up) until butchr closes the pane. Gating on herdr_pane_id mirrors
@@ -123,11 +135,13 @@ async function openTaskTerminal(id, btn) {
   }
 }
 
-// ---------- directory picker modal ----------
-// onSelect(path, register): register=false fills the field; true registers now.
-function openPicker(onSelect) {
-  let cur = null;
-
+// Shared modal scaffold. Builds the backdrop + modal, wires Escape and
+// backdrop-click to close, and mounts it on document.body — the identical ~12
+// lines every modal otherwise hand-rolls. Pass `title` for the standard head
+// (title + ✕ close button) and `body`/`footer` nodes for static content; or omit
+// them and paint into the returned `modal` element yourself (the picker rebuilds
+// its own head/list/foot on each navigation). Returns { close, backdrop, modal }.
+function openModal({ title, body, footer } = {}) {
   const backdrop = el("div", { class: "modal-backdrop" });
   const modal = el("div", { class: "modal" });
   backdrop.appendChild(modal);
@@ -135,6 +149,49 @@ function openPicker(onSelect) {
   function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
   function onKey(e) { if (e.key === "Escape") close(); }
   document.addEventListener("keydown", onKey);
+
+  if (title != null) {
+    const head = el("div", { class: "m-head" });
+    head.appendChild(el("h3", {}, title));
+    const x = el("button", { class: "btn ghost" }, "✕");
+    x.addEventListener("click", close);
+    head.appendChild(x);
+    modal.appendChild(head);
+  }
+  if (body) modal.appendChild(body);
+  if (footer) modal.appendChild(footer);
+
+  document.body.appendChild(backdrop);
+  return { close, backdrop, modal };
+}
+
+// Owns the disable/try/restore/toast dance every action button repeats: disable
+// `btn`, run `fn` (typically an api() call), and on success toast `success` (a
+// string, or a fn of fn's result) then run `onDone` (defaults to render()). On
+// failure, toast the error and re-enable the button so it can be retried. The
+// few buttons whose success message depends on the response toast inside `fn`
+// themselves and pass no `success`. Any pre-flight confirm() must run before
+// calling action(), so a cancel never disables the button.
+async function action(btn, fn, { success, onDone } = {}) {
+  btn.disabled = true;
+  try {
+    const r = await fn();
+    if (success != null) toast(typeof success === "function" ? success(r) : success);
+    (onDone || render)();
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+  }
+}
+
+// ---------- directory picker modal ----------
+// onSelect(path, register): register=false fills the field; true registers now.
+function openPicker(onSelect) {
+  let cur = null;
+
+  // No title/body/footer: the picker repaints its own head/list/foot on each
+  // navigation, so it just borrows openModal's backdrop/Escape/close scaffold.
+  const { close, modal } = openModal();
 
   async function load(path) {
     let data;
@@ -202,7 +259,6 @@ function openPicker(onSelect) {
     modal.appendChild(foot);
   }
 
-  document.body.appendChild(backdrop);
   // Start from the current field value if set, else home.
   const seed = (document.getElementById("dpath") || {}).value || "";
   load(seed.trim() || null);
@@ -419,20 +475,6 @@ async function renderDirectory(id) {
 // existing create endpoint; the new task surfaces via the SSE-driven re-render.
 // Context is intentionally left empty (the agent reads files itself).
 function openNewTaskModal(directoryId) {
-  const backdrop = el("div", { class: "modal-backdrop" });
-  const modal = el("div", { class: "modal" });
-  backdrop.appendChild(modal);
-  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
-  function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
-  function onKey(e) { if (e.key === "Escape") close(); }
-  document.addEventListener("keydown", onKey);
-
-  const head = el("div", { class: "m-head" });
-  head.appendChild(el("h3", {}, "New task"));
-  const x = el("button", { class: "btn ghost" }, "✕");
-  x.addEventListener("click", close);
-  head.appendChild(x);
-
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
     <label class="field">
@@ -455,16 +497,13 @@ function openNewTaskModal(directoryId) {
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
   const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  cancel.addEventListener("click", close);
   const create = el("button", { class: "btn" }, "Create task");
   foot.appendChild(errEl);
   foot.appendChild(cancel);
   foot.appendChild(create);
 
-  modal.appendChild(head);
-  modal.appendChild(body);
-  modal.appendChild(foot);
-  document.body.appendChild(backdrop);
+  const { close } = openModal({ title: "New task", body, footer: foot });
+  cancel.addEventListener("click", close);
 
   const promptEl = body.querySelector("#nt-prompt");
   const blockedEl = body.querySelector("#nt-blocked");
@@ -699,7 +738,7 @@ function finishedList(tasks) {
     const row = el("a", { class: "finished-row", href: "#/task/" + esc(t.id) });
     row.innerHTML = `
       <span class="fr-id">${esc(t.id)}</span>
-      ${chip(effStatus(t))}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}
+      ${taskChips(t)}
       <span class="fr-when" title="${esc(finishedTime(t) || "")}">${esc(fmtTime(finishedTime(t)))}</span>`;
     list.appendChild(row);
   }
@@ -719,7 +758,7 @@ function tasksTable(tasks) {
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
       <td class="id">${esc(t.id)}</td>
-      <td>${chip(effStatus(t))}${t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</td>
+      <td>${taskChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a>${
         herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
@@ -986,14 +1025,12 @@ function boardLane(lane, items, byId) {
 // blockers will never merge, so they're flagged as stuck.
 function boardCard(t, lane, byId) {
   const card = el("div", { class: "board-card" });
-  const planBadge = t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "";
   const termLink = isLive(t)
     ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a>` : "";
   card.innerHTML = `
     <div class="bc-top">
       <a class="bc-id" href="#/task/${esc(t.id)}">${esc(t.id)}</a>
-      <span class="bc-chips">${planBadge}${chip(effStatus(t))}${
-        t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</span>
+      <span class="bc-chips">${taskChips(t, { plan: true })}</span>
     </div>
     <div class="bc-meta">
       <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
@@ -1287,10 +1324,7 @@ async function renderTask(id) {
     headerRight.appendChild(term);
   }
   headerRight.appendChild(el("div", {
-    html: (t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
-      + chip(effStatus(t))
-      + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
-      + (t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : ""),
+    html: taskChips(t, { plan: true, rolledBack: true }),
   }));
   // Abort is available from any non-terminal state EXCEPT finalizing, whose merge
   // already landed in main (it auto-completes to merged).
@@ -1523,28 +1557,18 @@ async function renderTask(id) {
   mount(wrap);
 
   if (t.status === "failed") {
-    document.getElementById("requeue").addEventListener("click", async (ev) => {
-      ev.target.disabled = true;
-      try {
-        await api("POST", "/tasks/" + id + "/requeue");
-        toast("re-queued ✓");
-        render();
-      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    document.getElementById("requeue").addEventListener("click", (ev) => {
+      action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
     });
   }
 
   if (canAbort) {
-    document.getElementById("abort").addEventListener("click", async (ev) => {
+    document.getElementById("abort").addEventListener("click", (ev) => {
       const msg = t.status === "running"
         ? "Abort this running task? The agent is stopped and its worktree + branch are discarded without merging."
         : "Abort this task? Its worktree + branch are discarded without merging.";
       if (!confirm(msg)) return;
-      ev.target.disabled = true;
-      try {
-        await api("POST", "/tasks/" + id + "/abort");
-        toast("task aborted");
-        render();
-      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+      action(ev.target, () => api("POST", "/tasks/" + id + "/abort"), { success: "task aborted" });
     });
   }
 
@@ -1555,25 +1579,20 @@ async function renderTask(id) {
         + "with new revert commits. If the revert conflicts with later changes it is "
         + "aborted cleanly and you'll need to revert manually.",
       )) return;
-      ev.target.disabled = true;
-      try {
-        await api("POST", "/tasks/" + id + "/rollback");
-        toast("rolled back ✓ — commits reverted on the default branch");
-        render();
-      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+      action(ev.target, () => api("POST", "/tasks/" + id + "/rollback"),
+        { success: "rolled back ✓ — commits reverted on the default branch" });
     });
   }
 
   if (t.status === "review") {
-    document.getElementById("approve").addEventListener("click", async (ev) => {
+    document.getElementById("approve").addEventListener("click", (ev) => {
       // CI gate is advisory, not a hard block: warn on a failed build/tests but let
       // the operator proceed if they confirm.
       if (t.ci_status === "fail") {
         const label = (t.ci_summary || "CI failed").split("\n")[0].trim();
         if (!confirm(`CI failed (${label}). Approve and merge anyway?`)) return;
       }
-      ev.target.disabled = true;
-      try {
+      action(ev.target, async () => {
         const r = await api("POST", "/tasks/" + id + "/approve");
         // A merge conflict isn't an error — it's sent back to the live agent to
         // resolve in-context. The SSE refresh will show the task back in running.
@@ -1584,18 +1603,13 @@ async function renderTask(id) {
         } else {
           toast("approved ✓ — merged, agent wrapping up");
         }
-        backToDirectory(t.directory_id);
-      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+      }, { onDone: () => backToDirectory(t.directory_id) });
     });
-    document.getElementById("reject").addEventListener("click", async (ev) => {
+    document.getElementById("reject").addEventListener("click", (ev) => {
       const note = document.getElementById("rnote").value.trim();
       if (!note) return toast("change request note is required", true);
-      ev.target.disabled = true;
-      try {
-        await api("POST", "/tasks/" + id + "/reject", { note });
-        toast("changes requested");
-        backToDirectory(t.directory_id);
-      } catch (e) { toast(e.message, true); ev.target.disabled = false; }
+      action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
+        { success: "changes requested", onDone: () => backToDirectory(t.directory_id) });
     });
   }
 }

@@ -84,6 +84,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   driving both a shared dispatcher and `tools/list` filtering. No behavior change —
   the same `request_review` / `propose_subtasks` / `ask` tools are exposed to the
   same tasks; this just makes adding a tool a one-line registry entry (CLEANUP C10).
+- **Internal: the webapp's repeated UI scaffolds are now three shared helpers**
+  (`public/app.js`). The directory picker and the new-task modal each hand-rolled
+  the identical backdrop + Escape/backdrop-click-to-close boilerplate — that now
+  lives once in `openModal()`. The five task-detail action buttons (re-queue,
+  abort, roll back, approve, request-change) each repeated the same
+  disable-button → call API → toast → restore-on-error dance, now owned by
+  `action()`. And the per-view task badge cluster (status + conflict/plan/
+  rolled-back chips) is built by one `taskChips()` so a chip's markup can't drift
+  between the list, table, board, and detail views. Pure-internal refactor — each
+  view renders exactly the same badges and each button behaves exactly as before
+  (CLEANUP C5).
 
 ### Security
 - **CSRF / DNS-rebinding guard on the web API.** butchr binds to loopback, but a
