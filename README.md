@@ -14,6 +14,10 @@ terminal/agent session management to herdr.
 > architecture, the full task state machine, dispatch/review/merge internals, the
 > REST/MCP/CLI interfaces, the data model, and every config var — see
 > **[SPEC.md](./SPEC.md)** (the living design doc).
+>
+> 🛠️ Want to **hack on butchr**? See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for
+> local dev setup, code conventions, the zero-dependency rule, testing seams, and
+> the contribution workflow.
 
 ---
 
