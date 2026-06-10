@@ -550,6 +550,43 @@ pre.block {
 .panel.live-output.collapsed .live-output-body { display: none; }
 .panel.live-output.collapsed .live-output-head { border-bottom: 0; }
 
+/* Agent transcript panel — collapsible, monospace, read-only. */
+.panel.transcript { padding: 0; overflow: hidden; }
+.transcript-head {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px 14px; background: var(--panel-2); border: 0;
+  color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+.transcript-head:hover { background: var(--panel); }
+.transcript-head .caret { color: var(--muted); font-size: 11px; }
+.transcript-head .ts-title { font-weight: 600; font-size: 13px; }
+.transcript-head .ts-hint { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+.transcript-body { border-top: 1px solid var(--border); max-height: 560px; overflow: auto; }
+.panel.transcript.collapsed .transcript-body { display: none; }
+.panel.transcript.collapsed .transcript-head { border-bottom: 0; }
+.ts-empty { padding: 14px; color: var(--muted); font-size: 12.5px; }
+.ts-item { padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.ts-item:last-child { border-bottom: 0; }
+.ts-item.ts-tool_use { background: rgba(127, 127, 127, 0.05); }
+.ts-item.ts-tool_result { background: rgba(127, 127, 127, 0.08); }
+.ts-item.ts-thinking { opacity: 0.85; }
+.ts-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.ts-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.ts-label.assistant { color: var(--accent, #6ea8fe); }
+.ts-label.user { color: var(--muted); }
+.ts-label.tool { color: #d08770; font-family: var(--mono); text-transform: none; }
+.ts-label.result { color: var(--muted); }
+.ts-label.thinking { color: var(--muted); font-style: italic; text-transform: none; }
+.ts-time { color: var(--muted); font-size: 11px; font-family: var(--mono); margin-left: auto; }
+.ts-args { font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-all; }
+.ts-pre {
+  margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+  word-break: break-word; color: var(--text);
+}
+.ts-item.ts-tool_result .ts-pre, .ts-item.ts-thinking .ts-pre { color: var(--muted); }
+.ts-trunc { color: var(--muted); font-style: italic; }
+.ts-more { margin: 10px 14px; }
+
 .dl { display: flex; white-space: pre; }
 .dl .dl-sign {
   flex: 0 0 22px; text-align: center; color: var(--muted);

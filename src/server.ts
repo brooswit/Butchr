@@ -32,6 +32,8 @@ import {
   taskView,
 } from "./tasks.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
+import { readSessionTranscript } from "./transcript.ts";
+import { worktreePath } from "./git.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
 
@@ -354,6 +356,36 @@ route("GET", "/api/tasks/:id/output", async (_req, p) => {
   if (!t) throw new HttpError(404, "task not found");
   const output = t.herdr_pane_id ? await herdr.agentRead(p.id!) : "";
   return json({ output });
+});
+
+// Agent transcript: a readable, ordered view of what the task's Claude session
+// actually did — user/assistant prose, the assistant's thinking, tool calls
+// (name + brief args), and (truncated) tool results — parsed from the session
+// JSONL. Read-only and best-effort: returns an empty list (not a 404) when the
+// task has no session yet or its transcript can't be located/read. Paginated via
+// `?offset=&limit=` (limit clamped to 1..500, default 200) since a long session
+// produces hundreds of turns; `total` and `hasMore` let the UI page or "load more".
+route("GET", "/api/tasks/:id/transcript", async (req, p) => {
+  const t = getTask(p.id!);
+  if (!t) throw new HttpError(404, "task not found");
+  const dir = getDirectory(t.directory_id);
+  // The transcript lives under ~/.claude/projects (outside the worktree), so it
+  // survives worktree cleanup; findTranscript falls back to a by-session-id scan
+  // when the munged worktree path no longer exists (e.g. after merge).
+  const all =
+    dir && t.session_id
+      ? readSessionTranscript(worktreePath(dir.path, p.id!), t.session_id)
+      : [];
+  const total = all.length;
+  const url = new URL(req.url);
+  const rawOffset = Number(url.searchParams.get("offset"));
+  const rawLimit = Number(url.searchParams.get("limit"));
+  const offset =
+    Number.isFinite(rawOffset) && rawOffset > 0 ? Math.min(Math.floor(rawOffset), total) : 0;
+  const limit =
+    Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(500, Math.floor(rawLimit)) : 200;
+  const turns = all.slice(offset, offset + limit);
+  return json({ turns, total, offset, limit, hasMore: offset + turns.length < total });
 });
 
 route("POST", "/api/tasks/:id/approve", async (_req, p) => {

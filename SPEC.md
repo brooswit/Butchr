@@ -586,6 +586,7 @@ other paths fall through to static serving (SPA fallback to `index.html`).
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |
 | `GET` | `/api/tasks/:id/events` | — | `TaskEventRow[]` — the status-transition audit timeline, oldest→newest. 404 if gone. |
 | `GET` | `/api/tasks/:id/output` | — | `{ output }` — best-effort live agent terminal text (`herdr agent read`); `""` once the pane is gone. |
+| `GET` | `/api/tasks/:id/transcript` | `?offset=&limit=` | `{ turns, total, offset, limit, hasMore }` — the agent's session transcript parsed into ordered, role-labelled items (prose / thinking / tool-call name+brief-args / truncated tool-result); best-effort `turns:[]` when there's no session/transcript. `limit` clamped 1..500 (default 200). 404 if the task is gone. |
 | `POST` | `/api/tasks/:id/approve` | `{}` | the merged `TaskView`, **or** `{ task, conflictSentBack:true }`, **or** `{ task, revertedOnRed:true }`. 409 if not in review / on a hard merge failure. |
 | `POST` | `/api/tasks/:id/reject` | `{ note }` | `TaskView` (`→ queued` for resume). 409 if not in review; 400 if note blank. |
 | `POST` | `/api/tasks/:id/abort` | — | `TaskView` (`→ aborted`). 409 if already merged/aborted. |
@@ -665,8 +666,11 @@ hash-routed and SSE-driven. Views/features:
   selector, blocked-by, model).
 - **Task detail** — status/CI/summary, the rendered **diff** (`/api/tasks/:id/diff`,
   parsed + highlighted), the **timeline** (`/api/tasks/:id/events`), model/tokens/
-  cost labels, live output, approve/reject/abort/requeue/rollback controls, and an
-  **Open terminal** button (running tasks).
+  cost labels, live output, a collapsible **Agent transcript** panel
+  (`/api/tasks/:id/transcript`, lazily fetched + paged: role-labelled prose,
+  thinking, compact tool calls + truncated results, monospace + read-only),
+  approve/reject/abort/requeue/rollback controls, and an **Open terminal** button
+  (running tasks).
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
   and the conflict/revert/CI-pass/auto-merge rates.
 - **Chrome** — light/dark theme toggle (persisted, applied pre-paint), a live

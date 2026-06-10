@@ -1132,6 +1132,115 @@ function costLabel(t) {
   return typeof t.cost_usd === "number" ? `$${t.cost_usd.toFixed(4)}` : "— (not tracked)";
 }
 
+// ---------- agent transcript panel state ----------
+// The transcript is large and read straight off disk, so we fetch it lazily (only
+// on first open) and page it. `transcriptOpen` persists the open/closed choice
+// across SSE re-renders; `transcriptState` caches the loaded turns for ONE task at
+// a time (reset when a different task's panel is built).
+let transcriptOpen = false;
+const transcriptState = { id: null, turns: [], total: 0, loaded: false, loading: false };
+const TRANSCRIPT_PAGE = 200;
+
+// Render one transcript item (one content block) as a labelled, monospace row.
+function renderTranscriptItem(it) {
+  const row = el("div", { class: `ts-item ts-${esc(it.kind)} role-${esc(it.role)}` });
+  const time = it.ts
+    ? `<span class="ts-time" title="${esc(it.ts)}">${esc(fmtTime(it.ts))}</span>` : "";
+  const trunc = it.truncated ? '<span class="ts-trunc"> … (truncated)</span>' : "";
+  let label, bodyHtml;
+  if (it.kind === "tool_use") {
+    label = `<span class="ts-label tool">⚙ ${esc(it.tool)}</span>`;
+    bodyHtml = it.args ? `<code class="ts-args">${esc(it.args)}</code>` : "";
+  } else if (it.kind === "tool_result") {
+    label = `<span class="ts-label result">↳ result</span>`;
+    bodyHtml = `<pre class="ts-pre">${esc(it.text || "")}${trunc}</pre>`;
+  } else if (it.kind === "thinking") {
+    label = `<span class="ts-label thinking">${esc(it.role)} · thinking</span>`;
+    bodyHtml = `<pre class="ts-pre">${esc(it.text || "")}${trunc}</pre>`;
+  } else {
+    label = `<span class="ts-label ${esc(it.role)}">${esc(it.role)}</span>`;
+    bodyHtml = `<pre class="ts-pre">${esc(it.text || "")}${trunc}</pre>`;
+  }
+  row.innerHTML = `<div class="ts-head">${label}${time}</div>${bodyHtml}`;
+  return row;
+}
+
+// Build the collapsible "Agent transcript" panel for a task. Lazy: nothing is
+// fetched until the panel is opened; subsequent pages append via "Load more".
+function renderTranscriptPanel(id) {
+  // New task → drop any cached turns from a previously-viewed one.
+  if (transcriptState.id !== id) {
+    transcriptState.id = id;
+    transcriptState.turns = [];
+    transcriptState.total = 0;
+    transcriptState.loaded = false;
+    transcriptState.loading = false;
+  }
+
+  const caret = el("span", { class: "caret" }, transcriptOpen ? "▾" : "▸");
+  const head = el("button", { class: "transcript-head", type: "button" }, [
+    caret,
+    el("span", { class: "ts-title" }, "Agent transcript"),
+    el("span", { class: "ts-hint" }, "what the agent did · read-only"),
+  ]);
+  const body = el("div", { class: "transcript-body" });
+  const panel = el("div",
+    { class: "panel transcript" + (transcriptOpen ? "" : " collapsed") }, [head, body]);
+
+  const renderBody = () => {
+    body.innerHTML = "";
+    if (transcriptState.loading && !transcriptState.turns.length) {
+      body.appendChild(el("div", { class: "ts-empty" }, "loading transcript…"));
+      return;
+    }
+    if (transcriptState.loaded && !transcriptState.turns.length) {
+      body.appendChild(el("div", { class: "ts-empty" }, "No transcript available for this task yet."));
+      return;
+    }
+    for (const it of transcriptState.turns) body.appendChild(renderTranscriptItem(it));
+    if (transcriptState.turns.length < transcriptState.total) {
+      const more = el("button", { class: "btn ghost ts-more" },
+        `Load more (${transcriptState.turns.length} of ${transcriptState.total})`);
+      more.addEventListener("click", () => load(more));
+      body.appendChild(more);
+    }
+  };
+
+  const load = async (moreBtn) => {
+    if (transcriptState.loading) return;
+    transcriptState.loading = true;
+    if (moreBtn) moreBtn.disabled = true; else renderBody();
+    try {
+      const offset = transcriptState.turns.length;
+      const r = await api("GET",
+        `/tasks/${id}/transcript?offset=${offset}&limit=${TRANSCRIPT_PAGE}`);
+      transcriptState.turns = transcriptState.turns.concat(r.turns || []);
+      transcriptState.total = r.total || 0;
+      transcriptState.loaded = true;
+    } catch (e) {
+      transcriptState.loaded = true;
+      toast(e.message, true);
+    } finally {
+      transcriptState.loading = false;
+      renderBody();
+    }
+  };
+
+  head.addEventListener("click", () => {
+    transcriptOpen = !transcriptOpen;
+    panel.classList.toggle("collapsed", !transcriptOpen);
+    caret.textContent = transcriptOpen ? "▾" : "▸";
+    if (transcriptOpen && !transcriptState.loaded && !transcriptState.loading) load();
+    else renderBody();
+  });
+
+  if (transcriptOpen) {
+    if (!transcriptState.loaded && !transcriptState.loading) load();
+    else renderBody();
+  }
+  return panel;
+}
+
 async function renderTask(id) {
   const t = await api("GET", "/tasks/" + id);
   const dirs = await api("GET", "/directories");
@@ -1336,6 +1445,12 @@ async function renderTask(id) {
     wrap.appendChild(el("h2", {}, t.status === "merged" ? "Agent wrap-up" : "Agent output (snapshot)"));
     wrap.appendChild(el("pre", { class: "block", html: esc(t.output_snapshot) }));
   }
+
+  // agent transcript — a readable, lazily-fetched view of what the session's agent
+  // actually did (prose, thinking, tool calls + truncated results). Collapsible and
+  // read-only; only offered once the task has a session to read. The body is fetched
+  // on first open (transcripts get large) and paged via a "Load more" button.
+  if (t.session_id) wrap.appendChild(renderTranscriptPanel(t.id));
 
   // diff + review controls (when in review)
   if (t.status === "review") {

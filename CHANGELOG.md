@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet. New work goes here — see the
 [living-docs convention](./CONTRIBUTING.md#6-living-docs-update-on-every-change)._
 
+## [0.9.1] - 2026-06-10
+
+### Added
+
+- **Agent transcript viewer.** The task-detail page gains a collapsible **Agent
+  transcript** panel that shows what the task's agent actually did — its prose,
+  extended thinking, tool calls (name + a brief one-line arg summary), and
+  (truncated) tool results — without attaching to herdr. It's read-only and
+  monospace, fetched lazily on first open and paged via a "Load more" button.
+- **`GET /api/tasks/:id/transcript`** endpoint backing it: parses the Claude Code
+  session JSONL (located the same way per-task token usage is) into an ordered,
+  role-labelled list of turns, skipping internal frames and truncating large
+  bodies. Best-effort — returns `turns: []` when the task has no session or the
+  transcript can't be read — and paginated via `?offset=&limit=` (`limit` clamped
+  1..500, default 200) with `total`/`hasMore`.
+
 ## [0.9.0] - 2026-06-10
 
 This release establishes **change tracking** for butchr and catches the declared
