@@ -198,6 +198,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.rejected { background: var(--rejected); }
 .chip.failed { background: var(--failed); }
 .chip.aborted { background: var(--aborted); }
+/* `unknown` blocker — a dependency that isn't among the current directory's tasks
+   (so its status can't be resolved). Neutral muted fill. */
+.chip.unknown { background: var(--muted); }
 /* Rollback isn't a lifecycle status — it's a flag on a still-`merged` task whose
    commits were reverted off the default branch. Reuse the warning/aborted hue. */
 .chip.rolled-back { background: var(--aborted); }
@@ -395,6 +398,63 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-node.rejected .tg-rect { fill: var(--rejected); }
 .tg-node.failed .tg-rect { fill: var(--failed); }
 .tg-node.aborted .tg-rect { fill: var(--aborted); }
+
+/* pipeline / merge-train board (directory view) — active tasks grouped into
+   pipeline-order lanes, each with a status-colored left accent. */
+.board { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.board-summary { font-size: 13px; margin-bottom: 2px; }
+
+.board-lane {
+  background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid var(--queued); border-radius: 8px;
+  padding: 12px 14px;
+}
+.board-lane.lane-review     { border-left-color: var(--review); }
+.board-lane.lane-finalizing { border-left-color: var(--finalizing); }
+.board-lane.lane-running    { border-left-color: var(--running); }
+.board-lane.lane-queued     { border-left-color: var(--queued); }
+.board-lane.lane-blocked    { border-left-color: var(--blocked); }
+
+.board-lane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.board-lane-head .bl-title { font-weight: 600; font-size: 14px; }
+.board-lane-head .bl-count {
+  font-size: 11px; color: var(--muted); font-weight: 600;
+  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 1px 7px;
+}
+.board-empty { font-size: 13px; padding: 2px 0; }
+
+.board-cards {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+.board-card {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 10px 12px;
+}
+.board-card .bc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.board-card .bc-id { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+.board-card .bc-chips { display: inline-flex; gap: 4px; flex: 0 0 auto; }
+.board-card .bc-meta {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11.5px; color: var(--muted);
+}
+.board-card .bc-meta .bc-when { white-space: nowrap; }
+.board-card .bc-term { margin-left: auto; white-space: nowrap; }
+
+.bc-blockers {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 2px; padding-top: 8px; border-top: 1px dashed var(--border);
+}
+.bc-blk-label { font-size: 11px; }
+.bc-blocker {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 2px 6px; font-size: 12px; color: var(--text);
+}
+.bc-blocker:hover { background: var(--panel-2); text-decoration: none; }
+.bc-blocker .bk-id { font-family: var(--mono); font-size: 11.5px; }
+.bc-blocker.stuck { border-color: var(--rejected); }
 
 /* forms */
 .btn {

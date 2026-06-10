@@ -376,6 +376,9 @@ async function renderDirectory(id) {
     if (dirView === "graph") {
       body.appendChild(el("h2", {}, "Dependency graph"));
       body.appendChild(renderGraph(tasks));
+    } else if (dirView === "board") {
+      body.appendChild(el("h2", {}, "Merge train"));
+      body.appendChild(renderBoard(tasks));
     } else {
       // search + status filter bar. Filter state lives in module-level vars
       // (taskSearch / statusFilter) so it survives the full re-render the app does
@@ -514,13 +517,15 @@ function queueLine(tasks) {
 const ACTIVE_STATUSES = ["queued", "blocked", "running", "review", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
 
-// Directory page body mode: the task "List" or the dependency "Graph". Kept at
-// module scope (and mirrored to localStorage) so it survives the full re-render
-// the app does on every SSE event and across reloads.
+// Directory page body mode: the task "List", the pipeline "Board", or the
+// dependency "Graph". Kept at module scope (and mirrored to localStorage) so it
+// survives the full re-render the app does on every SSE event and across reloads.
 const DIRVIEW_KEY = "butchr-dirview";
 let dirView = (() => {
-  try { return localStorage.getItem(DIRVIEW_KEY) === "graph" ? "graph" : "list"; }
-  catch (e) { return "list"; }
+  try {
+    const v = localStorage.getItem(DIRVIEW_KEY);
+    return v === "graph" || v === "board" ? v : "list";
+  } catch (e) { return "list"; }
 })();
 function setDirView(v) {
   dirView = v;
@@ -726,14 +731,14 @@ function tasksTable(tasks) {
   return table;
 }
 
-// List / Graph segmented toggle for the directory body. Mutates dirView (module
-// scope + localStorage) and calls repaint() to swap the body region — the toggle
-// node itself is left in place so the choice sticks across clicks. The directory
-// view re-renders wholesale on every SSE event and reads dirView, so the chosen
-// mode also survives live updates without re-wiring anything.
+// List / Board / Graph segmented toggle for the directory body. Mutates dirView
+// (module scope + localStorage) and calls repaint() to swap the body region — the
+// toggle node itself is left in place so the choice sticks across clicks. The
+// directory view re-renders wholesale on every SSE event and reads dirView, so the
+// chosen mode also survives live updates without re-wiring anything.
 function buildViewToggle(repaint) {
   const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Task view" });
-  const defs = [["list", "List"], ["graph", "Graph"]];
+  const defs = [["list", "List"], ["board", "Board"], ["graph", "Graph"]];
   const btns = {};
   for (const [v, label] of defs) {
     const b = el("button", {
@@ -906,6 +911,119 @@ function renderGraph(tasks) {
 
   const scroll = el("div", { class: "task-graph-scroll" }, [root]);
   return el("div", {}, [legend, scroll]);
+}
+
+// ---------- pipeline / merge-train board ----------
+// The board view: the directory's active (in-flight) tasks grouped into lanes in
+// pipeline order — closest-to-landing first — so "what's happening / what's next"
+// reads at a glance. Lanes: Ready to merge (review) · Merging (finalizing, only
+// when present) · In progress (running/idle) · Queued · Blocked (each card shows
+// the blockers it's waiting on and their current status). Terminal-state tasks
+// (merged/aborted/rejected/failed) aren't part of the pipeline and are omitted —
+// they live in the List view's Finished section. Re-rendered wholesale on every
+// SSE event by the directory view, so it live-updates for free.
+const BOARD_LANES = [
+  { key: "review", title: "Ready to merge", hint: "ready to merge", match: (t) => t.status === "review" },
+  { key: "finalizing", title: "Merging", hint: "merging", match: (t) => t.status === "finalizing" },
+  { key: "running", title: "In progress", hint: "running", match: (t) => t.status === "running" },
+  { key: "queued", title: "Queued", hint: "queued", match: (t) => t.status === "queued" },
+  { key: "blocked", title: "Blocked", hint: "blocked", match: (t) => t.status === "blocked" },
+];
+
+function renderBoard(tasks) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+  if (active.length === 0) {
+    return el("div", { class: "empty" }, "No active tasks in the pipeline.");
+  }
+
+  // Oldest-first within a lane: the longest-waiting (review/queued) and the
+  // earliest-started (running) bubble to the top — the next thing to act on.
+  const byCreated = (a, b) =>
+    new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
+
+  // One-line "what's happening" caption from the populated lanes.
+  const counts = BOARD_LANES.map((l) => ({ l, n: active.filter(l.match).length }));
+  const summary = counts.filter((x) => x.n > 0).map((x) => `${x.n} ${x.l.hint}`);
+
+  const board = el("div", { class: "board" });
+  board.appendChild(el("div", { class: "board-summary muted" },
+    summary.length ? summary.join(" · ") : "Idle."));
+
+  for (const lane of BOARD_LANES) {
+    const items = active.filter(lane.match).sort(byCreated);
+    // Always render the four core lanes so the pipeline skeleton stays visible;
+    // the finalizing lane only appears when something is actually merging.
+    if (lane.key === "finalizing" && items.length === 0) continue;
+    board.appendChild(boardLane(lane, items, byId));
+  }
+  return board;
+}
+
+// One lane: a header (title + count) over a responsive grid of task cards, with a
+// status-colored left accent. Empty core lanes render a placeholder so the
+// pipeline structure reads even when a stage is clear.
+function boardLane(lane, items, byId) {
+  const sec = el("div", { class: "board-lane lane-" + lane.key });
+  sec.appendChild(el("div", { class: "board-lane-head" }, [
+    el("span", { class: "bl-title" }, lane.title),
+    el("span", { class: "bl-count" }, String(items.length)),
+  ]));
+  if (items.length === 0) {
+    sec.appendChild(el("div", { class: "board-empty muted" }, "—"));
+    return sec;
+  }
+  const cards = el("div", { class: "board-cards" });
+  for (const t of items) cards.appendChild(boardCard(t, lane, byId));
+  sec.appendChild(cards);
+  return sec;
+}
+
+// One task card: id (links to the detail page), status chip(s), created time, and
+// a live-terminal link when the agent pane is up. Blocked cards additionally list
+// each blocker with its current status — read from sibling tasks in this
+// directory (a blocker not in this list shows as "unknown"). Aborted/rejected
+// blockers will never merge, so they're flagged as stuck.
+function boardCard(t, lane, byId) {
+  const card = el("div", { class: "board-card" });
+  const planBadge = t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "";
+  const termLink = isLive(t)
+    ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a>` : "";
+  card.innerHTML = `
+    <div class="bc-top">
+      <a class="bc-id" href="#/task/${esc(t.id)}">${esc(t.id)}</a>
+      <span class="bc-chips">${planBadge}${chip(effStatus(t))}${
+        t.conflict ? ' <span class="chip rejected">conflict</span>' : ""}</span>
+    </div>
+    <div class="bc-meta">
+      <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
+      ${termLink ? `<span class="bc-term">${termLink}</span>` : ""}
+    </div>`;
+
+  if (lane.key === "blocked") {
+    const ids = blockedByIds(t.blocked_by);
+    if (ids.length) {
+      const blk = el("div", { class: "bc-blockers" });
+      blk.appendChild(el("span", { class: "bc-blk-label muted" }, "blocked by"));
+      for (const bid of ids) {
+        const b = byId.get(bid);
+        const st = b ? effStatus(b) : "unknown";
+        const stuck = st === "aborted" || st === "rejected";
+        const row = el("a", {
+          class: "bc-blocker" + (stuck ? " stuck" : ""),
+          href: "#/task/" + esc(bid),
+          title: stuck ? "will never merge — edit blocked_by to proceed" : bid,
+        });
+        row.innerHTML = `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
+        blk.appendChild(row);
+      }
+      card.appendChild(blk);
+    }
+  }
+
+  const tl = card.querySelector(".term-link");
+  if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(t.id); });
+  return card;
 }
 
 // CI GATE badge for the review panel. ci_status: 'running' shows a spinner;
