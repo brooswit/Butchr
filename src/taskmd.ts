@@ -18,6 +18,10 @@ export type TaskMeta = {
   // the front matter so renderAgentPrompt can hand a plan task the decomposition
   // protocol rather than the review protocol. Optional/absent reads back as "task".
   kind?: TaskKind;
+  // Optional per-task model (e.g. 'opus'/'sonnet'/'haiku' or a full 'claude-*' id)
+  // requested at creation and threaded into the agent launch (db.ts `model` column).
+  // Absent/empty means "default" — no --model flag. Round-tripped in the front matter.
+  model?: string | null;
 };
 
 export type TaskDoc = {
@@ -117,6 +121,9 @@ function serializeFrontMatter(meta: TaskMeta): string {
   // Only emit a kind line for plan tasks — ordinary tasks omit it and parse back as
   // the "task" default, keeping existing task.md files unchanged.
   if (meta.kind === "plan") lines.push(`kind: ${meta.kind}`);
+  // Only emit a model line when one was requested — an unset model omits it and
+  // parses back as null (the default), keeping existing task.md files unchanged.
+  if (meta.model) lines.push(`model: ${meta.model}`);
   if (meta.context.length === 0) {
     lines.push("context: []");
   } else {
@@ -193,6 +200,7 @@ export function parseTaskMd(raw: string): TaskDoc {
     status: "queued",
     context: [],
     kind: "task",
+    model: null,
   };
 
   let rest = raw;
@@ -217,6 +225,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       else if (key === "created") meta.created = val;
       else if (key === "status") meta.status = (val as TaskStatus) || "queued";
       else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
+      else if (key === "model") meta.model = val || null;
       else if (key === "context") {
         if (val === "" ) inContext = true;
         else if (val === "[]") meta.context = [];

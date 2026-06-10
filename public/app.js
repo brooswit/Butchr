@@ -440,6 +440,10 @@ function openNewTaskModal(directoryId) {
       <span class="lbl">blocked by (optional) — comma-separated task ids</span>
       <input type="text" id="nt-blocked" placeholder="e.g. snug-crag-ffae, wise-crag-b403" />
     </label>
+    <label class="field" style="margin-bottom:0">
+      <span class="lbl">model (optional) — blank uses the default</span>
+      <input type="text" id="nt-model" placeholder="e.g. opus, sonnet, haiku, or claude-opus-4-8" />
+    </label>
     <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
       <input type="checkbox" id="nt-plan" />
       <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
@@ -461,6 +465,7 @@ function openNewTaskModal(directoryId) {
 
   const promptEl = body.querySelector("#nt-prompt");
   const blockedEl = body.querySelector("#nt-blocked");
+  const modelEl = body.querySelector("#nt-model");
   const planEl = body.querySelector("#nt-plan");
   promptEl.focus();
 
@@ -472,10 +477,12 @@ function openNewTaskModal(directoryId) {
     // Split the comma-separated blocker list into trimmed, non-empty ids.
     const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
     const kind = planEl.checked ? "plan" : "task";
+    // Optional model — omit when blank so the backend defaults it.
+    const model = modelEl.value.trim() || null;
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind });
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model });
       toast(kind === "plan" ? "plan task created" : "task created");
       close();
       render();
@@ -947,6 +954,37 @@ function ciBadge(t) {
 }
 
 // ---------- task detail / review ----------
+// Human label for a task's model: the requested model, and (when known and
+// different) the model it actually ran under per the session transcript. An unset
+// request shows "default", annotated with what the default resolved to if captured.
+function modelLabel(t) {
+  const want = (t.model || "").trim();
+  const used = (t.model_used || "").trim();
+  if (want && used && want !== used) return `${want} (ran as ${used})`;
+  if (want) return want;
+  if (used) return `default (${used})`;
+  return "default";
+}
+
+// Compact token-usage summary built from the captured session totals. Returns "—"
+// until any usage has been recorded. Numbers only → safe to inject as HTML.
+function tokensLabel(t) {
+  const inT = t.usage_input_tokens, outT = t.usage_output_tokens;
+  const cr = t.usage_cache_read_tokens, cw = t.usage_cache_creation_tokens;
+  const has = [inT, outT, cr, cw].some((n) => typeof n === "number" && n > 0);
+  if (!has) return "—";
+  const n = (v) => (typeof v === "number" ? v : 0).toLocaleString();
+  const total = (inT || 0) + (outT || 0) + (cr || 0) + (cw || 0);
+  return `${n(total)} total <span class="muted">· in ${n(inT)} · out ${n(outT)} `
+    + `· cache r ${n(cr)} / w ${n(cw)}</span>`;
+}
+
+// Cost label. The session transcript records tokens but no dollar cost and butchr
+// has no pricing table, so we show "—" (not tracked) rather than fabricate a number.
+function costLabel(t) {
+  return typeof t.cost_usd === "number" ? `$${t.cost_usd.toFixed(4)}` : "— (not tracked)";
+}
+
 async function renderTask(id) {
   const t = await api("GET", "/tasks/" + id);
   const dirs = await api("GET", "/directories");
@@ -998,6 +1036,9 @@ async function renderTask(id) {
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
     <div class="k">completed</div><div class="v">${esc(t.completed_at || "—")}</div>
     <div class="k">merged</div><div class="v">${esc(t.merged_at || "—")}</div>
+    <div class="k">model</div><div class="v">${esc(modelLabel(t))}</div>
+    <div class="k">tokens</div><div class="v">${tokensLabel(t)}</div>
+    <div class="k">cost</div><div class="v">${esc(costLabel(t))}</div>
     ${t.rolled_back_at ? `<div class="k">rolled back</div><div class="v">${esc(t.rolled_back_at)}</div>` : ""}
     ${t.herdr_pane_id ? `<div class="k">herdr pane</div><div class="v">${esc(t.herdr_pane_id)}</div>` : ""}
     ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}

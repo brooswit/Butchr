@@ -10,6 +10,7 @@ import { run } from "./exec.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
+import { readSessionUsage } from "./usage.ts";
 import { verifyDefaultBranch } from "./verify.ts";
 import {
   appendRejection,
@@ -178,18 +179,43 @@ function emitUpdated(id: string): void {
   if (v) publish({ type: "task.updated", task: v });
 }
 
+/**
+ * Validate + normalize an optional per-task model. Returns null for an unset model
+ * (default — no --model flag), or the trimmed model string. Rejects (400) anything
+ * that isn't a plain model alias/name: the value is interpolated into the agent
+ * launch command, so we constrain it to letters/digits plus `.`/`-`/`_` (covers
+ * aliases like `opus`/`sonnet`/`haiku`/`fable` and full ids like `claude-opus-4-8`)
+ * — never whitespace or shell metacharacters.
+ */
+export function validateModel(model: unknown): string | null {
+  if (model === undefined || model === null) return null;
+  if (typeof model !== "string") throw new HttpError(400, "model must be a string");
+  const m = model.trim();
+  if (!m) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(m)) {
+    throw new HttpError(
+      400,
+      `invalid model "${m}": use a model alias (e.g. opus, sonnet, haiku) or a ` +
+        `full model id (e.g. claude-opus-4-8)`,
+    );
+  }
+  return m;
+}
+
 export async function createTask(
   directoryId: string,
   prompt: string,
   context: string[] = [],
   blockedBy: string[] = [],
   kind: TaskKind = "task",
+  model: string | null = null,
 ): Promise<TaskView> {
   const dir = getDirectory(directoryId);
   if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
   if (!prompt || !prompt.trim()) {
     throw new HttpError(400, "prompt is required");
   }
+  const taskModel = validateModel(model);
 
   // Normalize + validate the dependency set: every listed blocker must exist.
   const blockers = normalizeBlockedBy(blockedBy);
@@ -215,14 +241,14 @@ export async function createTask(
   await git.createWorktree(dir.path, id);
   writeTaskMd(
     dir.path,
-    { id, created, status, context, kind },
+    { id, created, status, context, kind, model: taskModel },
     prompt,
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, directoryId, status, JSON.stringify(blockers), kind, created);
+    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, directoryId, status, JSON.stringify(blockers), kind, taskModel, created);
 
   if (status === "blocked") logDeadBlockers(id, blockers);
 
@@ -409,6 +435,10 @@ export async function proposeSubtasks(
     planId,
   );
   updateTaskMdStatus(dir.path, planId, "merged");
+  // Capture the plan agent's token usage / model before its worktree is discarded
+  // below (the transcript lives outside the worktree, but capture here while the
+  // session id + dir are in hand).
+  captureSessionUsage(planId);
   // Tear down the agent's tab/pane and discard the (codeless) worktree + branch in
   // the background — best-effort, never blocking the caller.
   void (async () => {
@@ -1060,6 +1090,42 @@ export function adoptPane(id: string, paneId: string, tabId?: string): void {
   emitUpdated(id);
 }
 
+/**
+ * Capture the task's cumulative token usage (and the model it actually ran under)
+ * from the Claude Code session transcript and persist it onto the row. Called at
+ * the points where the agent has finished a turn — entering review (live or
+ * rescued) and on a plan task's completion — re-reading the full transcript each
+ * time, so the stored totals reflect all turns including reworks.
+ *
+ * Best-effort and side-effect-free on failure: with no session id, no transcript,
+ * or no usable turns we leave the existing columns untouched (rather than zeroing
+ * them). `model_used` is COALESCE-updated so a momentarily-unreadable transcript
+ * never clobbers a previously-captured model. Cost is intentionally NOT computed —
+ * the transcript carries no dollar figure and we don't fabricate one (see the
+ * `cost_usd` column TODO in db.ts).
+ */
+export function captureSessionUsage(id: string): void {
+  const row = getTask(id);
+  if (!row || !row.session_id) return;
+  const dir = getDirectory(row.directory_id);
+  if (!dir) return;
+  const usage = readSessionUsage(git.worktreePath(dir.path, id), row.session_id);
+  if (!usage) return;
+  db.query(
+    `UPDATE tasks SET usage_input_tokens=?, usage_output_tokens=?,
+       usage_cache_read_tokens=?, usage_cache_creation_tokens=?,
+       model_used=COALESCE(?, model_used) WHERE id=?`,
+  ).run(
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cacheReadTokens,
+    usage.cacheCreationTokens,
+    usage.model,
+    id,
+  );
+  emitUpdated(id);
+}
+
 export function markReview(id: string, snapshot: string): void {
   // Guard on status='running' so a task aborted while its agent was finishing
   // isn't resurrected into 'review' after abortTask parked it as terminal. This is
@@ -1076,6 +1142,8 @@ export function markReview(id: string, snapshot: string): void {
     if (dir) updateTaskMdStatus(dir.path, id, "review");
   }
   emitUpdated(id);
+  // Capture the session's token usage / model now that the agent has finished.
+  captureSessionUsage(id);
   // CI GATE: this is a genuine running→review transition (guarded above), so kick
   // off the build/test job for the task's worktree. Fire-and-forget — review must
   // not block on CI.
@@ -1117,6 +1185,9 @@ export function markReviewFromAgent(
   const dir = getDirectory(row.directory_id);
   if (dir) updateTaskMdStatus(dir.path, id, "review");
   emitUpdated(id);
+  // Capture the session's token usage / model now that the agent has finished this
+  // turn (re-read each call so a rework's added turns are reflected too).
+  captureSessionUsage(id);
   // CI GATE: only run on a genuine running→review transition. A duplicate
   // request_review call (review→review) shouldn't re-run the build/test job. Fire-
   // and-forget so the (already non-blocking) request_review handshake stays instant.

@@ -314,12 +314,15 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   // Optional kind: "plan" creates an AUTO-DECOMPOSE task that breaks the request
   // into sub-tasks via the propose_subtasks MCP tool instead of writing code.
   const kind = body.kind === "plan" ? "plan" : "task";
+  // Optional model: an alias (opus/sonnet/haiku/fable) or full id, threaded into the
+  // agent launch. Unset → claude's current default. Validated inside createTask.
   const view = await createTask(
     p.id!,
     body.prompt,
     body.context ?? [],
     body.blocked_by ?? [],
     kind,
+    body.model ?? null,
   );
   return json(view, 201);
 });

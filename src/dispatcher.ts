@@ -383,7 +383,7 @@ export type LaunchPlan = {
  * side-effects stay in dispatch(), keyed off the returned flags.
  */
 export function resolveLaunchCommand(
-  task: Pick<TaskRow, "started_at" | "session_id">,
+  task: Pick<TaskRow, "started_at" | "session_id" | "model">,
   promptFile: string,
   mcpConfigFile: string,
 ): LaunchPlan {
@@ -403,10 +403,18 @@ export function resolveLaunchCommand(
     sessionId = sid ?? crypto.randomUUID();
   }
 
+  // Thread the per-task model: a requested model becomes `--model <model>`; an
+  // unset one yields an empty flag so claude keeps its current default. The value
+  // was validated at creation (tasks.validateModel) and ends up single-quote
+  // escaped when the whole agentCmd is wrapped for `script -c`, so it's injection-safe.
+  const model = task.model?.trim();
+  const modelFlag = model ? `--model ${model}` : "";
+
   const agentCmd = (isResume ? config.resumeCmd : config.agentCmd)
     .replaceAll("{{PROMPT_FILE}}", promptFile)
     .replaceAll("{{MCP_CONFIG}}", mcpConfigFile)
-    .replaceAll("{{SESSION_ID}}", sessionId);
+    .replaceAll("{{SESSION_ID}}", sessionId)
+    .replaceAll("{{MODEL_FLAG}}", modelFlag);
 
   return { isResume, sessionId, agentCmd, lostContext };
 }

@@ -112,6 +112,11 @@ export const config = {
    *  - `{{SESSION_ID}}`  → a butchr-generated UUID assigned to the Claude Code
    *    session via `--session-id`, so butchr already knows the id to `--resume`
    *    later (see `resumeCmd`). Persisted on the task row.
+   *  - `{{MODEL_FLAG}}`  → `--model <model>` when the task specified a model at
+   *    creation, or EMPTY when it didn't (claude then uses its current default).
+   *    See tasks.createTask (the `model` column) + dispatcher.resolveLaunchCommand.
+   *    A custom override that omits this placeholder simply never threads a
+   *    per-task model — the substitution is a no-op on it.
    * It is run via `bash -lc`, in the worktree as cwd.
    *
    * Default: launch Claude Code INTERACTIVELY (no `-p`) with the prompt as the
@@ -129,7 +134,7 @@ export const config = {
     // The `--` is REQUIRED: claude's `--mcp-config <configs...>` is variadic and
     // would otherwise swallow the positional prompt as a second config path.
     // `--` ends option parsing so the prompt is treated as the positional arg.
-    "claude --dangerously-skip-permissions --session-id {{SESSION_ID}} " +
+    "claude --dangerously-skip-permissions {{MODEL_FLAG}} --session-id {{SESSION_ID}} " +
       '--mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
   ),
 
@@ -145,7 +150,7 @@ export const config = {
    */
   resumeCmd: env(
     "BUTCHR_RESUME_CMD",
-    "claude --dangerously-skip-permissions --resume {{SESSION_ID}} " +
+    "claude --dangerously-skip-permissions {{MODEL_FLAG}} --resume {{SESSION_ID}} " +
       '--mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
   ),
 

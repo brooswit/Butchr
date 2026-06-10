@@ -159,6 +159,31 @@ ensureColumn("tasks", "merge_base_sha", "TEXT");
 ensureColumn("tasks", "merged_sha", "TEXT");
 ensureColumn("tasks", "rolled_back_at", "TEXT");
 
+// PER-TASK MODEL + TOKEN/COST accounting.
+//   - `model` is the model alias/name the task REQUESTED at creation (e.g. 'opus',
+//     'sonnet', 'haiku', or a full 'claude-*' id). NULL means "unset" → the launch
+//     command threads no --model flag and claude uses its current default. Validated
+//     at creation (tasks.validateModel) and threaded into the agent launch via the
+//     `{{MODEL_FLAG}}` placeholder (config.agentCmd/resumeCmd, dispatcher.resolveLaunchCommand).
+//   - `model_used` is the model the agent ACTUALLY ran under, read back from the
+//     Claude Code session transcript (usage.ts). Useful when `model` is unset (shows
+//     what the default resolved to) or to confirm the requested model took effect.
+//   - The `usage_*_tokens` columns hold cumulative token counts for the session,
+//     summed across every assistant turn in the transcript (input, output, and the
+//     two cache buckets). Captured on the review/merge transition (tasks.captureSessionUsage).
+//   - `cost_usd` is a placeholder: Claude Code's session transcript records token
+//     usage but NOT a dollar cost, and butchr ships no per-model pricing table, so
+//     we do NOT fabricate a number. The column exists for when a cost source is
+//     wired up (TODO: derive from usage_* tokens × a model pricing table, or read it
+//     if a future claude exposes costUSD in the transcript). It stays NULL for now.
+ensureColumn("tasks", "model", "TEXT");
+ensureColumn("tasks", "model_used", "TEXT");
+ensureColumn("tasks", "usage_input_tokens", "INTEGER");
+ensureColumn("tasks", "usage_output_tokens", "INTEGER");
+ensureColumn("tasks", "usage_cache_read_tokens", "INTEGER");
+ensureColumn("tasks", "usage_cache_creation_tokens", "INTEGER");
+ensureColumn("tasks", "cost_usd", "REAL");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -242,6 +267,18 @@ export type TaskRow = {
   // tasks.parseBlockedBy and surfaced as a string[] on TaskView. See above.
   kind: TaskKind;
   spawned_subtasks: string | null;
+  // PER-TASK MODEL + TOKEN/COST (see the ensureColumn block above). `model` is the
+  // requested model (null = default); `model_used` is what the transcript shows ran;
+  // the `usage_*_tokens` are cumulative session token counts; `cost_usd` is a
+  // deliberately-unfabricated placeholder (null — no cost source yet). Surfaced on
+  // TaskView via the `...row` spread (no extra plumbing in taskView).
+  model: string | null;
+  model_used: string | null;
+  usage_input_tokens: number | null;
+  usage_output_tokens: number | null;
+  usage_cache_read_tokens: number | null;
+  usage_cache_creation_tokens: number | null;
+  cost_usd: number | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
