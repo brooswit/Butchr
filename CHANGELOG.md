@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copies that had to be kept in sync by hand. It's now a single internal helper, so
   the conflict note handed back to the agent can't drift between the two paths.
   Pure-internal refactor; no behavior change.
+- **Internal: per-task MCP tools now dispatch through a small registry.** The MCP
+  server's `tools/call` if-ladder and per-tool extract-validate-wrap boilerplate
+  (`src/mcp.ts`) were replaced with a single table of `{ def, plan?, run }` entries
+  driving both a shared dispatcher and `tools/list` filtering. No behavior change —
+  the same `request_review` / `propose_subtasks` / `ask` tools are exposed to the
+  same tasks; this just makes adding a tool a one-line registry entry (CLEANUP C10).
 
 ### Security
 - **CSRF / DNS-rebinding guard on the web API.** butchr binds to loopback, but a

@@ -202,11 +202,12 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
 
     case "tools/list": {
       // A PLAN task gets the decomposition tool; an ordinary task gets the review
-      // tool. `ask` is offered to both. (handleMcp already verified the task exists.)
+      // tool. `ask` is offered to both. The registry's `plan` flag encodes this
+      // (see TOOLS). (handleMcp already verified the task exists.)
       const isPlan = getTask(taskId)?.kind === "plan";
-      const tools = isPlan
-        ? [PROPOSE_SUBTASKS_TOOL, ASK_TOOL]
-        : [REQUEST_REVIEW_TOOL, ASK_TOOL];
+      const tools = TOOLS
+        .filter((t) => t.plan === undefined || t.plan === isPlan)
+        .map((t) => t.def);
       return rpcResult(msg.id, { tools });
     }
 
@@ -222,62 +223,81 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
   }
 }
 
+type ToolResult = { content: unknown[]; isError: boolean };
+
+/**
+ * One dispatchable MCP tool: its public definition (name/description/inputSchema),
+ * an optional `plan` gate, and a `run` that produces the tool result. The `plan`
+ * flag drives `tools/list` filtering: `true` exposes the tool only to PLAN tasks,
+ * `false` only to ordinary tasks, and omitted to both. The shared dispatcher
+ * (`handleToolCall`) does name lookup + arg extraction; each `run` owns its own
+ * field validation and error→`textResult` wrapping, since the messages are
+ * tool-specific.
+ */
+type ToolEntry = {
+  def: { name: string; description: string; inputSchema: unknown };
+  plan?: boolean;
+  run(taskId: string, args: any): Promise<ToolResult>;
+};
+
+// The tool registry. Order here is the order tools appear in `tools/list`:
+// PLAN tasks see [propose_subtasks, ask]; ordinary tasks see [request_review, ask].
+const TOOLS: ToolEntry[] = [
+  { def: PROPOSE_SUBTASKS_TOOL, plan: true, run: runProposeSubtasks },
+  { def: REQUEST_REVIEW_TOOL, plan: false, run: runRequestReview },
+  { def: ASK_TOOL, run: runAsk },
+];
+
+// Shared dispatcher for `tools/call`: look the tool up in the registry, extract its
+// arguments, and run it. Unknown tool names are a JSON-RPC invalid-params error.
 async function handleToolCall(
   taskId: string,
   msg: JsonRpcMessage,
 ): Promise<Response> {
   const name = msg.params?.name;
-  if (name === "ask") return handleAsk(taskId, msg);
-  if (name === "propose_subtasks") return handleProposeSubtasks(taskId, msg);
-  if (name !== "request_review") {
+  const entry = TOOLS.find((t) => t.def.name === name);
+  if (!entry) {
     return rpcError(msg.id, -32602, `unknown tool: ${name}`);
   }
-  const summary: string | undefined = msg.params?.arguments?.summary;
-
-  // Record the review request and move the task to `review`, then RETURN AT ONCE
-  // (non-blocking). If the task is already terminal (merged/aborted out from under
-  // the agent), report that instead. The agent should exit after this call; butchr
-  // drives merge-on-approve / resume-on-reject entirely from DB state.
-  const state = markReviewFromAgent(taskId, summary);
-  if (state !== "ok") {
-    return rpcResult(
-      msg.id,
-      toolResult({ status: getTask(taskId)?.status ?? "unknown" }),
-    );
-  }
-  return rpcResult(
-    msg.id,
-    toolResult({
-      status: "submitted",
-      message:
-        "Your work has been submitted for human review. You can stop now — do " +
-        "not wait. If changes are requested, butchr will re-launch you with the " +
-        "reviewer's notes; if it is approved, butchr merges your branch.",
-    }),
-  );
+  const args = msg.params?.arguments ?? {};
+  return rpcResult(msg.id, await entry.run(taskId, args));
 }
 
 /**
- * Handle a `propose_subtasks` tool call (PLAN tasks): validate + create the
- * decomposition's sub-tasks (wiring blocked_by among them) and complete the plan
- * task. A validation failure (bad/cyclic graph, blank prompt, wrong task kind)
- * comes back as an `isError` tool result so the agent sees the message and can
- * re-propose, rather than crashing the MCP server.
+ * `request_review`: record the review request and move the task to `review`, then
+ * RETURN AT ONCE (non-blocking). If the task is already terminal (merged/aborted
+ * out from under the agent), report that instead. The agent should exit after this
+ * call; butchr drives merge-on-approve / resume-on-reject entirely from DB state.
  */
-async function handleProposeSubtasks(
-  taskId: string,
-  msg: JsonRpcMessage,
-): Promise<Response> {
-  const args = msg.params?.arguments ?? {};
+async function runRequestReview(taskId: string, args: any): Promise<ToolResult> {
+  const summary: string | undefined = args.summary;
+  const state = markReviewFromAgent(taskId, summary);
+  if (state !== "ok") {
+    return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
+  }
+  return toolResult({
+    status: "submitted",
+    message:
+      "Your work has been submitted for human review. You can stop now — do " +
+      "not wait. If changes are requested, butchr will re-launch you with the " +
+      "reviewer's notes; if it is approved, butchr merges your branch.",
+  });
+}
+
+/**
+ * `propose_subtasks` (PLAN tasks): validate + create the decomposition's sub-tasks
+ * (wiring blocked_by among them) and complete the plan task. A validation failure
+ * (bad/cyclic graph, blank prompt, wrong task kind) comes back as an `isError` tool
+ * result so the agent sees the message and can re-propose, rather than crashing the
+ * MCP server.
+ */
+async function runProposeSubtasks(taskId: string, args: any): Promise<ToolResult> {
   const subtasks: unknown = args.subtasks;
   const summary: string | undefined =
     typeof args.summary === "string" ? args.summary : undefined;
 
   if (!Array.isArray(subtasks)) {
-    return rpcResult(
-      msg.id,
-      textResult("`propose_subtasks` requires a `subtasks` array.", true),
-    );
+    return textResult("`propose_subtasks` requires a `subtasks` array.", true);
   }
 
   try {
@@ -286,46 +306,37 @@ async function handleProposeSubtasks(
       subtasks as SubtaskSpec[],
       summary,
     );
-    return rpcResult(
-      msg.id,
-      toolResult({
-        status: "decomposed",
-        created,
-        message:
-          `Created ${created.length} sub-task(s): ${created.join(", ")}. The ` +
-          `dependencies were wired and this plan task is complete. You can stop now.`,
-      }),
-    );
+    return toolResult({
+      status: "decomposed",
+      created,
+      message:
+        `Created ${created.length} sub-task(s): ${created.join(", ")}. The ` +
+        `dependencies were wired and this plan task is complete. You can stop now.`,
+    });
   } catch (e) {
     // A validation HttpError is a normal "re-propose" signal for the agent; any
     // other error is reported the same way (never crashes the server).
     const detail = e instanceof HttpError ? e.message : (e as Error).message;
-    return rpcResult(msg.id, textResult(`Could not create sub-tasks: ${detail}`, true));
+    return textResult(`Could not create sub-tasks: ${detail}`, true);
   }
 }
 
 /**
- * Handle an `ask` tool call: run the CTO Claude (forked, headless, read-only) in
- * the asking task's worktree and return its answer. Any failure becomes an
- * `isError` tool result — it never crashes the MCP server or the asking task.
+ * `ask`: run the CTO Claude (forked, headless, read-only) in the asking task's
+ * worktree and return its answer. Any failure becomes an `isError` tool result —
+ * it never crashes the MCP server or the asking task.
  */
-async function handleAsk(taskId: string, msg: JsonRpcMessage): Promise<Response> {
-  const question: unknown = msg.params?.arguments?.question;
+async function runAsk(taskId: string, args: any): Promise<ToolResult> {
+  const question: unknown = args.question;
   if (typeof question !== "string" || !question.trim()) {
-    return rpcResult(
-      msg.id,
-      textResult("`ask` requires a non-empty `question` string.", true),
-    );
+    return textResult("`ask` requires a non-empty `question` string.", true);
   }
 
   // Resolve the task's worktree so the CTO can READ the code under discussion.
   const task = getTask(taskId)!; // handleMcp already verified the task exists.
   const dir = getDirectory(task.directory_id);
   if (!dir) {
-    return rpcResult(
-      msg.id,
-      textResult("Could not locate this task's directory to consult the CTO.", true),
-    );
+    return textResult("Could not locate this task's directory to consult the CTO.", true);
   }
   const cwd = join(dir.path, taskId);
 
@@ -337,9 +348,9 @@ async function handleAsk(taskId: string, msg: JsonRpcMessage): Promise<Response>
     const failed = /^(CTO (did not respond|could not)|Failed to consult|The CTO returned an empty)/.test(
       answer,
     );
-    return rpcResult(msg.id, textResult(answer, failed));
+    return textResult(answer, failed);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    return rpcResult(msg.id, textResult(`Failed to consult the CTO: ${detail}`, true));
+    return textResult(`Failed to consult the CTO: ${detail}`, true);
   }
 }
