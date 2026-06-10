@@ -235,6 +235,48 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .panel.blocked-panel { border-left: 3px solid var(--blocked); }
 .panel.blocked-panel h2 { color: var(--blocked); }
 
+/* audit timeline (task detail) — a compact vertical list of status transitions.
+   Each event has a status-colored dot on a connecting rail, the transition chips,
+   a relative timestamp, and the note explaining the move. */
+.timeline { display: flex; flex-direction: column; margin-top: 8px; }
+.tl-event {
+  position: relative;
+  display: flex; gap: 12px;
+  padding: 0 0 14px 4px;
+}
+.tl-event:last-child { padding-bottom: 0; }
+/* connecting rail behind the dots, drawn from each dot down to the next */
+.tl-event::before {
+  content: "";
+  position: absolute;
+  left: 9px; top: 14px; bottom: 0;
+  width: 2px; background: var(--border);
+}
+.tl-event:last-child::before { display: none; }
+.tl-dot {
+  position: relative; z-index: 1;
+  flex: 0 0 auto;
+  width: 12px; height: 12px; margin-top: 2px;
+  border-radius: 50%;
+  background: var(--queued);
+  box-shadow: 0 0 0 3px var(--panel);
+}
+.tl-dot.queued     { background: var(--queued); }
+.tl-dot.blocked    { background: var(--blocked); }
+.tl-dot.running    { background: var(--running); }
+.tl-dot.review     { background: var(--review); }
+.tl-dot.finalizing { background: var(--finalizing); }
+.tl-dot.merged     { background: var(--merged); }
+.tl-dot.rejected   { background: var(--rejected); }
+.tl-dot.failed     { background: var(--failed); }
+.tl-dot.aborted    { background: var(--aborted); }
+.tl-body { flex: 1 1 auto; min-width: 0; }
+.tl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tl-transition { display: inline-flex; align-items: center; gap: 6px; }
+.tl-arrow { color: var(--muted); font-size: 12px; }
+.tl-time { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.tl-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
 /* tasks table */
 .tasks { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .tasks th {

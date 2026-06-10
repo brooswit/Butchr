@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { config } from "./config.ts";
-import { computeMetrics, db, metricRows } from "./db.ts";
+import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
 import { dispatcherHealth } from "./dispatcher.ts";
 import {
   HttpError,
@@ -337,6 +337,13 @@ route("GET", "/api/tasks/:id", async (_req, p) => {
 route("GET", "/api/tasks/:id/diff", async (_req, p) => {
   const d = await taskDiff(p.id!);
   return json({ diff: d });
+});
+
+// Per-task AUDIT TIMELINE: the ordered log of this task's status transitions
+// (oldest → newest), powering the task-detail timeline. 404 if the task is gone.
+route("GET", "/api/tasks/:id/events", async (_req, p) => {
+  if (!getTask(p.id!)) throw new HttpError(404, "task not found");
+  return json(listTaskEvents(p.id!));
 });
 
 // Best-effort live snapshot of the agent's recent terminal output, for the task

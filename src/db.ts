@@ -38,6 +38,23 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_dir    ON tasks(directory_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+-- PER-TASK AUDIT TIMELINE: an append-only log of a task's status transitions. One
+-- row per change (from_status -> to_status) with the wall-clock time and a short
+-- human note explaining WHY it moved. Purely additive — nothing reads it to drive
+-- behavior; it powers the task-detail timeline (see recordTaskEvent /
+-- listTaskEvents below + server GET /api/tasks/:id/events). from_status is NULL for
+-- the creation event. Cascade-deletes with its task (which only happens when a
+-- directory is unregistered — merged tasks keep their rows + history).
+CREATE TABLE IF NOT EXISTS task_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  at          TEXT NOT NULL,
+  from_status TEXT,
+  to_status   TEXT NOT NULL,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, at);
 `);
 
 // Lightweight forward migrations: add columns introduced after the initial
@@ -287,6 +304,45 @@ export type TaskRow = {
 
 export function nowIso(): string {
   return new Date().toISOString();
+}
+
+// ---- PER-TASK AUDIT TIMELINE ----------------------------------------------
+// A row in the task_events log: one status transition for one task.
+export type TaskEventRow = {
+  id: number;
+  task_id: string;
+  at: string;
+  from_status: string | null;
+  to_status: string;
+  note: string | null;
+};
+
+/**
+ * Append a status-transition event for a task. Called from the status-setting
+ * functions in tasks.ts AFTER the row's status actually changed (so the log only
+ * ever reflects real transitions). `from` is null for the creation event. Cheap,
+ * non-throwing-by-design single INSERT — never gate a status change on it.
+ */
+export function recordTaskEvent(
+  taskId: string,
+  from: string | null,
+  to: string,
+  note?: string | null,
+): void {
+  db.query(
+    `INSERT INTO task_events (task_id, at, from_status, to_status, note)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(taskId, nowIso(), from, to, note ?? null);
+}
+
+/** The full transition timeline for a task, oldest → newest. */
+export function listTaskEvents(taskId: string): TaskEventRow[] {
+  return db
+    .query<TaskEventRow, [string]>(
+      `SELECT id, task_id, at, from_status, to_status, note
+         FROM task_events WHERE task_id=? ORDER BY at ASC, id ASC`,
+    )
+    .all(taskId);
 }
 
 // ---- METRICS (read-only aggregation) --------------------------------------

@@ -1,7 +1,7 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { config } from "./config.ts";
-import { db, nowIso } from "./db.ts";
+import { db, nowIso, recordTaskEvent } from "./db.ts";
 import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { HttpError, getDirectory } from "./directories.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
@@ -249,6 +249,12 @@ export async function createTask(
     `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, directoryId, status, JSON.stringify(blockers), kind, taskModel, created);
+  recordTaskEvent(
+    id,
+    null,
+    status,
+    kind === "plan" ? "plan task created" : "task created",
+  );
 
   if (status === "blocked") logDeadBlockers(id, blockers);
 
@@ -421,7 +427,7 @@ export async function proposeSubtasks(
   // and we never block on — or race — the agent's own exit).
   const snapshot = readRunLogSnapshot(planId);
   const when = nowIso();
-  db.query(
+  const planRes = db.query(
     `UPDATE tasks SET status='merged', spawned_subtasks=?, summary=COALESCE(?, summary),
        output_snapshot=COALESCE(?, output_snapshot), herdr_pane_id=NULL, idle=0, conflict=0,
        completed_at=COALESCE(completed_at, ?), merged_at=COALESCE(merged_at, ?)
@@ -434,6 +440,14 @@ export async function proposeSubtasks(
     when,
     planId,
   );
+  if (planRes.changes > 0) {
+    recordTaskEvent(
+      planId,
+      plan.status,
+      "merged",
+      `plan decomposed into ${created.length} sub-task${created.length === 1 ? "" : "s"}`,
+    );
+  }
   updateTaskMdStatus(dir.path, planId, "merged");
   // Capture the plan agent's token usage / model before its worktree is discarded
   // below (the transcript lives outside the worktree, but capture here while the
@@ -476,6 +490,7 @@ export function reevaluateBlockedTask(id: string): boolean {
       )
       .run(id);
     if (res.changes === 0) return false; // moved under us
+    recordTaskEvent(id, "blocked", "queued", "all blockers merged");
     const dir = getDirectory(row.directory_id);
     if (dir) updateTaskMdStatus(dir.path, id, "queued");
     emitUpdated(id);
@@ -546,10 +561,13 @@ export async function setBlockedBy(
     // No outstanding blockers. A blocked task becomes eligible → queued; anything
     // else (queued/running/review) is already past the block, so leave it.
     if (row.status === "blocked") {
-      db.query(
+      const res = db.query(
         `UPDATE tasks SET status='queued', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
       ).run(id);
-      if (dir) updateTaskMdStatus(dir.path, id, "queued");
+      if (res.changes > 0) {
+        recordTaskEvent(id, "blocked", "queued", "dependencies cleared by operator");
+        if (dir) updateTaskMdStatus(dir.path, id, "queued");
+      }
     }
     emitUpdated(id);
     return taskView(id)!;
@@ -573,6 +591,7 @@ export async function setBlockedBy(
     `UPDATE tasks SET status='blocked', herdr_pane_id=NULL, herdr_tab_id=NULL,
        output_snapshot=NULL, conflict=0, idle=0 WHERE id=?`,
   ).run(id);
+  recordTaskEvent(id, row.status, "blocked", "blocked on new dependencies (operator)");
   if (dir) updateTaskMdStatus(dir.path, id, "blocked");
   logDeadBlockers(id, blockers);
   emitUpdated(id);
@@ -637,6 +656,7 @@ async function requestChanges(
   note: string,
   paneId: string | null,
   tabId: string | null,
+  eventNote: string,
 ): Promise<void> {
   // Non-blocking model: the agent already exited after request_review, so there
   // is no live call to resolve — just re-queue for a `--resume` re-launch. Tear
@@ -652,6 +672,7 @@ async function requestChanges(
     `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0,
        dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(note, id);
+  recordTaskEvent(id, "review", "queued", eventNote);
   updateTaskMdStatus(dirPath, id, "queued");
 }
 
@@ -816,7 +837,14 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
       appendRejection(dir.path, id, notes, nowIso());
       // Same channel as reject: into the live agent if blocked, else re-queue
       // (requestChanges tears down any lingering tab in the fallback).
-      await requestChanges(id, dir.path, notes, row.herdr_pane_id, row.herdr_tab_id);
+      await requestChanges(
+        id,
+        dir.path,
+        notes,
+        row.herdr_pane_id,
+        row.herdr_tab_id,
+        "merge conflict — sent back to agent",
+      );
       emitUpdated(id);
       return { task: taskView(id)!, conflictSentBack: true };
     }
@@ -853,6 +881,12 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
       emitUpdated(id);
       return { task: taskView(id)! };
     }
+    recordTaskEvent(
+      id,
+      "review",
+      "failed",
+      "merge auto-reverted off main (post-merge verify failed)",
+    );
     updateTaskMdStatus(dir.path, id, "failed");
     emitUpdated(id);
     return { task: taskView(id)!, revertedOnRed: true };
@@ -881,6 +915,7 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     reevaluateAllBlocked();
     return { task: taskView(id)! };
   }
+  recordTaskEvent(id, "review", "merged", "approved & merged into the default branch");
   updateTaskMdStatus(dir.path, id, "merged");
   emitUpdated(id);
   // This task just merged — promote any task that was blocked on it (and whose
@@ -973,6 +1008,7 @@ export async function finalizeTask(id: string): Promise<TaskView | null> {
        WHERE id=? AND status='finalizing'`,
   ).run(snapshot || null, nowIso(), id);
   if (res.changes === 0) return taskView(id); // finalized under us
+  recordTaskEvent(id, "finalizing", "merged", "finalized (legacy wrap-up)");
   updateTaskMdStatus(dir.path, id, "merged");
 
   emitUpdated(id);
@@ -998,7 +1034,14 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
   // session via `--resume <session_id>` with the notes — full prior context, no
   // context loss. The agent already exited after the non-blocking request_review;
   // requestChanges tears down any lingering tab defensively.
-  await requestChanges(id, dir.path, note.trim(), row.herdr_pane_id, row.herdr_tab_id);
+  await requestChanges(
+    id,
+    dir.path,
+    note.trim(),
+    row.herdr_pane_id,
+    row.herdr_tab_id,
+    "changes requested by reviewer",
+  );
 
   emitUpdated(id);
   return taskView(id)!;
@@ -1037,6 +1080,7 @@ export async function abortTask(id: string): Promise<TaskView> {
     `UPDATE tasks SET status='aborted', conflict=0, idle=0, review_note=NULL,
        output_snapshot=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL, completed_at=? WHERE id=?`,
   ).run(nowIso(), id);
+  recordTaskEvent(id, row.status, "aborted", "aborted by operator");
   updateTaskMdStatus(dir.path, id, "aborted");
 
   emitUpdated(id);
@@ -1066,6 +1110,7 @@ export function markRunning(
        WHERE id=? AND status='queued'`,
   ).run(paneId, tabId ?? null, sessionId, nowIso(), id);
   if (res.changes === 0) return; // aborted (or otherwise moved) under us
+  recordTaskEvent(id, "queued", "running", "agent launched");
   const row = getTask(id);
   if (row) {
     const dir = getDirectory(row.directory_id);
@@ -1136,6 +1181,7 @@ export function markReview(id: string, snapshot: string): void {
        WHERE id=? AND status='running'`,
   ).run(nowIso(), snapshot, id);
   if (res.changes === 0) return; // aborted (or otherwise moved) under us
+  recordTaskEvent(id, "running", "review", "agent finished — submitted for review");
   const row = getTask(id);
   if (row) {
     const dir = getDirectory(row.directory_id);
@@ -1177,11 +1223,16 @@ export function markReviewFromAgent(
 
   // running → review (normal), or review → review (a duplicate call). Clear the
   // pane: the agent is exiting and review holds no live process.
-  db.query(
+  const res = db.query(
     `UPDATE tasks SET status='review', completed_at=COALESCE(completed_at, ?), summary=?, idle=0,
        herdr_pane_id=NULL, output_snapshot=?
        WHERE id=? AND status IN ('running','review')`,
   ).run(nowIso(), summary ?? null, snapshot || null, id);
+  // Record only the genuine running→review transition (not a duplicate
+  // request_review call, which is review→review and changes no status).
+  if (res.changes > 0 && row.status === "running") {
+    recordTaskEvent(id, "running", "review", "agent requested review");
+  }
   const dir = getDirectory(row.directory_id);
   if (dir) updateTaskMdStatus(dir.path, id, "review");
   emitUpdated(id);
@@ -1509,6 +1560,9 @@ export async function backToQueued(id: string): Promise<void> {
     `UPDATE tasks SET status='queued', herdr_pane_id=NULL, herdr_tab_id=NULL,
        dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(id);
+  if (row && row.status !== "queued") {
+    recordTaskEvent(id, row.status, "queued", "re-queued");
+  }
   emitUpdated(id);
 }
 
@@ -1553,6 +1607,12 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
       `UPDATE tasks SET status='failed', dispatch_attempts=?, last_dispatch_error=?,
          next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
     ).run(attempts, err, id);
+    recordTaskEvent(
+      id,
+      row.status,
+      "failed",
+      `dispatch gave up after ${attempts} attempt${attempts === 1 ? "" : "s"}`,
+    );
     if (dir) updateTaskMdStatus(dir.path, id, "failed");
     console.error(
       `[butchr] task ${id} failed to dispatch after ${attempts} attempts: ${err}`,
@@ -1591,6 +1651,9 @@ export async function requeueTask(id: string): Promise<TaskView> {
     `UPDATE tasks SET status='queued', dispatch_attempts=0, last_dispatch_error=NULL,
        next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
   ).run(id);
+  if (row.status !== "queued") {
+    recordTaskEvent(id, row.status, "queued", "manually re-queued by operator");
+  }
   if (dir) updateTaskMdStatus(dir.path, id, "queued");
   emitUpdated(id);
   return taskView(id)!;

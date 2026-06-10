@@ -954,6 +954,35 @@ function ciBadge(t) {
 }
 
 // ---------- task detail / review ----------
+// Compact vertical AUDIT TIMELINE of a task's status transitions (oldest → newest):
+// one row per change with the transition (from → to chips) and the short note that
+// explains why it moved, plus a relative timestamp (full ISO on hover). Driven by
+// GET /api/tasks/:id/events. Returns null when there are no recorded events.
+function renderTimeline(events) {
+  if (!Array.isArray(events) || events.length === 0) return null;
+  const panel = el("div", { class: "panel timeline-panel" });
+  panel.appendChild(el("h2", { style: "margin-top:0" }, "Timeline"));
+  const list = el("div", { class: "timeline" });
+  for (const ev of events) {
+    const transition = ev.from_status && ev.from_status !== ev.to_status
+      ? `${chip(ev.from_status)}<span class="tl-arrow">→</span>${chip(ev.to_status)}`
+      : chip(ev.to_status);
+    const row = el("div", { class: "tl-event" });
+    row.innerHTML = `
+      <span class="tl-dot ${esc(ev.to_status)}"></span>
+      <div class="tl-body">
+        <div class="tl-head">
+          <span class="tl-transition">${transition}</span>
+          <span class="tl-time" title="${esc(ev.at)}">${esc(fmtTime(ev.at))}</span>
+        </div>
+        ${ev.note ? `<div class="tl-note">${esc(ev.note)}</div>` : ""}
+      </div>`;
+    list.appendChild(row);
+  }
+  panel.appendChild(list);
+  return panel;
+}
+
 // Human label for a task's model: the requested model, and (when known and
 // different) the model it actually ran under per the session transcript. An unset
 // request shows "default", annotated with what the default resolved to if captured.
@@ -1044,6 +1073,12 @@ async function renderTask(id) {
     ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
   wrap.appendChild(meta);
+
+  // audit timeline — the task's status-transition history (best-effort: a fetch
+  // failure just omits the panel rather than breaking the detail view).
+  const events = await api("GET", "/tasks/" + id + "/events").catch(() => []);
+  const timeline = renderTimeline(events);
+  if (timeline) wrap.appendChild(timeline);
 
   // blocked-by — what this task is waiting on. Shown whenever the task has a
   // dependency set, with each blocker's current status; dead blockers (terminal,
