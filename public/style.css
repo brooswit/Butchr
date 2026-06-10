@@ -19,7 +19,8 @@
   --accent-2: #3144d9; /* blue-600 (interactive text / hover) */
 
   /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible */
-  --queued: #6c727a;     /* gray-500 (neutral) */
+  --idea: #9333ea;       /* purple-600 (front state — a raw idea, spec not written yet) */
+  --queued: #6c727a;     /* gray-500 (neutral) — surfaced as 'ready' */
   --blocked: #7c3aed;    /* violet-600 (waiting on dependencies) */
   --running: #425eff;    /* blue-500 */
   --idle: #0e7490;       /* cyan-700 (running but quiet) */
@@ -241,6 +242,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   border-radius: var(--radius-md);
   color: #fff;
 }
+.chip.idea { background: var(--idea); }
 .chip.queued { background: var(--queued); }
 .chip.blocked { background: var(--blocked); }
 .chip.running { background: var(--running); }
@@ -275,10 +277,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* A non-zero dispatch priority — shown only when set (priority 0 is the silent FIFO
    default). Reuse the running hue so it reads as an "acts sooner" signal. */
 .chip.priority { background: var(--running); }
-/* `stage` marks where a task sits on the idea→spec→build lifecycle — shown only for an
-   idea/spec-stage (spec-writing) task ('build' is the silent default). Reuse the
-   review/info hue, like `plan`, so it reads as an informational lifecycle badge. */
-.chip.stage { background: var(--review); }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
@@ -534,6 +532,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* sub-tree merge-progress bar drawn inside nodes that gate dependents */
 .tg-node .tg-prog-track { fill: rgba(0, 0, 0, 0.28); }
 .tg-node .tg-prog-fill { fill: rgba(255, 255, 255, 0.92); }
+.tg-node.idea .tg-rect { fill: var(--idea); }
 .tg-node.queued .tg-rect { fill: var(--queued); }
 .tg-node.blocked .tg-rect { fill: var(--blocked); }
 .tg-node.running .tg-rect { fill: var(--running); }
@@ -971,6 +970,7 @@ small.muted { font-size: 12px; }
 .status-bar-row .sb-fill { height: 100%; background: var(--queued); border-radius: var(--radius-sm); }
 .status-bar-row .sb-count { flex: 0 0 auto; font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 28px; text-align: right; }
 /* fill colors mirror the chip palette */
+.sb-fill.idea { background: var(--idea); }
 .sb-fill.queued { background: var(--queued); }
 .sb-fill.blocked { background: var(--blocked); }
 .sb-fill.running { background: var(--running); }

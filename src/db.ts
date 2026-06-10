@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- queued | running | review | awaiting_input | merged | aborted
+  status          TEXT NOT NULL,            -- idea | queued | blocked | running | review | awaiting_input | merged | rejected | aborted | failed
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -304,27 +304,32 @@ ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
 // taskmd.renderAgentPrompt's plan-preview protocol.
 ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
 
-// IDEA → SPEC → BUILD STAGE. A task's `stage` places it on the work lifecycle:
-//   - 'build' (the DEFAULT every existing row backfills to) is today's behavior: an
-//     ordinary work task whose prompt IS the work — it dispatches, builds code, and
-//     runs the normal CI → review → merge flow, fully backward-compatible.
-//   - 'idea' is a SPEC-WRITING task: created from a short one-line brief, its agent
-//     does NOT write code — it produces a detailed, repo-grounded task prompt (a SPEC)
-//     for the brief and submits it via request_review (so REVIEWING it = reviewing the
-//     spec). renderAgentPrompt hands it the idea/spec protocol instead of the review one.
-//   - 'spec' is what an 'idea' task AUTO-advances to once its agent submits the spec for
-//     review (the idea→spec gate is automatic — see tasks.flipIdeaToSpec). It is a spec
-//     sitting in review awaiting the operator's sign-off.
-// THE SPEC GATE (the key leverage point): approving an idea/spec-stage task does NOT
-// merge code — it AUTO-CREATES a stage='build' task in the SAME directory whose PROMPT
-// is the approved spec (the agent's request_review summary), then completes the spec
-// task terminally (it merges nothing of its own, like a plan task), recording the build
-// id in `spawned_subtasks`. That build task then runs the normal flow. So idea→spec is
-// automatic; spec→build is GATED (approve the spec → spawn the build); build→merge is
-// the existing review. Set only at creation (default 'build'); orthogonal to `kind`,
-// `plan_preview`, and `status`. See tasks.createTask / approveTask (the SPEC GATE) /
-// taskmd.renderAgentPrompt (the idea/spec protocol).
-ensureColumn("tasks", "stage", "TEXT NOT NULL DEFAULT 'build'");
+// UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
+// design (task playful-rabbit-0405) carried a SECOND axis (`stage` = idea|spec|build)
+// orthogonal to `status`; the CEO retracted it as over-complicated. The idea-vs-rest
+// distinction is now carried by the SINGLE status pipeline via a new FRONT state,
+// `idea` — a task that has NO spec yet, whose dispatch RUNS the CTO-fork spec generator
+// (see src/cto.ts + dispatcher) and then advances to `queued` ('ready') carrying the
+// generated spec as its prompt. The `stage` column is no longer written or read.
+//
+// MIGRATION (backward-compatible, one-time): any task still in the PRE-SPEC idea stage
+// (stage='idea' and not yet dispatched — queued/blocked) becomes status='idea'; every
+// other row keeps its current status untouched (a `build` task is exactly today's flow;
+// a mid-flight idea/spec task in running/review just finishes through the normal
+// running→review→merged transitions). Guarded on the column still existing, so a fresh
+// DB (which never had a stage axis) skips it. We deliberately do NOT drop the column —
+// an old DB keeps it orphaned (it defaults 'build' on inserts that omit it) rather than
+// risk a destructive ALTER on the core tasks table.
+export function migrateStageAxisToStatus(): void {
+  const cols = db
+    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+    .all();
+  if (!cols.some((c) => c.name === "stage")) return; // fresh DB — never had a stage axis
+  db.exec(
+    `UPDATE tasks SET status='idea' WHERE stage='idea' AND status IN ('queued','blocked')`,
+  );
+}
+migrateStageAxisToStatus();
 
 export type DirectoryRow = {
   id: string;
@@ -360,19 +365,22 @@ export type DirectoryRow = {
 // request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks).
 export type TaskKind = "task" | "plan";
 
-// A task's STAGE on the idea → spec → build lifecycle (see the `stage` column comment
-// above). 'build' is the default = today's ordinary work task. 'idea'/'spec' are the
-// spec-writing record (idea created from a brief; auto-advances to spec at review);
-// approving an idea/spec task spawns a stage='build' task carrying the approved spec.
-export type TaskStage = "idea" | "spec" | "build";
-
 // `awaiting_input` is a pause state for the ASK handshake: a running agent called
 // the MCP `ask` tool, so butchr stored its `question`, parked the task here, and the
 // agent exited. Like `review` it is non-terminal with NO live process — it waits for
 // an operator/CTO answer (API/CLI/webapp), then re-queues for a `--resume` re-launch
 // that injects the answer (see tasks.markAwaitingInputFromAgent / answerTask). It is
 // NOT terminal (the reaper leaves its worktree alone) and needs operator attention.
+// `idea` is the FRONT state of the unified pipeline (idea → ready → in_progress →
+// review → merged, with the lateral states below). A task in `idea` has NO spec yet:
+// it was created from a one-line operator brief, and its "dispatch" is NOT a build
+// agent — the dispatcher runs the CTO-fork spec generator (src/cto.ts) to turn the
+// brief into a repo-grounded spec, then advances the task to `queued` ('ready')
+// carrying that spec as its prompt, where it dispatches the build agent as usual. The
+// internal status values `queued`/`running` are KEPT (not mass-renamed) to minimize
+// risk; the webapp surfaces the friendly labels 'ready'/'in progress'.
 export type TaskStatus =
+  | "idea"
   | "queued"
   | "blocked"
   | "running"
@@ -468,10 +476,6 @@ export type TaskRow = {
   // the plan-preview gate (the agent proposes a plan and pauses for operator approval
   // before writing code), else 0. Surfaced on TaskView via the `...row` spread.
   plan_preview: number;
-  // IDEA → SPEC → BUILD STAGE (see the `stage` ensureColumn block above): 'build'
-  // (default = today's ordinary work task), or 'idea'/'spec' for a spec-writing record.
-  // Surfaced on TaskView via the `...row` spread (no extra plumbing in taskView).
-  stage: TaskStage;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

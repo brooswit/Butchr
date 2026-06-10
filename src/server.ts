@@ -545,10 +545,14 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   // Optional plan_preview: a boolean that opts the task into the PLAN-PREVIEW gate —
   // the agent proposes a plan and pauses for operator approval before writing code
   // (see tasks.createTask / taskmd.renderAgentPrompt). Validated inside createTask.
-  // Optional stage: 'idea' creates a SPEC-WRITING task (its agent turns the prompt/brief
-  // into a spec and submits it for review; approving the spec spawns a build task — the
-  // SPEC GATE). Omitted/'build' (the default) is today's ordinary work task, fully
-  // backward-compatible. Validated inside createTask. See db.ts `stage`.
+  // Optional idea: true creates the task in the unified pipeline's FRONT state `idea` —
+  // the `prompt` is treated as a one-line operator BRIEF, and the task's first dispatch
+  // runs the CTO-fork spec generator (src/cto.ts) to turn the brief into a spec before it
+  // advances to `queued` ('ready') and dispatches the build agent. Omitted/false is
+  // today's ordinary work task, fully backward-compatible. We also honor a legacy
+  // `stage: 'idea'` body (the retracted idea→spec→build axis) as `idea: true` so older
+  // clients keep working. Validated inside createTask.
+  const idea = body.idea === true || body.stage === "idea";
   const view = await createTask(
     p.id!,
     prompt,
@@ -559,7 +563,7 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
     body.tags ?? [],
     body.priority ?? 0,
     body.plan_preview ?? false,
-    body.stage ?? "build",
+    idea,
   );
   return json(view, 201);
 });

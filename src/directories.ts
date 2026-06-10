@@ -73,7 +73,7 @@ function counts(directoryId: string): Record<string, number> {
     )
     .all(directoryId);
   const out: Record<string, number> = {
-    queued: 0, blocked: 0, running: 0, idle: 0, review: 0, finalizing: 0,
+    idea: 0, queued: 0, blocked: 0, running: 0, idle: 0, review: 0, finalizing: 0,
     merged: 0, rejected: 0, aborted: 0, failed: 0,
   };
   for (const r of rows) out[r.status] = r.n;
@@ -165,8 +165,8 @@ export function updateDirectoryGateCmd(id: string, gateCmd: unknown): DirectoryV
  * plus the directory's effective gate command, and accumulates a `totals` row. The
  * buckets (a task can fall in more than one — `needsAttention` is the operator
  * pull-signal, deliberately overlapping `review`/`failed`, matching /health):
- *  - `active`         — in-flight work needing no human: queued + blocked + running
- *                       + idle + finalizing.
+ *  - `active`         — in-flight work needing no human: idea + queued + blocked +
+ *                       running + idle + finalizing.
  *  - `review`         — waiting for a human to review/merge.
  *  - `failed`         — gave up dispatching / auto-reverted off main.
  *  - `needsAttention` — review + failed (what to look at right now).
@@ -204,7 +204,7 @@ export function dashboard(): Dashboard {
   const directories = rows.map((d) => {
     const c = counts(d.id);
     const active =
-      (c.queued ?? 0) + (c.blocked ?? 0) + (c.running ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
+      (c.idea ?? 0) + (c.queued ?? 0) + (c.blocked ?? 0) + (c.running ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
     const review = c.review ?? 0;
     const failed = c.failed ?? 0;
     const needsAttention = review + failed;

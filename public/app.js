@@ -52,8 +52,21 @@ function fmtTime(iso) {
   if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+// CONCEPTUAL STATUS LABELS for the unified pipeline (idea → ready → in progress →
+// review → merged, with the lateral states). The internal status VALUES are kept as-is
+// to minimize churn (`queued`/`running` are NOT renamed in the DB); the webapp just
+// surfaces friendlier labels. The chip's CSS CLASS stays the raw status (so colors
+// don't drift); only the display TEXT is mapped. Any status not listed shows verbatim.
+const STATUS_LABELS = {
+  queued: "ready",
+  running: "in progress",
+  awaiting_input: "awaiting input",
+};
+function statusLabel(status) {
+  return STATUS_LABELS[status] || status;
+}
 function chip(status) {
-  return `<span class="chip ${esc(status)}">${esc(status)}</span>`;
+  return `<span class="chip ${esc(status)}">${esc(statusLabel(status))}</span>`;
 }
 // `idle` is a flag on a running task (agent alive but its CLI has gone quiet),
 // not a real lifecycle status. Render it as its own chip in place of "running".
@@ -69,13 +82,6 @@ function effStatus(t) {
 function taskChips(t, { plan = false } = {}) {
   return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
     + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
-    // STAGE badge (idea → spec → build). 'build' is the silent default (no badge); an
-    // idea/spec-stage task is a SPEC-WRITING record — approving its spec spawns the
-    // build task (the SPEC GATE). Always shown (not gated behind `plan`) so the board
-    // cards surface where a task sits on the lifecycle.
-    + (t.stage === "idea" || t.stage === "spec"
-        ? `<span class="chip stage" title="idea→spec→build lifecycle: this task writes a SPEC; approving it spawns the build task">${esc(t.stage)}</span> `
-        : "")
     + chip(effStatus(t))
     + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
@@ -570,7 +576,7 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted"]
+  const pills = ["idea", "blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted"]
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
         : s === "running" && c[s] ? "count-pill has-running"
@@ -579,7 +585,7 @@ function dirCard(d) {
         : s === "awaiting_input" && c[s] ? "count-pill has-awaiting"
         : s === "finalizing" && c[s] ? "count-pill has-finalizing"
         : s === "failed" && c[s] ? "count-pill has-failed" : "count-pill";
-      const label = s === "awaiting_input" ? "awaiting" : s;
+      const label = s === "awaiting_input" ? "awaiting" : statusLabel(s);
       return `<span class="${cls}">${label} <b>${c[s] || 0}</b></span>`;
     }).join("");
   // Aggregate bucket badges (active / review / needs-attention / failed) when the
@@ -814,7 +820,7 @@ function openNewTaskModal(directoryId) {
         </label>
         <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
           <input type="checkbox" id="nt-idea" />
-          <span class="lbl" style="margin:0">Idea stage — the agent turns the prompt above into a SPEC (writes no code); approving the spec spawns the build task</span>
+          <span class="lbl" style="margin:0">New Idea — submit the one-line idea above as-is; butchr drafts the spec automatically (CTO-fork) and queues it as ready (no Expand or prompt needed)</span>
         </label>
       </div>
     </div>`;
@@ -917,19 +923,27 @@ function openNewTaskModal(directoryId) {
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
   create.addEventListener("click", async () => {
-    const prompt = promptEl.value.trim();
-    if (!prompt) { showErr("Prompt is required."); promptEl.focus(); return; }
+    // NEW IDEA mode: the one-line idea box IS the submission (the operator gives a brief,
+    // not a spec). butchr's CTO-fork drafts the spec automatically, so neither Expand nor
+    // a full prompt is required — fall back to the prompt textarea only if the idea box is
+    // empty. Normal mode requires the prompt textarea as before.
+    const idea = ideaEl.checked;
+    const brief = briefEl.value.trim();
+    const prompt = idea ? (brief || promptEl.value.trim()) : promptEl.value.trim();
+    if (!prompt) {
+      if (idea) { showErr("Type a one-line idea above first."); briefEl.focus(); }
+      else { showErr("Prompt is required."); promptEl.focus(); }
+      return;
+    }
     // Split the comma-separated blocker list into trimmed, non-empty ids.
     const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
-    const kind = planEl.checked ? "plan" : "task";
+    // plan / plan-preview don't apply to an idea task (its first step is spec generation,
+    // not a build agent), so force them off in idea mode.
+    const kind = (!idea && planEl.checked) ? "plan" : "task";
     // Optional plan-preview gate — the agent proposes a plan and pauses for approval
     // before writing code. Mutually independent of a plan task; ignored for one (a
     // plan task writes no code, so there is nothing to gate).
-    const plan_preview = planPreviewEl.checked;
-    // Optional idea STAGE — create a SPEC-WRITING task: its agent turns the prompt above
-    // into a spec and submits it for review; approving the spec spawns the build task
-    // (the SPEC GATE). Omitted (unchecked) → stage 'build', today's ordinary work task.
-    const stage = ideaEl.checked ? "idea" : "build";
+    const plan_preview = !idea && planPreviewEl.checked;
     // Optional model — omit when blank so the backend defaults it.
     const model = modelEl.value.trim() || null;
     // Optional tags — split the comma-separated list into trimmed, non-empty labels
@@ -947,8 +961,8 @@ function openNewTaskModal(directoryId) {
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview, stage });
-      toast(kind === "plan" ? "plan task created" : stage === "idea" ? "idea task created" : plan_preview ? "plan-preview task created" : "task created");
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview, idea });
+      toast(idea ? "idea created" : kind === "plan" ? "plan task created" : plan_preview ? "plan-preview task created" : "task created");
       close();
       render();
     } catch (e) {
@@ -978,7 +992,7 @@ function queueLine(tasks) {
 // Lifecycle statuses still in flight — these stay in the main directory list.
 // Everything else (merged, aborted, rejected) is terminal and lives in History.
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
-const ACTIVE_STATUSES = ["blocked", "queued", "running", "review", "awaiting_input", "finalizing"];
+const ACTIVE_STATUSES = ["idea", "blocked", "queued", "running", "review", "awaiting_input", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
 
 // Directory page body mode: the task "List", the pipeline "Board", or the
@@ -1005,7 +1019,7 @@ function historyOpen() {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted", "rejected"];
+const FILTER_STATUSES = ["idea", "blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted", "rejected"];
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
@@ -1093,7 +1107,7 @@ function buildFilterBar(dirId, tasks, results) {
       type: "button",
       class: "filter-chip chip " + s + (statusFilter.has(s) ? " active" : ""),
       "aria-pressed": statusFilter.has(s) ? "true" : "false",
-    }, s);
+    }, statusLabel(s));
     c.addEventListener("click", () => {
       if (statusFilter.has(s)) statusFilter.delete(s); else statusFilter.add(s);
       const on = statusFilter.has(s);

@@ -28,7 +28,7 @@ terminal/PTY/agent-session management to herdr.
    - [2.4 Dependencies (blocked_by)](#24-dependencies-blocked_by)
    - [2.5 Plan / auto-decompose tasks](#25-plan--auto-decompose-tasks)
    - [2.6 Plan-preview gate](#26-plan-preview-gate)
-   - [2.7 Idea → spec → build stage lifecycle](#27-idea--spec--build-stage-lifecycle)
+   - [2.7 The `idea` front state (CTO-fork spec generation)](#27-the-idea-front-state-cto-fork-spec-generation)
 3. [Dispatch & agents](#3-dispatch--agents)
 4. [Review & merge](#4-review--merge)
 5. [Self-healing & ops](#5-self-healing--ops)
@@ -124,13 +124,20 @@ wordlists are lowercase-`a-z` only). Directory ids are `dir-<8hex>`.
 
 ### 2.1 States
 
-`TaskStatus` (`src/db.ts`):
+`TaskStatus` (`src/db.ts`) is a **single, unified pipeline** — `idea → ready →
+in_progress → review → merged`, with the lateral states `blocked`, `awaiting_input`,
+`failed`, `aborted`, `rejected`. There is **no second axis** (an earlier two-axis design
+that added a separate `stage` field orthogonal to `status` was **retracted** as
+over-complicated; see §2.7). To minimize churn the internal status **values**
+`queued`/`running` are **kept** (not renamed), and the webapp surfaces the friendly
+labels **'ready'** (`queued`) and **'in progress'** (`running`).
 
 | status | terminal? | active? | meaning |
 |--------|-----------|---------|---------|
-| `queued` | no | pending | worktree + `task.md` exist; waiting for the dispatcher to launch an agent. |
+| `idea` | no | pending | the **front state**: a task created from a one-line operator **brief** with **no spec yet**. Its first "dispatch" is **not** a build agent — the dispatcher runs the **CTO-fork spec generator** (`src/cto.ts`) to turn the brief into a spec, then advances the task to `queued` ('ready') carrying that spec as its prompt. See §2.7. |
+| `queued` | no | pending | (UI: **'ready'**) worktree + `task.md` exist with a spec/prompt; waiting for the dispatcher to launch an agent. |
 | `blocked` | no | pending | has ≥1 not-yet-merged blocker (`blocked_by`); a **pre-dispatch waiting** state — no agent runs. Promoted to `queued` when all blockers merge. |
-| `running` | no | yes | an interactive agent is executing in the worktree. |
+| `running` | no | yes | (UI: **'in progress'**) an interactive agent is executing in the worktree. |
 | `review` | no | yes | work submitted for human review (agent called `request_review`, or was rescued). Pure DB state — **no live process**. |
 | `awaiting_input` | no | yes | a running agent called `ask` to pose a clarifying question (stored in `question`); the agent exited. Pure DB state — **no live process**, exactly like `review`. Needs an operator/CTO answer (API/CLI/webapp); on answer it re-queues for a `--resume` re-launch with the answer injected. |
 | `merged` | **yes** | — | branch fast-forwarded into the default branch; worktree + branch removed. (Also the terminal state for a completed **plan** task, which merges nothing of its own.) |
@@ -152,8 +159,12 @@ the `task_events` audit log via `recordTaskEvent`.
 
 | from → to | trigger | code |
 |-----------|---------|------|
+| (none) → `idea` | task created with `idea: true` (a one-line brief, no spec yet) | `createTask` |
 | (none) → `queued` | task created with no/already-merged blockers | `createTask` |
 | (none) → `blocked` | task created with ≥1 unmerged blocker | `createTask` |
+| `idea` → `queued`/`blocked` | CTO-fork spec generator produced the spec → advance to 'ready' (or `blocked` if it carries unmerged blockers); the brief in `task.md` is rewritten to the spec | `promoteIdeaToReady` (via dispatcher `generateSpecForIdea`) |
+| `idea` → `idea` (backoff) | spec generation failed, under the attempt cap → stamp `next_dispatch_at` | `markSpecGenFailure` |
+| `idea` → `failed` | spec generation failed at/over the cap | `markSpecGenFailure` |
 | `blocked` → `queued` | all blockers merged (auto-unblock), or operator clears deps | `reevaluateBlockedTask` / `setBlockedBy` |
 | `queued`/`running`/`review`/`awaiting_input` → `blocked` | operator adds an unmerged blocker (kill-on-block if a live agent) | `setBlockedBy` |
 | `queued` → `running` | dispatcher launched the agent | `markRunning` |
@@ -272,48 +283,51 @@ AWAITING-INPUT handshake** (§2.1 `awaiting_input`), so no new lifecycle state i
   creation** (API `plan_preview`, CLI `new --plan`, webapp checkbox) and stored on the
   task row + in `task.md` front matter (`plan_preview: true`).
 
-### 2.7 Idea → spec → build stage lifecycle
+### 2.7 The `idea` front state (CTO-fork spec generation)
 
-The unit of work flows through **stages**, each worked by an agent: an **Idea** (an
-operator one-liner) → an agent writes a **Spec** → the operator approves the spec → an
-agent **Builds** → review → merge. The model is **linked records on the existing
-dependency graph**, *not* one mega state machine: a task carries a **`stage`** of
-`idea` | `spec` | `build`, **default `build`** — which is today's behavior, **fully
-backward-compatible**.
+**The unified pipeline has ONE state machine** (§2.1): a single task flows `idea → ready
+→ in_progress → review → merged`. The `idea` front state collapses what an earlier design
+modelled as a separate `stage` axis (`idea | spec | build`) into the status itself.
 
-- **`build` (default)** is an ordinary work task: its prompt *is* the work. It
-  dispatches, builds code, and runs the normal CI → review → merge flow. Creating a
-  `build` task directly with a full prompt is exactly today's flow (stages are opt-in).
-- **`idea`** is a **spec-writing** task, created from a short brief. Its agent writes
-  **no code**: on its first dispatch it is handed the **`IDEA_SPEC_PROTOCOL`**
-  (`taskmd.ts`) instead of the review protocol — it grounds itself in the repo (à la
-  `src/expand.ts`), writes a detailed, repo-grounded task **prompt (the spec)**, and
-  submits it as the **`summary`** of `request_review`. So **reviewing an idea/spec-stage
-  task = reviewing the spec.**
-- **`spec`** is what an `idea` task **auto-advances to** the moment its agent submits the
-  spec for review (`flipIdeaToSpec` — the **idea→spec gate is automatic**, no operator
-  action). The record now reads as "a spec sitting in review awaiting sign-off".
+> **Retraction note.** A prior task (`playful-rabbit-0405`) added a SECOND axis: a `stage`
+> field orthogonal to `status`, where an `idea`-stage *agent* wrote a spec, an operator
+> approved it through a **spec gate**, and that **spawned a separate `build` task**. The
+> CEO **retracted** that as over-complicated. It is **folded out**: there is no `stage`
+> field, no spec gate, and no spawned build task — one task carries the work from idea to
+> merge. (The `stage` DB column is left orphaned on old DBs, never read/written; see the
+> migration below.)
 
-**The spec gate (the key leverage point).** Approving an idea/spec-stage task does **not**
-merge code. `approveTask` branches on `stage !== "build"` into **`approveSpecStage`**,
-which:
+**How `idea` works.** An `idea` task is created from a one-line operator **brief** (the
+"New Idea" path; `createTask({idea:true})`), starting in status `idea` with the brief as
+its prompt. It is **not** dispatched as a build agent. Instead the dispatcher
+(`generateSpecForIdea`) runs the **CTO-fork spec generator** (`src/cto.ts`):
 
-- **auto-creates a `stage="build"` task** in the **same directory** whose **prompt is the
-  approved spec** (the agent's `request_review` summary; it falls back to the idea task's
-  own prompt/brief if no summary was captured). The build task inherits the model
-  preference and runs the **normal** dispatch → CI → review → merge flow;
-- **completes the spec task terminally** to `merged` (it merges nothing of its own, like
-  a plan task), recording the build id in **`spawned_subtasks`** (reusing the plan→
-  sub-tasks linkage the webapp renders), tearing down its worktree + tab best-effort,
-  capturing token usage, and re-evaluating any task blocked on it.
+- a forked, **headless, READ-ONLY** claude (`config.specGenCmd`) that grounds itself in
+  the repo (`Read`/`Grep`/`Glob` over `SPEC.md` / code — it **reuses `src/expand.ts`**'s
+  brief→prompt grounding prompt + output parser) and writes a detailed, repo-grounded
+  task **prompt (the spec)**. When `config.ctoSessionId` is set, `{{CTO_SESSION}}` expands
+  to `--resume <id> --fork-session` so the spec inherits the **CTO's** accumulated context
+  without mutating the real session. It has **no `--mcp-config`** (can't recurse into
+  butchr's own tools) and **no write tools** (can't mutate the repo). This **revives** the
+  retired CTO-fork mechanism (the human-ask change had retired the old CTO auto-answer).
+- On **success** (`promoteIdeaToReady`): the task's `task.md` Prompt section is rewritten
+  brief → **spec**, and the task advances to `queued` ('ready') — or `blocked` if it
+  carries unmerged blockers (the blocker check deferred at creation now applies). From
+  there it dispatches the **build agent** through the normal flow, so `review` is of the
+  **code**, exactly like any other task. There is no separate spec-review step.
+- On **failure** (`markSpecGenFailure`): the same bounded retry/backoff as a dispatch
+  failure, except the task stays in `idea` between retries; at the attempt cap it goes to
+  `failed`.
 
-So the gates are: **idea→spec automatic**; **spec→build gated** (approve the spec → spawn
-the build — steer cheaply at the spec, not expensively at the diff); **build→merge** is
-the existing review. `stage` is set **only at creation** (API `stage`, webapp "Idea
-stage" checkbox) and stored on the task row + in `task.md` front matter (`stage:` is
-emitted only for a non-`build` stage, so existing `task.md` files parse back as `build`).
-Fan-out (one spec → **many** build tasks, absorbing auto-decompose) is a follow-on; this
-is the 1:1 foundation.
+**`build` is just the default.** Creating a task with a full prompt (the "New task" path,
+`idea` omitted/false) enters `queued` ('ready') directly and runs exactly as today —
+nothing about the non-idea flow changed.
+
+**Migration (backward-compatible).** On startup `db.migrateStageAxisToStatus()` flips any
+legacy `stage='idea'` row that hadn't been dispatched (`queued`/`blocked`) to status
+`idea`; every other row keeps its current status. A legacy `stage:` line in a `task.md`
+front matter is simply ignored on parse. Old DBs keep the orphaned `stage` column (we
+don't risk a destructive `ALTER`); fresh DBs never have it.
 
 ---
 
@@ -548,11 +562,10 @@ review isn't resurrected).
 
 ### Approve → global merge queue → post-merge verify
 
-`approveTask` (only valid on `review`) first checks the task's **stage** (§2.7): an
-idea/spec-stage task (`stage !== "build"`) carries a **spec**, not code, so it branches
-into the **spec gate** (`approveSpecStage`) — spawning a `build` task whose prompt is the
-approved spec and completing the spec task terminally — and never touches the merge queue
-below. A `build`-stage task (the default) proceeds to the merge path.
+`approveTask` (only valid on `review`) merges the task's code. (There is no longer a
+separate "spec gate": in the unified pipeline an `idea` task generates its spec
+automatically and continues as the SAME task — see §2.7 — so by the time anything reaches
+`review` it is always code to merge.)
 
 The merge path runs inside a process-wide **global merge queue** (`runExclusiveMerge` —
 a never-rejecting promise chain) so concurrent approvals rebase + fast-forward one at a
@@ -900,7 +913,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | `?q=` (optional) | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks`/`tags` as arrays plus precomputed `blockerStates`/`deadBlockers`. `?q=` is a case-insensitive FULL-TEXT SEARCH (server-side, so huge prompts never ship to the client): only tasks whose prompt (from `task.md`), `summary`, review notes (`review_note` + the `task.md` Review Notes), or id contain `q` are returned. A blank/absent `q` returns the full list and reads no `task.md`; a non-blank `q` reads each task's `task.md` to scan its prompt. 404 if directory gone. |
-| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, priority?, plan_preview?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `plan_preview:true` → the agent proposes a plan and pauses for operator approval before writing code (§2.6). `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `priority` is an integer (higher = dispatched sooner; default 0). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), priority integer (400), plan_preview boolean (400), template name (404), `vars` shape (400), prompt required (400). |
+| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, priority?, plan_preview?, idea?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `plan_preview:true` → the agent proposes a plan and pauses for operator approval before writing code (§2.6). `idea:true` → create in the `idea` **front state** (the `prompt` is a one-line brief; the CTO-fork drafts the spec, then it advances to 'ready' — §2.7); a legacy `stage:"idea"` body is honored as `idea:true`. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `priority` is an integer (higher = dispatched sooner; default 0). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), priority integer (400), plan_preview boolean (400), idea boolean (400), template name (404), `vars` shape (400), prompt required (400). |
 | `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks`/`tags` + `estimate`, the rough p50–p90 duration estimate — see §10). 404 if gone. |
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |
 | `GET` | `/api/tasks/:id/estimate` | — | `{ single, chain }` — the rough duration estimate (§10): `single` is the task's own p50–p90 range (same object as `TaskView.estimate`), `chain` the critical-path total across its dependency chain (a plan's sub-tasks, or this task's blockers) or `null` when there's nothing to chain. 404 if gone. |
@@ -1027,10 +1040,14 @@ hash-routed and SSE-driven. Views/features:
   headless read-only claude over the repo to turn the idea into a proper, grounded task
   prompt, dropped into the prompt textarea for the operator to review/edit (a spinner
   runs while it works; on error the brief is kept with a message). The manual
-  "write your own prompt" path stays. The five less-common knobs — **blocked-by**,
-  **model**, **tags**, **priority**, and the **plan** / **plan-preview** toggles — are
-  collapsed behind an **Advanced** disclosure (closed by default). The modal submits
-  the completed prompt to the plain create endpoint. Tags render as neutral chips on the task
+  "write your own prompt" path stays. The less-common knobs — **blocked-by**,
+  **model**, **tags**, **priority**, the **plan** / **plan-preview** toggles, and a
+  **New Idea** toggle — are collapsed behind an **Advanced** disclosure (closed by
+  default). **New Idea** submits the one-line idea box as-is with `idea: true` (no Expand
+  or full prompt needed): the task enters the `idea` front state and butchr's **CTO-fork**
+  drafts the spec automatically, then it becomes 'ready' (§2.7). The modal submits to the
+  plain create endpoint. The chips show the **conceptual status labels** ('ready' for
+  `queued`, 'in progress' for `running`, plus the `idea` front state). Tags render as neutral chips on the task
   rows, finished list, and board cards; a non-zero **priority** shows as a `prio N`
   chip across those same views. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
@@ -1182,7 +1199,7 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `path_type` | TEXT | coarse path-based type of the changed files (`docs`/`webapp`/`core`/`mixed`), captured alongside `diff_lines`; the TYPE-bucket signal for estimates (§10). Null until/unless captured. |
 | `priority` | INTEGER (`0`) | dispatch priority — **higher = dispatched sooner**. The queued selection orders by `priority DESC, created_at ASC`, so an urgent task jumps the queue while ties stay FIFO (§3 *The tick loop*). Set at creation and updatable via `POST /api/tasks/:id/priority`; orthogonal to `status` (only affects `queued` dispatch order). |
 | `plan_preview` | INTEGER (`0`) | 1 when the task opts into the **plan-preview gate** (§2.6): its first dispatch hands the agent the `propose_plan` tool + plan-preview protocol, parking it in `awaiting_input` for operator approval before any code is written. Orthogonal to `kind`/`status`; set only at creation. Surfaced on `TaskView`, round-tripped in `task.md` (`plan_preview: true`). |
-| `stage` | TEXT (`'build'`) | the **idea → spec → build** stage (§2.7): `build` (default) = today's ordinary work task; `idea`/`spec` = a **spec-writing** record whose agent writes a spec (not code) and submits it via `request_review`. Approving an idea/spec-stage task **spawns a `build` task carrying the approved spec** (the spec gate) instead of merging. Orthogonal to `kind`/`plan_preview`/`status`; set only at creation. Surfaced on `TaskView`, round-tripped in `task.md` (`stage:` emitted only when non-`build`). |
+| ~~`stage`~~ | (folded out) | the retracted idea→spec→build axis (§2.7). **No longer read or written.** New code carries the idea-vs-rest distinction in `status` (the `idea` front state). An old DB keeps the orphaned column (defaults `'build'` on inserts that omit it); a startup migration (`migrateStageAxisToStatus`) flips legacy `stage='idea'` rows to `status='idea'`. |
 | `created_at` | TEXT | ISO creation time. |
 | `started_at` | TEXT | first `running` transition (never cleared). |
 | `completed_at` | TEXT | `running→review` transition. |
@@ -1253,6 +1270,9 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_CONFORMANCE_MAX_DIFF_BYTES` | `60000` | cap on the git diff fed to the conformance reviewer (larger diffs are truncated with a marker). |
 | `BUTCHR_EXPAND_BRIEF_CMD` | `claude -p --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | read-only, non-recursing **brief expander** for `POST /api/expand-brief` (one-line idea → repo-grounded task prompt), run via `bash -lc` in the target repo. Placeholder: `{{PROMPT_FILE}}`. **Empty disables** expansion (the endpoint 502s). |
 | `BUTCHR_EXPAND_BRIEF_TIMEOUT_MS` | `120000` | max wait for the brief expander before it's killed (→ expansion failure). |
+| `BUTCHR_SPEC_GEN_CMD` | `claude -p {{CTO_SESSION}} --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | the **CTO-fork spec generator** (§2.7): turns an `idea` task's brief into a repo-grounded spec, run via `bash -lc` in the task's worktree. Read-only, non-recursing. Placeholders: `{{CTO_SESSION}}` (→ `--resume <id> --fork-session` when `BUTCHR_CTO_SESSION_ID` is set, else empty), `{{PROMPT_FILE}}`. **Empty disables** spec generation (an idea task then fails to advance). |
+| `BUTCHR_SPEC_GEN_TIMEOUT_MS` | `300000` | max wait for the spec generator before it's killed (→ generation failure → retry/`failed`). |
+| `BUTCHR_CTO_SESSION_ID` | _(empty)_ | optional CTO session id to **resume + fork** so the spec generator inherits the CTO's prior context (`{{CTO_SESSION}}` in `BUTCHR_SPEC_GEN_CMD`). Empty → a fresh read-only session. |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command. Else auto-detect kitty/konsole/alacritty/xfce4-terminal/xterm/gnome-terminal/x-terminal-emulator (needs `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ---

@@ -282,6 +282,43 @@ export const config = {
   expandBriefTimeoutMs: envInt("BUTCHR_EXPAND_BRIEF_TIMEOUT_MS", 120000),
 
   /**
+   * IDEA → SPEC generation (the CTO-fork). The unified pipeline's FRONT state is
+   * `idea`: a task created from a one-line operator brief with NO spec yet. The
+   * dispatcher does NOT launch a build agent for it — it runs THIS command to turn the
+   * brief into a detailed, repo-grounded SPEC (the task's real prompt), then advances
+   * the task to `queued` ('ready') where it dispatches the build agent as usual. See
+   * src/cto.ts (generateSpec) + dispatcher.
+   *
+   * This REVIVES the retired CTO-fork mechanism. It reuses the conformance/expander's
+   * headless, read-only, non-recursing claude recipe so the spec writer can inspect the
+   * repo (SPEC.md / code) but never mutate it and can't recurse into butchr's own tools:
+   *  - `-p` runs headless and prints the spec to stdout, then exits.
+   *  - `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` → read-only.
+   *  - NO `--mcp-config` / `--dangerously-skip-permissions`: no recursion.
+   *  - `{{CTO_SESSION}}` expands to `--resume <ctoSessionId> --fork-session` when
+   *    `ctoSessionId` is set — FORKING the CTO's session into a throwaway so the spec is
+   *    written WITH the CTO's accumulated context but the real session isn't mutated —
+   *    or to nothing for a fresh read-only session.
+   *  - `{{PROMPT_FILE}}` → a temp file holding the rendered spec-writing prompt (avoids
+   *    shell-escaping). Run via `bash -lc`, cwd = the idea task's worktree.
+   * Set it EMPTY to DISABLE spec generation (an idea task then fails to advance and the
+   * operator is shown the error). See src/cto.ts.
+   */
+  specGenCmd: env(
+    "BUTCHR_SPEC_GEN_CMD",
+    "claude -p {{CTO_SESSION}} --permission-mode dontAsk " +
+      '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"',
+  ),
+  /** Max wall-clock (ms) the CTO-fork spec generator may run before it's killed (→ failure). */
+  specGenTimeoutMs: envInt("BUTCHR_SPEC_GEN_TIMEOUT_MS", 1000 * 60 * 5),
+  /**
+   * Optional CTO session id to RESUME + FORK so the spec generator inherits the CTO's
+   * prior context. When set, `{{CTO_SESSION}}` in `specGenCmd` resolves to
+   * `--resume <id> --fork-session`; when empty it resolves to nothing (a fresh session).
+   */
+  ctoSessionId: env("BUTCHR_CTO_SESSION_ID", ""),
+
+  /**
    * AUTO-MERGE green, low-risk tasks (opt-in; DEFAULT OFF). When enabled, a task
    * in `review` whose CI gate settled to `pass` and which qualifies as LOW-RISK is
    * approved + merged AUTOMATICALLY — running the SAME approve path a human would,
