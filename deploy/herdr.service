@@ -1,0 +1,24 @@
+# herdr — systemd USER service (headless terminal/session server).
+#
+# butchr delegates ALL PTY/agent/session management to herdr; with herdr down,
+# no task progresses past `queued`. Keep it running alongside butchr.
+#
+# TEMPLATE: @HERDR@ is substituted with the absolute herdr path by
+# scripts/install-service.sh before install. Do not enable this file in place.
+[Unit]
+Description=herdr — terminal workspace/session manager (headless server)
+Documentation=file://@REPO_DIR@/OPERATIONS.md
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@HERDR@ server
+Restart=always
+RestartSec=2
+SyslogIdentifier=herdr
+
+[Install]
+WantedBy=default.target

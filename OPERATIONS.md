@@ -44,6 +44,114 @@ a clean stop stays stopped.
 
 ---
 
+## Auto-recovery (systemd user services) — recommended
+
+This is the production answer to "butchr died on power loss and had to be
+hand-restarted." It runs butchr **and** herdr under the systemd **user** manager
+with `Restart=always`, so they relaunch on any crash and start on boot — no
+operator action after the one-time enable. A small health-watchdog timer is also
+installed: it probes `/health` every ~30s and restarts butchr if the endpoint is
+unreachable or the dispatcher tick has gone stale.
+
+Everything lives in `deploy/` (unit templates) and `scripts/` (installer +
+watchdog) — plain shell + systemd, **no extra dependencies, no `src/` changes.**
+
+| File | Role |
+|------|------|
+| `deploy/butchr.service` | butchr server (`bun run src/index.ts`), `Restart=always`, journald logging |
+| `deploy/herdr.service` | `herdr server` (PTY/session manager butchr dispatches into), `Restart=always` |
+| `deploy/butchr-health.service` + `.timer` | watchdog: curls `/health`, restarts butchr if down/stale |
+| `scripts/install-service.sh` | renders the templates with real paths, installs them, `daemon-reload`, prints the enable commands |
+| `scripts/health-watchdog.sh` | the probe the timer runs (dependency-free curl + bash) |
+
+The `deploy/*` files are **templates** — `@REPO_DIR@`/`@BUN@`/`@HERDR@` are
+substituted with absolute paths at install time so the units don't depend on the
+user manager's minimal PATH. Don't point systemd at `deploy/` directly; install
+them first.
+
+### 1. Install the units
+
+From the repo root:
+
+```sh
+bash scripts/install-service.sh
+```
+
+Idempotent — safe to re-run after pulling changes (it re-renders and overwrites
+the installed units, then reloads). It writes to `~/.config/systemd/user/`, runs
+`systemctl --user daemon-reload`, validates with `systemd-analyze --user verify`,
+and then **prints** the enable commands. It does **not** enable or start anything
+— that privileged step is left to you (below).
+
+### 2. Enable + start (operator runs these)
+
+```sh
+systemctl --user enable --now herdr.service
+systemctl --user enable --now butchr.service
+systemctl --user enable --now butchr-health.timer
+```
+
+Both **butchr and herdr must run** — with herdr down, no task progresses past
+`queued` (butchr stays "healthy" but idle; see Health). `butchr.service` softly
+`Wants` herdr, so starting butchr also pulls herdr in.
+
+### 3. Survive logout / start on boot
+
+By default user services stop when you log out. Enable lingering so the user
+manager (and thus butchr + herdr) keeps running across logout and starts at boot:
+
+```sh
+loginctl enable-linger "$USER"
+```
+
+### Status, logs, health
+
+```sh
+systemctl --user status butchr.service herdr.service
+systemctl --user list-timers butchr-health.timer
+
+journalctl --user -u butchr.service -f          # follow butchr logs
+journalctl --user -u herdr.service -f           # follow herdr logs
+journalctl --user -u butchr-health.service      # watchdog probe results / restarts
+journalctl --user -t butchr --since "10 min ago"
+
+curl -s http://127.0.0.1:47800/health | jq      # see Health section below
+```
+
+(butchr also tees to `~/.local/share/butchr/butchr.log` independently of journald.)
+
+### Disable / stop
+
+```sh
+systemctl --user disable --now butchr-health.timer
+systemctl --user disable --now butchr.service
+systemctl --user disable --now herdr.service
+# optional: stop the user manager from lingering after logout
+loginctl disable-linger "$USER"
+```
+
+A `systemctl --user stop` is a **manual** stop — `Restart=always` does not
+override it, so a deliberately stopped service stays down until you start it
+again (same semantics as Ctrl-C on the bundled supervisor).
+
+### Notes & tuning
+
+- **Crash-loop backstop.** The service units cap restarts at 10 within 60s
+  (`StartLimitIntervalSec`/`StartLimitBurst`). If butchr is genuinely wedged it
+  stops trying — but the health timer's `systemctl --user restart` clears that
+  limit and revives it, and a manual restart does too.
+- **Non-default port / env.** Drop `BUTCHR_*` overrides in
+  `~/.config/butchr/butchr.env` (read via `EnvironmentFile=-`, optional). If you
+  change `BUTCHR_PORT`, also set `BUTCHR_HEALTH_URL` for the watchdog —
+  `Environment=BUTCHR_HEALTH_URL=http://127.0.0.1:<port>/health` in
+  `deploy/butchr-health.service` (then re-run the installer).
+- **Watchdog cadence.** Edit `OnUnitActiveSec` in `deploy/butchr-health.timer`
+  and re-run the installer.
+- **One supervisor only.** Use the systemd units **or** `scripts/supervise.sh` —
+  not both at once.
+
+---
+
 ## Restart safely
 
 **Find the process by the PORT it's listening on, and kill that PID:**

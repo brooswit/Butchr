@@ -1,0 +1,13 @@
+# Drives butchr-health.service on a fixed cadence: ~1 min after boot, then every
+# ~30s. Enable this timer (not the .service) to turn the watchdog on.
+[Unit]
+Description=Run the butchr health watchdog periodically
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=5s
+Unit=butchr-health.service
+
+[Install]
+WantedBy=timers.target

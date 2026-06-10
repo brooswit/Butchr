@@ -1,0 +1,43 @@
+# butchr — systemd USER service (auto-recovery for the agent task harness).
+#
+# This is a TEMPLATE: the @REPO_DIR@ / @BUN@ tokens are substituted with real
+# absolute paths by scripts/install-service.sh before it is copied into
+# ~/.config/systemd/user/. Do not point systemd at this file directly.
+#
+# Equivalent to running `bun run src/index.ts` from the repo, but kept alive by
+# systemd: Restart=always relaunches it on any crash/power-loss exit, and the
+# user manager starts it on boot once enabled (see OPERATIONS.md).
+[Unit]
+Description=butchr — agent task harness (Bun server + dispatcher)
+Documentation=file://@REPO_DIR@/OPERATIONS.md
+# herdr owns the PTY/agent sessions butchr dispatches into. butchr starts fine
+# without it and resumes once it is reachable, so this is a soft Wants (pull
+# herdr in when butchr starts) + After (order it first when both are enabled) —
+# NOT a hard Requires that would drag butchr down whenever herdr blips.
+Wants=network-online.target herdr.service
+After=network-online.target herdr.service
+# Crash-loop backstop: if it dies >10 times in 60s, stop trying (the health
+# timer / a manual `systemctl --user restart` resets this and revives it).
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@
+# The user manager's PATH is minimal; butchr shells out to herdr/git/bun/claude,
+# so spell out where they live. %h expands to the operator's home directory.
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Optional BUTCHR_* overrides (BUTCHR_PORT, BUTCHR_DATA_DIR, …). The leading '-'
+# makes the file optional — absent is fine.
+EnvironmentFile=-%h/.config/butchr/butchr.env
+ExecStart=@BUN@ run src/index.ts
+# Relaunch on ANY exit (crash, OOM, the post-power-loss restart). A deliberate
+# `systemctl --user stop` is a manual stop, which Restart=always does NOT
+# override — so stopping it stays stopped, exactly like the bundled supervisor.
+Restart=always
+RestartSec=2
+# Tag journald lines so `journalctl --user -t butchr` works.
+SyslogIdentifier=butchr
+
+[Install]
+WantedBy=default.target
