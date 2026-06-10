@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and flagged for same-file sequencing. Report only — no code changes.
 
 ### Changed
+- **Internal: task status transitions now flow through one `setStatus()` helper**
+  (`src/tasks.ts`). The four-step transition skeleton — guarded `UPDATE` →
+  `recordTaskEvent` (audit) → `updateTaskMdStatus` (mirror to task.md) → `emitUpdated`
+  (SSE) — was hand-copied at ~a dozen sites, so a new transition that forgot a step
+  could silently drop an audit entry, desync task.md, or leave the webapp stale. That
+  spine now lives once in `setStatus(id, to, { from, note, set })`, and the core
+  lifecycle transitions (queued→running, →review, →blocked, →aborted, →merged, the
+  legacy finalize, auto-unblock, and re-queue) call it. No behavior change — the audit
+  timeline, task.md mirror, and SSE events are identical (CLEANUP C1).
 - **`exec.run()` gained an optional `timeoutMs` bound** (internal). The shared
   "shell out, never throw" helper can now kill a subprocess that exceeds a
   wall-clock deadline, resolving with a non-zero code, a `timedOut` flag, and a

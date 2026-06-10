@@ -254,6 +254,83 @@ function emitUpdated(id: string): void {
 }
 
 /**
+ * Wrap a value passed in setStatus's `set` so the column compiles to
+ * `col=COALESCE(col, ?)` (fill it ONLY if currently NULL) instead of a plain
+ * `col=?`. Used for stamp-once columns (started_at / merged_at / session_id) that
+ * must stick to the FIRST value assigned across re-runs.
+ */
+function keep(
+  value: string | number | null,
+): { __keep: true; value: string | number | null } {
+  return { __keep: true, value };
+}
+function isKeep(v: unknown): v is { __keep: true; value: string | number | null } {
+  return typeof v === "object" && v !== null && (v as { __keep?: unknown }).__keep === true;
+}
+
+/**
+ * The ONE guarded task-status transition. Builds a `WHERE id=? [AND status IN
+ * (…from)]` UPDATE that writes `status` (plus any `opts.set` columns) and, ONLY when
+ * it actually changed a row, performs the other three steps that must stay in
+ * lockstep with it: record the audit event, mirror the new status into task.md, and
+ * emit the SSE `task.updated`. Returns whether a row changed (false = lost a race /
+ * no match — the caller bails, exactly like the old `if (res.changes === 0) return`).
+ *
+ * Centralizing this four-step skeleton is the whole point: every hand-written
+ * transition used to re-copy UPDATE → recordTaskEvent → updateTaskMdStatus →
+ * emitUpdated, so one that forgot a step silently dropped an audit entry, desynced
+ * task.md, or left the webapp stale until the next tick. Now a transition can't.
+ *
+ *  - `from` — the status(es) the row must be in for the UPDATE to apply (the race
+ *    guard); omit for an unconditional `WHERE id=?`.
+ *  - `note` — the audit-event note. The event is recorded only when the status
+ *    actually changed (`row.status !== to`), so a same-status write (e.g. a duplicate
+ *    re-queue) logs no spurious transition — matching the old per-call-site guards.
+ *  - `set` — extra columns written alongside status as `col=?`; wrap a value in
+ *    `keep(...)` for `col=COALESCE(col, ?)` stamp-once semantics.
+ */
+function setStatus(
+  id: string,
+  to: TaskStatus,
+  opts: {
+    from?: TaskStatus | TaskStatus[];
+    note?: string;
+    set?: Record<string, unknown>;
+  } = {},
+): boolean {
+  const row = getTask(id);
+  if (!row) return false;
+
+  const assigns = ["status=?"];
+  const params: (string | number | null)[] = [to];
+  for (const [col, val] of Object.entries(opts.set ?? {})) {
+    if (isKeep(val)) {
+      assigns.push(`${col}=COALESCE(${col}, ?)`);
+      params.push(val.value);
+    } else {
+      assigns.push(`${col}=?`);
+      params.push(val as string | number | null);
+    }
+  }
+  let where = "id=?";
+  params.push(id);
+  if (opts.from !== undefined) {
+    const froms = Array.isArray(opts.from) ? opts.from : [opts.from];
+    where += ` AND status IN (${froms.map(() => "?").join(", ")})`;
+    params.push(...froms);
+  }
+
+  const res = db.query(`UPDATE tasks SET ${assigns.join(", ")} WHERE ${where}`).run(...params);
+  if (res.changes === 0) return false;
+
+  if (row.status !== to) recordTaskEvent(id, row.status, to, opts.note ?? null);
+  const dir = getDirectory(row.directory_id);
+  if (dir) updateTaskMdStatus(dir.path, id, to);
+  emitUpdated(id);
+  return true;
+}
+
+/**
  * Validate + normalize an optional per-task model. Returns null for an unset model
  * (default — no --model flag), or the trimmed model string. Rejects (400) anything
  * that isn't a plain model alias/name: the value is interpolated into the agent
@@ -558,16 +635,15 @@ export function reevaluateBlockedTask(id: string): boolean {
   const ids = parseBlockedBy(row.blocked_by);
   if (allBlockersMerged(ids)) {
     // Promote to queued. Clear any stale backoff so it dispatches on the next tick.
-    const res = db
-      .query(
-        `UPDATE tasks SET status='queued', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
-      )
-      .run(id);
-    if (res.changes === 0) return false; // moved under us
-    recordTaskEvent(id, "blocked", "queued", "all blockers merged");
-    const dir = getDirectory(row.directory_id);
-    if (dir) updateTaskMdStatus(dir.path, id, "queued");
-    emitUpdated(id);
+    if (
+      !setStatus(id, "queued", {
+        from: "blocked",
+        note: "all blockers merged",
+        set: { next_dispatch_at: null },
+      })
+    ) {
+      return false; // moved under us
+    }
     console.log(`[butchr] task ${id} unblocked → queued (all blockers merged)`);
     return true;
   }
@@ -661,14 +737,17 @@ export async function setBlockedBy(
     // KEEPING session_id + worktree for a later --resume. NOT a dispatch failure.
     await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
   }
-  db.query(
-    `UPDATE tasks SET status='blocked', herdr_pane_id=NULL, herdr_tab_id=NULL,
-       output_snapshot=NULL, conflict=0, idle=0 WHERE id=?`,
-  ).run(id);
-  recordTaskEvent(id, row.status, "blocked", "blocked on new dependencies (operator)");
-  if (dir) updateTaskMdStatus(dir.path, id, "blocked");
+  setStatus(id, "blocked", {
+    note: "blocked on new dependencies (operator)",
+    set: {
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+      output_snapshot: null,
+      conflict: 0,
+      idle: 0,
+    },
+  });
   logDeadBlockers(id, blockers);
-  emitUpdated(id);
   return taskView(id)!;
 }
 
@@ -976,12 +1055,22 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   // agent exited after request_review, but removes any empty husk tab).
   await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
   await git.cleanup(dir.path, id).catch(() => {});
-  const res = db.query(
-    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
-       output_snapshot=?, merge_base_sha=?, merged_sha=?, merged_at=COALESCE(merged_at, ?)
-       WHERE id=? AND status='review'`,
-  ).run(snapshot || null, result.baseSha ?? null, result.mergedSha ?? null, nowIso(), id);
-  if (res.changes === 0) {
+  if (
+    !setStatus(id, "merged", {
+      from: "review",
+      note: "approved & merged into the default branch",
+      set: {
+        conflict: 0,
+        idle: 0,
+        herdr_pane_id: null,
+        herdr_tab_id: null,
+        output_snapshot: snapshot || null,
+        merge_base_sha: result.baseSha ?? null,
+        merged_sha: result.mergedSha ?? null,
+        merged_at: keep(nowIso()),
+      },
+    })
+  ) {
     // Raced (e.g. aborted) between the merge and here — the branch already landed
     // in main, but the task moved on. Nothing more to do.
     emitUpdated(id);
@@ -989,9 +1078,6 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     reevaluateAllBlocked();
     return { task: taskView(id)! };
   }
-  recordTaskEvent(id, "review", "merged", "approved & merged into the default branch");
-  updateTaskMdStatus(dir.path, id, "merged");
-  emitUpdated(id);
   // This task just merged — promote any task that was blocked on it (and whose
   // other blockers are also merged) to queued right away, rather than waiting for
   // the next dispatcher tick to notice.
@@ -1076,16 +1162,22 @@ export async function finalizeTask(id: string): Promise<TaskView | null> {
   // The agent no longer needs its worktree cwd — tear down worktree + branch.
   await git.cleanup(dir.path, id).catch(() => {});
 
-  const res = db.query(
-    `UPDATE tasks SET status='merged', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
-       output_snapshot=?, merged_at=COALESCE(merged_at, ?)
-       WHERE id=? AND status='finalizing'`,
-  ).run(snapshot || null, nowIso(), id);
-  if (res.changes === 0) return taskView(id); // finalized under us
-  recordTaskEvent(id, "finalizing", "merged", "finalized (legacy wrap-up)");
-  updateTaskMdStatus(dir.path, id, "merged");
-
-  emitUpdated(id);
+  if (
+    !setStatus(id, "merged", {
+      from: "finalizing",
+      note: "finalized (legacy wrap-up)",
+      set: {
+        conflict: 0,
+        idle: 0,
+        herdr_pane_id: null,
+        herdr_tab_id: null,
+        output_snapshot: snapshot || null,
+        merged_at: keep(nowIso()),
+      },
+    })
+  ) {
+    return taskView(id); // finalized under us
+  }
   return taskView(id)!;
 }
 
@@ -1150,14 +1242,18 @@ export async function abortTask(id: string): Promise<TaskView> {
   // Throw away the worktree + branch — nothing gets merged.
   await git.cleanup(dir.path, id).catch(() => {});
 
-  db.query(
-    `UPDATE tasks SET status='aborted', conflict=0, idle=0, review_note=NULL,
-       output_snapshot=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL, completed_at=? WHERE id=?`,
-  ).run(nowIso(), id);
-  recordTaskEvent(id, row.status, "aborted", "aborted by operator");
-  updateTaskMdStatus(dir.path, id, "aborted");
-
-  emitUpdated(id);
+  setStatus(id, "aborted", {
+    note: "aborted by operator",
+    set: {
+      conflict: 0,
+      idle: 0,
+      review_note: null,
+      output_snapshot: null,
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+      completed_at: nowIso(),
+    },
+  });
   return taskView(id)!;
 }
 
@@ -1177,20 +1273,23 @@ export function markRunning(
   // the agent runs in (one tab per task).
   // A successful launch clears the dispatch retry state: this run got off the
   // ground, so any earlier consecutive-failure count / backoff / error is stale.
-  const res = db.query(
-    `UPDATE tasks SET status='running', herdr_pane_id=?, herdr_tab_id=?,
-       session_id=COALESCE(session_id, ?), started_at=COALESCE(started_at, ?),
-       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL
-       WHERE id=? AND status='queued'`,
-  ).run(paneId, tabId ?? null, sessionId, nowIso(), id);
-  if (res.changes === 0) return; // aborted (or otherwise moved) under us
-  recordTaskEvent(id, "queued", "running", "agent launched");
-  const row = getTask(id);
-  if (row) {
-    const dir = getDirectory(row.directory_id);
-    if (dir) updateTaskMdStatus(dir.path, id, "running");
+  if (
+    !setStatus(id, "running", {
+      from: "queued",
+      note: "agent launched",
+      set: {
+        herdr_pane_id: paneId,
+        herdr_tab_id: tabId ?? null,
+        session_id: keep(sessionId),
+        started_at: keep(nowIso()),
+        dispatch_attempts: 0,
+        last_dispatch_error: null,
+        next_dispatch_at: null,
+      },
+    })
+  ) {
+    return; // aborted (or otherwise moved) under us
   }
-  emitUpdated(id);
 }
 
 /**
@@ -1279,18 +1378,21 @@ export function markReview(id: string, snapshot: string): void {
   // isn't resurrected into 'review' after abortTask parked it as terminal. This is
   // the dead-agent fallback (the live request_review path is markReviewFromAgent),
   // so the agent's tab is already being torn down by the caller — clear its id.
-  const res = db.query(
-    `UPDATE tasks SET status='review', completed_at=?, output_snapshot=?, herdr_pane_id=NULL, herdr_tab_id=NULL, idle=0
-       WHERE id=? AND status='running'`,
-  ).run(nowIso(), snapshot, id);
-  if (res.changes === 0) return; // aborted (or otherwise moved) under us
-  recordTaskEvent(id, "running", "review", "agent finished — submitted for review");
-  const row = getTask(id);
-  if (row) {
-    const dir = getDirectory(row.directory_id);
-    if (dir) updateTaskMdStatus(dir.path, id, "review");
+  if (
+    !setStatus(id, "review", {
+      from: "running",
+      note: "agent finished — submitted for review",
+      set: {
+        completed_at: nowIso(),
+        output_snapshot: snapshot,
+        herdr_pane_id: null,
+        herdr_tab_id: null,
+        idle: 0,
+      },
+    })
+  ) {
+    return; // aborted (or otherwise moved) under us
   }
-  emitUpdated(id);
   // Capture the session's token usage / model now that the agent has finished.
   captureSessionUsage(id);
   // Capture the change footprint (size + path type) for duration estimates while the
@@ -1754,18 +1856,18 @@ export async function requeueTask(id: string): Promise<TaskView> {
   if (row.status === "merged" || row.status === "aborted") {
     throw new HttpError(409, `task is ${row.status}; cannot re-queue`);
   }
-  const dir = getDirectory(row.directory_id);
   // Tear down any lingering agent/tab defensively before a fresh dispatch.
   await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
-  db.query(
-    `UPDATE tasks SET status='queued', dispatch_attempts=0, last_dispatch_error=NULL,
-       next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
-  ).run(id);
-  if (row.status !== "queued") {
-    recordTaskEvent(id, row.status, "queued", "manually re-queued by operator");
-  }
-  if (dir) updateTaskMdStatus(dir.path, id, "queued");
-  emitUpdated(id);
+  setStatus(id, "queued", {
+    note: "manually re-queued by operator",
+    set: {
+      dispatch_attempts: 0,
+      last_dispatch_error: null,
+      next_dispatch_at: null,
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+    },
+  });
   return taskView(id)!;
 }
 
