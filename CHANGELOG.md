@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Config reads every `BUTCHR_*` var through the typed `env()` helpers.** The two
+  remaining vars that read `process.env` directly (`BUTCHR_CTO_CONTEXT`,
+  `BUTCHR_TERMINAL_CMD`) now go through `env(name, "")` like the rest of
+  `config.ts`. Pure-internal refactor — behavior is identical (an empty/unset var
+  still falls back to `""`).
+
 ### Security
 - **CSRF / DNS-rebinding guard on the web API.** butchr binds to loopback, but a
   web page the operator merely visits could make their browser send forged

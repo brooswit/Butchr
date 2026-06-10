@@ -77,7 +77,7 @@ export const config = {
    * directory's `.butchr/CTO.md`. When unset or unreadable, the built-in
    * default CTO context is used instead.
    */
-  ctoContextPath: process.env.BUTCHR_CTO_CONTEXT || "",
+  ctoContextPath: env("BUTCHR_CTO_CONTEXT", ""),
 
   /** Path to the git binary. */
   gitBin: env("BUTCHR_GIT_BIN", "git"),
@@ -288,7 +288,7 @@ export const config = {
    * `herdr agent attach <id>` command. If unset, butchr auto-detects an
    * emulator (gnome-terminal, kitty, konsole, …).
    */
-  terminalCmd: process.env.BUTCHR_TERMINAL_CMD || "",
+  terminalCmd: env("BUTCHR_TERMINAL_CMD", ""),
 };
 
 export type Config = typeof config;
