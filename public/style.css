@@ -255,9 +255,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* `unknown` blocker — a dependency that isn't among the current directory's tasks
    (so its status can't be resolved). Neutral muted fill. */
 .chip.unknown { background: var(--muted); }
-/* Rollback isn't a lifecycle status — it's a flag on a still-`merged` task whose
-   commits were reverted off the default branch. Reuse the warning/aborted hue. */
-.chip.rolled-back { background: var(--aborted); }
 /* `plan` is a task KIND, not a lifecycle status — a decomposition task that spawns
    sub-tasks. Reuse the review/info hue so it reads as an informational badge. */
 .chip.plan { background: var(--review); }

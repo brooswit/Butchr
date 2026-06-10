@@ -64,8 +64,9 @@ afterAll(() => {
 test("listTemplates exposes the built-ins with extracted placeholders", () => {
   const list = templatesMod.listTemplates();
   const names = list.map((t) => t.name).sort();
-  // The four shapes the task brief calls for.
-  expect(names).toEqual(["add-endpoint", "feature", "refactor-extract", "webapp-panel"]);
+  // The task shapes butchr ships as recipes (incl. `rollback`, which drives the
+  // webapp's "Roll back" button).
+  expect(names).toEqual(["add-endpoint", "feature", "refactor-extract", "rollback", "webapp-panel"]);
 
   for (const t of list) {
     expect(typeof t.name).toBe("string");
@@ -160,4 +161,50 @@ test("a rendered template substitutes into a created task's prompt + task.md", a
   const doc = taskmdMod.readTaskMd(REPO_ROOT, v.id);
   expect(doc.prompt).toContain("GET /api/widgets");
   expect(doc.prompt).toContain("listWidgets");
+});
+
+// ---- ROLLBACK TEMPLATE -----------------------------------------------------
+// Rollback is no longer a mechanical `git revert` endpoint — it's a deliberate TASK
+// created from this template (the webapp's "Roll back" button on a merged task),
+// flowing through the standard dispatch → CI gate → review → merge pipeline.
+
+test("the rollback template exposes {{task}}/{{sha}} and renders a correct revert prompt", () => {
+  const tpl = templatesMod.listTemplates().find((t) => t.name === "rollback")!;
+  expect(tpl).toBeDefined();
+  // The two slots the webapp pre-fills (target task id + its merge/finalize commit).
+  expect(tpl.placeholders).toEqual(["task", "sha"]);
+
+  const prompt = templatesMod.renderTemplate("rollback", {
+    task: "plush-zebra-6caf",
+    sha: "abc1234def567",
+  });
+  // It instructs a clean revert of the named task's commit...
+  expect(prompt).toContain("Revert the changes introduced by task plush-zebra-6caf (commit abc1234def567).");
+  expect(prompt).toContain("git revert");
+  // ...then a real fix-the-fallout pass gated on build + tests...
+  expect(prompt).toContain("bun build src/index.ts --target bun --outfile /dev/null");
+  expect(prompt).toContain("bun test");
+  // ...and the standard convention (butchr owns CHANGELOG/version at merge).
+  expect(prompt).toContain("do NOT hand-edit CHANGELOG.md / package.json");
+  // No leftover markers once both vars are supplied.
+  expect(prompt).not.toContain("{{task}}");
+  expect(prompt).not.toContain("{{sha}}");
+});
+
+test("the 'Roll back' button's create flow yields a real rollback task", async () => {
+  // The button POSTs { template: "rollback", vars: { task, sha } } to the create
+  // route, which renders the template and creates the task. Exercise that exact
+  // server path (renderTemplate → createTask) end-to-end.
+  const prompt = templatesMod.renderTemplate("rollback", {
+    task: "crimson-magpie-563b",
+    sha: "deadbeefcafe",
+  });
+  const v = await tasksMod.createTask(DIR_ID, prompt, []);
+
+  expect(v.status === "queued" || v.status === "blocked").toBe(true);
+  expect(v.prompt).toContain("Revert the changes introduced by task crimson-magpie-563b (commit deadbeefcafe).");
+  // The prompt round-trips through task.md on disk for the agent to read.
+  const doc = taskmdMod.readTaskMd(REPO_ROOT, v.id);
+  expect(doc.prompt).toContain("crimson-magpie-563b");
+  expect(doc.prompt).toContain("deadbeefcafe");
 });

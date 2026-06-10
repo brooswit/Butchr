@@ -61,19 +61,18 @@ function effStatus(t) {
   return t.status === "running" && t.idle ? "idle" : t.status;
 }
 // Renders a task's badge cluster — the status chip plus the optional plan /
-// conflict / rolled-back badges — as an HTML string. Each badge's markup lives
-// here only, so how a chip *looks* can't drift across the views. Which badges a
-// view shows stays the caller's call (History/table stay lean, the detail header
-// shows all), passed via opts; taskChips renders exactly the set requested. The
-// conflict badge is always included when set — every view already shows it.
-function taskChips(t, { plan = false, rolledBack = false } = {}) {
+// conflict badges — as an HTML string. Each badge's markup lives here only, so how
+// a chip *looks* can't drift across the views. Which badges a view shows stays the
+// caller's call (History/table stay lean, the detail header shows all), passed via
+// opts; taskChips renders exactly the set requested. The conflict badge is always
+// included when set — every view already shows it.
+function taskChips(t, { plan = false } = {}) {
   return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
     + chip(effStatus(t))
     + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
     // (priority 0 is the silent FIFO default, shown on no card).
-    + (Number(t.priority) ? ` <span class="chip priority" title="dispatch priority — higher runs sooner">prio ${esc(String(t.priority))}</span>` : "")
-    + (rolledBack && t.rolled_back_at ? ' <span class="chip rolled-back">rolled back</span>' : "");
+    + (Number(t.priority) ? ` <span class="chip priority" title="dispatch priority — higher runs sooner">prio ${esc(String(t.priority))}</span>` : "");
 }
 // Renders a task's organizational LABELS as a row of neutral chips (distinct from
 // the colored status chips), as an HTML string. Returns "" when the task has no
@@ -1862,7 +1861,7 @@ async function renderTask(id) {
     headerRight.appendChild(term);
   }
   headerRight.appendChild(el("div", {
-    html: taskChips(t, { plan: true, rolledBack: true }),
+    html: taskChips(t, { plan: true }),
   }));
   // Abort is available from any non-terminal state EXCEPT finalizing, whose merge
   // already landed in main (it auto-completes to merged).
@@ -1871,11 +1870,12 @@ async function renderTask(id) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
   }
-  // Roll back: revert an already-merged task's commits off the default branch.
-  // Offered only for a merged task that hasn't already been rolled back and whose
-  // merge range was recorded (older merges have no range and can't be reverted
-  // automatically — the backend 409s, but we also hide the button for them).
-  const canRollback = t.status === "merged" && !t.rolled_back_at
+  // Roll back: create a deliberate ROLLBACK TASK (from the built-in `rollback`
+  // template) that reverts this merged task's change AND repairs any fallout, then
+  // flows through the normal dispatch → CI gate → review → merge → post-merge-verify
+  // pipeline like any task — NOT a mechanical bypass. Offered only for a merged task
+  // whose merge range was recorded (older merges have no commit to pre-fill).
+  const canRollback = t.status === "merged"
     && !!t.merge_base_sha && !!t.merged_sha && t.merge_base_sha !== t.merged_sha;
   if (canRollback) {
     headerRight.appendChild(el("button", { class: "btn ghost danger-outline", id: "rollback" }, "Roll back"));
@@ -1899,7 +1899,6 @@ async function renderTask(id) {
     <div class="k">model</div><div class="v">${esc(modelLabel(t))}</div>
     <div class="k">tokens</div><div class="v">${tokensLabel(t)}</div>
     <div class="k">cost</div><div class="v">${esc(costLabel(t))}</div>
-    ${t.rolled_back_at ? `<div class="k">rolled back</div><div class="v">${esc(t.rolled_back_at)}</div>` : ""}
     ${t.herdr_pane_id ? `<div class="k">herdr pane</div><div class="v">${esc(t.herdr_pane_id)}</div>` : ""}
     ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
@@ -2151,14 +2150,23 @@ async function renderTask(id) {
   }
 
   if (canRollback) {
-    document.getElementById("rollback").addEventListener("click", async (ev) => {
+    document.getElementById("rollback").addEventListener("click", (ev) => {
       if (!confirm(
-        "Roll back this merged task? Its commits are reverted off the default branch "
-        + "with new revert commits. If the revert conflicts with later changes it is "
-        + "aborted cleanly and you'll need to revert manually.",
+        "Create a rollback task for this merged task? An agent reverts its change "
+        + "(commit " + t.merged_sha.slice(0, 12) + ") and repairs any fallout — "
+        + "dependents, tests, docs, revert conflicts — then it flows through the "
+        + "normal CI gate → review → merge pipeline like any task.",
       )) return;
-      action(ev.target, () => api("POST", "/tasks/" + id + "/rollback"),
-        { success: "rolled back ✓ — commits reverted on the default branch" });
+      // Create from the built-in `rollback` template via the normal create-task
+      // flow: the server renders {{task}}/{{sha}} into the prompt (server.ts). Jump
+      // to the new task so the operator can follow it through the pipeline.
+      action(ev.target, async () => {
+        const created = await api("POST", "/directories/" + t.directory_id + "/tasks", {
+          template: "rollback",
+          vars: { task: id, sha: t.merged_sha },
+        });
+        if (created && created.id) location.hash = "#/task/" + created.id;
+      }, { success: "rollback task created ✓" });
     });
   }
 

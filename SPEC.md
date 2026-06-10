@@ -170,8 +170,9 @@ the `task_events` audit log via `recordTaskEvent`.
 | `failed`/stuck non-terminal → `queued` | operator re-queued (resets retry state) | `requeueTask` |
 | `finalizing` → `merged` | startup recovery of legacy state | `finalizeTask` / `recoverFinalizingTasks` |
 
-`merged` tasks additionally support **one-click rollback** (revert commits off
-main); the task stays `merged` but is stamped `rolled_back_at` (see §4).
+A `merged` task can be **rolled back** by creating a deliberate **rollback task**
+from the built-in `rollback` template (the webapp's "Roll back" button); that task
+reverts the change and repairs any fallout through the standard pipeline (see §4).
 
 **Timestamp semantics** (used by metrics): `started_at` = first `running`
 transition (COALESCE — never cleared on rework); `completed_at` = `running→review`;
@@ -544,7 +545,7 @@ text transforms live in **`src/changelog.ts`** (unit-tested independently):
 
 Both edits are committed onto the task branch as a single `butchr: changelog + version
 bump (task <id>)` commit, so they fast-forward onto the base with the rest of the work
-and fall inside the `baseSha..mergedSha` rollback range. Everything is best-effort: a
+and fall inside the recorded `baseSha..mergedSha` merge range. Everything is best-effort: a
 repo with no `CHANGELOG.md` / `package.json`, or an unparseable one, simply skips that
 piece — never failing the merge. **SPEC.md is unchanged by this flow** — it is not
 append-only, is edited surgically, and rarely collides, so it stays a manual living-doc
@@ -577,16 +578,26 @@ only; or an exact path), **and**
 A merge conflict (kicked back to the agent) or a post-merge-verify revert never
 counts as an auto-merge; only a real merge stamps `auto_merged=1`.
 
-### One-click rollback
+### Rollback (as a task)
 
-`rollbackTask` (`POST …/rollback`) reverts an already-merged task's commits off the
-default branch. Valid only for a `merged` task that hasn't been rolled back and
-whose `merge_base_sha..merged_sha` range was recorded (tasks merged before this
-feature, or that landed no commits, are refused with 409). The `git revert
---no-edit <base>..<merged>` runs inside the **same global merge queue**; on a clean
-revert the task **stays `merged`** but is stamped `rolled_back_at` (its branch did
-land — revert commits were appended). A revert **conflict** (or any failure) leaves
-the tree clean and surfaces a 409 with a clear message.
+Rolling back a merged change is a **deliberate, considered** act that often must
+undo the change AND repair its fallout — dependents, tests, docs, revert conflicts —
+so butchr models it as an ordinary **task**, not a mechanical revert that bypasses
+the gates. (Emergency *bad* merges are already handled instantly by the post-merge
+verify auto-revert — see above; this is the deliberate path.)
+
+The webapp's **"Roll back"** button on a `merged` task creates a task from the
+built-in **`rollback` template** (`src/templates.ts`) via the normal create-task
+flow, pre-filling its `{{task}}`/`{{sha}}` slots with the target task id and its
+recorded merge/finalize commit (`merged_sha`). The button shows only when that
+commit was recorded (`merge_base_sha..merged_sha`, with commits) — older merges have
+nothing to pre-fill. The rendered prompt instructs the agent to *prefer a clean `git
+revert`, then fix any resulting breakage so `bun build` + `bun test` pass, and update
+SPEC.md if behavior changed*. From there it flows through the **same pipeline as any
+task** — dispatch → auto-rebase → CI gate → review → merge → post-merge verify — so
+the revert is itself **VERIFIED** before it lands. There is no `POST …/rollback`
+route and no `rolled_back_at` flag; a rollback is just another task with its own
+review and merge.
 
 ### Reject
 
@@ -752,8 +763,10 @@ confirms the whole pipeline (dispatch → herdr → the agent run → the CI gat
 review → optional merge) actually works end-to-end, rather than discovering
 breakage on the next real task.
 
-It is a **pure REST client** (no server logic; like the rest of `bin/butchr`) that
-composes existing routes:
+It is almost entirely a **REST client** (no server logic; like the rest of
+`bin/butchr`) that composes existing routes — the one exception is the `--merge`
+cleanup, which reverts the probe's own merge directly in the sandbox (there is no
+server route to undo a merge; deliberate rollback is a normal task). The steps:
 
 1. **Resolve** the sandbox: auto-find the registered directory labelled `sandbox`
    (or whose path basename is `sandbox`), or take `--dir <id|path>`.
@@ -770,8 +783,9 @@ composes existing routes:
    post-merge-verify path.
 5. **Clean up on EVERY exit path** (pass, failure, or timeout) so the sandbox stays
    clean: a not-yet-merged probe is **aborted** (worktree + branch discarded); a
-   merged probe is **rolled back** (its commits reverted off the default branch). A
-   cleanup failure is itself flagged.
+   merged probe's commits are **reverted directly in the sandbox** (a local `git
+   revert` of its recorded `merge_base_sha..merged_sha` range, injected so tests stub
+   it). A cleanup failure is itself flagged.
 
 Exit 0 on PASS, 1 on FAIL; `--json` prints the structured `{ ok, taskId, dir,
 stages, error }` result. All time/IO is injected, so the orchestration is
@@ -808,7 +822,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `GET` | `/api/metrics?days=N` | — | `Metrics` aggregate (see below). `days` 1–90, default 14. |
 | `GET` | `/api/dashboard` | — | cross-project rollup: `{ directories:[{ id, path, label, gate_cmd, effective_gate_cmd, counts, active, review, failed, needsAttention }], totals:{ directories, active, review, failed, needsAttention } }`. Per directory: `active` = queued+blocked+running+idle+finalizing; `review`; `failed`; `needsAttention` = review+failed (the operator pull-signal). `effective_gate_cmd` is the directory's own `gate_cmd` or the default. Read-only. |
 | `GET` | `/api/directories` | — | `DirectoryView[]` (rows + `counts` by status, with `idle` peeled out of `running`). |
-| `GET` | `/api/templates` | — | `TemplateView[]` — the built-in task **templates** (recipes): each `{ name, description, body, placeholders }`, where `body` carries `{{placeholder}}` markers and `placeholders` lists their distinct names (first-seen order). Static built-ins from `src/templates.ts` (`feature`, `refactor-extract`, `webapp-panel`, `add-endpoint`). |
+| `GET` | `/api/templates` | — | `TemplateView[]` — the built-in task **templates** (recipes): each `{ name, description, body, placeholders }`, where `body` carries `{{placeholder}}` markers and `placeholders` lists their distinct names (first-seen order). Static built-ins from `src/templates.ts` (`feature`, `refactor-extract`, `webapp-panel`, `add-endpoint`, `rollback`). |
 | `POST` | `/api/directories` | `{ path, label?, gate_cmd? }` | `201` `DirectoryView`. `gate_cmd` sets the per-directory build/test gate command (omit/null → default; `""` → disable). 400 if not a git repo or `gate_cmd` isn't a string; 409 if already registered; 502 if the herdr workspace can't be created. |
 | `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
@@ -828,7 +842,6 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `PUT` / `POST` | `/api/tasks/:id/blocked_by` | `{ blocked_by:[id,…] }` | `TaskView` — replaces + re-evaluates the dep set (auto-unblock / kill-on-block). 409 on terminal tasks; 404 unknown blocker; 400 cycle. |
 | `POST` | `/api/tasks/:id/priority` | `{ priority }` | `TaskView` — sets the task's dispatch priority (integer; higher = dispatched sooner; default 0). 404 if gone; 400 if not an integer. Accepted on any status but only affects `queued` dispatch order. |
 | `POST` | `/api/tasks/:id/requeue` | `{}` | `TaskView` (`→ queued`, retry state cleared). 409 if merged/aborted. |
-| `POST` | `/api/tasks/:id/rollback` | `{}` | `TaskView` (stays `merged`, stamped `rolled_back_at`). 409 if not merged / no recorded range / revert conflict. |
 | `POST` | `/api/tasks/:id/terminal` | — | `{ ok, emulator?, command }` — opens a GUI terminal attached to the live pane. 409 if no live pane; 503 (with the manual command) if no emulator. |
 | `GET` | `/api/events` | — | SSE stream (see §6.2). |
 | `POST`/`GET`/`DELETE` | `/mcp/:taskId` | JSON-RPC | per-task MCP transport (see §6.3). `GET`→405, `DELETE`→204, 404 if task gone. |
@@ -901,7 +914,7 @@ server (a DB restore can't go through a live server — see §5).
 | `requeue <id>` | `POST …/requeue` |
 | `block <id> --on id,id` | `PUT …/blocked_by` (`--on ''` clears) |
 | `priority <id> <N>` | `POST …/priority` (set the dispatch priority; higher = sooner) |
-| `selftest [--dir <id\|path>] [--merge] [--timeout <sec>]` | composes existing routes (`GET /api/directories`, `POST …/tasks`, `GET …/tasks/:id`, `POST …/approve`, `…/rollback`, `…/abort`) into an end-to-end **smoke test** — see [§5 Self-test](#self-test-smoke-harness) |
+| `selftest [--dir <id\|path>] [--merge] [--timeout <sec>]` | composes existing routes (`GET /api/directories`, `POST …/tasks`, `GET …/tasks/:id`, `POST …/approve`, `…/abort`) into an end-to-end **smoke test**; with `--merge` it reverts its own throwaway merge in the sandbox during cleanup — see [§5 Self-test](#self-test-smoke-harness) |
 | `backups` | **offline** — lists DB snapshots in `BUTCHR_BACKUP_DIR` (newest first) via `src/backup.ts`; no server call |
 | `restore <file\|latest> [--force]` | **offline** — restores `BUTCHR_DB` from a snapshot (saves the current db aside first). Refuses if a server answers on `BUTCHR_URL` unless `--force`; stop butchr first (§5) |
 
@@ -956,10 +969,12 @@ hash-routed and SSE-driven. Views/features:
   read-only), a **sub-task progress rollup** (for a task that gates dependents: an
   "N/M merged" fraction, a progress bar, and the direct children with their live
   statuses — computed client-side from the directory's task list, so no extra API
-  field), approve/reject/abort/requeue/rollback controls, an **answer box** for an
-  `awaiting_input` task (shows the agent's question + posts the answer to
-  `POST …/answer`, mirroring the review change-request box), and an **Open terminal**
-  button (running tasks). The board adds an **Awaiting answer** lane.
+  field), approve/reject/abort/requeue controls plus a **"Roll back"** button on a
+  merged task (which creates a rollback task from the `rollback` template — §4 — and
+  jumps to it), an **answer box** for an `awaiting_input` task (shows the agent's
+  question + posts the answer to `POST …/answer`, mirroring the review change-request
+  box), and an **Open terminal** button (running tasks). The board adds an **Awaiting
+  answer** lane.
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
   and the conflict/revert/CI-pass/auto-merge rates. Also a **Disk usage** readout
   (from `/health`'s `disk` object — see §5): cards for task-worktree bytes (+ count),
@@ -1067,8 +1082,7 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `spawned_subtasks` | TEXT | JSON array of sub-task ids a plan task created. |
 | `auto_merged` | INTEGER | 1 if butchr auto-merged this task. |
 | `merge_base_sha` | TEXT | pre-ff base tip (exclusive lower bound of landed commits). |
-| `merged_sha` | TEXT | post-ff tip (inclusive upper bound) — together the rollback range. |
-| `rolled_back_at` | TEXT | ISO time the merge was rolled back (task stays `merged`). |
+| `merged_sha` | TEXT | post-ff tip (inclusive upper bound) — the merge/finalize commit a **rollback task** is pre-filled with (§4). |
 | `usage_input_tokens` | INTEGER | cumulative session input tokens. |
 | `usage_output_tokens` | INTEGER | cumulative session output tokens. |
 | `usage_cache_read_tokens` | INTEGER | cumulative cache-read tokens. |

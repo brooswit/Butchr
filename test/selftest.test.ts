@@ -29,7 +29,6 @@ function mockApi(opts: {
   taskSequence?: any[];
   approve?: any;
   onAbort?: () => void;
-  onRollback?: () => void;
 }): { api: SelftestApi; calls: Array<{ method: string; path: string; body?: unknown }> } {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   const seq = [...(opts.taskSequence ?? [])];
@@ -51,10 +50,6 @@ function mockApi(opts: {
     if (method === "POST" && /\/abort$/.test(path)) {
       opts.onAbort?.();
       return { id: "probe-1", status: "aborted" };
-    }
-    if (method === "POST" && /\/rollback$/.test(path)) {
-      opts.onRollback?.();
-      return { id: "probe-1", status: "merged" };
     }
     throw new Error(`unexpected call ${method} ${path}`);
   };
@@ -140,8 +135,8 @@ test("dispatch observed even when polling skips straight to review", async () =>
   expect(dispatch?.detail).toContain("via review");
 });
 
-test("--merge: approves, confirms merge, then rolls back to clean the sandbox", async () => {
-  let rolledBack = false;
+test("--merge: approves, confirms merge, then reverts to clean the sandbox", async () => {
+  let revertedWith: { path: string; from: string; to: string } | null = null;
   let aborted = false;
   const { api, calls } = mockApi({
     directories: [SANDBOX],
@@ -149,8 +144,8 @@ test("--merge: approves, confirms merge, then rolls back to clean the sandbox", 
       { id: "probe-1", status: "running" },
       { id: "probe-1", status: "review", ci_status: "pass" },
     ],
-    approve: { id: "probe-1", status: "merged" },
-    onRollback: () => (rolledBack = true),
+    // The approved task carries its recorded merge range so cleanup can revert it.
+    approve: { id: "probe-1", status: "merged", merge_base_sha: "base0", merged_sha: "tip9" },
     onAbort: () => (aborted = true),
   });
   const result = await runSelftest({
@@ -159,11 +154,17 @@ test("--merge: approves, confirms merge, then rolls back to clean the sandbox", 
     now: fakeClock(),
     marker: "m3",
     merge: true,
+    // Stub the local git revert so no real git runs; just record the call.
+    revertMerge: async (path, from, to) => {
+      revertedWith = { path, from, to };
+    },
   });
 
   expect(result.ok).toBe(true);
   expect(result.stages.map((s) => s.name)).toContain("merge");
-  expect(rolledBack).toBe(true);
+  // The merged probe is cleaned up by reverting its recorded range in the sandbox.
+  expect(revertedWith).toEqual({ path: "/repos/sandbox", from: "base0", to: "tip9" });
+  expect(result.stages.find((s) => s.name === "cleanup")?.detail).toBe("reverted");
   expect(aborted).toBe(false);
   expect(calls.some((c) => /\/approve$/.test(c.path))).toBe(true);
 });

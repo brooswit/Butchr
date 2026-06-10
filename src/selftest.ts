@@ -5,12 +5,40 @@
 // merge — actually works end-to-end, catching breakage immediately instead of on
 // the next real task.
 //
-// Like the rest of bin/butchr this is a PURE REST CLIENT: it adds no server logic
-// and maps onto existing routes (GET /api/directories, POST …/tasks, GET …/tasks/:id,
-// POST …/approve, …/rollback, …/abort). Everything time- or IO-bound — the HTTP
-// client, the clock, and the sleep — is INJECTED so the orchestration logic is
-// unit-testable with the API mocked and no real wall-clock waits.
+// This is almost entirely a REST CLIENT: it adds no server logic and maps onto
+// existing routes (GET /api/directories, POST …/tasks, GET …/tasks/:id, POST
+// …/approve, …/abort). The ONE exception is the `--merge` cleanup: a merged probe
+// can no longer be undone via a server route (the mechanical /rollback endpoint was
+// retired — deliberate rollback is now a normal task), so the harness reverts its
+// OWN throwaway merge directly in the sandbox repo. Everything time-, IO-, or
+// git-bound — the HTTP client, the clock, the sleep, and that revert — is INJECTED
+// so the orchestration logic is unit-testable with no real server, waits, or git.
 import { basename } from "node:path";
+
+/**
+ * Default `revertMerge`: undo a merged probe's commits by reverting the recorded
+ * range directly in the sandbox repo, leaving the tree CLEAN (a conflicting revert
+ * is aborted, then surfaced). Only ever runs against the throwaway selftest probe
+ * in the sandbox directory. Injected (so tests stub it out); never touches a real
+ * project's history because the probe only ever lands in the sandbox.
+ */
+async function defaultRevertMerge(
+  sandboxPath: string,
+  fromSha: string,
+  toSha: string,
+): Promise<void> {
+  const proc = Bun.spawn(
+    ["git", "-C", sandboxPath, "revert", "--no-edit", `${fromSha}..${toSha}`],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = (await new Response(proc.stderr).text()).trim();
+    // Leave the sandbox clean: abort any half-applied revert (a no-op if none).
+    Bun.spawnSync(["git", "-C", sandboxPath, "revert", "--abort"]);
+    throw new Error(`git revert ${fromSha}..${toSha} failed: ${err || `exit ${code}`}`);
+  }
+}
 
 /** A single lifecycle checkpoint the probe passed (or failed) through, with timing. */
 export type SelftestStage = {
@@ -45,6 +73,12 @@ export type SelftestOptions = {
   sleep?: (ms: number) => Promise<void>;
   /** Monotonic clock in ms. Defaults to Date.now; injected/deterministic in tests. */
   now?: () => number;
+  /**
+   * Undo a merged probe's commits to keep the sandbox clean (the `--merge` path's
+   * cleanup). Defaults to a local `git revert` of the recorded merge range
+   * (defaultRevertMerge); stubbed in tests so no real git runs.
+   */
+  revertMerge?: (sandboxPath: string, fromSha: string, toSha: string) => Promise<void>;
   /**
    * Directory selector: an explicit registered-directory id or path. When unset,
    * the harness AUTO-FINDS the directory labelled `sandbox` (or whose path basename
@@ -138,14 +172,17 @@ export async function resolveSandbox(
 /**
  * Run the full self-test. Always leaves the sandbox clean: on ANY exit path (pass,
  * fail, or timeout) the probe is torn down — a not-yet-merged probe is `abort`ed
- * (worktree + branch discarded) and a merged probe is `rollback`ed (its commits
- * reverted off the default branch). Returns a structured result; never throws.
+ * (worktree + branch discarded) and a merged probe's commits are REVERTED directly
+ * in the sandbox (its merge landed on the default branch; there is no longer a
+ * server route to undo it, so the harness reverts its own throwaway merge). Returns
+ * a structured result; never throws.
  */
 export async function runSelftest(options: SelftestOptions): Promise<SelftestResult> {
   const api = options.api;
   const log = options.log ?? (() => {});
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = options.now ?? (() => Date.now());
+  const revertMerge = options.revertMerge ?? defaultRevertMerge;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
 
@@ -163,6 +200,9 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
   };
 
   let merged = false;
+  // The recorded merge range of a successfully-merged probe, captured for cleanup so
+  // we can revert exactly the commits it landed on the sandbox's default branch.
+  let mergedRange: { from: string; to: string } | null = null;
 
   try {
     // (1) Resolve the sandbox directory.
@@ -226,6 +266,10 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
         throw new Error(`approve did not merge the probe (status=${t ? t.status : "unknown"})`);
       }
       merged = true;
+      // Record the merge range so cleanup can revert exactly these commits.
+      if (t.merge_base_sha && t.merged_sha) {
+        mergedRange = { from: t.merge_base_sha, to: t.merged_sha };
+      }
       mark("merge", true, "merged into default branch");
     }
   } catch (e) {
@@ -236,8 +280,14 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     if (result.taskId) {
       try {
         if (merged) {
-          await api("POST", `/api/tasks/${encodeURIComponent(result.taskId)}/rollback`, {});
-          mark("cleanup", true, "rolled back");
+          // The probe landed on the sandbox's default branch. There is no server
+          // route to undo a merge (deliberate rollback is now a normal task), so
+          // revert exactly the commits it contributed, directly in the sandbox.
+          if (!mergedRange || !result.dir) {
+            throw new Error("merged probe has no recorded merge range to revert");
+          }
+          await revertMerge(result.dir.path, mergedRange.from, mergedRange.to);
+          mark("cleanup", true, "reverted");
         } else {
           await api("POST", `/api/tasks/${encodeURIComponent(result.taskId)}/abort`, {});
           mark("cleanup", true, "aborted");

@@ -101,6 +101,24 @@ export const TEMPLATES: Template[] = [
     ].join("\n"),
   },
   {
+    name: "rollback",
+    description: "Revert a merged task's changes through the standard pipeline, repairing any fallout so build + tests pass.",
+    body: [
+      "Revert the changes introduced by task {{task}} (commit {{sha}}).",
+      "",
+      "Prefer a clean `git revert` of that change. Then FIX any resulting breakage —",
+      "dependents, tests, docs, and revert conflicts — so the tree is consistent:",
+      "make `bun build src/index.ts --target bun --outfile /dev/null` and `bun test`",
+      "both green before calling request_review. Update SPEC.md if the reverted change",
+      "altered behavior the spec documents.",
+      "",
+      "FOLLOW CONTRIBUTING.md: zero new dependencies (Bun stdlib only); match the",
+      "surrounding module's style and import with the `.ts` extension. butchr records",
+      "the CHANGELOG entry + version bump at merge from your request_review summary, so",
+      "do NOT hand-edit CHANGELOG.md / package.json.",
+    ].join("\n"),
+  },
+  {
     name: "add-endpoint",
     description: "Add a REST endpoint: thin handler over a service function, with SPEC + a test.",
     body: [

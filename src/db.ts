@@ -203,20 +203,17 @@ ensureColumn("tasks", "spawned_subtasks", "TEXT");
 // once a merge actually succeeds (a conflict/revert never sets it).
 ensureColumn("tasks", "auto_merged", "INTEGER NOT NULL DEFAULT 0");
 
-// One-click rollback bookkeeping. When a task merges, we record the SHAs that
-// bracket the commits it landed on the default branch so the merge can later be
-// reverted precisely:
+// Merge-range bookkeeping. When a task merges, we record the SHAs that bracket the
+// commits it landed on the default branch:
 //   - `merge_base_sha` is the base tip BEFORE the fast-forward (exclusive lower
 //     bound); `merged_sha` is the new tip AFTER it (inclusive upper bound). The
 //     task's commits are exactly `merge_base_sha..merged_sha`.
-//   - `rolled_back_at` is an ISO timestamp set when the operator rolls the task
-//     back (POST /api/tasks/:id/rollback): the task stays `merged` (its branch
-//     did land) but is flagged as undone via revert commits on the default branch.
-// Tasks merged before this feature have NULL SHAs and cannot be rolled back
-// automatically (see tasks.rollbackTask).
+// Rollback is a deliberate TASK now (created from the `rollback` template via the
+// webapp's "Roll back" button — see src/templates.ts), not a mechanical revert, so
+// these SHAs let that button pre-fill the exact commit to revert. Tasks merged
+// before this feature have NULL SHAs (the button is hidden for them).
 ensureColumn("tasks", "merge_base_sha", "TEXT");
 ensureColumn("tasks", "merged_sha", "TEXT");
-ensureColumn("tasks", "rolled_back_at", "TEXT");
 
 // PER-TASK MODEL + TOKEN/COST accounting.
 //   - `model` is the model alias/name the task REQUESTED at creation (e.g. 'opus',
@@ -390,12 +387,11 @@ export type TaskRow = {
   // the `...row` spread (no extra plumbing in taskView), like ci_status/ci_summary.
   conformance_status: string | null;
   conformance_summary: string | null;
-  // Rollback bookkeeping (see the ensureColumn block above): the SHAs bracketing
-  // the commits this task landed (`merge_base_sha..merged_sha`) and the time the
-  // task was rolled back, if ever.
+  // Merge-range bookkeeping (see the ensureColumn block above): the SHAs bracketing
+  // the commits this task landed (`merge_base_sha..merged_sha`), used to pre-fill a
+  // rollback task with the exact commit to revert.
   merge_base_sha: string | null;
   merged_sha: string | null;
-  rolled_back_at: string | null;
   // AUTO-MERGE: 1 when butchr auto-merged this task (CI-green + low-risk), else 0.
   // Surfaced on TaskView via the `...row` spread. See tasks.maybeAutoMerge.
   auto_merged: number;
