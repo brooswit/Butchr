@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- queued | running | review | merged | aborted
+  status          TEXT NOT NULL,            -- queued | running | review | awaiting_input | merged | aborted
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -243,6 +243,21 @@ ensureColumn("tasks", "usage_cache_read_tokens", "INTEGER");
 ensureColumn("tasks", "usage_cache_creation_tokens", "INTEGER");
 ensureColumn("tasks", "cost_usd", "REAL");
 
+// AWAITING-INPUT HANDSHAKE. When a running agent calls the MCP `ask` tool, butchr
+// records its clarifying question and parks the task in status='awaiting_input'
+// (the agent returns immediately and exits — no live process, exactly like the
+// non-blocking review handshake). Whoever operates answers through ONE unified
+// surface (API / CLI / webapp), and butchr re-launches the SAME Claude session via
+// `--resume` with the answer injected (mirroring reject→resume):
+//   - `question` is the agent's pending question, surfaced while status='awaiting_input'
+//     (webapp answer box + /health needsAttention). Cleared when the question is answered.
+//   - `answer` is the operator's answer, held transiently for the resume dispatch to
+//     inject into the prompt, then consumed (cleared) the moment the agent re-launches
+//     (markRunning). Orthogonal to `status`. See tasks.markAwaitingInputFromAgent /
+//     tasks.answerTask / dispatcher.dispatch (the answer-resume prompt).
+ensureColumn("tasks", "question", "TEXT");
+ensureColumn("tasks", "answer", "TEXT");
+
 // DURATION-ESTIMATE FOOTPRINT. Two cheap signals captured WHEN A TASK ENTERS REVIEW
 // (while its worktree still exists), used to bucket the task for the rough
 // duration-estimate model (see src/estimate.ts):
@@ -313,11 +328,18 @@ export type DirectoryRow = {
 // request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks).
 export type TaskKind = "task" | "plan";
 
+// `awaiting_input` is a pause state for the ASK handshake: a running agent called
+// the MCP `ask` tool, so butchr stored its `question`, parked the task here, and the
+// agent exited. Like `review` it is non-terminal with NO live process — it waits for
+// an operator/CTO answer (API/CLI/webapp), then re-queues for a `--resume` re-launch
+// that injects the answer (see tasks.markAwaitingInputFromAgent / answerTask). It is
+// NOT terminal (the reaper leaves its worktree alone) and needs operator attention.
 export type TaskStatus =
   | "queued"
   | "blocked"
   | "running"
   | "review"
+  | "awaiting_input"
   | "finalizing"
   | "merged"
   | "rejected"
@@ -336,6 +358,12 @@ export type TaskRow = {
   idle: number;
   review_note: string | null;
   summary: string | null;
+  // ASK handshake (see the `question`/`answer` ensureColumn block above): `question`
+  // is the agent's pending clarifying question while status='awaiting_input';
+  // `answer` is the operator's reply, held transiently for the resume dispatch and
+  // consumed at re-launch. Surfaced on TaskView via the `...row` spread.
+  question: string | null;
+  answer: string | null;
   dispatch_attempts: number;
   last_dispatch_error: string | null;
   next_dispatch_at: string | null;

@@ -24,6 +24,7 @@
   --running: #425eff;    /* blue-500 */
   --idle: #0e7490;       /* cyan-700 (running but quiet) */
   --review: #a35901;     /* brand-orange-dark (warning) */
+  --awaiting: #be185d;   /* pink-700 (agent asked a question — needs an answer) */
   --finalizing: #4f46e5; /* indigo-600 (merging) */
   --merged: #006933;     /* green-600 (success) */
   --rejected: #b6073c;   /* red-600 (error) */
@@ -245,6 +246,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.running { background: var(--running); }
 .chip.idle { background: var(--idle); }
 .chip.review { background: var(--review); }
+.chip.awaiting_input { background: var(--awaiting); }
 .chip.finalizing { background: var(--finalizing); }
 .chip.merged { background: var(--merged); }
 .chip.rejected { background: var(--rejected); }
@@ -288,6 +290,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .count-pill.has-running { border-color: var(--running); color: var(--running); }
 .count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
 .count-pill.has-review { border-color: var(--review); color: var(--review); }
+.count-pill.has-awaiting { border-color: var(--awaiting); color: var(--awaiting); }
 .count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
 .count-pill.has-failed { border-color: var(--failed); color: var(--failed); }
 
@@ -402,6 +405,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tl-dot.blocked    { background: var(--blocked); }
 .tl-dot.running    { background: var(--running); }
 .tl-dot.review     { background: var(--review); }
+.tl-dot.awaiting_input { background: var(--awaiting); }
 .tl-dot.finalizing { background: var(--finalizing); }
 .tl-dot.merged     { background: var(--merged); }
 .tl-dot.rejected   { background: var(--rejected); }
@@ -534,6 +538,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-node.running .tg-rect { fill: var(--running); }
 .tg-node.idle .tg-rect { fill: var(--idle); }
 .tg-node.review .tg-rect { fill: var(--review); }
+.tg-node.awaiting_input .tg-rect { fill: var(--awaiting); }
 .tg-node.finalizing .tg-rect { fill: var(--finalizing); }
 .tg-node.merged .tg-rect { fill: var(--merged); }
 .tg-node.rejected .tg-rect { fill: var(--rejected); }
@@ -929,6 +934,7 @@ small.muted { font-size: 12px; }
 .sb-fill.running { background: var(--running); }
 .sb-fill.idle { background: var(--idle); }
 .sb-fill.review { background: var(--review); }
+.sb-fill.awaiting_input { background: var(--awaiting); }
 .sb-fill.finalizing { background: var(--finalizing); }
 .sb-fill.merged { background: var(--merged); }
 .sb-fill.rejected { background: var(--rejected); }

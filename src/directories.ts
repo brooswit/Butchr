@@ -25,8 +25,10 @@ const DEFAULT_CTO_CONTEXT = `A CTO — the human's principal engineer (the Claud
 root) — is available for guidance on this work.
 
 When requirements are ambiguous or you hit a judgment call, call the **\`ask\`**
-MCP tool (provided by the butchr MCP server) to consult the CTO before
-guessing. Keep your questions specific and actionable.
+MCP tool (provided by the butchr MCP server) instead of guessing. It is
+non-blocking: it records your question and returns immediately, after which you
+should STOP and exit — butchr will re-launch you in the same session once it's
+answered. Keep your questions specific and actionable.
 
 ## Project conventions
 

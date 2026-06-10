@@ -16,10 +16,13 @@
 // reject it re-launches the SAME Claude session (`--resume <session-id>`) with the
 // notes. This is what makes review durable across an agent or butchr restart — an
 // MCP server cannot wake an idle Claude Code client, so we never park a call.
-import { join } from "node:path";
-import { askCto } from "./cto.ts";
-import { getDirectory, HttpError } from "./directories.ts";
-import { getTask, markReviewFromAgent, proposeSubtasks } from "./tasks.ts";
+import { HttpError } from "./directories.ts";
+import {
+  getTask,
+  markAwaitingInputFromAgent,
+  markReviewFromAgent,
+  proposeSubtasks,
+} from "./tasks.ts";
 import type { SubtaskSpec } from "./tasks.ts";
 
 const REQUEST_REVIEW_TOOL = {
@@ -45,16 +48,19 @@ const REQUEST_REVIEW_TOOL = {
 const ASK_TOOL = {
   name: "ask",
   description:
-    "Ask the CTO a clarifying question about this task — requirements, " +
-    "conventions, design judgment calls. Returns the CTO's answer. Read-only: " +
-    "the CTO cannot change files. Prefer asking over guessing when something is " +
-    "ambiguous.",
+    "Ask a clarifying question about this task — requirements, conventions, design " +
+    "judgment calls. Returns IMMEDIATELY (does NOT block): it records your question " +
+    "and parks the task awaiting an answer, after which you should STOP and exit. " +
+    "Whoever operates answers through butchr (the CTO/operator via API/CLI, or a " +
+    "human in the webapp); once answered, butchr RE-LAUNCHES you in this same " +
+    "session with the answer so you can continue. Prefer asking over guessing when " +
+    "something is genuinely ambiguous.",
   inputSchema: {
     type: "object",
     properties: {
       question: {
         type: "string",
-        description: "The clarifying question to put to the CTO.",
+        description: "The clarifying question to put to the operator/CTO.",
       },
     },
     required: ["question"],
@@ -322,9 +328,13 @@ async function runProposeSubtasks(taskId: string, args: any): Promise<ToolResult
 }
 
 /**
- * `ask`: run the CTO Claude (forked, headless, read-only) in the asking task's
- * worktree and return its answer. Any failure becomes an `isError` tool result —
- * it never crashes the MCP server or the asking task.
+ * `ask`: record the agent's clarifying question and park the task in
+ * `awaiting_input`, then RETURN AT ONCE (non-blocking) — the unified AWAITING-INPUT
+ * handshake that mirrors request_review. The agent should exit after this call;
+ * butchr surfaces the question through one surface (API + CLI + webapp), and on an
+ * answer re-launches the SAME Claude session (`--resume`) with the answer injected
+ * (see tasks.markAwaitingInputFromAgent / answerTask). If the task is already
+ * terminal (merged/aborted out from under the agent), report that instead.
  */
 async function runAsk(taskId: string, args: any): Promise<ToolResult> {
   const question: unknown = args.question;
@@ -332,25 +342,16 @@ async function runAsk(taskId: string, args: any): Promise<ToolResult> {
     return textResult("`ask` requires a non-empty `question` string.", true);
   }
 
-  // Resolve the task's worktree so the CTO can READ the code under discussion.
-  const task = getTask(taskId)!; // handleMcp already verified the task exists.
-  const dir = getDirectory(task.directory_id);
-  if (!dir) {
-    return textResult("Could not locate this task's directory to consult the CTO.", true);
+  const state = markAwaitingInputFromAgent(taskId, question.trim());
+  if (state !== "ok") {
+    return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
   }
-  const cwd = join(dir.path, taskId);
-
-  try {
-    const answer = await askCto(question, { cwd, taskId });
-    // askCto returns a human-readable error string on timeout/failure; treat a
-    // leading "CTO did not respond"/"could not"/"Failed" as a tool error so the
-    // agent knows the answer is not authoritative. Plain answers pass through.
-    const failed = /^(CTO (did not respond|could not)|Failed to consult|The CTO returned an empty)/.test(
-      answer,
-    );
-    return textResult(answer, failed);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    return textResult(`Failed to consult the CTO: ${detail}`, true);
-  }
+  return toolResult({
+    status: "awaiting_input",
+    message:
+      "Your question has been recorded and this task is now awaiting an answer. " +
+      "You can stop now — do not wait. butchr will surface it to whoever operates " +
+      "(the CTO/operator via API/CLI, or a human in the webapp) and, once answered, " +
+      "RE-LAUNCH you in this same session with the answer so you can continue.",
+  });
 }

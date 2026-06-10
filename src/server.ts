@@ -24,6 +24,7 @@ import { getLastReap } from "./reaper.ts";
 import pkg from "../package.json" with { type: "json" };
 import {
   abortTask,
+  answerTask,
   approveTask,
   createTask,
   getTask,
@@ -248,18 +249,24 @@ async function healthResponse(): Promise<Response> {
   // above so we issue no extra queries. Tasks dispatch uncapped — every queued
   // task is launched as soon as it's seen.
   const concurrency = {
-    active: (tasks.running ?? 0) + (tasks.review ?? 0) + (tasks.finalizing ?? 0),
+    active:
+      (tasks.running ?? 0) +
+      (tasks.review ?? 0) +
+      (tasks.awaiting_input ?? 0) +
+      (tasks.finalizing ?? 0),
     queued: tasks.queued ?? 0,
   };
 
   // Operator pull-signal: tasks that need a human's eyes right now — ones waiting
-  // in `review` and ones that gave up dispatching (`failed`). The webapp turns this
+  // in `review`, ones parked `awaiting_input` (an agent asked a question that needs
+  // answering), and ones that gave up dispatching (`failed`). The webapp turns this
   // into a tab-title badge + header indicator so the operator gets pulled in rather
   // than polling. Derived from the status counts above; no extra query.
   const needsAttention = {
     review: tasks.review ?? 0,
+    awaiting_input: tasks.awaiting_input ?? 0,
     failed: tasks.failed ?? 0,
-    total: (tasks.review ?? 0) + (tasks.failed ?? 0),
+    total: (tasks.review ?? 0) + (tasks.awaiting_input ?? 0) + (tasks.failed ?? 0),
   };
 
   // Tick-loop liveness: stale if we've ticked at least once but not within
@@ -611,6 +618,16 @@ route("POST", "/api/tasks/:id/approve", async (_req, p) => {
 route("POST", "/api/tasks/:id/reject", async (req, p) => {
   const body = await readJson(req);
   return json(await rejectTask(p.id!, body.note));
+});
+
+// Answer a task parked in `awaiting_input` (the agent called the MCP `ask` tool).
+// This is the unified answer surface shared by the operator CLI (`butchr answer`),
+// the webapp answer box, and any API caller. On answer butchr re-queues the task and
+// re-launches the SAME agent session via `--resume` with the answer injected (see
+// tasks.answerTask). 409 if not awaiting input; 400 if the answer is blank.
+route("POST", "/api/tasks/:id/answer", async (req, p) => {
+  const body = await readJson(req);
+  return json(await answerTask(p.id!, body.answer));
 });
 
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {

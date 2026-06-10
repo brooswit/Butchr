@@ -481,15 +481,17 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["queued", "blocked", "running", "idle", "review", "finalizing", "failed", "merged", "aborted"]
+  const pills = ["queued", "blocked", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted"]
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
         : s === "running" && c[s] ? "count-pill has-running"
         : s === "idle" && c[s] ? "count-pill has-idle"
         : s === "review" && c[s] ? "count-pill has-review"
+        : s === "awaiting_input" && c[s] ? "count-pill has-awaiting"
         : s === "finalizing" && c[s] ? "count-pill has-finalizing"
         : s === "failed" && c[s] ? "count-pill has-failed" : "count-pill";
-      return `<span class="${cls}">${s} <b>${c[s] || 0}</b></span>`;
+      const label = s === "awaiting_input" ? "awaiting" : s;
+      return `<span class="${cls}">${label} <b>${c[s] || 0}</b></span>`;
     }).join("");
   // Aggregate bucket badges (active / review / needs-attention / failed) when the
   // card comes from the dashboard rollup (those fields are absent on a plain
@@ -785,9 +787,11 @@ function queueLine(tasks) {
   const r = tasks.filter((t) => t.status === "running" && !t.idle).length;
   const i = tasks.filter((t) => t.status === "running" && t.idle).length;
   const f = tasks.filter((t) => t.status === "finalizing").length;
+  const aw = tasks.filter((t) => t.status === "awaiting_input").length;
   const parts = [];
   if (r) parts.push(`${r} running`);
   if (i) parts.push(`${i} idle`);
+  if (aw) parts.push(`${aw} awaiting answer`);
   if (f) parts.push(`${f} finalizing`);
   if (q) parts.push(`${q} queued`);
   if (b) parts.push(`${b} blocked`);
@@ -797,7 +801,7 @@ function queueLine(tasks) {
 // Lifecycle statuses still in flight — these stay in the main directory list.
 // Everything else (merged, aborted, rejected) is terminal and lives in History.
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
-const ACTIVE_STATUSES = ["queued", "blocked", "running", "review", "finalizing"];
+const ACTIVE_STATUSES = ["queued", "blocked", "running", "review", "awaiting_input", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
 
 // Directory page body mode: the task "List", the pipeline "Board", or the
@@ -824,7 +828,7 @@ function historyOpen() {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["queued", "blocked", "running", "idle", "review", "finalizing", "failed", "merged", "aborted", "rejected"];
+const FILTER_STATUSES = ["queued", "blocked", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted", "rejected"];
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
@@ -1080,7 +1084,8 @@ function tasksTable(tasks) {
   const tb = el("tbody");
   for (const t of tasks) {
     const tr = el("tr");
-    const action = t.status === "review" ? "review →" : "open →";
+    const action = t.status === "review" ? "review →"
+      : t.status === "awaiting_input" ? "answer →" : "open →";
     const termLink = isLive(t)
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
@@ -1328,6 +1333,7 @@ function renderGraph(tasks) {
 // SSE event by the directory view, so it live-updates for free.
 const BOARD_LANES = [
   { key: "review", title: "Ready to merge", hint: "ready to merge", match: (t) => t.status === "review" },
+  { key: "awaiting_input", title: "Awaiting answer", hint: "awaiting answer", match: (t) => t.status === "awaiting_input" },
   { key: "finalizing", title: "Merging", hint: "merging", match: (t) => t.status === "finalizing" },
   { key: "running", title: "In progress", hint: "running", match: (t) => t.status === "running" },
   { key: "queued", title: "Queued", hint: "queued", match: (t) => t.status === "queued" },
@@ -2016,6 +2022,29 @@ async function renderTask(id) {
     wrap.appendChild(controls);
   }
 
+  // awaiting-input answer box — the agent paused mid-task by calling the MCP `ask`
+  // tool, so the task holds a pending question. Mirrors the review change-request
+  // box: show the question, take an answer, and POST it. On answer butchr re-launches
+  // the SAME agent session via `--resume` with the answer injected.
+  if (t.status === "awaiting_input") {
+    if (t.question) {
+      wrap.appendChild(el("h2", {}, "Agent's question"));
+      wrap.appendChild(el("pre", { class: "block", html: esc(t.question) }));
+    }
+    const answerPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    answerPanel.innerHTML = `
+      <h2 style="margin-top:0">Answer</h2>
+      <label class="field">
+        <span class="lbl">your answer (required)</span>
+        <textarea id="answer" placeholder="Answer the agent's question. It goes back to the same agent, which butchr re-launches in-context (--resume) to continue."></textarea>
+      </label>
+      <div class="row">
+        <button class="btn success" id="sendAnswer">Send answer</button>
+        <div class="spacer"></div>
+      </div>`;
+    wrap.appendChild(answerPanel);
+  }
+
   mount(wrap);
 
   if (t.status === "failed") {
@@ -2081,6 +2110,15 @@ async function renderTask(id) {
       if (!note) return toast("add a note or at least one inline comment", true);
       action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
         { success: "changes requested", onDone: () => backToDirectory(t.directory_id) });
+    });
+  }
+
+  if (t.status === "awaiting_input") {
+    document.getElementById("sendAnswer").addEventListener("click", (ev) => {
+      const answer = document.getElementById("answer").value.trim();
+      if (!answer) return toast("an answer is required", true);
+      action(ev.target, () => api("POST", "/tasks/" + id + "/answer", { answer }),
+        { success: "answer sent — agent resuming", onDone: () => backToDirectory(t.directory_id) });
     });
   }
 }
@@ -2639,6 +2677,7 @@ function applyAttentionIndicator(na) {
   }
   const parts = [];
   if (na.review) parts.push(`${na.review} review`);
+  if (na.awaiting_input) parts.push(`${na.awaiting_input} awaiting answer`);
   if (na.failed) parts.push(`${na.failed} failed`);
   node.textContent = String(na.total);
   node.title = "Needs attention: " + parts.join(", ");
@@ -2652,10 +2691,12 @@ function maybeNotify(na) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   if (!lastAttention) return; // first poll — establish a baseline, don't alert
   const newReview = na.review - lastAttention.review;
+  const newAwaiting = (na.awaiting_input || 0) - (lastAttention.awaiting_input || 0);
   const newFailed = na.failed - lastAttention.failed;
-  if (newReview <= 0 && newFailed <= 0) return;
+  if (newReview <= 0 && newAwaiting <= 0 && newFailed <= 0) return;
   const bits = [];
   if (newReview > 0) bits.push(`${newReview} ready for review`);
+  if (newAwaiting > 0) bits.push(`${newAwaiting} awaiting an answer`);
   if (newFailed > 0) bits.push(`${newFailed} failed to dispatch`);
   try {
     new Notification("butchr — needs attention", { body: bits.join(", "), tag: "butchr-attention" });
@@ -2677,7 +2718,7 @@ async function updateAttention() {
   applyTitleBadge(na.total);
   applyAttentionIndicator(na);
   maybeNotify(na);
-  lastAttention = { review: na.review, failed: na.failed, total: na.total };
+  lastAttention = { review: na.review, awaiting_input: na.awaiting_input || 0, failed: na.failed, total: na.total };
 }
 
 // ---------- dispatcher pause / maintenance mode ----------

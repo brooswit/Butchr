@@ -62,7 +62,11 @@ const REVIEW_PROTOCOL = [
   "",
   "If anything about the requirements, conventions, or a design judgment call is",
   "ambiguous, use the **butchr** MCP server's `ask` tool to put a clarifying",
-  "question to the CTO and get an answer — prefer asking over guessing.",
+  "question — prefer asking over guessing. `ask` is ALSO non-blocking: it records",
+  "your question and returns immediately, after which you should STOP and exit.",
+  "butchr surfaces the question to whoever operates (the CTO/operator via API/CLI,",
+  "or a human in the webapp); once answered, butchr RE-LAUNCHES you in the same",
+  "session with the answer so you can continue. Do not wait for the answer inline.",
   "",
   "You do NOT need to commit or clean up — butchr captures your worktree changes",
   "automatically. After calling `request_review`, stop.",
@@ -98,8 +102,10 @@ const PLAN_PROTOCOL = [
   "creates the sub-tasks (wiring their dependencies) and completes this plan task.",
   "",
   "If anything about the request is ambiguous, use the **butchr** MCP server's `ask`",
-  "tool to put a clarifying question to the CTO before proposing — prefer asking over",
-  "guessing.",
+  "tool to put a clarifying question before proposing — prefer asking over guessing.",
+  "`ask` is non-blocking: it records your question and returns immediately, after",
+  "which you should STOP and exit; butchr surfaces it to whoever operates and, once",
+  "answered, RE-LAUNCHES you in the same session with the answer to continue.",
 ].join("\n");
 
 /** Absolute path to a task's directory under .butchr/tasks/. */
@@ -181,6 +187,49 @@ export function appendRejection(
   }
   const entry = `\n### Rejection — ${whenIso}\n${note.trim()}\n`;
   writeFileSync(p, text.trimEnd() + "\n" + entry, "utf8");
+}
+
+const CLARIFY_SECTION = "## Clarifications";
+
+/**
+ * Append a question/answer pair to task.md's Clarifications section — the durable
+ * audit trail of the ASK handshake (a running agent asked via the MCP `ask` tool
+ * and an operator answered). Purely for the record/UI; the resume itself injects the
+ * answer from the `answer` column, mirroring how appendRejection logs review notes
+ * while the resume reads them back.
+ */
+export function appendAnswer(
+  directoryRoot: string,
+  taskId: string,
+  question: string,
+  answer: string,
+  whenIso: string,
+): void {
+  const p = taskMdPath(directoryRoot, taskId);
+  let text = existsSync(p) ? readFileSync(p, "utf8") : "";
+  if (!text.includes(CLARIFY_SECTION)) {
+    text += `\n\n${CLARIFY_SECTION}\n`;
+  }
+  const q = question.trim() || "(question not recorded)";
+  const entry = `\n### Q&A — ${whenIso}\n**Q:** ${q}\n\n**A:** ${answer.trim()}\n`;
+  writeFileSync(p, text.trimEnd() + "\n" + entry, "utf8");
+}
+
+/**
+ * Build the prompt for an ANSWER-driven re-launch. The agent paused mid-task by
+ * calling the MCP `ask` tool (parking the task in `awaiting_input` and exiting);
+ * an operator answered, and butchr resumes the SAME `claude --resume <session-id>`
+ * session — so it still has the original prompt, its prior work, and its own
+ * question in context. This is a focused message: the answer plus a reminder to
+ * continue and submit, exactly like renderReworkPrompt is for a reject.
+ */
+export function renderAnswerPrompt(answer: string): string {
+  const body =
+    `You paused this task to ask a clarifying question via the \`ask\` tool. Here ` +
+    `is the answer:\n\n${answer.trim()}\n\nUse it to continue the task. When the ` +
+    `work is complete, call \`request_review\` (or use \`ask\` again if something ` +
+    `else is genuinely ambiguous).`;
+  return [`# Answer to your question`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
 }
 
 /** Update only the `status:` line in the front matter, in place. */

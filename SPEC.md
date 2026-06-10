@@ -85,12 +85,12 @@ all lookups (`agentExists`, `agentRead`, `agentDeregister`, …) key off the tas
         ▲                      │  ├─ git.ts   (worktree / rebase / merge / revert / cleanup)                    │
         │ herdr CLI            │  ├─ herdr.ts (workspace / tab / pane / agent)                                  │
         │ (agent start, …)     │  ├─ verify.ts (post-merge gate)  usage.ts (token accounting)                  │
-        ▼                      │  └─ cto.ts   (ask → forked read-only Claude)                                   │
+        ▼                      │  └─ taskmd.ts (prompt render: agent / rework / answer)                         │
    herdr server ◄─PTY/panes────┘   reaper.ts (boot cleanup)  log.ts (rotating file log)                        │
                           └────────────────────────────────────────────────────────────────────────────────────┘
                               │
        Per repo on disk:  <repo>/.butchr/tasks/<id>/task.md   (+ CTO.md)   and   <repo>/<id>/  (git worktree)
-       butchr state dir:  ~/.local/share/butchr/{butchr.db, butchr.log, prompts/, runs/, mcp/, ask/}
+       butchr state dir:  ~/.local/share/butchr/{butchr.db, butchr.log, prompts/, runs/, mcp/}
 ```
 
 **Process model.** `src/index.ts` is the entry point. On start it: installs file
@@ -130,6 +130,7 @@ wordlists are lowercase-`a-z` only). Directory ids are `dir-<8hex>`.
 | `blocked` | no | pending | has ≥1 not-yet-merged blocker (`blocked_by`); a **pre-dispatch waiting** state — no agent runs. Promoted to `queued` when all blockers merge. |
 | `running` | no | yes | an interactive agent is executing in the worktree. |
 | `review` | no | yes | work submitted for human review (agent called `request_review`, or was rescued). Pure DB state — **no live process**. |
+| `awaiting_input` | no | yes | a running agent called `ask` to pose a clarifying question (stored in `question`); the agent exited. Pure DB state — **no live process**, exactly like `review`. Needs an operator/CTO answer (API/CLI/webapp); on answer it re-queues for a `--resume` re-launch with the answer injected. |
 | `merged` | **yes** | — | branch fast-forwarded into the default branch; worktree + branch removed. (Also the terminal state for a completed **plan** task, which merges nothing of its own.) |
 | `aborted` | **yes** | — | abandoned from any non-terminal state; worktree + branch discarded, **nothing merged**. `task.md` kept. |
 | `failed` | terminal-ish | no | dispatch gave up after `BUTCHR_MAX_DISPATCH_ATTEMPTS` consecutive failures, **or** a merge was auto-reverted off main by the post-merge verify gate (carries `revert_reason`). Leaves only via `requeue`. |
@@ -152,10 +153,12 @@ the `task_events` audit log via `recordTaskEvent`.
 | (none) → `queued` | task created with no/already-merged blockers | `createTask` |
 | (none) → `blocked` | task created with ≥1 unmerged blocker | `createTask` |
 | `blocked` → `queued` | all blockers merged (auto-unblock), or operator clears deps | `reevaluateBlockedTask` / `setBlockedBy` |
-| `queued`/`running`/`review` → `blocked` | operator adds an unmerged blocker (kill-on-block if a live agent) | `setBlockedBy` |
+| `queued`/`running`/`review`/`awaiting_input` → `blocked` | operator adds an unmerged blocker (kill-on-block if a live agent) | `setBlockedBy` |
 | `queued` → `running` | dispatcher launched the agent | `markRunning` |
 | `running` → `review` | agent called `request_review` (live path) | `markReviewFromAgent` |
 | `running` → `review` | watcher rescue (agent ended without submitting / runaway / timeout / vanished / never-started; or reconcile of a dead agent) | `markReview` |
+| `running` → `awaiting_input` | agent called `ask` (non-blocking) → parks holding the question, agent exits | `markAwaitingInputFromAgent` |
+| `awaiting_input` → `queued` | operator/CTO/human answered → re-queue for a `--resume` re-launch with the answer injected (clears retry state) | `answerTask` |
 | `running`/`review` → `queued` | reviewer rejected, or merge conflict kicked back to agent (clears retry state) | `requestChanges` (via `rejectTask` / `approveTask`) |
 | `queued` → `queued` (backoff) | dispatch failed, under the attempt cap → stamp `next_dispatch_at` | `markDispatchFailure` |
 | any non-terminal → `failed` | dispatch failed at/over the cap | `markDispatchFailure` |
@@ -406,6 +409,22 @@ review is pure DB state with no live process held open. This is what makes revie
 durable across an agent or butchr restart (an MCP server can't wake an idle Claude
 Code client, so butchr never parks a call).
 
+### Non-blocking ask (the awaiting-input handshake)
+
+`ask` (MCP) follows the **same non-blocking shape** as `request_review`, applied to
+a mid-task clarifying question. `markAwaitingInputFromAgent` records the agent's
+`question`, moves the task `running → awaiting_input`, clears the pane, captures the
+run-log snapshot + token usage — then returns immediately. The agent **exits**;
+awaiting-input is pure DB state with no live process (no CTO Claude is consulted —
+that auto-answer mechanism was retired). butchr surfaces the question through **one
+unified surface** — `/health` `needsAttention`, the webapp answer box, the
+`POST /api/tasks/:id/answer` endpoint, and `butchr answer <id> -m …` — so whoever
+operates answers: the operator/CTO via API/CLI when running unattended, or a human
+in the webapp on a project they want to be in the loop on. `answerTask` then logs
+the Q&A to `task.md`, re-queues the task, and the dispatcher **re-launches the SAME
+Claude session** via `--resume <session_id>` with the answer injected (rendered by
+`renderAnswerPrompt`) — the exact mirror of the reject→resume rework path.
+
 ### CI gate (pre-merge, in-worktree, advisory)
 
 On a genuine `running → review` transition, `triggerCi` runs the directory's
@@ -577,6 +596,19 @@ cleared). The dispatcher re-launches the **same** Claude session via
 `--resume <session_id>` with the focused rework prompt, so the agent re-enters with
 full prior context. Any lingering pane/tab is torn down defensively.
 
+### Answer (the awaiting-input handshake)
+
+`answerTask` (only on `awaiting_input`, answer required) is the **mirror of reject**
+for a clarifying question an agent posed via the MCP `ask` tool. It logs the Q&A to
+`task.md`'s Clarifications section, stores the answer in the `answer` column, clears
+the pending `question`, and re-queues the task (`→ queued`, retry state cleared,
+`session_id` kept). The dispatcher re-launches the **same** Claude session via
+`--resume <session_id>`; because the row carries a pending `answer`,
+`dispatch` renders the **answer-resume** prompt (`renderAnswerPrompt`) instead of the
+rework prompt, and `markRunning` consumes (clears) the `answer` once the agent is
+(re-)running. Reachable from one **unified surface**:
+`POST /api/tasks/:id/answer`, `butchr answer <id> -m …`, and the webapp answer box.
+
 ### Abort
 
 `abortTask` (any non-terminal state; 409 if already merged/aborted): signals the
@@ -616,7 +648,7 @@ Self-heals artifacts leaked by tasks that reached a **terminal** state
   `git worktree list --porcelain` and reaps any **direct child** worktree
   `<repo>/<taskId>` whose task is terminal or missing (`worktree remove --force` +
   `branch -D`, `prune` on failure). It **never** touches the main worktree or a
-  worktree whose task is still queued/blocked/running/review/finalizing.
+  worktree whose task is still queued/blocked/running/review/awaiting_input/finalizing.
 - **herdr husks** — a terminal-state task whose agent name is still registered gets
   `agentDeregister`'d. **Skipped when herdr is down** (worktree reaping still runs).
 
@@ -661,8 +693,8 @@ dispatch is halted for maintenance; running/review/idle tasks are unaffected), `
 (`alive`/`count`/`lastTickAt`/`ageMs`/
 `staleAfterMs` — stale if it has ticked but not within `max(tickMs·5, 10s)`; a
 never-ticked loop is treated as *still starting*, not stalled), `tasks` (counts by
-status), `failedTasks`, `concurrency` (`active` = running+review+finalizing,
-`queued`), `needsAttention` (`review`+`failed`), `reaper` (last boot reap),
+status), `failedTasks`, `concurrency` (`active` = running+review+awaiting_input+finalizing,
+`queued`), `needsAttention` (`review`+`awaiting_input`+`failed`), `reaper` (last boot reap),
 `backup` (DB-snapshot resilience: `enabled`, `lastSnapshotAt` — null until the
 first snapshot of this run — `count` of retained snapshots, `keep`, `intervalMs`,
 `dir`), `disk` (**disk-usage accounting**, see below), and `herdr.reachable`
@@ -790,6 +822,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `GET` | `/api/tasks/:id/transcript` | `?offset=&limit=` | `{ turns, total, offset, limit, hasMore }` — the agent's session transcript parsed into ordered, role-labelled items (prose / thinking / tool-call name+brief-args / truncated tool-result); best-effort `turns:[]` when there's no session/transcript. `limit` clamped 1..500 (default 200). 404 if the task is gone. |
 | `POST` | `/api/tasks/:id/approve` | `{}` | the merged `TaskView`, **or** `{ task, conflictSentBack:true }`, **or** `{ task, revertedOnRed:true }`. 409 if not in review / on a hard merge failure. |
 | `POST` | `/api/tasks/:id/reject` | `{ note }` | `TaskView` (`→ queued` for resume). 409 if not in review; 400 if note blank. |
+| `POST` | `/api/tasks/:id/answer` | `{ answer }` | `TaskView` (`→ queued` for `--resume` with the answer injected). 409 if not `awaiting_input`; 400 if answer blank. |
 | `POST` | `/api/tasks/:id/abort` | — | `TaskView` (`→ aborted`). 409 if already merged/aborted. |
 | `PUT` / `POST` | `/api/tasks/:id/blocked_by` | `{ blocked_by:[id,…] }` | `TaskView` — replaces + re-evaluates the dep set (auto-unblock / kill-on-block). 409 on terminal tasks; 404 unknown blocker; 400 cycle. |
 | `POST` | `/api/tasks/:id/priority` | `{ priority }` | `TaskView` — sets the task's dispatch priority (integer; higher = dispatched sooner; default 0). 404 if gone; 400 if not an integer. Accepted on any status but only affects `queued` dispatch order. |
@@ -831,13 +864,16 @@ depend on `kind`:
   *plan tasks only.* Validates + creates the decomposition and completes the plan
   task (see §2.5). A bad/cyclic graph or blank prompt comes back as an `isError`
   tool result so the agent can re-propose (it never crashes the server).
-- **`ask({ question })`** — *both kinds.* Routes the question to the **CTO**: a
-  forked, headless, **read-only** Claude session (`src/cto.ts` →
-  `BUTCHR_CTO_CMD`) run in the asking task's worktree so it can read the code under
-  discussion. The CTO has **no `--mcp-config`** (can't recurse into ask/request_review)
-  and only `Read/Grep/Glob` tools (can't edit). Timeouts/failures come back as a
-  non-authoritative `isError` result. Agents are told (in the rendered prompt) to
-  prefer asking over guessing.
+- **`ask({ question })`** — *both kinds.* **Non-blocking**, the unified
+  AWAITING-INPUT handshake (mirrors `request_review`): records the agent's question
+  and parks the task in `awaiting_input` (`markAwaitingInputFromAgent`), then returns
+  immediately; the agent should exit. There is **no auto-answering CTO Claude** — that
+  forked read-only mechanism was retired. butchr surfaces the question through one
+  surface (`/health` `needsAttention`, the webapp answer box, `POST …/answer`,
+  `butchr answer`); on an answer it re-launches the SAME session via `--resume` with
+  the answer injected (see §4 "Answer"). A terminal task (merged/aborted) reports its
+  status instead. Agents are told (in the rendered prompt) to prefer asking over
+  guessing.
 
 ### 6.4 Operator CLI (`bin/butchr`)
 
@@ -857,9 +893,10 @@ server (a DB restore can't go through a live server — see §5).
 | `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b] [--priority N]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels; `--priority` sets the dispatch priority, higher = sooner) |
 | `new <dir> --template <name> [--var k=v …] [--blocked-by …] [--tag …] [--priority N]` | `POST /api/directories/:id/tasks` with `{ template, vars }` instead of `-m` — create from a built-in template, filling its `{{placeholders}}` with repeatable `--var key=value` pairs (server-rendered; un-supplied markers stay visible) |
 | `templates` | `GET /api/templates` — list the built-in templates as a `name`/`placeholders`/`description` table |
-| `show <id>` | `GET /api/tasks/:id` — status, CI, tags, summary, review notes, blockers, dispatch/revert errors |
+| `show <id>` | `GET /api/tasks/:id` — status, CI, tags, summary, review notes, the pending `awaiting_input` question, blockers, dispatch/revert errors |
 | `approve <id>` | `POST …/approve` (reports merged / conflict-sent-back / reverted-on-red) |
 | `reject <id> -m <note>` | `POST …/reject` |
+| `answer <id> -m <text>` | `POST …/answer` (answers an `awaiting_input` task; resumes the agent) |
 | `requeue <id>` | `POST …/requeue` |
 | `block <id> --on id,id` | `PUT …/blocked_by` (`--on ''` clears) |
 | `priority <id> <N>` | `POST …/priority` (set the dispatch priority; higher = sooner) |
@@ -913,8 +950,10 @@ hash-routed and SSE-driven. Views/features:
   read-only), a **sub-task progress rollup** (for a task that gates dependents: an
   "N/M merged" fraction, a progress bar, and the direct children with their live
   statuses — computed client-side from the directory's task list, so no extra API
-  field), approve/reject/abort/requeue/rollback controls, and an **Open terminal**
-  button (running tasks).
+  field), approve/reject/abort/requeue/rollback controls, an **answer box** for an
+  `awaiting_input` task (shows the agent's question + posts the answer to
+  `POST …/answer`, mirroring the review change-request box), and an **Open terminal**
+  button (running tasks). The board adds an **Awaiting answer** lane.
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
   and the conflict/revert/CI-pass/auto-merge rates. Also a **Disk usage** readout
   (from `/health`'s `disk` object — see §5): cards for task-worktree bytes (+ count),
@@ -922,7 +961,7 @@ hash-routed and SSE-driven. Views/features:
   when `disk.warn` is set.
 - **Chrome** — light/dark theme toggle (persisted, applied pre-paint), a live
   connection LED, an **attention indicator** + tab-title badge driven by
-  `needsAttention` (review + failed), with optional desktop notifications, and a
+  `needsAttention` (review + awaiting-input + failed), with optional desktop notifications, and a
   **pause/resume control** + **PAUSED banner** driven by `health.paused`
   (`POST /api/pause` / `/api/resume`) so the operator can enter drain-only
   maintenance mode and see it at a glance.
@@ -1005,6 +1044,8 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `output_snapshot` | TEXT | sanitized run-log snapshot captured at review/merge. |
 | `summary` | TEXT | the agent's optional `request_review` summary. |
 | `review_note` | TEXT | the latest reviewer/conflict note (mirrored into `task.md`). |
+| `question` | TEXT | ASK handshake: the agent's pending clarifying question while `awaiting_input` (cleared on answer). |
+| `answer` | TEXT | ASK handshake: the operator's answer, held transiently for the `--resume` re-launch to inject, then consumed at re-launch (`markRunning`). |
 | `conflict` | INTEGER | flag: a surfaced non-conflict merge failure on `review`. |
 | `idle` | INTEGER | flag: a `running` agent gone quiet. |
 | `ci_status` | TEXT | CI gate: `running`/`pass`/`fail`/null. |
@@ -1095,9 +1136,6 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_AUTO_MERGE` | `false` | auto-merge CI-green low-risk tasks (opt-in). |
 | `BUTCHR_AUTO_MERGE_ALLOWLIST` | `public/,test/,docs/,*.md` | comma-separated low-risk path allowlist. |
 | `BUTCHR_AUTO_MERGE_MAX_LINES` | `150` | max changed lines for low-risk. |
-| `BUTCHR_CTO_CMD` | `claude -p {{CTO_SESSION}} --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{QUESTION_FILE}})"` | read-only, non-recursing CTO command for `ask`. Placeholders: `{{QUESTION_FILE}}`, `{{CTO_SESSION}}`. |
-| `BUTCHR_CTO_SESSION_ID` | _(empty)_ | optional CTO session to `--resume … --fork-session` so the CTO inherits prior context. |
-| `BUTCHR_ASK_TIMEOUT_MS` | `120000` | max wait for a CTO `ask` answer before it's killed. |
 | `BUTCHR_CONFORMANCE_CMD` | `claude -p --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | read-only, non-recursing reviewer for the **spec-conformance gate** (does the diff satisfy the prompt?), run via `bash -lc` in the task's worktree. Placeholder: `{{PROMPT_FILE}}`. **Empty disables** the gate. |
 | `BUTCHR_CONFORMANCE_TIMEOUT_MS` | `120000` | max wait for the conformance reviewer before it's killed (→ null verdict). |
 | `BUTCHR_CONFORMANCE_MAX_DIFF_BYTES` | `60000` | cap on the git diff fed to the conformance reviewer (larger diffs are truncated with a marker). |
@@ -1127,9 +1165,8 @@ files would blow `MAX_ARG_STRLEN` → E2BIG); the agent reads the files itself.
 
 **butchr state dir** (`~/.local/share/butchr/`): `butchr.db` (+ WAL), `butchr.log`
 (+ rotations), `backups/butchr-<ts>.db` (DB snapshots — see §5), `prompts/<id>.md`
-(rendered prompts), `runs/<id>.log` + `<id>.done` (PTY run log + exit marker),
-`mcp/<id>.json` (per-task MCP config), `ask/<id>.q.md` (transient CTO question
-files).
+(rendered prompts), `runs/<id>.log` + `<id>.done` (PTY run log + exit marker), and
+`mcp/<id>.json` (per-task MCP config).
 
 ---
 

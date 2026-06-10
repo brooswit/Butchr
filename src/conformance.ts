@@ -12,12 +12,11 @@
 // It is modelled on the CI gate (tasks.triggerCi): fired on the genuine
 // running→review transition, fire-and-forget (review never blocks on it), advisory
 // (it NEVER hard-blocks approval — mirrors the CI-fail warning), and best-effort
-// (NULL when it can't run or its verdict can't be parsed). The reviewer reuses the
-// SAME headless, read-only, non-recursing claude mechanism as the CTO `ask`
-// (config.conformanceCmd, run via `bash -lc` in the task's worktree with only
-// Read/Grep/Glob — see src/cto.ts / config.ts). The runner is overridable in tests
-// (setConformanceRunner) so the persistence + trigger wiring is exercised without
-// spawning a real claude.
+// (NULL when it can't run or its verdict can't be parsed). The reviewer runs a
+// headless, read-only, non-recursing claude (config.conformanceCmd, run via
+// `bash -lc` in the task's worktree with only Read/Grep/Glob — see config.ts). The
+// runner is overridable in tests (setConformanceRunner) so the persistence + trigger
+// wiring is exercised without spawning a real claude.
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";

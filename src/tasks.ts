@@ -21,6 +21,7 @@ import { uniqueTaskId } from "./ids.ts";
 import { readSessionUsage } from "./usage.ts";
 import { verifyDefaultBranch } from "./verify.ts";
 import {
+  appendAnswer,
   appendRejection,
   readTaskMd,
   taskMdPath,
@@ -867,7 +868,13 @@ export async function setBlockedBy(
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
   // Only non-terminal, pre-merge states may have their dependencies edited.
-  const editable = new Set<TaskStatus>(["queued", "blocked", "running", "review"]);
+  const editable = new Set<TaskStatus>([
+    "queued",
+    "blocked",
+    "running",
+    "review",
+    "awaiting_input",
+  ]);
   if (!editable.has(row.status)) {
     throw new HttpError(409, `cannot edit blocked_by on a ${row.status} task`);
   }
@@ -1487,6 +1494,10 @@ export function markRunning(
         dispatch_attempts: 0,
         last_dispatch_error: null,
         next_dispatch_at: null,
+        // Consume any pending ASK answer: it has been injected into this launch's
+        // rendered prompt (see dispatcher.dispatch), so clear it now that the agent
+        // is (re-)running, exactly as the answer-resume handshake intends.
+        answer: null,
       },
     })
   ) {
@@ -1665,6 +1676,103 @@ export function markReviewFromAgent(
   // diff satisfies the prompt; orthogonal to CI.
   if (row.status === "running") void triggerConformance(id);
   return "ok";
+}
+
+/**
+ * Move a running task to `awaiting_input` because its agent called the MCP `ask`
+ * tool. Mirrors markReviewFromAgent's non-blocking shape exactly: the agent EXITS
+ * right after this returns, so awaiting_input is pure DB state with no live process
+ * (we clear herdr_pane_id — its pane is about to close). Stores the agent's
+ * `question` for the operator to answer (surfaced in /health + the webapp) and
+ * captures the run-log snapshot so the answerer has the agent's context. Unlike
+ * review this is NOT a completion: no completed_at, no CI gate, no diff footprint.
+ *
+ * Returns:
+ *  - "ok"        → parked in awaiting_input (or already there — duplicate ask).
+ *  - "terminal"  → task is merged/aborted; nothing to do.
+ *  - "notfound"  → no such task.
+ */
+export function markAwaitingInputFromAgent(
+  id: string,
+  question: string,
+): "ok" | "terminal" | "notfound" {
+  const row = getTask(id);
+  if (!row) return "notfound";
+  if (row.status === "merged" || row.status === "aborted") return "terminal";
+
+  // Capture the agent's terminal output now: once it exits there is no live pane,
+  // so the snapshot is what the answerer sees of where the agent got stuck.
+  const snapshot = readRunLogSnapshot(id);
+
+  // running → awaiting_input (normal), or awaiting_input → awaiting_input (a
+  // duplicate ask). Clear the pane: the agent is exiting and this state holds no
+  // live process.
+  const res = db.query(
+    `UPDATE tasks SET status='awaiting_input', question=?, idle=0,
+       herdr_pane_id=NULL, output_snapshot=?
+       WHERE id=? AND status IN ('running','awaiting_input')`,
+  ).run(question, snapshot || null, id);
+  if (res.changes === 0) {
+    // Not in a state we can park (e.g. it was rejected/aborted out from under the
+    // agent) — report the current status so the tool surfaces it.
+    return getTask(id)?.status === "merged" || getTask(id)?.status === "aborted"
+      ? "terminal"
+      : "ok";
+  }
+  if (row.status === "running") {
+    recordTaskEvent(id, "running", "awaiting_input", "agent asked a clarifying question");
+  }
+  const dir = getDirectory(row.directory_id);
+  if (dir) updateTaskMdStatus(dir.path, id, "awaiting_input");
+  emitUpdated(id);
+  // Capture the session's token usage / model now that the agent has paused this turn.
+  captureSessionUsage(id);
+  return "ok";
+}
+
+/**
+ * Answer a task parked in `awaiting_input` (operator/CTO via API/CLI, or a human via
+ * the webapp) and re-queue it for a `--resume` re-launch with the answer injected —
+ * the exact mirror of rejectTask→requestChanges, but for the ASK handshake. Only
+ * valid on `awaiting_input` (409 otherwise); a blank answer is rejected (400).
+ *
+ * The answer is logged to task.md's Clarifications section (audit/UI) and stored in
+ * the `answer` column, which dispatcher.dispatch reads to render the answer-resume
+ * prompt (then markRunning consumes it). The pending `question` is cleared and
+ * session_id is KEPT so the dispatcher resumes the SAME Claude session with full
+ * prior context. Retry state is reset (fresh intent, not a dispatch failure).
+ */
+export async function answerTask(id: string, answer: string): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (row.status !== "awaiting_input") {
+    throw new HttpError(409, `task is not awaiting input (status=${row.status})`);
+  }
+  if (!answer || !answer.trim()) throw new HttpError(400, "answer is required");
+  const dir = getDirectory(row.directory_id);
+  if (!dir) throw new HttpError(404, "directory not found");
+
+  const when = nowIso();
+  const clean = answer.trim();
+  // Log the Q&A to task.md for the durable record (visible in the UI; survives
+  // restarts), mirroring how appendRejection logs review notes.
+  appendAnswer(dir.path, id, row.question ?? "", clean, when);
+
+  // Tear down any lingering tab defensively (normally none — the agent exited after
+  // the non-blocking ask), then re-queue for a `--resume` re-launch. Store the answer
+  // for the dispatcher to inject, clear the pending question, and reset the dispatch
+  // retry state (this is a fresh intent to run, not a dispatch failure) while KEEPING
+  // session_id + the worktree for full-context resume.
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  db.query(
+    `UPDATE tasks SET status='queued', answer=?, question=NULL,
+       herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, idle=0,
+       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
+  ).run(clean, id);
+  recordTaskEvent(id, "awaiting_input", "queued", "question answered by operator");
+  updateTaskMdStatus(dir.path, id, "queued");
+  emitUpdated(id);
+  return taskView(id)!;
 }
 
 // --- CI GATE: build + test on the review transition ------------------------

@@ -38,6 +38,7 @@ COMMANDS
   show <id>                       Task detail: status, ci, tags, summary, notes.
   approve <id>                    Approve a task in review (merges its branch).
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
+  answer <id> -m <text>           Answer a task awaiting input (resumes the agent).
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
   priority <id> <N>               Set a task's dispatch priority (higher = sooner).
@@ -419,6 +420,7 @@ async function cmdShow(positionals, flags) {
       lines.push(`  dead blockers (never merge): ${t.deadBlockers.join(", ")}`);
     }
   }
+  if (t.question) lines.push(`\nawaiting answer to:\n${t.question}`);
   if (t.last_dispatch_error) lines.push(`dispatch error: ${t.last_dispatch_error}`);
   if (t.revert_reason) lines.push(`revert reason: ${t.revert_reason}`);
   if (t.ci_summary) lines.push(`\nCI:\n${t.ci_summary}`);
@@ -459,6 +461,19 @@ async function cmdReject(positionals, flags) {
     return;
   }
   process.stdout.write(`rejected ${id} → ${t.status} (agent will resume with your note)\n`);
+}
+
+async function cmdAnswer(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("answer: missing <id>");
+  const answer = flags.message;
+  if (!answer) fail("answer: missing -m <text>");
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/answer`, { answer });
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  process.stdout.write(`answered ${id} → ${t.status} (agent will resume with your answer)\n`);
 }
 
 async function cmdRequeue(positionals, flags) {
@@ -625,6 +640,8 @@ async function main() {
       return cmdApprove(positionals, flags);
     case "reject":
       return cmdReject(positionals, flags);
+    case "answer":
+      return cmdAnswer(positionals, flags);
     case "requeue":
       return cmdRequeue(positionals, flags);
     case "block":

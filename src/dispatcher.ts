@@ -21,7 +21,7 @@ import { db, getSetting, setSetting } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
-import { readTaskMd, renderAgentPrompt, renderReworkPrompt } from "./taskmd.ts";
+import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderReworkPrompt } from "./taskmd.ts";
 import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
@@ -544,12 +544,20 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
 
     // Render the prompt to a file in butchr's own data dir (never pollute the repo
     // worktree). First launch → the full prompt (context files + prompt). Resume →
-    // a focused rework prompt (just the review notes): the resumed session already
-    // holds the original prompt and prior work in its context.
+    // a focused prompt: the resumed session already holds the original prompt and
+    // prior work in its context, so we inject only what's new. A resume with a
+    // pending ASK `answer` is an ANSWER-resume (the agent paused on a question) →
+    // hand it the answer; otherwise it's a reject/conflict rework → hand it the
+    // review notes.
     const doc = readTaskMd(dir.path, task.id);
-    const rendered = isResume
-      ? renderReworkPrompt(dir.path, doc)
-      : renderAgentPrompt(dir.path, doc);
+    let rendered: string;
+    if (isResume && task.answer && task.answer.trim()) {
+      rendered = renderAnswerPrompt(task.answer);
+    } else if (isResume) {
+      rendered = renderReworkPrompt(dir.path, doc);
+    } else {
+      rendered = renderAgentPrompt(dir.path, doc);
+    }
     writeFileSync(promptFile, rendered, "utf8");
 
     // Per-task MCP config pointing the agent at butchr's /mcp/<id> endpoint.
