@@ -10,6 +10,11 @@ terminal/agent session management to herdr.
 - **Stack:** Bun · SQLite (`bun:sqlite`) · herdr · git — **zero npm dependencies.**
 - **Webapp:** vanilla JS single-page app, no framework.
 
+> 📖 For the **complete, current specification** of butchr as it actually exists —
+> architecture, the full task state machine, dispatch/review/merge internals, the
+> REST/MCP/CLI interfaces, the data model, and every config var — see
+> **[SPEC.md](./SPEC.md)** (the living design doc).
+
 ---
 
 ## Concepts
