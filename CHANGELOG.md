@@ -18,11 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`exec.run()` gained an optional `timeoutMs` bound** (internal). The shared
+  "shell out, never throw" helper can now kill a subprocess that exceeds a
+  wall-clock deadline, resolving with a non-zero code, a `timedOut` flag, and a
+  marker in `stderr`. The bound is opt-in and off by default, so existing callers
+  are unaffected — this is groundwork that lets the CI gate share the same bounded
+  runner the post-merge verify gate already uses (no user-facing behavior change).
 - **Config reads every `BUTCHR_*` var through the typed `env()` helpers.** The two
   remaining vars that read `process.env` directly (`BUTCHR_CTO_CONTEXT`,
   `BUTCHR_TERMINAL_CMD`) now go through `env(name, "")` like the rest of
   `config.ts`. Pure-internal refactor — behavior is identical (an empty/unset var
   still falls back to `""`).
+- **Auto-rebase and auto-merge now share one conflict-collection helper.** The
+  identical tail that both paths ran after a failed `git rebase` — gather the
+  conflicting files (via `--diff-filter=U`, falling back to scraping git's text),
+  abort the rebase, and decide whether the failure was a conflict — lived in two
+  copies that had to be kept in sync by hand. It's now a single internal helper, so
+  the conflict note handed back to the agent can't drift between the two paths.
+  Pure-internal refactor; no behavior change.
 
 ### Security
 - **CSRF / DNS-rebinding guard on the web API.** butchr binds to loopback, but a
@@ -45,15 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree: each finding names the smell (with `file:function`), why it matters, and a
   specific refactor scoped as an independent follow-up task, ranked by value/effort
   and flagged for same-file sequencing. Report only — no code changes.
-
-### Changed
-- **Auto-rebase and auto-merge now share one conflict-collection helper.** The
-  identical tail that both paths ran after a failed `git rebase` — gather the
-  conflicting files (via `--diff-filter=U`, falling back to scraping git's text),
-  abort the rebase, and decide whether the failure was a conflict — lived in two
-  copies that had to be kept in sync by hand. It's now a single internal helper, so
-  the conflict note handed back to the agent can't drift between the two paths.
-  Pure-internal refactor; no behavior change.
 
 ## [0.9.2] - 2026-06-10
 
