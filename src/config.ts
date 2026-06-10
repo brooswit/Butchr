@@ -87,6 +87,16 @@ export const config = {
   backupIntervalMs: envInt("BUTCHR_BACKUP_INTERVAL_MS", 1000 * 60 * 15),
   backupKeep: envInt("BUTCHR_BACKUP_KEEP", 24),
 
+  /**
+   * DISK-USAGE advisory threshold (bytes). butchr's two unbounded footprints — the
+   * per-task git worktrees under each registered repo and the DB backup directory —
+   * are sized on `/health` (the `disk` object). When their COMBINED size exceeds this,
+   * `/health` flags `disk.warn=true` and the webapp shows an advisory badge. Purely
+   * advisory: it never blocks dispatch, merges, or backups. Default 5 GiB. Set to 0
+   * to DISABLE the warning (sizes are still reported). See src/disk.ts.
+   */
+  diskWarnBytes: envInt("BUTCHR_DISK_WARN_BYTES", 5 * 1024 * 1024 * 1024),
+
   /** Path to the herdr binary. */
   herdrBin: env("BUTCHR_HERDR_BIN", "herdr"),
 

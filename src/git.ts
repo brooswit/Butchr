@@ -1,7 +1,7 @@
 // Git operations butchr owns directly. All run against a directory root that
 // is a git repository. Task branches/worktrees are named by task ID.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   bumpPatchVersion,
   insertUnreleasedEntry,
@@ -38,6 +38,29 @@ export async function defaultBranch(dir: string): Promise<string> {
  */
 export function worktreePath(dir: string, taskId: string): string {
   return join(dir, taskId);
+}
+
+/**
+ * List the LINKED (task) worktrees of the repo at `dir` — i.e. every worktree
+ * EXCEPT the main checkout (`dir` itself). butchr creates one worktree per task at
+ * `<dir>/<taskId>`, so this is the authoritative set of task checkouts on disk
+ * (including any orphaned ones a crash left behind). Returns absolute paths.
+ *
+ * Parses `git worktree list --porcelain`: a block per worktree, each starting with a
+ * `worktree <abs-path>` line. The FIRST block is always the main worktree, which we
+ * drop. Best-effort: a git error (e.g. `dir` is no longer a repo) yields an empty list.
+ */
+export async function listWorktrees(dir: string): Promise<string[]> {
+  const res = await run([git, "-C", dir, "worktree", "list", "--porcelain"]);
+  if (!res.ok) return [];
+  const paths: string[] = [];
+  for (const line of res.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) paths.push(line.slice("worktree ".length).trim());
+  }
+  // The first entry is the main worktree (the repo root). Drop it — and defensively
+  // drop any entry equal to `dir` — so only the per-task checkouts remain.
+  const main = resolve(dir);
+  return paths.filter((p) => resolve(p) !== main);
 }
 
 /** Create a worktree on a new branch <taskId> at <dir>/<taskId>. */

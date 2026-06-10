@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
+import { computeDiskUsage } from "./disk.ts";
 import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
 import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
@@ -289,6 +290,17 @@ async function healthResponse(): Promise<Response> {
     /* best-effort */
   }
 
+  // DISK-USAGE snapshot (see src/disk.ts): size of the per-task worktrees under the
+  // registered repo(s) + the DB backup dir, with an advisory `warn` when the total
+  // crosses config.diskWarnBytes. Best-effort — a sizing failure leaves `disk` null
+  // and never affects the 200/503 verdict.
+  let disk: Awaited<ReturnType<typeof computeDiskUsage>> | null = null;
+  try {
+    disk = await computeDiskUsage();
+  } catch {
+    /* best-effort — disk accounting must never fail health */
+  }
+
   const healthy = dbOk && tickAlive;
   const body = {
     status: healthy ? "ok" : "degraded",
@@ -326,6 +338,9 @@ async function healthResponse(): Promise<Response> {
       intervalMs: config.backupIntervalMs,
       dir: config.backupDir,
     },
+    // DISK usage of the worktrees + backup dir, with an advisory over-threshold flag
+    // (null if sizing failed). See src/disk.ts / config.diskWarnBytes.
+    disk,
     herdr: { reachable: herdrReachable },
   };
   return json(body, healthy ? 200 : 503);

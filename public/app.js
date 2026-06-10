@@ -2336,6 +2336,18 @@ function fmtDuration(ms) {
   const hr = h % 24;
   return hr ? `${d}d ${hr}h` : `${d}d`;
 }
+// Format a byte count as a human-readable size (KB/MB/GB, binary units). "—" for
+// null/non-finite; "0 B" for zero.
+function fmtBytes(bytes) {
+  if (bytes == null || !isFinite(bytes)) return "—";
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  const v = n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1);
+  return `${v} ${units[i]}`;
+}
 // Format a rate (0..1 or null) as a percentage string; "—" when there's no data.
 function fmtPct(rate) {
   if (rate == null || !isFinite(rate)) return "—";
@@ -2436,6 +2448,34 @@ async function renderMetrics() {
 
   wrap.appendChild(el("small", { class: "muted" },
     "Rates reflect each task's current state — conflict/CI flags can be cleared as a task moves on, so treat them as best-effort snapshots."));
+
+  // Disk usage readout — sourced from /health's `disk` object (best-effort; absent
+  // if sizing failed). Surfaces butchr's two growth footprints (task worktrees + DB
+  // backups) and an advisory badge when the total crosses the configured threshold.
+  let health = null;
+  try { health = await api("GET", "/health"); } catch (e) { /* degraded — skip readout */ }
+  const disk = health && health.disk;
+  if (disk) {
+    const head = el("h2", {}, "Disk usage");
+    if (disk.warn) {
+      head.appendChild(el("span", {
+        class: "disk-warn-badge",
+        title: `Total ${fmtBytes(disk.totalBytes)} exceeds the ${fmtBytes(disk.warnBytes)} advisory threshold (BUTCHR_DISK_WARN_BYTES)`,
+      }, "over threshold"));
+    }
+    wrap.appendChild(head);
+    const dcards = el("div", { class: "metrics-cards" });
+    dcards.appendChild(metricCard("Task worktrees", fmtBytes(disk.worktreesBytes),
+      `${disk.worktreeCount} worktree${disk.worktreeCount === 1 ? "" : "s"}`));
+    dcards.appendChild(metricCard("DB backups", fmtBytes(disk.backupsBytes)));
+    dcards.appendChild(metricCard("Total", fmtBytes(disk.totalBytes),
+      disk.warnBytes > 0 ? `threshold ${fmtBytes(disk.warnBytes)}` : "no threshold"));
+    wrap.appendChild(dcards);
+    wrap.appendChild(el("small", { class: "muted" },
+      "Worktrees are the per-task git checkouts under each repo; backups are the DB snapshots. "
+      + (disk.truncated ? "Some trees hit the scan cap, so totals are a floor. " : "")
+      + "Set BUTCHR_DISK_WARN_BYTES to tune the advisory threshold (0 disables it)."));
+  }
 
   mount(wrap);
 }

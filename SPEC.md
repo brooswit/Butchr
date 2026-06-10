@@ -657,8 +657,25 @@ status), `failedTasks`, `concurrency` (`active` = running+review+finalizing,
 `queued`), `needsAttention` (`review`+`failed`), `reaper` (last boot reap),
 `backup` (DB-snapshot resilience: `enabled`, `lastSnapshotAt` — null until the
 first snapshot of this run — `count` of retained snapshots, `keep`, `intervalMs`,
-`dir`), and `herdr.reachable` (**best-effort — does NOT affect the 200/503
-verdict**; herdr down ⇒ tasks stall at `queued` but butchr stays "healthy").
+`dir`), `disk` (**disk-usage accounting**, see below), and `herdr.reachable`
+(**best-effort — does NOT affect the 200/503 verdict**; herdr down ⇒ tasks stall at
+`queued` but butchr stays "healthy").
+
+**`disk`** (`src/disk.ts`) sizes butchr's two unbounded-growth footprints — the
+per-task git **worktrees** under each registered repo (one checkout per live task, at
+`<repo>/<taskId>`) and the **DB backup directory** — so an operator can see them
+before they fill the disk. Fields: `worktreesBytes`, `worktreeCount`, `backupsBytes`
+(0 if the backup dir doesn't exist yet), `totalBytes` (= worktrees + backups),
+`warnBytes` (the `BUTCHR_DISK_WARN_BYTES` threshold; 0 = disabled), `warn` (true when
+`warnBytes > 0 && totalBytes > warnBytes` — **purely advisory**, never blocks
+dispatch/merge/backups), and `truncated` (true if a directory tree hit the scan cap,
+making the totals a floor). The sizing is a **bounded, best-effort** `lstat` walk
+(symlinks counted as the link, never followed; per-entry errors skipped; capped entry
+count) **memoized for ~30 s** so the frequent `/health` polls don't re-walk every
+checkout each time. The whole `disk` object is `null` if the computation fails — it never affects
+the 200/503 verdict. Worktree paths come from `git worktree list` (`git.listWorktrees`,
+which drops the main checkout). The webapp's **Metrics** page renders a "Disk usage"
+readout from this object, with an "over threshold" badge when `warn` is set.
 
 ### Supervision (systemd + watchdog)
 
@@ -877,7 +894,10 @@ hash-routed and SSE-driven. Views/features:
   field), approve/reject/abort/requeue/rollback controls, and an **Open terminal**
   button (running tasks).
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
-  and the conflict/revert/CI-pass/auto-merge rates.
+  and the conflict/revert/CI-pass/auto-merge rates. Also a **Disk usage** readout
+  (from `/health`'s `disk` object — see §5): cards for task-worktree bytes (+ count),
+  DB-backup bytes, and the combined total, with an advisory "over threshold" badge
+  when `disk.warn` is set.
 - **Chrome** — light/dark theme toggle (persisted, applied pre-paint), a live
   connection LED, an **attention indicator** + tab-title badge driven by
   `needsAttention` (review + failed), with optional desktop notifications, and a
@@ -1031,6 +1051,7 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_BACKUP_DIR` | `<data>/backups` | where `VACUUM INTO` snapshots (`butchr-<ts>.db`) are written. |
 | `BUTCHR_BACKUP_INTERVAL_MS` | `900000` (15 min) | periodic snapshot cadence; ≤0 disables the periodic loop (a shutdown snapshot is still taken). |
 | `BUTCHR_BACKUP_KEEP` | `24` | newest snapshots to retain after each snapshot; ≤0 keeps **all** (no prune). |
+| `BUTCHR_DISK_WARN_BYTES` | `5368709120` (5 GiB) | advisory threshold on combined worktree + backup disk usage; `/health` flags `disk.warn` when exceeded. `0` disables the warning (sizes still reported). |
 | `BUTCHR_HERDR_BIN` | `herdr` | herdr binary. |
 | `BUTCHR_GIT_BIN` | `git` | git binary. |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval. |
