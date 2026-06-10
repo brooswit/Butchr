@@ -252,6 +252,147 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
+// ---- METRICS (read-only aggregation) --------------------------------------
+// Powers the webapp's Metrics view. A single SELECT pulls just the columns the
+// aggregation needs (metricRows), and computeMetrics() turns the raw rows into
+// dashboard aggregates with NO DB access — so the aggregation is unit-testable
+// against synthetic rows and `now`. Timestamp semantics (see tasks.ts):
+//   started_at   — running transition (agent launched)
+//   completed_at — running→review transition (work submitted for review)
+//   merged_at    — merged into the default branch
+// so started→review uses (started_at, completed_at) and started→merge uses
+// (started_at, merged_at). The orthogonal flags (conflict/ci_status) reflect a
+// task's CURRENT row state, not its full history — they can be cleared as a task
+// moves on — so the derived rates are best-effort snapshots (surfaced as such).
+
+// Columns the metrics aggregation reads; nothing else is fetched.
+export type MetricRow = {
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  merged_at: string | null;
+  conflict: number;
+  auto_merged: number;
+  revert_reason: string | null;
+  ci_status: string | null;
+};
+
+export function metricRows(): MetricRow[] {
+  return db
+    .query<MetricRow, []>(
+      `SELECT status, started_at, completed_at, merged_at,
+              conflict, auto_merged, revert_reason, ci_status
+         FROM tasks`,
+    )
+    .all();
+}
+
+// A rate plus its raw numerator/denominator, so the UI can show "12% (3/25)" and
+// distinguish a real 0% from "no data yet" (rate=null when the denominator is 0).
+export type Rate = { rate: number | null; num: number; of: number };
+export type Median = { medianMs: number | null; count: number };
+
+export type Metrics = {
+  total: number;
+  byStatus: Record<string, number>;
+  throughput: {
+    days: number;
+    perDay: { date: string; count: number }[]; // oldest → newest, length === days
+    windowMerged: number; // merged within the window
+    totalMerged: number; // merged all-time (status='merged')
+  };
+  timeToReview: Median; // started_at → completed_at
+  timeToMerge: Median; // started_at → merged_at
+  conflictRate: Rate; // conflict=1 over dispatched (started_at set)
+  revertRate: Rate; // revert_reason set over (merged + reverted) merge attempts
+  ciPassRate: Rate; // ci_status='pass' over (pass + fail) settled CI runs
+  autoMergeRate: Rate; // auto_merged=1 over merged tasks
+};
+
+const DAY_MS = 86_400_000;
+
+function median(xs: number[]): number | null {
+  if (xs.length === 0) return null;
+  const s = xs.slice().sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : Math.round((s[mid - 1]! + s[mid]!) / 2);
+}
+
+// Positive ms span between two ISO timestamps; null if either is missing or the
+// span is non-positive (same instant / clock skew — not a meaningful duration).
+function spanMs(a: string | null, b: string | null): number | null {
+  if (!a || !b) return null;
+  const ms = new Date(b).getTime() - new Date(a).getTime();
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+function rate(num: number, of: number): Rate {
+  return { rate: of > 0 ? num / of : null, num, of };
+}
+
+// Pure: derive dashboard aggregates from raw rows + the current time. `days` is
+// the throughput window length (UTC-day buckets, oldest → newest).
+export function computeMetrics(rows: MetricRow[], nowMs: number, days = 14): Metrics {
+  const byStatus: Record<string, number> = {};
+  for (const r of rows) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
+
+  // Throughput: merged tasks bucketed by UTC day across the last `days` days.
+  // ISO timestamps are UTC ('…Z'), so the first 10 chars are the UTC date.
+  const perDay: { date: string; count: number }[] = [];
+  const dayIdx = new Map<string, number>();
+  for (let i = days - 1; i >= 0; i--) {
+    const date = new Date(nowMs - i * DAY_MS).toISOString().slice(0, 10);
+    dayIdx.set(date, perDay.length);
+    perDay.push({ date, count: 0 });
+  }
+  let windowMerged = 0;
+  for (const r of rows) {
+    if (!r.merged_at) continue;
+    const at = dayIdx.get(r.merged_at.slice(0, 10));
+    if (at !== undefined) {
+      perDay[at]!.count++;
+      windowMerged++;
+    }
+  }
+
+  const toReview: number[] = [];
+  const toMerge: number[] = [];
+  let started = 0;
+  let conflicts = 0;
+  let reverted = 0;
+  let ciPass = 0;
+  let ciFail = 0;
+  let autoMerged = 0;
+  for (const r of rows) {
+    if (r.started_at) started++;
+    if (r.conflict) conflicts++;
+    if (r.revert_reason) reverted++;
+    if (r.ci_status === "pass") ciPass++;
+    else if (r.ci_status === "fail") ciFail++;
+    if (r.auto_merged) autoMerged++;
+    const tr = spanMs(r.started_at, r.completed_at);
+    if (tr !== null) toReview.push(tr);
+    const tm = spanMs(r.started_at, r.merged_at);
+    if (tm !== null) toMerge.push(tm);
+  }
+  const merged = byStatus.merged ?? 0;
+
+  return {
+    total: rows.length,
+    byStatus,
+    throughput: { days, perDay, windowMerged, totalMerged: merged },
+    timeToReview: { medianMs: median(toReview), count: toReview.length },
+    timeToMerge: { medianMs: median(toMerge), count: toMerge.length },
+    conflictRate: rate(conflicts, started),
+    // A revertedOnRed task ends `failed` (carrying revert_reason), so it is NOT in
+    // the merged count — merge attempts that landed (if only briefly) are
+    // merged + reverted.
+    revertRate: rate(reverted, merged + reverted),
+    ciPassRate: rate(ciPass, ciPass + ciFail),
+    autoMergeRate: rate(autoMerged, merged),
+  };
+}
+
 // NOTE: there is deliberately no blind "running → queued" recovery here. A task
 // left `running` after a restart still has a live herdr agent whose name is taken;
 // re-queuing it just makes the dispatcher collide on `agent_name_taken`. Startup

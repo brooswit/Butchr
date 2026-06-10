@@ -213,6 +213,7 @@ function parseHash() {
   const hash = location.hash.replace(/^#/, "") || "/";
   const parts = hash.split("/").filter(Boolean);
   if (parts.length === 0) return { name: "dashboard" };
+  if (parts[0] === "metrics") return { name: "metrics" };
   if (parts[0] === "dir") return { name: "directory", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
   return { name: "dashboard" };
@@ -235,8 +236,10 @@ async function render() {
   const route = parseHash();
   current = route;
   stopLiveOutput();
+  syncTopnav(route);
   try {
     if (route.name === "dashboard") await renderDashboard();
+    else if (route.name === "metrics") await renderMetrics();
     else if (route.name === "directory") await renderDirectory(route.id);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
@@ -1319,6 +1322,142 @@ function wireDiff(box) {
   box.querySelectorAll(".diff-file-head").forEach((head) => {
     head.addEventListener("click", () => head.parentElement.classList.toggle("collapsed"));
   });
+}
+
+// ---------- topnav active state ----------
+// Highlight the topbar nav link matching the current route. Directory/task pages
+// fall under "Directories"; the Metrics page under "Metrics".
+function syncTopnav(route) {
+  const links = document.querySelectorAll(".topnav-link");
+  if (!links.length) return;
+  const onMetrics = route && route.name === "metrics";
+  links.forEach((a) => {
+    const isMetrics = a.getAttribute("href") === "#/metrics";
+    const active = isMetrics ? onMetrics : !onMetrics;
+    a.classList.toggle("active", active);
+    if (active) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+}
+
+// ---------- metrics view ----------
+// Format a millisecond duration as a compact human string (e.g. "2h 5m", "3m",
+// "45s"). Returns "—" for null/zero so empty medians read cleanly.
+function fmtDuration(ms) {
+  if (ms == null || !isFinite(ms) || ms <= 0) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  if (h < 24) return rem ? `${h}h ${rem}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const hr = h % 24;
+  return hr ? `${d}d ${hr}h` : `${d}d`;
+}
+// Format a rate (0..1 or null) as a percentage string; "—" when there's no data.
+function fmtPct(rate) {
+  if (rate == null || !isFinite(rate)) return "—";
+  const pct = rate * 100;
+  return (pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)) + "%";
+}
+
+// A single number card: big value, label, and an optional sub-line (e.g. raw
+// numerator/denominator behind a rate).
+function metricCard(label, value, sub) {
+  return el("div", { class: "metric-card" }, [
+    el("div", { class: "metric-value" }, String(value)),
+    el("div", { class: "metric-label" }, label),
+    sub != null ? el("div", { class: "metric-sub" }, sub) : null,
+  ]);
+}
+// "num/of" sub-line for a rate card (or "no data" when nothing has happened yet).
+function rateSub(r) {
+  if (!r || r.of === 0) return "no data yet";
+  return `${r.num} / ${r.of}`;
+}
+
+// Tiny inline bar sparkline for merged-per-day throughput. No chart lib: a row of
+// CSS-height bars, each titled with its date + count. Heights are scaled to the
+// busiest day in the window (a flat zero series renders as a baseline).
+function throughputSpark(perDay) {
+  const max = Math.max(1, ...perDay.map((d) => d.count));
+  const bars = perDay.map((d) => {
+    const h = d.count > 0 ? Math.max(8, Math.round((d.count / max) * 100)) : 2;
+    const bar = el("div", {
+      class: "spark-bar" + (d.count > 0 ? "" : " zero"),
+      style: `height:${h}%`,
+      title: `${d.date}: ${d.count} merged`,
+    });
+    return el("div", { class: "spark-col" }, [bar]);
+  });
+  return el("div", { class: "spark" }, bars);
+}
+
+// Horizontal status breakdown bars: one row per present status, reusing the
+// existing .chip color via a class, width proportional to the largest count.
+function statusBars(byStatus) {
+  const entries = Object.entries(byStatus).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return el("div", { class: "empty" }, "No tasks yet.");
+  const max = Math.max(1, ...entries.map(([, n]) => n));
+  const rows = entries.map(([status, n]) => {
+    const fill = el("div", {
+      class: "sb-fill " + status,
+      style: `width:${Math.max(2, Math.round((n / max) * 100))}%`,
+    });
+    return el("div", { class: "status-bar-row" }, [
+      el("span", { class: "sb-label", html: chip(status) }),
+      el("div", { class: "sb-track" }, [fill]),
+      el("span", { class: "sb-count" }, String(n)),
+    ]);
+  });
+  return el("div", { class: "status-bars" }, rows);
+}
+
+async function renderMetrics() {
+  const m = await api("GET", "/metrics");
+  const wrap = el("div");
+  wrap.appendChild(el("h1", {}, "Metrics"));
+  wrap.appendChild(el("div", { class: "crumbs" },
+    `aggregate across all tasks · ${m.total} total`));
+
+  // number cards
+  const cards = el("div", { class: "metrics-cards" });
+  cards.appendChild(metricCard("Total tasks", m.total));
+  cards.appendChild(metricCard("Merged (all-time)", m.throughput.totalMerged));
+  cards.appendChild(metricCard("Merged / last " + m.throughput.days + "d", m.throughput.windowMerged));
+  cards.appendChild(metricCard("Median time to review",
+    fmtDuration(m.timeToReview.medianMs), `${m.timeToReview.count} sample${m.timeToReview.count === 1 ? "" : "s"}`));
+  cards.appendChild(metricCard("Median time to merge",
+    fmtDuration(m.timeToMerge.medianMs), `${m.timeToMerge.count} sample${m.timeToMerge.count === 1 ? "" : "s"}`));
+  cards.appendChild(metricCard("Conflict rate", fmtPct(m.conflictRate.rate), rateSub(m.conflictRate)));
+  cards.appendChild(metricCard("Revert rate", fmtPct(m.revertRate.rate), rateSub(m.revertRate)));
+  cards.appendChild(metricCard("CI pass rate", fmtPct(m.ciPassRate.rate), rateSub(m.ciPassRate)));
+  cards.appendChild(metricCard("Auto-merge rate", fmtPct(m.autoMergeRate.rate), rateSub(m.autoMergeRate)));
+  wrap.appendChild(cards);
+
+  // throughput sparkline
+  wrap.appendChild(el("h2", {}, "Throughput — merged / day"));
+  const tp = el("div", { class: "panel" });
+  tp.appendChild(throughputSpark(m.throughput.perDay));
+  tp.appendChild(el("div", { class: "spark-axis" }, [
+    el("span", {}, m.throughput.perDay[0] ? m.throughput.perDay[0].date : ""),
+    el("span", {}, m.throughput.perDay.length
+      ? m.throughput.perDay[m.throughput.perDay.length - 1].date : ""),
+  ]));
+  wrap.appendChild(tp);
+
+  // status breakdown
+  wrap.appendChild(el("h2", {}, "Tasks by status"));
+  const sb = el("div", { class: "panel" });
+  sb.appendChild(statusBars(m.byStatus));
+  wrap.appendChild(sb);
+
+  wrap.appendChild(el("small", { class: "muted" },
+    "Rates reflect each task's current state — conflict/CI flags can be cleared as a task moves on, so treat them as best-effort snapshots."));
+
+  mount(wrap);
 }
 
 // ---------- needs-attention signal ----------

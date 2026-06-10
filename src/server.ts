@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { config } from "./config.ts";
-import { db } from "./db.ts";
+import { computeMetrics, db, metricRows } from "./db.ts";
 import { dispatcherHealth } from "./dispatcher.ts";
 import {
   HttpError,
@@ -276,6 +276,17 @@ route("GET", "/api/fs", async (req) => {
 
 // Health (also exposed at the bare /health path — see fetch()).
 route("GET", "/api/health", async () => healthResponse());
+
+// Operational metrics for the webapp's Metrics view. Read-only aggregates over
+// all tasks (see db.computeMetrics): status counts, merged-per-day throughput,
+// median time-to-review / time-to-merge, and conflict / revert / CI-pass /
+// auto-merge rates. `?days=N` (1–90, default 14) sets the throughput window.
+route("GET", "/api/metrics", async (req) => {
+  const url = new URL(req.url);
+  const raw = Number(url.searchParams.get("days"));
+  const days = Number.isFinite(raw) && raw > 0 ? Math.min(90, Math.floor(raw)) : 14;
+  return json(computeMetrics(metricRows(), Date.now(), days));
+});
 
 // Directories
 route("GET", "/api/directories", async () => json(listDirectories()));

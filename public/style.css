@@ -110,6 +110,16 @@ a:hover { text-decoration: underline; }
 
 .topbar-right { display: flex; align-items: center; gap: 14px; }
 
+/* topbar nav — Directories / Metrics. Sits to the right of the brand; the active
+   route's link is highlighted. margin-right:auto pushes topbar-right to the end. */
+.topnav { display: flex; align-items: center; gap: 4px; margin-left: 22px; margin-right: auto; }
+.topnav-link {
+  color: var(--muted); font-size: 13px; font-weight: 600;
+  padding: 6px 10px; border-radius: var(--radius-md);
+}
+.topnav-link:hover { color: var(--text); background: var(--panel-2); text-decoration: none; }
+.topnav-link.active { color: var(--text); background: var(--panel-2); }
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
@@ -534,3 +544,55 @@ small.muted { font-size: 12px; }
 }
 .ci-detail.collapsed .ci-detail-body { display: none; }
 .ci-detail-body { margin-top: 8px; max-height: 320px; overflow: auto; }
+
+/* ---- metrics view ---- */
+/* number cards grid */
+.metrics-cards {
+  display: grid; gap: 12px; margin: 16px 0 8px;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+}
+.metric-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px;
+}
+.metric-value { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; }
+.metric-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric-sub { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 6px; opacity: 0.85; }
+
+/* throughput sparkline — a row of CSS-height bars, no chart lib */
+.spark {
+  display: flex; align-items: flex-end; gap: 3px;
+  height: 96px; padding: 4px 0;
+}
+.spark-col { flex: 1 1 0; display: flex; align-items: flex-end; justify-content: center; height: 100%; min-width: 4px; }
+.spark-bar {
+  width: 100%; max-width: 28px; background: var(--accent);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0; min-height: 2px;
+}
+.spark-bar.zero { background: var(--border); }
+.spark-axis {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 6px;
+}
+
+/* status breakdown — one horizontal bar per status, reusing chip colors */
+.status-bars { display: flex; flex-direction: column; gap: 8px; }
+.status-bar-row { display: flex; align-items: center; gap: 10px; }
+.status-bar-row .sb-label { flex: 0 0 92px; }
+.status-bar-row .sb-track {
+  flex: 1; height: 10px; background: var(--panel-2);
+  border-radius: var(--radius-sm); overflow: hidden;
+}
+.status-bar-row .sb-fill { height: 100%; background: var(--queued); border-radius: var(--radius-sm); }
+.status-bar-row .sb-count { flex: 0 0 auto; font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 28px; text-align: right; }
+/* fill colors mirror the chip palette */
+.sb-fill.queued { background: var(--queued); }
+.sb-fill.blocked { background: var(--blocked); }
+.sb-fill.running { background: var(--running); }
+.sb-fill.idle { background: var(--idle); }
+.sb-fill.review { background: var(--review); }
+.sb-fill.finalizing { background: var(--finalizing); }
+.sb-fill.merged { background: var(--merged); }
+.sb-fill.rejected { background: var(--rejected); }
+.sb-fill.failed { background: var(--failed); }
+.sb-fill.aborted { background: var(--aborted); }
