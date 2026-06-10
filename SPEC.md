@@ -683,10 +683,11 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `POST` | `/api/resume` | `{}` | `{ paused: false }` — resume normal dispatch. Persisted; idempotent. Publishes a `dispatch.paused` SSE event. |
 | `GET` | `/api/metrics?days=N` | — | `Metrics` aggregate (see below). `days` 1–90, default 14. |
 | `GET` | `/api/directories` | — | `DirectoryView[]` (rows + `counts` by status, with `idle` peeled out of `running`). |
+| `GET` | `/api/templates` | — | `TemplateView[]` — the built-in task **templates** (recipes): each `{ name, description, body, placeholders }`, where `body` carries `{{placeholder}}` markers and `placeholders` lists their distinct names (first-seen order). Static built-ins from `src/templates.ts` (`feature`, `refactor-extract`, `webapp-panel`, `add-endpoint`). |
 | `POST` | `/api/directories` | `{ path, label? }` | `201` `DirectoryView`. 400 if not a git repo; 409 if already registered; 502 if the herdr workspace can't be created. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | — | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks`/`tags` as arrays plus precomputed `blockerStates`/`deadBlockers`. 404 if directory gone. |
-| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags? }` | `201` `TaskView`. `kind:"plan"` → plan task. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). Validates blockers exist (404), cycle (400), model (400), tags shape (400), prompt required (400). |
+| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), template name (404), `vars` shape (400), prompt required (400). |
 | `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks`/`tags` + `estimate`, the rough p50–p90 duration estimate — see §10). 404 if gone. |
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |
 | `GET` | `/api/tasks/:id/estimate` | — | `{ single, chain }` — the rough duration estimate (§10): `single` is the task's own p50–p90 range (same object as `TaskView.estimate`), `chain` the critical-path total across its dependency chain (a plan's sub-tasks, or this task's blockers) or `null` when there's nothing to chain. 404 if gone. |
@@ -754,6 +755,8 @@ the raw payload.
 | `health` | `GET /health` (exit 1 if degraded) |
 | `ls [--dir <id>] [--status <s>] [--tag a,b]` | `GET /api/directories(/:id/tasks)` — compact id/status/CI/tags table; `idle` shows `status*`; `--dir` accepts an id or path; `--status` filters client-side; `--tag` keeps tasks carrying ANY of the given labels |
 | `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels) |
+| `new <dir> --template <name> [--var k=v …] [--blocked-by …] [--tag …]` | `POST /api/directories/:id/tasks` with `{ template, vars }` instead of `-m` — create from a built-in template, filling its `{{placeholders}}` with repeatable `--var key=value` pairs (server-rendered; un-supplied markers stay visible) |
+| `templates` | `GET /api/templates` — list the built-in templates as a `name`/`placeholders`/`description` table |
 | `show <id>` | `GET /api/tasks/:id` — status, CI, tags, summary, review notes, blockers, dispatch/revert errors |
 | `approve <id>` | `POST …/approve` (reports merged / conflict-sent-back / reverted-on-red) |
 | `reject <id> -m <note>` | `POST …/reject` |
@@ -770,8 +773,11 @@ hash-routed and SSE-driven. Views/features:
 - **Directory view** — its tasks with three layouts (list/table, **board** by
   lane, and a dependency **graph** via `graphLevels`), a filter bar (id search +
   status chips + a second row of **tag chips**, ANY-match), a queue line, a
-  collapsible history section, and a **new-task modal** (prompt, context-file
-  selector, blocked-by, model, **tags**). Tags render as neutral chips on the task
+  collapsible history section, and a **new-task modal** (an optional **template**
+  picker — `GET /api/templates` — that fills the prompt textarea with a recipe's
+  body and hints which `{{placeholders}}` to complete, plus prompt, context-file
+  selector, blocked-by, model, **tags**; the modal submits the completed prompt to
+  the plain create endpoint). Tags render as neutral chips on the task
   rows, finished list, and board cards. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
   dependents).

@@ -562,7 +562,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .btn.ghost.danger-outline:hover { background: var(--rejected); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-input[type="text"], textarea {
+input[type="text"], textarea, select {
   width: 100%; background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: var(--radius-md); padding: 9px 11px;
   font-size: 13px; font-family: inherit;
@@ -570,6 +570,8 @@ input[type="text"], textarea {
 textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-size: 13px; }
 label.field { display: block; margin-bottom: 12px; }
 label.field .lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+/* inline field hint (e.g. the template picker's "Fill in: {{…}}" placeholder list) */
+label.field .hint { display: block; font-size: 12px; color: var(--muted); margin-top: 5px; }
 
 .row { display: flex; gap: 10px; align-items: center; }
 .row.between { justify-content: space-between; }

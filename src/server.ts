@@ -33,6 +33,7 @@ import {
   taskListView,
   taskView,
 } from "./tasks.ts";
+import { listTemplates, renderTemplate } from "./templates.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
 import { readSessionTranscript } from "./transcript.ts";
 import { worktreePath } from "./git.ts";
@@ -410,6 +411,11 @@ route("GET", "/api/metrics", async (req) => {
 // Directories
 route("GET", "/api/directories", async () => json(listDirectories()));
 
+// Built-in TASK TEMPLATES (recipes): the named, parameterized prompt skeletons the
+// CLI `templates` command and the webapp new-task picker list. Each entry carries
+// its `{{placeholder}}` names so a caller knows what to fill. See src/templates.ts.
+route("GET", "/api/templates", async () => json(listTemplates()));
+
 route("POST", "/api/directories", async (req) => {
   const body = await readJson(req);
   const view = await registerDirectory(body.path, body.label);
@@ -437,9 +443,17 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   // agent launch. Unset → claude's current default. Validated inside createTask.
   // Optional tags: an array of free-form organizational labels (validated +
   // normalized inside createTask) for filtering the task list.
+  // Optional template: create FROM a named built-in template (src/templates.ts) —
+  // its body is rendered with `vars` substituted into the `{{placeholders}}` and the
+  // result becomes the prompt (any explicit `prompt` is ignored when a template is
+  // given). 404 on an unknown template name. The webapp instead renders client-side
+  // (fills the textarea), so it posts a plain `prompt` and never this field.
+  const prompt = body.template
+    ? renderTemplate(body.template, body.vars)
+    : body.prompt;
   const view = await createTask(
     p.id!,
-    body.prompt,
+    prompt,
     body.context ?? [],
     body.blocked_by ?? [],
     kind,

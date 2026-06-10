@@ -23,6 +23,9 @@ COMMANDS
   new <dir> -m <prompt>           Create a task in directory <dir> (id or path).
       [--blocked-by id,id]          Start it blocked on the given task ids.
       [--tag a,b]                   Attach organizational labels (comma-separated).
+      [--template <name>]           Create from a template instead of -m; fill its
+      [--var key=val ...]             {{placeholders}} with repeatable --var pairs.
+  templates                       List the built-in task templates + placeholders.
   show <id>                       Task detail: status, ci, tags, summary, notes.
   approve <id>                    Approve a task in review (merges its branch).
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
@@ -41,7 +44,7 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag"]);
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template"]);
 
 function parseArgs(argv) {
   const positionals = [];
@@ -52,6 +55,12 @@ function parseArgs(argv) {
       flags.json = true;
     } else if (tok === "-h" || tok === "--help") {
       flags.help = true;
+    } else if (tok === "--var" || tok.startsWith("--var=")) {
+      // --var is REPEATABLE (one `key=value` template variable each), so it
+      // accumulates into an array rather than overwriting like the value flags.
+      const val = tok.startsWith("--var=") ? tok.slice("--var=".length) : argv[++i];
+      if (val === undefined) fail("flag --var needs a key=value");
+      (flags.var ||= []).push(val);
     } else if (tok.startsWith("--") && tok.includes("=")) {
       const eq = tok.indexOf("=");
       flags[tok.slice(2, eq)] = tok.slice(eq + 1);
@@ -77,6 +86,17 @@ function parseIdList(raw) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/** Turn the repeatable `--var key=value` entries into a {key: value} object. */
+function parseVars(list) {
+  const out = {};
+  for (const entry of list || []) {
+    const eq = String(entry).indexOf("=");
+    if (eq < 0) fail(`--var must be key=value (got "${entry}")`);
+    out[String(entry).slice(0, eq).trim()] = String(entry).slice(eq + 1);
+  }
+  return out;
 }
 
 // ---- HTTP -----------------------------------------------------------------
@@ -237,21 +257,46 @@ async function cmdLs(flags) {
 async function cmdNew(positionals, flags) {
   const dir = positionals[0];
   if (!dir) fail("new: missing <dir> (directory id or path)");
-  const prompt = flags.message;
-  if (!prompt) fail("new: missing -m <prompt>");
   const dirId = await resolveDirectoryId(dir);
   const blockedBy = parseIdList(flags["blocked-by"]);
   const tags = parseIdList(flags.tag);
-  const task = await api("POST", `/api/directories/${encodeURIComponent(dirId)}/tasks`, {
-    prompt,
-    blocked_by: blockedBy,
-    tags,
-  });
+  const reqBody = { blocked_by: blockedBy, tags };
+  if (flags.template) {
+    // Create FROM a built-in template: the server renders its body with the given
+    // --var key=value pairs substituted into the {{placeholders}}. Any unset
+    // placeholder is left visible (as `{{name}}`) in the created prompt.
+    reqBody.template = flags.template;
+    reqBody.vars = parseVars(flags.var);
+  } else {
+    const prompt = flags.message;
+    if (!prompt) fail("new: missing -m <prompt> (or --template <name>)");
+    reqBody.prompt = prompt;
+  }
+  const task = await api(
+    "POST",
+    `/api/directories/${encodeURIComponent(dirId)}/tasks`,
+    reqBody,
+  );
   if (flags.json) {
     printJson(task);
     return;
   }
   process.stdout.write(`created ${task.id} (${task.status})\n`);
+}
+
+async function cmdTemplates(flags) {
+  const tpls = await api("GET", "/api/templates");
+  if (flags.json) {
+    printJson(tpls);
+    return;
+  }
+  process.stdout.write(
+    table(tpls, [
+      { header: "NAME", get: (t) => t.name },
+      { header: "PLACEHOLDERS", get: (t) => (t.placeholders.length ? t.placeholders.join(",") : "-") },
+      { header: "DESCRIPTION", get: (t) => t.description },
+    ]) + "\n",
+  );
 }
 
 async function cmdShow(positionals, flags) {
@@ -363,6 +408,8 @@ async function main() {
       return cmdLs(flags);
     case "new":
       return cmdNew(positionals, flags);
+    case "templates":
+      return cmdTemplates(flags);
     case "show":
       return cmdShow(positionals, flags);
     case "approve":

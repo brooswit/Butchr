@@ -547,6 +547,11 @@ async function renderDirectory(id) {
 function openNewTaskModal(directoryId) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
+    <label class="field" style="margin-bottom:8px">
+      <span class="lbl">template (optional) — fills the prompt with a recipe to complete</span>
+      <select id="nt-template"><option value="">— none (write your own prompt) —</option></select>
+      <span class="hint" id="nt-tpl-hint"></span>
+    </label>
     <label class="field">
       <span class="lbl">prompt</span>
       <textarea id="nt-prompt" placeholder="Describe the work for the agent…"></textarea>
@@ -584,7 +589,33 @@ function openNewTaskModal(directoryId) {
   const modelEl = body.querySelector("#nt-model");
   const tagsEl = body.querySelector("#nt-tags");
   const planEl = body.querySelector("#nt-plan");
+  const tplEl = body.querySelector("#nt-template");
+  const tplHintEl = body.querySelector("#nt-tpl-hint");
   promptEl.focus();
+
+  // Load the built-in templates and populate the picker. Selecting one fills the
+  // prompt textarea with its body (placeholders intact) so the operator completes
+  // the {{markers}} inline — the form still submits a plain prompt to the create
+  // endpoint, so no template field crosses the wire from the webapp.
+  let templates = [];
+  api("GET", "/templates")
+    .then((list) => {
+      templates = Array.isArray(list) ? list : [];
+      for (const t of templates) {
+        tplEl.appendChild(el("option", { value: t.name }, `${t.name} — ${t.description}`));
+      }
+    })
+    .catch(() => { /* templates are optional — leave the picker empty on failure */ });
+
+  tplEl.addEventListener("change", () => {
+    const t = templates.find((x) => x.name === tplEl.value);
+    if (!t) { tplHintEl.textContent = ""; return; }
+    promptEl.value = t.body;
+    tplHintEl.textContent = t.placeholders.length
+      ? `Fill in: ${t.placeholders.map((p) => "{{" + p + "}}").join(", ")}`
+      : "";
+    promptEl.focus();
+  });
 
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
