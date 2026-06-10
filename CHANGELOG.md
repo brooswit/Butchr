@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marker in `stderr`. The bound is opt-in and off by default, so existing callers
   are unaffected — this is groundwork that lets the CI gate share the same bounded
   runner the post-merge verify gate already uses (no user-facing behavior change).
+- **Internal: collapsed herdr JSON-envelope parsing into one `herdrSoft()`
+  helper** (`src/herdr.ts`). The six soft-failing herdr probes (`agentTabId`,
+  `agentPaneId`, `agentTerminalId`, `paneTerminalId`, `paneList`, `agentRead`)
+  each re-implemented the same run → check-ok → trim → `JSON.parse` →
+  check-`error` → unwrap `result` block; that block now lives once in
+  `herdrSoft()`, which returns `null` on any failure so each caller keeps just
+  its own field-probe and default. No behavior change — purely removes the
+  duplication so a future change to herdr's envelope shape lands in one place.
 - **Config reads every `BUTCHR_*` var through the typed `env()` helpers.** The two
   remaining vars that read `process.env` directly (`BUTCHR_CTO_CONTEXT`,
   `BUTCHR_TERMINAL_CMD`) now go through `env(name, "")` like the rest of

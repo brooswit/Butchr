@@ -31,6 +31,28 @@ async function herdr(args: string[]): Promise<any> {
   return env.result ?? env;
 }
 
+/**
+ * Soft sibling of `herdr()`: run a herdr command and unwrap its JSON envelope,
+ * returning `null` instead of throwing on ANY failure — a non-zero exit, empty
+ * output, non-JSON output, or an `error` field. The probe/read functions below
+ * use this so a missing-or-broken herdr degrades to their default
+ * (`undefined`/`[]`/`""`) rather than propagating. On success returns the
+ * unwrapped `env.result ?? env` for the caller to field-probe.
+ */
+async function herdrSoft(args: string[]): Promise<any | null> {
+  const res = await run([bin, ...args]);
+  if (!res.ok) return null;
+  const text = res.stdout.trim();
+  if (!text) return null;
+  try {
+    const env: Envelope = JSON.parse(text);
+    if (env.error) return null;
+    return env.result ?? env;
+  } catch {
+    return null;
+  }
+}
+
 /** Is the herdr server reachable? */
 export async function isUp(): Promise<boolean> {
   const res = await run([bin, "status", "server"]);
@@ -110,18 +132,8 @@ export async function tabClose(tabId: string | null | undefined): Promise<void> 
  */
 export async function agentTabId(name: string): Promise<string | undefined> {
   if (!name) return undefined;
-  const res = await run([bin, "agent", "get", name]);
-  if (!res.ok) return undefined;
-  const text = res.stdout.trim();
-  if (!text) return undefined;
-  let env: Envelope;
-  try {
-    env = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  if (env.error) return undefined;
-  const r = env.result ?? env;
+  const r = await herdrSoft(["agent", "get", name]);
+  if (!r) return undefined;
   return r.agent?.tab_id ?? r.pane?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id ?? undefined;
 }
 
@@ -198,18 +210,8 @@ export async function agentExists(name: string): Promise<boolean> {
  */
 export async function agentPaneId(name: string): Promise<string | undefined> {
   if (!name) return undefined;
-  const res = await run([bin, "agent", "get", name]);
-  if (!res.ok) return undefined;
-  const text = res.stdout.trim();
-  if (!text) return undefined;
-  let env: Envelope;
-  try {
-    env = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  if (env.error) return undefined;
-  const r = env.result ?? env;
+  const r = await herdrSoft(["agent", "get", name]);
+  if (!r) return undefined;
   return (
     r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ?? r.terminal_id ??
     r.terminal?.terminal_id ?? undefined
@@ -226,18 +228,8 @@ export async function agentPaneId(name: string): Promise<string | undefined> {
  */
 export async function agentTerminalId(name: string): Promise<string | undefined> {
   if (!name) return undefined;
-  const res = await run([bin, "agent", "get", name]);
-  if (!res.ok) return undefined;
-  const text = res.stdout.trim();
-  if (!text) return undefined;
-  let env: Envelope;
-  try {
-    env = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  if (env.error) return undefined;
-  const r = env.result ?? env;
+  const r = await herdrSoft(["agent", "get", name]);
+  if (!r) return undefined;
   return r.agent?.terminal_id ?? r.terminal_id ?? r.pane?.terminal_id ?? undefined;
 }
 
@@ -248,18 +240,8 @@ export async function agentTerminalId(name: string): Promise<string | undefined>
  */
 export async function paneTerminalId(paneId: string): Promise<string | undefined> {
   if (!paneId) return undefined;
-  const res = await run([bin, "pane", "get", paneId]);
-  if (!res.ok) return undefined;
-  const text = res.stdout.trim();
-  if (!text) return undefined;
-  let env: Envelope;
-  try {
-    env = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  if (env.error) return undefined;
-  const r = env.result ?? env;
+  const r = await herdrSoft(["pane", "get", paneId]);
+  if (!r) return undefined;
   return r.pane?.terminal_id ?? r.terminal_id ?? undefined;
 }
 
@@ -274,18 +256,8 @@ export type PaneInfo = {
 export async function paneList(workspaceId?: string): Promise<PaneInfo[]> {
   const args = ["pane", "list"];
   if (workspaceId) args.push("--workspace", workspaceId);
-  const res = await run([bin, ...args]);
-  if (!res.ok) return [];
-  const text = res.stdout.trim();
-  if (!text) return [];
-  let env: Envelope;
-  try {
-    env = JSON.parse(text);
-  } catch {
-    return [];
-  }
-  if (env.error) return [];
-  const r = env.result ?? env;
+  const r = await herdrSoft(args);
+  if (!r) return [];
   const panes: any[] = r.panes ?? [];
   return panes
     .map((p) => ({
@@ -375,21 +347,11 @@ const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]|[\x
  */
 export async function agentRead(name: string, lines = 200): Promise<string> {
   if (!name) return "";
-  const res = await run([
-    bin, "agent", "read", name,
+  const r = await herdrSoft([
+    "agent", "read", name,
     "--source", "recent-unwrapped", "--format", "text", "--lines", String(lines),
   ]);
-  if (!res.ok) return "";
-  const text = res.stdout.trim();
-  if (!text) return "";
-  let env: Envelope;
-  try {
-    env = JSON.parse(text);
-  } catch {
-    return "";
-  }
-  if (env.error) return "";
-  const r = env.result ?? env;
+  if (!r) return "";
   const raw: string = r.read?.text ?? r.text ?? "";
   if (!raw) return "";
   return raw.replace(ANSI_RE, "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trimEnd();
