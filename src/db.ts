@@ -112,6 +112,18 @@ ensureColumn("tasks", "blocked_by", "TEXT");
 ensureColumn("tasks", "ci_status", "TEXT");
 ensureColumn("tasks", "ci_summary", "TEXT");
 
+// `revert_reason` records WHY a task's merge was auto-reverted off the default
+// branch: the post-merge verify gate (build + tests) came back RED, so the merge
+// was undone (git reset to the pre-merge tip) and the task flagged. It holds the
+// failing build/test output. Orthogonal to `status` — set alongside status='failed'
+// so the dispatcher won't re-launch it and the reaper leaves its worktree/branch
+// intact for inspection; its presence is what the webapp keys on to render a
+// "reverted from main" panel (distinct from a dispatch failure). See
+// tasks.approveTask's post-merge verify path. This is the POST-MERGE gate (repo
+// root, blocking + auto-revert) — distinct from the CI gate above, which is the
+// pre-merge, in-worktree, advisory review badge.
+ensureColumn("tasks", "revert_reason", "TEXT");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -164,6 +176,9 @@ export type TaskRow = {
   dispatch_attempts: number;
   last_dispatch_error: string | null;
   next_dispatch_at: string | null;
+  // Build/test failure output when this task's merge was auto-reverted off the
+  // default branch by the post-merge verify gate (null otherwise). See approveTask.
+  revert_reason: string | null;
   // Raw JSON-array TEXT of blocker task ids (or null). Parsed via
   // tasks.parseBlockedBy; surfaced as a real string[] on the serialized TaskView.
   blocked_by: string | null;

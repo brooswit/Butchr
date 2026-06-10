@@ -729,7 +729,23 @@ async function renderTask(id) {
   // exhausted its retries. Surface why (last_dispatch_error) and how many tries
   // it took, plus a Re-queue action that clears the retry state and dispatches
   // again. On success the task flips back to `queued` and this panel disappears.
-  if (t.status === "failed") {
+  // A `failed` task carrying a revert_reason isn't a dispatch failure — its merge
+  // fast-forwarded into main but the post-merge verify gate (build + tests) came
+  // back RED, so the merge was auto-reverted off main. Surface that distinctly,
+  // with the failing build/test output. Re-queue re-launches the agent (worktree
+  // + branch were kept) to fix it.
+  if (t.status === "failed" && t.revert_reason) {
+    const panel = el("div", { class: "panel failed-panel" });
+    panel.innerHTML = `
+      <h2 style="margin-top:0">Merge auto-reverted off main</h2>
+      <p class="muted" style="margin:0 0 10px">This branch merged, but the post-merge verify (build + tests) failed on the default branch, so the merge was reverted to keep main green. The branch + worktree were kept.</p>
+      <pre class="block">${esc(t.revert_reason)}</pre>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="requeue">Re-queue</button>
+        <small class="muted">Re-launches the agent (in-context) to fix the breakage, then it can be re-reviewed.</small>
+      </div>`;
+    wrap.appendChild(panel);
+  } else if (t.status === "failed") {
     const n = t.dispatch_attempts || 0;
     const panel = el("div", { class: "panel failed-panel" });
     panel.innerHTML = `
@@ -873,6 +889,8 @@ async function renderTask(id) {
         // resolve in-context. The SSE refresh will show the task back in running.
         if (r && r.conflictSentBack) {
           toast("Merge conflict — sent back to the agent to resolve");
+        } else if (r && r.revertedOnRed) {
+          toast("Merged but verify FAILED — auto-reverted off main", true);
         } else {
           toast("approved ✓ — merged, agent wrapping up");
         }

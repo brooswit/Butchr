@@ -323,6 +323,9 @@ route("POST", "/api/tasks/:id/approve", async (_req, p) => {
   const r = await approveTask(p.id!);
   // Conflict kicked back to the agent: 200 with a flag the UI shows informationally.
   if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
+  // Merge fast-forwarded but the post-merge verify gate failed → auto-reverted off
+  // main and the task flagged. 200 with a flag so the UI explains the revert.
+  if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
   return json(r.task);
 });
 

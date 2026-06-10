@@ -10,6 +10,7 @@ import { run } from "./exec.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
+import { verifyDefaultBranch } from "./verify.ts";
 import {
   appendRejection,
   readTaskMd,
@@ -389,8 +390,19 @@ function runExclusiveMerge<T>(fn: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/** What approveTask did: merged the branch, or kicked a conflict back to the agent. */
-export type ApproveOutcome = { task: TaskView; conflictSentBack?: boolean };
+/**
+ * What approveTask did:
+ *  - merged the branch (default),
+ *  - `conflictSentBack` — kicked a merge conflict back to the agent, or
+ *  - `revertedOnRed` — the branch DID fast-forward into main but the post-merge
+ *    verify gate (build + tests) failed, so the merge was auto-reverted off main
+ *    and the task flagged. The default branch is back at its pre-merge tip.
+ */
+export type ApproveOutcome = {
+  task: TaskView;
+  conflictSentBack?: boolean;
+  revertedOnRed?: boolean;
+};
 
 /**
  * Send a task in `review` back for rework with a change-request note. In the
@@ -462,7 +474,46 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
 
   // Serialize through the global merge queue so concurrent approvals rebase+ff
   // one-at-a-time against an up-to-date base tip instead of racing in parallel.
-  const result = await runExclusiveMerge(() => git.merge(dir.path, id));
+  //
+  // The verify gate + its auto-revert run INSIDE this same exclusive section: a
+  // merge fast-forwards the default branch, then (if it stuck) we build+test the
+  // NEW tip and, on RED, reset the default branch back to the captured pre-merge
+  // tip — all before the next queued merge runs, so a revert can never interleave
+  // with another merge moving the same branch.
+  type Gate = {
+    mr: git.MergeResult;
+    verify?: { ok: boolean; output: string };
+    reverted?: boolean;
+    priorTip?: string | null;
+  };
+  const gate: Gate = await runExclusiveMerge<Gate>(async () => {
+    // Capture the default-branch tip BEFORE the ff so we can restore it on RED.
+    const priorTip = await git.headSha(dir.path).catch(() => null);
+    const mr = await git.merge(dir.path, id);
+    if (!mr.ok) return { mr };
+    // Merge stuck (ff'd into main). Gate the new tip: build + tests must be GREEN.
+    const verify = await verifyDefaultBranch(dir.path);
+    if (verify.ok) return { mr, verify };
+    // RED — undo the ff so a broken commit never sits on main. We need the prior
+    // tip to reset to; if we somehow failed to capture it, we can't safely revert,
+    // so surface that loudly and let the merge stand (flagged) rather than guess.
+    if (priorTip) {
+      await git.resetHard(dir.path, priorTip).catch((e) => {
+        console.error(
+          `[butchr] CRITICAL: verify FAILED for ${id} but the auto-revert to ` +
+            `${priorTip} ALSO failed: ${e}. The default branch may hold a broken commit.`,
+        );
+      });
+    } else {
+      console.error(
+        `[butchr] CRITICAL: verify FAILED for ${id} but the pre-merge tip was not ` +
+          `captured, so the merge could not be auto-reverted. Inspect main.`,
+      );
+    }
+    return { mr, verify, reverted: true, priorTip };
+  });
+
+  const result = gate.mr;
   if (!result.ok) {
     if (result.conflict) {
       // Content conflict — git.merge already aborted, so the tree is CLEAN.
@@ -484,6 +535,36 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     ).run(result.message, id);
     emitUpdated(id);
     throw new HttpError(409, `merge failed: ${result.message}`);
+  }
+
+  // Merge succeeded at the git level, but the post-merge verify gate came back RED
+  // and the ff was auto-reverted (default branch reset to its pre-merge tip). Do
+  // NOT mark merged: flag the task so a human can see the breakage and the
+  // dispatcher won't silently re-launch it. We KEEP the worktree + branch (no
+  // git.cleanup) so the work survives for inspection / a fixup re-run, and store
+  // the failing build/test output in `revert_reason` (surfaced by the webapp).
+  if (gate.reverted) {
+    const snapshot = readRunLogSnapshot(id);
+    await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+    const reason = gate.verify?.output?.trim() || "(no verify output captured)";
+    console.error(
+      `[butchr] task ${id} merge AUTO-REVERTED: post-merge verify failed on the ` +
+        `default branch; main restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
+    );
+    const res = db.query(
+      `UPDATE tasks SET status='failed', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
+         output_snapshot=COALESCE(?, output_snapshot), revert_reason=?, last_dispatch_error=?,
+         completed_at=COALESCE(completed_at, ?)
+         WHERE id=? AND status='review'`,
+    ).run(snapshot || null, reason, reason, nowIso(), id);
+    if (res.changes === 0) {
+      // Raced (e.g. aborted) between the gate and here — leave whatever won.
+      emitUpdated(id);
+      return { task: taskView(id)! };
+    }
+    updateTaskMdStatus(dir.path, id, "failed");
+    emitUpdated(id);
+    return { task: taskView(id)!, revertedOnRed: true };
   }
 
   // Merge succeeded. There is no live agent to wait on (the non-blocking

@@ -241,6 +241,27 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   };
 }
 
+/** Current commit SHA of HEAD at `dir` (the default-branch tip when run at the repo root). */
+export async function headSha(dir: string): Promise<string> {
+  const res = await run([git, "-C", dir, "rev-parse", "HEAD"]);
+  if (!res.ok) {
+    throw new Error(`rev-parse HEAD failed in ${dir}: ${(res.stderr || res.stdout).trim()}`);
+  }
+  return res.stdout.trim();
+}
+
+/**
+ * Hard-reset the branch checked out at `dir` back to `sha`. Used to UNDO a
+ * just-merged fast-forward when the post-merge verify gate fails (see
+ * tasks.approveTask): because merges are serialized through the global merge
+ * queue, nothing else landed after the ff, so resetting to the captured pre-merge
+ * tip cleanly removes exactly the bad commits and keeps history linear — no revert
+ * commit clutter. Throws on failure so the caller can log loudly.
+ */
+export async function resetHard(dir: string, sha: string): Promise<void> {
+  await runOrThrow([git, "-C", dir, "reset", "--hard", sha]);
+}
+
 /** Remove the worktree and delete the task branch (post-merge cleanup). */
 export async function cleanup(dir: string, taskId: string): Promise<void> {
   const path = worktreePath(dir, taskId);

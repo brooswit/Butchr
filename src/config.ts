@@ -57,6 +57,28 @@ export const config = {
   tickMs: envInt("BUTCHR_TICK_MS", 1500),
 
   /**
+   * POST-MERGE VERIFY GATE. After a task's branch fast-forwards into the default
+   * branch (see tasks.approveTask → git.merge), butchr runs this command in the
+   * repo ROOT (the default-branch worktree) to confirm the NEW tip still builds
+   * and its tests pass. If it exits NON-ZERO, the merge is auto-reverted (the
+   * default branch is reset back to its pre-merge tip — see git.resetHard) and the
+   * task is flagged so a broken commit never sits on main. Runs INSIDE the global
+   * merge queue, so a verify+revert can never interleave with another merge.
+   *
+   * Run via `bash -lc` with the repo root as cwd. The default builds the bun entry
+   * and runs the suite — appropriate when butchr manages its OWN repo (the
+   * dogfooding setup). For a repo where this command does not apply, override
+   * BUTCHR_VERIFY_CMD with the right build/test command. Set it EMPTY to DISABLE
+   * the gate entirely (every merge is accepted as before — no verify, no revert).
+   */
+  verifyCmd: env(
+    "BUTCHR_VERIFY_CMD",
+    "bun build src/index.ts --target bun --outfile /dev/null && bun test",
+  ),
+  /** Max wall-clock (ms) the verify gate may run before it's killed + treated as RED. */
+  verifyTimeoutMs: envInt("BUTCHR_VERIFY_TIMEOUT_MS", 1000 * 60 * 10),
+
+  /**
    * Bounded dispatch retry with exponential backoff. When dispatch() throws
    * (workspace heal / worktree / herdr pane setup failed), the task is re-queued
    * with a growing delay instead of hot-looping every tick. After
