@@ -11,7 +11,7 @@
 // of typed blocks (text / thinking / tool_use / tool_result). We flatten those into
 // an ordered list of TranscriptItems — one per block, role-labelled, with long
 // bodies truncated — and skip everything else as noise.
-import { readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { findTranscript } from "./usage.ts";
 
 /** One renderable line of an agent transcript (one content block, in order). */
@@ -211,5 +211,117 @@ export function readSessionTranscript(cwd: string, sessionId: string): Transcrip
     return parseTranscript(readFileSync(p, "utf8"));
   } catch {
     return [];
+  }
+}
+
+// --- LIVE ACTIVITY PULSE ----------------------------------------------------
+//
+// A read-only one-line "what is the agent doing right now" signal for a RUNNING
+// task's card in the webapp, WITHOUT attaching to herdr. Derived from the SAME
+// transcript the viewer parses, but cheap to poll: we read only the TAIL of the
+// JSONL (the latest frames) rather than re-parsing the whole — possibly huge —
+// session file on every poll.
+
+/** The latest meaningful agent action from a session transcript (for the pulse). */
+export type SessionActivity = {
+  /** A short label for the most recent meaningful step (null if none found). */
+  lastAction: string | null;
+  /** ISO timestamp of that step's frame, or null. */
+  lastAt: string | null;
+};
+
+// How much of the transcript tail to read for the pulse. A single tool_result
+// frame (e.g. a whole-file Read) can be large, so keep enough headroom that the
+// most recent tool_use/text frame is virtually always within the window — while
+// still reading a fixed, small slice instead of the entire session each poll.
+const ACTIVITY_TAIL_BYTES = 128 * 1024;
+// Cap for an action label so a long prose step stays one scannable line.
+const ACTION_CAP = 120;
+
+/** Read up to the last `maxBytes` of a file as UTF-8 (whole file if smaller). */
+function readFileTail(path: string, maxBytes: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const len = size - start;
+    if (len <= 0) return "";
+    const buf = Buffer.allocUnsafe(len);
+    const read = readSync(fd, buf, 0, len, start);
+    return buf.toString("utf8", 0, read);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The first arg VALUE from a brief `key=value, …` args summary (its target). */
+function primaryArg(args?: string): string | null {
+  if (!args) return null;
+  const first = args.split(", ")[0] ?? "";
+  const eq = first.indexOf("=");
+  const val = (eq >= 0 ? first.slice(eq + 1) : first).trim();
+  return val || null;
+}
+
+/** Collapse to a single clipped line, or null if blank. */
+function oneLine(text: string | undefined, cap: number): string | null {
+  const t = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+  return t.length > cap ? t.slice(0, cap - 1) + "…" : t;
+}
+
+/**
+ * Describe a transcript item as a pulse label, or null if it isn't a meaningful
+ * AGENT action (a tool_result is a response, not an action; user prose isn't the
+ * agent acting). A tool_use becomes "Read /x/y.ts"; assistant prose its first
+ * line; thinking a neutral "thinking…".
+ */
+function describeActivity(it: TranscriptItem): string | null {
+  switch (it.kind) {
+    case "tool_use": {
+      const tool = it.tool || "tool";
+      const target = primaryArg(it.args);
+      return target ? oneLine(`${tool} ${target}`, ACTION_CAP) : tool;
+    }
+    case "text":
+      return it.role === "assistant" ? oneLine(it.text, ACTION_CAP) : null;
+    case "thinking":
+      return "thinking…";
+    default:
+      return null; // tool_result / anything else — not an action
+  }
+}
+
+/**
+ * The latest meaningful agent action in an ordered transcript: scan from the END
+ * and return the first item that describes an action (skipping tool_results and
+ * user prose). Returns nulls when nothing qualifies.
+ */
+export function extractActivity(items: TranscriptItem[]): SessionActivity {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const action = describeActivity(items[i]!);
+    if (action) return { lastAction: action, lastAt: items[i]!.ts ?? null };
+  }
+  return { lastAction: null, lastAt: null };
+}
+
+/** Extract the latest activity from a (possibly tail-only) transcript text. */
+export function parseTranscriptActivity(text: string): SessionActivity {
+  return extractActivity(parseTranscript(text));
+}
+
+/**
+ * Cheap live-activity read for a session: locate the transcript, read only its
+ * TAIL, and extract the latest meaningful action. Best-effort — returns nulls
+ * when the session id is empty or the transcript can't be located/read.
+ */
+export function readSessionActivity(cwd: string, sessionId: string): SessionActivity {
+  if (!sessionId) return { lastAction: null, lastAt: null };
+  const p = findTranscript(cwd, sessionId);
+  if (!p) return { lastAction: null, lastAt: null };
+  try {
+    return parseTranscriptActivity(readFileTail(p, ACTIVITY_TAIL_BYTES));
+  } catch {
+    return { lastAction: null, lastAt: null };
   }
 }

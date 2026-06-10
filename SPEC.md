@@ -820,6 +820,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `GET` | `/api/tasks/:id/events` | — | `TaskEventRow[]` — the status-transition audit timeline, oldest→newest. 404 if gone. |
 | `GET` | `/api/tasks/:id/output` | — | `{ output }` — best-effort live agent terminal text (`herdr agent read`); `""` once the pane is gone. |
 | `GET` | `/api/tasks/:id/transcript` | `?offset=&limit=` | `{ turns, total, offset, limit, hasMore }` — the agent's session transcript parsed into ordered, role-labelled items (prose / thinking / tool-call name+brief-args / truncated tool-result); best-effort `turns:[]` when there's no session/transcript. `limit` clamped 1..500 (default 200). 404 if the task is gone. |
+| `GET` | `/api/tasks/:id/activity` | — | `{ lastAction, lastAt, elapsedMs }` — the **live activity pulse**: the latest meaningful transcript step (last tool call as `"<tool> <target>"`, else the last assistant prose / thinking) plus `elapsedMs` since the task started running. CHEAP — reads only the **tail** of the session JSONL (not the whole file), so the webapp safe-polls it on running cards. `lastAction`/`lastAt` are `null` with no transcript / no qualifying step; `elapsedMs` `null` until the task has started. Read-only. 404 if the task is gone. |
 | `POST` | `/api/tasks/:id/approve` | `{}` | the merged `TaskView`, **or** `{ task, conflictSentBack:true }`, **or** `{ task, revertedOnRed:true }`. 409 if not in review / on a hard merge failure. |
 | `POST` | `/api/tasks/:id/reject` | `{ note }` | `TaskView` (`→ queued` for resume). 409 if not in review; 400 if note blank. |
 | `POST` | `/api/tasks/:id/answer` | `{ answer }` | `TaskView` (`→ queued` for `--resume` with the answer injected). 409 if not `awaiting_input`; 400 if answer blank. |
@@ -930,7 +931,12 @@ hash-routed and SSE-driven. Views/features:
   rows, finished list, and board cards; a non-zero **priority** shows as a `prio N`
   chip across those same views. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
-  dependents).
+  dependents). Running task cards/rows show a read-only **live activity pulse** — a
+  pulsing dot, the agent's latest action (last tool call + target, clipped to one
+  line), and elapsed-since-started — polled from `/api/tasks/:id/activity` on a small
+  timer (the cheap transcript-tail read); the latest action is cached so the wholesale
+  SSE re-render repaints it without flashing, and the elapsed readout ticks locally
+  between polls. Read-only — no actions, no herdr attach.
 - **Task detail** — status/CI/**conformance**/summary (the CI badge and an advisory
   **spec-conformance** badge — green *conforms* / amber *concern: <reason>* — sit
   above the diff in the review panel; a `concern` warns on approve but never blocks),

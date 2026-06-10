@@ -360,11 +360,93 @@ function stopLiveOutput() {
   if (liveOutputTimer) { clearInterval(liveOutputTimer); liveOutputTimer = null; }
 }
 
+// ---------- live activity pulse ----------
+// A read-only one-line "what is the agent doing right now" on each running task's
+// card/row, polled from GET /api/tasks/:id/activity (which reads only the tail of
+// the session transcript). The directory view re-renders wholesale on every SSE
+// event, which destroys+rebuilds the pulse nodes; this timer is module-scope and
+// re-discovers the live `.pulse[data-id]` nodes each tick, and `activityCache`
+// survives re-renders so a rebuild repaints the last-known action without flashing
+// empty. render() stops it up front; renderDirectory restarts it after mount.
+let activityTimer = null;
+const activityCache = new Map(); // task id -> { lastAction, lastAt, elapsedMs }
+function stopActivity() {
+  if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+}
+
+// A task whose agent is live enough to have transcript activity worth pulsing:
+// running (incl. the idle sub-state, which is still status==="running").
+function isPulsing(t) {
+  return t.status === "running";
+}
+
+// The pulse markup embedded into a card/row's innerHTML. Pre-fills the last-known
+// action from the cache so an SSE-driven rebuild repaints instantly; the poller
+// fills in the rest. `data-started` drives the locally-ticked elapsed readout.
+function pulseMarkup(t) {
+  if (!isPulsing(t)) return "";
+  const cached = activityCache.get(t.id);
+  const action = cached && cached.lastAction
+    ? esc(cached.lastAction)
+    : `<span class="muted">waiting for activity…</span>`;
+  return `<div class="pulse" data-id="${esc(t.id)}" data-started="${esc(t.started_at || "")}" title="latest agent activity (read-only)">
+      <span class="pulse-dot" aria-hidden="true"></span>
+      <span class="pulse-action">${action}</span>
+      <span class="pulse-elapsed"></span>
+    </div>`;
+}
+
+function applyPulse(node, a) {
+  const actionEl = node.querySelector(".pulse-action");
+  if (actionEl) {
+    if (a && a.lastAction) actionEl.textContent = a.lastAction;
+    else actionEl.innerHTML = `<span class="muted">waiting for activity…</span>`;
+  }
+}
+
+// Locally-ticked "elapsed since started" (computed from data-started so it advances
+// between polls without a round-trip). Falls back to the server's elapsedMs only via
+// the action poll; here we just keep the displayed duration fresh and cheap.
+function tickPulseElapsed(node) {
+  const elapsedEl = node.querySelector(".pulse-elapsed");
+  if (!elapsedEl) return;
+  const started = node.getAttribute("data-started");
+  const ms = started ? Date.now() - Date.parse(started) : NaN;
+  elapsedEl.textContent = isFinite(ms) && ms >= 0 ? "· " + fmtDuration(ms) : "";
+}
+
+async function pollActivity() {
+  const nodes = Array.from(document.querySelectorAll(".pulse[data-id]"));
+  if (!nodes.length) { stopActivity(); return; }
+  for (const node of nodes) {
+    tickPulseElapsed(node);
+    const cached = activityCache.get(node.getAttribute("data-id"));
+    if (cached) applyPulse(node, cached); // repaint cache first (avoids flashing empty)
+  }
+  await Promise.all(nodes.map(async (node) => {
+    const id = node.getAttribute("data-id");
+    try {
+      const a = await api("GET", "/tasks/" + id + "/activity");
+      activityCache.set(id, a);
+      applyPulse(node, a);
+      tickPulseElapsed(node);
+    } catch (e) { /* best-effort — leave the last-known pulse in place */ }
+  }));
+}
+
+function startActivity() {
+  stopActivity();
+  if (!document.querySelector(".pulse[data-id]")) return;
+  pollActivity();
+  activityTimer = setInterval(pollActivity, 2500);
+}
+
 let current = null;
 async function render() {
   const route = parseHash();
   current = route;
   stopLiveOutput();
+  stopActivity();
   syncTopnav(route);
   try {
     if (route.name === "dashboard") await renderDashboard();
@@ -595,6 +677,8 @@ async function renderDirectory(id) {
   wrap.appendChild(dz);
 
   mount(wrap);
+  // Begin polling the live activity pulse for any running task cards now in the DOM.
+  startActivity();
 }
 
 // ---------- per-directory build/test gate panel ----------
@@ -1089,7 +1173,7 @@ function tasksTable(tasks) {
     const termLink = isLive(t)
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
-      <td class="id">${esc(t.id)}</td>
+      <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
       <td>${taskChips(t)}${tagChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a>${
@@ -1407,7 +1491,8 @@ function boardCard(t, lane, byId) {
       <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
       ${termLink ? `<span class="bc-term">${termLink}</span>` : ""}
     </div>
-    ${tagChips(t) ? `<div class="bc-tags">${tagChips(t)}</div>` : ""}`;
+    ${tagChips(t) ? `<div class="bc-tags">${tagChips(t)}</div>` : ""}
+    ${pulseMarkup(t)}`;
 
   if (lane.key === "blocked") {
     const ids = t.blocked_by || [];

@@ -41,7 +41,7 @@ import {
 } from "./tasks.ts";
 import { listTemplates, renderTemplate } from "./templates.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
-import { readSessionTranscript } from "./transcript.ts";
+import { readSessionActivity, readSessionTranscript } from "./transcript.ts";
 import { worktreePath } from "./git.ts";
 
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
@@ -603,6 +603,26 @@ route("GET", "/api/tasks/:id/transcript", async (req, p) => {
     Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(500, Math.floor(rawLimit)) : 200;
   const turns = all.slice(offset, offset + limit);
   return json({ turns, total, offset, limit, hasMore: offset + turns.length < total });
+});
+
+// LIVE ACTIVITY PULSE: a cheap, read-only "what is the agent doing right now" for a
+// running task's card — the latest meaningful transcript action (last tool call +
+// target, or last assistant step) plus how long the task has been running. Reads
+// only the TAIL of the session JSONL (see transcript.readSessionActivity), so it's
+// safe for the webapp to poll. `lastAction`/`lastAt` are null when no transcript /
+// no qualifying step yet; `elapsedMs` is null until the task has started running.
+// No actions, no side effects. 404 only if the task itself is gone.
+route("GET", "/api/tasks/:id/activity", async (_req, p) => {
+  const t = getTask(p.id!);
+  if (!t) throw new HttpError(404, "task not found");
+  const dir = getDirectory(t.directory_id);
+  const activity =
+    dir && t.session_id
+      ? readSessionActivity(worktreePath(dir.path, p.id!), t.session_id)
+      : { lastAction: null, lastAt: null };
+  const startMs = t.started_at ? Date.parse(t.started_at) : NaN;
+  const elapsedMs = Number.isFinite(startMs) ? Math.max(0, Date.now() - startMs) : null;
+  return json({ ...activity, elapsedMs });
 });
 
 route("POST", "/api/tasks/:id/approve", async (_req, p) => {
