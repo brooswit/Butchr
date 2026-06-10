@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BUTCHR_ALLOWED_ORIGINS`** — comma-separated list of extra browser origins
   permitted to make state-changing `/api` requests, on top of the derived loopback
   origins, for the CSRF / DNS-rebinding guard above.
+- **`docs/CLEANUP.md`** — a prioritized code-quality / DRY audit of the merged
+  tree: each finding names the smell (with `file:function`), why it matters, and a
+  specific refactor scoped as an independent follow-up task, ranked by value/effort
+  and flagged for same-file sequencing. Report only — no code changes.
 
 ## [0.9.2] - 2026-06-10
 
