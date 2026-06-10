@@ -779,7 +779,13 @@ hash-routed and SSE-driven. Views/features:
   **spec-conformance** badge — green *conforms* / amber *concern: <reason>* — sit
   above the diff in the review panel; a `concern` warns on approve but never blocks),
   a **tags** row in the meta grid, the rendered **diff** (`/api/tasks/:id/diff`,
-  parsed + highlighted), the **timeline** (`/api/tasks/:id/events`), model/tokens/
+  parsed into per-file cards with **dependency-free syntax highlighting** — a small
+  inline tokenizer colors TS/JS/JSON/CSS keywords/strings/comments/numbers — and a
+  line-number gutter; in review, clicking a line's gutter attaches an **inline
+  comment**, and on **Request change** all collected comments are composed with their
+  `file:line` context into the single change-request note sent to `/reject`, so the
+  resumed agent gets a per-line punch-list — the reject payload stays `{ note }`),
+  the **timeline** (`/api/tasks/:id/events`), model/tokens/
   cost labels, a rough **duration estimate** (an *est. duration* row from
   `TaskView.estimate` plus a critical-path line on the blocked-by / spawned panels
   from `/api/tasks/:id/estimate` — see §10), live output, a collapsible **Agent
