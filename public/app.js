@@ -20,6 +20,24 @@ function el(tag, attrs = {}, children = []) {
   }
   return node;
 }
+// SVG sibling of el(): builds nodes in the SVG namespace so <svg>, <path>, <rect>,
+// <text> etc. render correctly (createElement would put them in the HTML namespace
+// and they'd be inert). Same attr/children contract as el().
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.setAttribute("class", v);
+    else if (k.startsWith("on") && typeof v === "function")
+      node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) {
+    if (c == null) continue;
+    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return node;
+}
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
@@ -346,16 +364,31 @@ async function renderDirectory(id) {
   launch.appendChild(newBtn);
   wrap.appendChild(launch);
 
-  // search + status filter bar. Filter state lives in module-level vars
-  // (taskSearch / statusFilter) so it survives the full re-render the app does
-  // on every SSE event. Typing/toggling rebuilds only the results region below
-  // (not the bar itself), so the search input keeps focus while you type. The
-  // split of active (queued/running/idle/review/finalizing) vs terminal-state
-  // history (merged/aborted/rejected) happens inside renderResults.
-  const results = el("div", { class: "results" });
-  wrap.appendChild(buildFilterBar(tasks, results));
-  wrap.appendChild(results);
-  renderResults(tasks, results);
+  // List / Graph view toggle. The toggle bar sits outside the body region so it
+  // persists while the body is swapped; the chosen mode lives in dirView (module
+  // scope + localStorage) so it survives SSE re-renders and reloads.
+  const body = el("div", { class: "dir-body" });
+  const paintBody = () => {
+    body.innerHTML = "";
+    if (dirView === "graph") {
+      body.appendChild(el("h2", {}, "Dependency graph"));
+      body.appendChild(renderGraph(tasks));
+    } else {
+      // search + status filter bar. Filter state lives in module-level vars
+      // (taskSearch / statusFilter) so it survives the full re-render the app does
+      // on every SSE event. Typing/toggling rebuilds only the results region below
+      // (not the bar itself), so the search input keeps focus while you type. The
+      // split of active (queued/running/idle/review/finalizing) vs terminal-state
+      // history (merged/aborted/rejected) happens inside renderResults.
+      const results = el("div", { class: "results" });
+      body.appendChild(buildFilterBar(tasks, results));
+      body.appendChild(results);
+      renderResults(tasks, results);
+    }
+  };
+  wrap.appendChild(buildViewToggle(paintBody));
+  wrap.appendChild(body);
+  paintBody();
 
   // danger zone
   const dz = el("div", { class: "row", style: "margin-top:32px" });
@@ -470,6 +503,19 @@ function queueLine(tasks) {
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
 const ACTIVE_STATUSES = ["queued", "blocked", "running", "review", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
+
+// Directory page body mode: the task "List" or the dependency "Graph". Kept at
+// module scope (and mirrored to localStorage) so it survives the full re-render
+// the app does on every SSE event and across reloads.
+const DIRVIEW_KEY = "butchr-dirview";
+let dirView = (() => {
+  try { return localStorage.getItem(DIRVIEW_KEY) === "graph" ? "graph" : "list"; }
+  catch (e) { return "list"; }
+})();
+function setDirView(v) {
+  dirView = v;
+  try { localStorage.setItem(DIRVIEW_KEY, v); } catch (e) { /* ignore */ }
+}
 
 function historyOpen() {
   try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch (e) { return false; }
@@ -668,6 +714,188 @@ function tasksTable(tasks) {
   }
   table.appendChild(tb);
   return table;
+}
+
+// List / Graph segmented toggle for the directory body. Mutates dirView (module
+// scope + localStorage) and calls repaint() to swap the body region — the toggle
+// node itself is left in place so the choice sticks across clicks. The directory
+// view re-renders wholesale on every SSE event and reads dirView, so the chosen
+// mode also survives live updates without re-wiring anything.
+function buildViewToggle(repaint) {
+  const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Task view" });
+  const defs = [["list", "List"], ["graph", "Graph"]];
+  const btns = {};
+  for (const [v, label] of defs) {
+    const b = el("button", {
+      type: "button",
+      class: "vt-btn" + (dirView === v ? " active" : ""),
+      role: "tab",
+      "aria-selected": dirView === v ? "true" : "false",
+    }, label);
+    b.addEventListener("click", () => {
+      if (dirView === v) return;
+      setDirView(v);
+      for (const [k, node] of Object.entries(btns)) {
+        const on = k === v;
+        node.classList.toggle("active", on);
+        node.setAttribute("aria-selected", on ? "true" : "false");
+      }
+      repaint();
+    });
+    btns[v] = b;
+    bar.appendChild(b);
+  }
+  return bar;
+}
+
+// Parse a blocked_by value into a clean id array. The directory task list returns
+// raw DB rows, where blocked_by is a JSON-array TEXT column (a string, or null);
+// the single-task view already parses it to an array. Accept either shape.
+function blockedByIds(v) {
+  if (Array.isArray(v)) return v.filter((x) => typeof x === "string");
+  if (typeof v === "string" && v) {
+    try {
+      const a = JSON.parse(v);
+      return Array.isArray(a) ? a.filter((x) => typeof x === "string") : [];
+    } catch { return []; }
+  }
+  return [];
+}
+
+// Assign each node a column (level) = longest blocker-chain depth, so blockers sit
+// strictly left of the tasks they block (a layered topological layout). Roots
+// (no in-graph blockers) land at level 0. The backend forbids dependency cycles,
+// but a guard bounds the relaxation passes so a stray cycle can't loop forever.
+function graphLevels(nodeIds, edges) {
+  const level = {};
+  for (const id of nodeIds) level[id] = 0;
+  const incoming = {};
+  for (const id of nodeIds) incoming[id] = [];
+  for (const e of edges) incoming[e.to].push(e.from);
+  let changed = true;
+  let guard = 0;
+  const cap = nodeIds.size + 1;
+  while (changed && guard <= cap) {
+    changed = false;
+    for (const id of nodeIds) {
+      for (const from of incoming[id]) {
+        if (level[from] + 1 > level[id]) { level[id] = level[from] + 1; changed = true; }
+      }
+    }
+    guard++;
+  }
+  return level;
+}
+
+// Draw a DAG of the directory's non-terminal tasks and their blockers: nodes are
+// tasks (label = id, colored by effective status), edges are blocker→blocked
+// arrows pointing left→right across topological levels. Inline SVG, no library.
+// Clicking a node opens its task detail. Re-rendered wholesale on each SSE event
+// by the directory view, so it live-updates for free.
+function renderGraph(tasks) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+
+  // Node set: every non-terminal task, plus any of their blockers that exist in
+  // this directory (so each edge has a node to land on — a merged blocker shows up
+  // as a green node, making the dependency's provenance visible).
+  const nodeIds = new Set(active.map((t) => t.id));
+  for (const t of active) {
+    for (const b of blockedByIds(t.blocked_by)) if (byId.has(b)) nodeIds.add(b);
+  }
+
+  if (nodeIds.size === 0) {
+    return el("div", { class: "empty" }, "No active tasks to graph.");
+  }
+
+  const edges = [];
+  for (const id of nodeIds) {
+    for (const b of blockedByIds(byId.get(id).blocked_by)) {
+      if (nodeIds.has(b)) edges.push({ from: b, to: id });
+    }
+  }
+
+  // layout geometry
+  const NW = 158, NH = 38, COL_GAP = 64, ROW_GAP = 16, PAD = 14;
+  const level = graphLevels(nodeIds, edges);
+  const byLevel = new Map();
+  for (const id of nodeIds) {
+    const lv = level[id];
+    if (!byLevel.has(lv)) byLevel.set(lv, []);
+    byLevel.get(lv).push(id);
+  }
+  const maxLevel = Math.max(0, ...[...nodeIds].map((id) => level[id]));
+  const pos = new Map();
+  let maxRows = 0;
+  for (let lv = 0; lv <= maxLevel; lv++) {
+    const col = byLevel.get(lv) || [];
+    maxRows = Math.max(maxRows, col.length);
+    col.forEach((id, i) => {
+      pos.set(id, { x: PAD + lv * (NW + COL_GAP), y: PAD + i * (NH + ROW_GAP) });
+    });
+  }
+  const width = PAD * 2 + (maxLevel + 1) * NW + maxLevel * COL_GAP;
+  const height = PAD * 2 + maxRows * NH + Math.max(0, maxRows - 1) * ROW_GAP;
+
+  const root = svg("svg", {
+    class: "task-graph", width, height, viewBox: `0 0 ${width} ${height}`,
+    role: "img", "aria-label": "Task dependency graph",
+  });
+
+  // arrowhead marker, reused by every edge
+  const defs = svg("defs", {}, [
+    svg("marker", {
+      id: "tg-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5",
+      markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse",
+    }, [svg("path", { class: "tg-arrow-head", d: "M0,0 L10,5 L0,10 z" })]),
+  ]);
+  root.appendChild(defs);
+
+  // edges first so nodes paint on top of them
+  const edgeLayer = svg("g", { class: "tg-edges" });
+  for (const e of edges) {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    if (!a || !b) continue;
+    const x1 = a.x + NW, y1 = a.y + NH / 2;
+    const x2 = b.x, y2 = b.y + NH / 2;
+    const dx = Math.max(18, (x2 - x1) / 2);
+    edgeLayer.appendChild(svg("path", {
+      class: "tg-edge",
+      d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
+      "marker-end": "url(#tg-arrow)",
+    }));
+  }
+  root.appendChild(edgeLayer);
+
+  // nodes
+  for (const id of nodeIds) {
+    const t = byId.get(id);
+    const p = pos.get(id);
+    const st = effStatus(t);
+    const g = svg("g", {
+      class: "tg-node " + st, transform: `translate(${p.x},${p.y})`,
+      tabindex: "0", role: "link", "aria-label": `${id} — ${st}`,
+    });
+    g.appendChild(svg("title", {}, `${id} · ${st}${t.kind === "plan" ? " · plan" : ""}`));
+    g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
+    g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: NH / 2 - 3 }, id));
+    g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: NH / 2 + 11 },
+      st + (t.kind === "plan" ? " · plan" : "")));
+    const go = () => { location.hash = "#/task/" + id; };
+    g.addEventListener("click", go);
+    g.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
+    });
+    root.appendChild(g);
+  }
+
+  // legend of the statuses actually present, reusing the .chip color styling
+  const present = [...new Set([...nodeIds].map((id) => effStatus(byId.get(id))))];
+  const legend = el("div", { class: "tg-legend" },
+    present.map((s) => el("span", { class: "chip " + s }, s)));
+
+  const scroll = el("div", { class: "task-graph-scroll" }, [root]);
+  return el("div", {}, [legend, scroll]);
 }
 
 // CI GATE badge for the review panel. ci_status: 'running' shows a spinner;

@@ -292,6 +292,58 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .finished-row .fr-id { font-family: var(--mono); font-size: 13px; flex: 1; word-break: break-all; }
 .finished-row .fr-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
+/* List / Graph view toggle (directory page) — a small segmented control */
+.view-toggle {
+  display: inline-flex; gap: 0; margin: 16px 0 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden;
+}
+.vt-btn {
+  background: var(--panel); color: var(--muted); border: 0; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600; padding: 6px 16px;
+}
+.vt-btn + .vt-btn { border-left: 1px solid var(--border); }
+.vt-btn:hover { background: var(--panel-2); color: var(--text); }
+.vt-btn.active { background: var(--accent); color: #fff; }
+
+/* dependency graph — inline SVG DAG of non-terminal tasks + their blockers */
+.tg-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.task-graph-scroll {
+  overflow: auto; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); padding: 4px; max-height: 70vh;
+}
+.task-graph { display: block; }
+
+.tg-edge { fill: none; stroke: var(--muted); stroke-width: 1.5; opacity: 0.55; }
+.tg-arrow-head { fill: var(--muted); opacity: 0.7; }
+
+.tg-node { cursor: pointer; }
+.tg-node .tg-rect {
+  fill: var(--queued); stroke: rgba(0, 0, 0, 0.18); stroke-width: 1;
+  transition: filter 0.12s;
+}
+.tg-node:hover .tg-rect { filter: brightness(1.12); }
+.tg-node:focus { outline: none; }
+.tg-node:focus .tg-rect { stroke: var(--accent); stroke-width: 2.5; }
+.tg-node .tg-id {
+  fill: #fff; font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+  text-anchor: middle; dominant-baseline: middle; pointer-events: none;
+}
+.tg-node .tg-status {
+  fill: rgba(255, 255, 255, 0.85); font-size: 8.5px; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  text-anchor: middle; dominant-baseline: middle; pointer-events: none;
+}
+.tg-node.queued .tg-rect { fill: var(--queued); }
+.tg-node.blocked .tg-rect { fill: var(--blocked); }
+.tg-node.running .tg-rect { fill: var(--running); }
+.tg-node.idle .tg-rect { fill: var(--idle); }
+.tg-node.review .tg-rect { fill: var(--review); }
+.tg-node.finalizing .tg-rect { fill: var(--finalizing); }
+.tg-node.merged .tg-rect { fill: var(--merged); }
+.tg-node.rejected .tg-rect { fill: var(--rejected); }
+.tg-node.failed .tg-rect { fill: var(--failed); }
+.tg-node.aborted .tg-rect { fill: var(--aborted); }
+
 /* forms */
 .btn {
   background: var(--accent); color: #fff; border: none; border-radius: var(--radius-md);
