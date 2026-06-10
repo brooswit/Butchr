@@ -26,6 +26,13 @@ export type TaskMeta = {
   // column). Round-tripped in the front matter as a YAML list. Absent reads back as
   // [] — existing task.md files (which carry no `tags:` line) parse unchanged.
   tags?: string[];
+  // PLAN-PREVIEW GATE (db.ts `plan_preview` column). When true, the FIRST rendered
+  // prompt hands the agent the plan-preview protocol (propose a plan via the MCP
+  // `propose_plan` tool and pause for operator approval) instead of diving straight
+  // into the work. Stored in the front matter so renderAgentPrompt can branch on it.
+  // Absent/false reads back as the default (no plan-preview), keeping existing
+  // task.md files unchanged.
+  plan_preview?: boolean;
 };
 
 export type TaskDoc = {
@@ -108,6 +115,39 @@ const PLAN_PROTOCOL = [
   "answered, RE-LAUNCHES you in the same session with the answer to continue.",
 ].join("\n");
 
+// Appended to a PLAN-PREVIEW task's FIRST rendered prompt instead of REVIEW_PROTOCOL.
+// A plan-preview task IS an ordinary work task (it writes code), but it must get the
+// operator's sign-off on its approach FIRST: before touching any code, the agent
+// submits a concise implementation plan via the butchr MCP `propose_plan` tool, which
+// parks the task in `awaiting_input` holding the plan (reusing the ASK handshake) and
+// returns immediately so the agent exits. The operator answers 'proceed' (or sends
+// steering notes); butchr re-launches the SAME session via `--resume` with that
+// decision, at which point the agent implements and submits via request_review like
+// any other task (the answer-resume prompt — renderAnswerPrompt — carries the
+// review protocol). See mcp.ts (propose_plan) / tasks.markAwaitingInputFromAgent.
+const PLAN_PREVIEW_PROTOCOL = [
+  "# First, propose a plan (PLAN-PREVIEW gate)",
+  "",
+  "This task has **PLAN-PREVIEW enabled**: do NOT write any code yet. FIRST analyze",
+  "the request above (read the repository with your tools as needed) and produce a",
+  "CONCISE implementation plan — the files you intend to change and the approach you",
+  "will take — then submit it by calling the `propose_plan` tool provided by the",
+  "**butchr** MCP server, passing your plan as the `plan` argument.",
+  "",
+  "`propose_plan` returns IMMEDIATELY (it does NOT block) and parks this task awaiting",
+  "the operator's decision; once it returns you should STOP and exit. Do not start",
+  "implementing and do not wait inline. The operator reviews your plan and answers",
+  "'proceed' (or sends steering notes to adjust it); butchr then RE-LAUNCHES you in",
+  "this SAME session with their decision, at which point you IMPLEMENT the work and",
+  "submit it for review with `request_review` exactly as a normal task would.",
+  "",
+  "If anything about the request is ambiguous, use the **butchr** MCP server's `ask`",
+  "tool to put a clarifying question before proposing — prefer asking over guessing.",
+  "`ask` is also non-blocking: it records your question and returns immediately, after",
+  "which you should STOP and exit; once answered butchr re-launches you in the same",
+  "session with the answer to continue.",
+].join("\n");
+
 /** Absolute path to a task's directory under .butchr/tasks/. */
 export function taskDir(directoryRoot: string, taskId: string): string {
   return join(directoryRoot, ".butchr", "tasks", taskId);
@@ -134,6 +174,9 @@ function serializeFrontMatter(meta: TaskMeta): string {
   // Only emit a model line when one was requested — an unset model omits it and
   // parses back as null (the default), keeping existing task.md files unchanged.
   if (meta.model) lines.push(`model: ${meta.model}`);
+  // Only emit a plan_preview line when the gate is on — the default (off) omits it
+  // and parses back as false, keeping existing task.md files unchanged.
+  if (meta.plan_preview) lines.push(`plan_preview: true`);
   // Only emit a tags line when the task has labels — an empty/absent set omits it
   // and parses back as [], keeping existing task.md files unchanged.
   if (meta.tags && meta.tags.length) {
@@ -261,6 +304,7 @@ export function parseTaskMd(raw: string): TaskDoc {
     kind: "task",
     model: null,
     tags: [],
+    plan_preview: false,
   };
 
   let rest = raw;
@@ -291,6 +335,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       else if (key === "status") meta.status = (val as TaskStatus) || "queued";
       else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
       else if (key === "model") meta.model = val || null;
+      else if (key === "plan_preview") meta.plan_preview = val === "true";
       else if (key === "context" || key === "tags") {
         const target: "context" | "tags" = key;
         if (val === "") inList = target;
@@ -359,9 +404,18 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
     body += `\n\n# Review notes from previous attempts\n\n${doc.reviewNotes}\n\nAddress the review notes above in this attempt.`;
   }
   parts.push(body);
-  // A plan task decomposes the request via propose_subtasks; an ordinary task does
-  // the work and submits via request_review. Hand each the matching protocol.
-  parts.push(doc.meta.kind === "plan" ? PLAN_PROTOCOL : REVIEW_PROTOCOL);
+  // Hand the agent the matching protocol for this FIRST launch:
+  //  - a PLAN task (kind='plan') decomposes the request via propose_subtasks;
+  //  - a PLAN-PREVIEW task proposes a plan via propose_plan and pauses for approval
+  //    BEFORE writing code (it implements on the answer-resume — renderAnswerPrompt);
+  //  - an ordinary task does the work and submits via request_review.
+  parts.push(
+    doc.meta.kind === "plan"
+      ? PLAN_PROTOCOL
+      : doc.meta.plan_preview
+        ? PLAN_PREVIEW_PROTOCOL
+        : REVIEW_PROTOCOL,
+  );
   return parts.join("\n\n---\n\n");
 }
 

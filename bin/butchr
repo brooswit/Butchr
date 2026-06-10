@@ -32,6 +32,8 @@ COMMANDS
       [--blocked-by id,id]          Start it blocked on the given task ids.
       [--tag a,b]                   Attach organizational labels (comma-separated).
       [--priority N]                Dispatch priority (higher = sooner; default 0).
+      [--plan]                      Plan-preview gate: the agent proposes a plan and
+                                    pauses for your approval before writing code.
       [--template <name>]           Create from a template instead of -m; fill its
       [--var key=val ...]             {{placeholders}} with repeatable --var pairs.
   templates                       List the built-in task templates + placeholders.
@@ -65,7 +67,7 @@ ENVIRONMENT
 const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set"]);
 
 // Boolean flags: present → true, consume no following token.
-const BOOLEAN_FLAGS = new Set(["--merge", "--clear"]);
+const BOOLEAN_FLAGS = new Set(["--merge", "--clear", "--plan"]);
 
 function parseArgs(argv) {
   const positionals = [];
@@ -361,6 +363,9 @@ async function cmdNew(positionals, flags) {
   const reqBody = { blocked_by: blockedBy, tags };
   // Optional dispatch priority — higher dispatches sooner; omit to default to 0.
   if (flags.priority !== undefined) reqBody.priority = parsePriority(flags.priority);
+  // Optional plan-preview gate — the agent proposes a plan and pauses for operator
+  // approval before writing any code (see the propose_plan MCP tool).
+  if (flags.plan) reqBody.plan_preview = true;
   if (flags.template) {
     // Create FROM a built-in template: the server renders its body with the given
     // --var key=value pairs substituted into the {{placeholders}}. Any unset

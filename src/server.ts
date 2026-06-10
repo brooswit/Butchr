@@ -522,6 +522,9 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
     : body.prompt;
   // Optional priority: an integer (higher = dispatched sooner; default 0) that lets
   // an urgent task jump the dispatch queue. Validated inside createTask.
+  // Optional plan_preview: a boolean that opts the task into the PLAN-PREVIEW gate —
+  // the agent proposes a plan and pauses for operator approval before writing code
+  // (see tasks.createTask / taskmd.renderAgentPrompt). Validated inside createTask.
   const view = await createTask(
     p.id!,
     prompt,
@@ -531,6 +534,7 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
     body.model ?? null,
     body.tags ?? [],
     body.priority ?? 0,
+    body.plan_preview ?? false,
   );
   return json(view, 201);
 });

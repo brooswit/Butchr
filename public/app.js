@@ -68,6 +68,7 @@ function effStatus(t) {
 // included when set — every view already shows it.
 function taskChips(t, { plan = false } = {}) {
   return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
+    + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
     + chip(effStatus(t))
     + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
@@ -781,6 +782,10 @@ function openNewTaskModal(directoryId) {
     <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
       <input type="checkbox" id="nt-plan" />
       <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
+    </label>
+    <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
+      <input type="checkbox" id="nt-plan-preview" />
+      <span class="lbl" style="margin:0">Plan-preview — the agent proposes a plan and pauses for your approval before writing code</span>
     </label>`;
 
   const foot = el("div", { class: "m-foot" });
@@ -800,6 +805,7 @@ function openNewTaskModal(directoryId) {
   const tagsEl = body.querySelector("#nt-tags");
   const priorityEl = body.querySelector("#nt-priority");
   const planEl = body.querySelector("#nt-plan");
+  const planPreviewEl = body.querySelector("#nt-plan-preview");
   const tplEl = body.querySelector("#nt-template");
   const tplHintEl = body.querySelector("#nt-tpl-hint");
   promptEl.focus();
@@ -836,6 +842,10 @@ function openNewTaskModal(directoryId) {
     // Split the comma-separated blocker list into trimmed, non-empty ids.
     const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
     const kind = planEl.checked ? "plan" : "task";
+    // Optional plan-preview gate — the agent proposes a plan and pauses for approval
+    // before writing code. Mutually independent of a plan task; ignored for one (a
+    // plan task writes no code, so there is nothing to gate).
+    const plan_preview = planPreviewEl.checked;
     // Optional model — omit when blank so the backend defaults it.
     const model = modelEl.value.trim() || null;
     // Optional tags — split the comma-separated list into trimmed, non-empty labels
@@ -853,8 +863,8 @@ function openNewTaskModal(directoryId) {
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority });
-      toast(kind === "plan" ? "plan task created" : "task created");
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview });
+      toast(kind === "plan" ? "plan task created" : plan_preview ? "plan-preview task created" : "task created");
       close();
       render();
     } catch (e) {

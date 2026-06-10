@@ -507,6 +507,21 @@ export function validatePriority(priority: unknown): number {
   return n;
 }
 
+/**
+ * Validate the optional `plan_preview` flag from an API/CLI body. Returns a boolean,
+ * defaulting to false when unset/null. Rejects (400) any non-boolean value. When true,
+ * the task opts into the PLAN-PREVIEW gate: its first dispatch hands the agent the
+ * plan-preview protocol (propose a plan via the MCP `propose_plan` tool and pause for
+ * operator approval before writing code) — see taskmd.renderAgentPrompt / mcp.ts.
+ */
+export function validatePlanPreview(planPreview: unknown): boolean {
+  if (planPreview === undefined || planPreview === null) return false;
+  if (typeof planPreview !== "boolean") {
+    throw new HttpError(400, "plan_preview must be a boolean");
+  }
+  return planPreview;
+}
+
 export async function createTask(
   directoryId: string,
   prompt: string,
@@ -516,6 +531,7 @@ export async function createTask(
   model: string | null = null,
   tags: string[] = [],
   priority: number | string | null = 0,
+  planPreview: boolean = false,
 ): Promise<TaskView> {
   const dir = getDirectory(directoryId);
   if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
@@ -526,6 +542,7 @@ export async function createTask(
   // Validate + normalize the organizational labels (trim/dedupe/length-cap).
   const taskTags = validateTags(tags);
   const taskPriority = validatePriority(priority);
+  const taskPlanPreview = validatePlanPreview(planPreview);
 
   // Normalize + validate the dependency set: every listed blocker must exist.
   const blockers = normalizeBlockedBy(blockedBy);
@@ -551,13 +568,22 @@ export async function createTask(
   await git.createWorktree(dir.path, id);
   writeTaskMd(
     dir.path,
-    { id, created, status, context, kind, model: taskModel, tags: taskTags },
+    {
+      id,
+      created,
+      status,
+      context,
+      kind,
+      model: taskModel,
+      tags: taskTags,
+      plan_preview: taskPlanPreview,
+    },
     prompt,
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, priority, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, priority, plan_preview, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     directoryId,
@@ -567,6 +593,7 @@ export async function createTask(
     taskModel,
     JSON.stringify(taskTags),
     taskPriority,
+    taskPlanPreview ? 1 : 0,
     created,
   );
   recordTaskEvent(

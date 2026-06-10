@@ -291,6 +291,19 @@ ensureColumn("tasks", "tags", "TEXT");
 // tasks dispatch in; it is ignored once a task is running/terminal.
 ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
 
+// PLAN-PREVIEW GATE. 1 when a task opts into the plan-preview gate, else 0 (the
+// default every existing row backfills to). A plan-preview task does NOT decompose
+// like a `kind='plan'` task (it is an ordinary work task that writes code) — instead
+// its FIRST dispatch renders a prompt that instructs the agent to submit a concise
+// implementation PLAN via the MCP `propose_plan` tool and STOP, parking the task in
+// `awaiting_input` (reusing the ASK handshake) holding the plan. The operator reviews
+// the plan and answers 'proceed' or steering notes; butchr re-launches the SAME
+// session via `--resume` with the decision and the agent then implements + calls
+// request_review as normal. Orthogonal to `kind` and `status`. Set only at creation
+// (API/CLI/webapp). See tasks.createTask / mcp.ts (propose_plan) /
+// taskmd.renderAgentPrompt's plan-preview protocol.
+ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -423,6 +436,10 @@ export type TaskRow = {
   // sooner; the queued selection orders by `priority DESC, created_at ASC`. Default
   // 0. Surfaced on TaskView via the `...row` spread (no extra plumbing in taskView).
   priority: number;
+  // PLAN-PREVIEW GATE (see the ensureColumn block above): 1 when the task opts into
+  // the plan-preview gate (the agent proposes a plan and pauses for operator approval
+  // before writing code), else 0. Surfaced on TaskView via the `...row` spread.
+  plan_preview: number;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

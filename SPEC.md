@@ -79,7 +79,7 @@ all lookups (`agentExists`, `agentRead`, `agentDeregister`, …) key off the tas
   bin/butchr CLI ─REST────┤   ├─ REST /api/*  ──────────────► tasks.ts / directories.ts ◄─► db.ts (SQLite WAL) │
                           │   ├─ SSE  /api/events ◄─ events.ts (in-proc pub/sub)                                │
                           │   ├─ /health                                                                        │
-                          │   └─ /mcp/:taskId ─────────────► mcp.ts ── request_review / ask / propose_subtasks  │
+                          │   └─ /mcp/:taskId ──► mcp.ts ── request_review / ask / propose_subtasks / propose_plan │
                           │                                                                                    │
   Claude Code agent ─MCP──┘   dispatcher.ts (tick loop + watcher) ─► taskmd.ts (prompt render)                 │
         ▲                      │  ├─ git.ts   (worktree / rebase / merge / revert / cleanup)                    │
@@ -247,6 +247,28 @@ decomposition. It is created via `POST …/tasks` with `kind: "plan"`.
   own), its worktree + tab are torn down best-effort, its token usage is captured,
   and any task blocked on the plan is re-evaluated. The call is non-blocking and
   **idempotent** (a re-call on a completed plan returns its prior ids).
+
+### 2.6 Plan-preview gate
+
+A task created with **`plan_preview: true`** opts into the **plan-preview gate**. This
+is *orthogonal* to `kind`: a plan-preview task is an **ordinary work task that writes
+code** — it just gets the operator's sign-off on its approach *first*. It **reuses the
+AWAITING-INPUT handshake** (§2.1 `awaiting_input`), so no new lifecycle state is added.
+
+- On its **first** dispatch the agent is handed the **`PLAN_PREVIEW_PROTOCOL`**
+  (`taskmd.ts`) instead of the review protocol, plus the **`propose_plan`** MCP tool.
+  It is told to analyze the request, submit a **concise implementation plan** via
+  `propose_plan`, and **stop** — *before* writing any code.
+- `propose_plan` calls `markAwaitingInputFromAgent` (the same core the `ask` tool
+  uses), parking the task in **`awaiting_input`** holding the plan (stored in
+  `question`); it returns immediately and the agent exits.
+- The operator reviews the plan (webapp answer box / CLI `answer` / API) and answers
+  **`proceed`** or steering notes. `answerTask` re-queues for a **`--resume`** re-launch
+  with the decision injected (`renderAnswerPrompt`, which carries the review protocol),
+  so the agent **implements** the work and calls `request_review` as normal.
+- Non-plan-preview tasks behave exactly as before. `plan_preview` is set **only at
+  creation** (API `plan_preview`, CLI `new --plan`, webapp checkbox) and stored on the
+  task row + in `task.md` front matter (`plan_preview: true`).
 
 ---
 
@@ -827,7 +849,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | `?q=` (optional) | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks`/`tags` as arrays plus precomputed `blockerStates`/`deadBlockers`. `?q=` is a case-insensitive FULL-TEXT SEARCH (server-side, so huge prompts never ship to the client): only tasks whose prompt (from `task.md`), `summary`, review notes (`review_note` + the `task.md` Review Notes), or id contain `q` are returned. A blank/absent `q` returns the full list and reads no `task.md`; a non-blank `q` reads each task's `task.md` to scan its prompt. 404 if directory gone. |
-| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, priority?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `priority` is an integer (higher = dispatched sooner; default 0). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), priority integer (400), template name (404), `vars` shape (400), prompt required (400). |
+| `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, priority?, plan_preview?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `plan_preview:true` → the agent proposes a plan and pauses for operator approval before writing code (§2.6). `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `priority` is an integer (higher = dispatched sooner; default 0). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), priority integer (400), plan_preview boolean (400), template name (404), `vars` shape (400), prompt required (400). |
 | `GET` | `/api/tasks/:id` | — | `TaskView` (DB row + `task.md` prompt/context/review_notes + `blocked_by`/`blockerStates`/`deadBlockers`/`spawned_subtasks`/`tags` + `estimate`, the rough p50–p90 duration estimate — see §10). 404 if gone. |
 | `GET` | `/api/tasks/:id/diff` | — | `{ diff }` — committed `base...id` plus uncommitted worktree changes. |
 | `GET` | `/api/tasks/:id/estimate` | — | `{ single, chain }` — the rough duration estimate (§10): `single` is the task's own p50–p90 range (same object as `TaskView.estimate`), `chain` the critical-path total across its dependency chain (a plan's sub-tasks, or this task's blockers) or `null` when there's nothing to chain. 404 if gone. |
@@ -868,16 +890,26 @@ banner live). The server runs with `idleTimeout: 0` so streams aren't dropped.
 
 Hand-rolled Streamable-HTTP MCP (`src/mcp.ts`), stateless (identity = the
 `/mcp/<taskId>` path, no `Mcp-Session-Id`). Handles `initialize`,
-`notifications/initialized` (202), `ping`, `tools/list`, `tools/call`. Tools offered
-depend on `kind`:
+`notifications/initialized` (202), `ping`, `tools/list`, `tools/call`. Each tool
+carries an optional **`gate`** predicate; `tools/list` offers a tool only when its
+gate is absent or returns true for the task's row (so the set offered depends on
+`kind` *and* `plan_preview`):
 
-- **`request_review({ summary? })`** — *ordinary tasks.* Non-blocking: records the
-  review request (`markReviewFromAgent`), returns immediately; the agent should
-  exit. A terminal task (merged/aborted) reports its status instead.
+- **`request_review({ summary? })`** — *non-plan tasks* (`kind !== 'plan'`).
+  Non-blocking: records the review request (`markReviewFromAgent`), returns
+  immediately; the agent should exit. A terminal task (merged/aborted) reports its
+  status instead.
 - **`propose_subtasks({ subtasks:[{prompt,context?,blocked_by?}], summary? })`** —
-  *plan tasks only.* Validates + creates the decomposition and completes the plan
-  task (see §2.5). A bad/cyclic graph or blank prompt comes back as an `isError`
-  tool result so the agent can re-propose (it never crashes the server).
+  *plan tasks only* (`kind === 'plan'`). Validates + creates the decomposition and
+  completes the plan task (see §2.5). A bad/cyclic graph or blank prompt comes back as
+  an `isError` tool result so the agent can re-propose (it never crashes the server).
+- **`propose_plan({ plan })`** — *plan-preview tasks only* (`plan_preview` set,
+  `kind !== 'plan'`; see §2.6). Non-blocking: records the agent's implementation plan
+  and parks the task in `awaiting_input` for operator approval by **reusing the ASK
+  handshake** (`markAwaitingInputFromAgent` — the plan is stored like a question), then
+  returns; the agent should exit. A blank plan is an `isError` result; a terminal task
+  reports its status. On the operator's answer the SAME session resumes (`--resume`)
+  and the agent implements + `request_review`.
 - **`ask({ question })`** — *both kinds.* **Non-blocking**, the unified
   AWAITING-INPUT handshake (mirrors `request_review`): records the agent's question
   and parks the task in `awaiting_input` (`markAwaitingInputFromAgent`), then returns
@@ -904,7 +936,7 @@ server (a DB restore can't go through a live server — see §5).
 | `dashboard` | `GET /api/dashboard` — per-directory active / review / needs-attention / failed table + totals |
 | `gate <dir> [--set "<cmd>"] [--clear]` | `PATCH /api/directories/:id` (set/clear the gate command) or `GET /api/dashboard` (no flag → show the effective command); accepts an id or path |
 | `ls [--dir <id>] [--status <s>] [--tag a,b] [--search <text>]` | `GET /api/directories(/:id/tasks)` — compact id/status/CI/tags table; `idle` shows `status*`; `--dir` accepts an id or path; `--status` filters client-side; `--tag` keeps tasks carrying ANY of the given labels; `--search` is a server-side full-text filter (`?q=`) over each task's prompt/summary/review notes/id |
-| `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b] [--priority N]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels; `--priority` sets the dispatch priority, higher = sooner) |
+| `new <dir> -m <prompt> [--blocked-by id,id] [--tag a,b] [--priority N] [--plan]` | `POST /api/directories/:id/tasks` (`--tag` attaches organizational labels; `--priority` sets the dispatch priority, higher = sooner; `--plan` sets `plan_preview` — the agent proposes a plan and pauses for approval before writing code, §2.6) |
 | `new <dir> --template <name> [--var k=v …] [--blocked-by …] [--tag …] [--priority N]` | `POST /api/directories/:id/tasks` with `{ template, vars }` instead of `-m` — create from a built-in template, filling its `{{placeholders}}` with repeatable `--var key=value` pairs (server-rendered; un-supplied markers stay visible) |
 | `templates` | `GET /api/templates` — list the built-in templates as a `name`/`placeholders`/`description` table |
 | `show <id>` | `GET /api/tasks/:id` — status, CI, tags, summary, review notes, the pending `awaiting_input` question, blockers, dispatch/revert errors |
@@ -1091,6 +1123,7 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `diff_lines` | INTEGER | final changed-line count (added + deleted vs the default branch) captured on the review transition; the SIZE-bucket signal for duration estimates (§10). Null until/unless captured. |
 | `path_type` | TEXT | coarse path-based type of the changed files (`docs`/`webapp`/`core`/`mixed`), captured alongside `diff_lines`; the TYPE-bucket signal for estimates (§10). Null until/unless captured. |
 | `priority` | INTEGER (`0`) | dispatch priority — **higher = dispatched sooner**. The queued selection orders by `priority DESC, created_at ASC`, so an urgent task jumps the queue while ties stay FIFO (§3 *The tick loop*). Set at creation and updatable via `POST /api/tasks/:id/priority`; orthogonal to `status` (only affects `queued` dispatch order). |
+| `plan_preview` | INTEGER (`0`) | 1 when the task opts into the **plan-preview gate** (§2.6): its first dispatch hands the agent the `propose_plan` tool + plan-preview protocol, parking it in `awaiting_input` for operator approval before any code is written. Orthogonal to `kind`/`status`; set only at creation. Surfaced on `TaskView`, round-tripped in `task.md` (`plan_preview: true`). |
 | `created_at` | TEXT | ISO creation time. |
 | `started_at` | TEXT | first `running` transition (never cleared). |
 | `completed_at` | TEXT | `running→review` transition. |
@@ -1177,7 +1210,8 @@ registration):
 ```
 
 `task.md` front matter (`src/taskmd.ts`, hand-rolled YAML): `id`, `created`,
-`status`, `context: [paths]`, plus `kind: plan` and `model: …` only when set.
+`status`, `context: [paths]`, plus `kind: plan`, `model: …`, `tags: […]`, and
+`plan_preview: true` only when set.
 Sections: `## Prompt`, `## Review Notes` (rejection notes appended over time). The
 rendered agent prompt **lists context-file paths** rather than inlining their bodies
 (the prompt is passed as a single shell argv via `"$(cat …)"`, so inlining large

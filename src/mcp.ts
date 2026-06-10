@@ -17,6 +17,7 @@
 // notes. This is what makes review durable across an agent or butchr restart — an
 // MCP server cannot wake an idle Claude Code client, so we never park a call.
 import { HttpError } from "./directories.ts";
+import type { TaskRow } from "./db.ts";
 import {
   getTask,
   markAwaitingInputFromAgent,
@@ -121,6 +122,37 @@ const PROPOSE_SUBTASKS_TOOL = {
   },
 } as const;
 
+// Exposed ONLY for PLAN-PREVIEW tasks (plan_preview=1). On its first launch such a
+// task is instructed to submit a concise implementation PLAN here BEFORE writing any
+// code; this reuses the ASK handshake (markAwaitingInputFromAgent) to park the task
+// in `awaiting_input` holding the plan, returning at once so the agent exits. The
+// operator answers 'proceed'/steering notes and butchr resumes the SAME session with
+// the decision, at which point the agent implements + request_review as normal.
+const PROPOSE_PLAN_TOOL = {
+  name: "propose_plan",
+  description:
+    "PLAN-PREVIEW: submit your concise implementation PLAN for operator approval " +
+    "BEFORE writing any code. Returns IMMEDIATELY (does NOT block) and parks this " +
+    "task awaiting the operator's decision; after it returns, STOP and exit. The " +
+    "operator reviews your plan and answers 'proceed' (or sends steering notes), " +
+    "after which butchr RE-LAUNCHES you in this SAME session with their decision so " +
+    "you implement the plan and call request_review as normal. Pass `plan`: a short " +
+    "description of the files you intend to change and the approach you will take. Do " +
+    "NOT start implementing before calling this.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      plan: {
+        type: "string",
+        description:
+          "The concise implementation plan to put to the operator for approval.",
+      },
+    },
+    required: ["plan"],
+    additionalProperties: false,
+  },
+} as const;
+
 const PROTOCOL_VERSION = "2025-06-18";
 
 type JsonRpcMessage = {
@@ -207,12 +239,13 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
       return rpcResult(msg.id, {});
 
     case "tools/list": {
-      // A PLAN task gets the decomposition tool; an ordinary task gets the review
-      // tool. `ask` is offered to both. The registry's `plan` flag encodes this
-      // (see TOOLS). (handleMcp already verified the task exists.)
-      const isPlan = getTask(taskId)?.kind === "plan";
+      // Each tool's optional `gate` decides whether it is offered for THIS task: a
+      // PLAN task gets the decomposition tool, an ordinary task gets the review tool,
+      // a PLAN-PREVIEW task additionally gets propose_plan, and `ask` (no gate) is
+      // offered to all. (handleMcp already verified the task exists.)
+      const task = getTask(taskId)!;
       const tools = TOOLS
-        .filter((t) => t.plan === undefined || t.plan === isPlan)
+        .filter((t) => !t.gate || t.gate(task))
         .map((t) => t.def);
       return rpcResult(msg.id, { tools });
     }
@@ -233,24 +266,30 @@ type ToolResult = { content: unknown[]; isError: boolean };
 
 /**
  * One dispatchable MCP tool: its public definition (name/description/inputSchema),
- * an optional `plan` gate, and a `run` that produces the tool result. The `plan`
- * flag drives `tools/list` filtering: `true` exposes the tool only to PLAN tasks,
- * `false` only to ordinary tasks, and omitted to both. The shared dispatcher
+ * an optional `gate` predicate, and a `run` that produces the tool result. `gate`
+ * drives `tools/list` filtering: a tool is offered for a task only when its gate is
+ * absent (offer to all) or returns true for that task's row. The shared dispatcher
  * (`handleToolCall`) does name lookup + arg extraction; each `run` owns its own
  * field validation and error→`textResult` wrapping, since the messages are
  * tool-specific.
  */
 type ToolEntry = {
   def: { name: string; description: string; inputSchema: unknown };
-  plan?: boolean;
+  gate?: (task: TaskRow) => boolean;
   run(taskId: string, args: any): Promise<ToolResult>;
 };
 
 // The tool registry. Order here is the order tools appear in `tools/list`:
-// PLAN tasks see [propose_subtasks, ask]; ordinary tasks see [request_review, ask].
+// PLAN tasks see [propose_subtasks, ask]; a PLAN-PREVIEW task sees
+// [propose_plan, request_review, ask]; an ordinary task sees [request_review, ask].
 const TOOLS: ToolEntry[] = [
-  { def: PROPOSE_SUBTASKS_TOOL, plan: true, run: runProposeSubtasks },
-  { def: REQUEST_REVIEW_TOOL, plan: false, run: runRequestReview },
+  { def: PROPOSE_SUBTASKS_TOOL, gate: (t) => t.kind === "plan", run: runProposeSubtasks },
+  {
+    def: PROPOSE_PLAN_TOOL,
+    gate: (t) => t.kind !== "plan" && !!t.plan_preview,
+    run: runProposePlan,
+  },
+  { def: REQUEST_REVIEW_TOOL, gate: (t) => t.kind !== "plan", run: runRequestReview },
   { def: ASK_TOOL, run: runAsk },
 ];
 
@@ -353,5 +392,36 @@ async function runAsk(taskId: string, args: any): Promise<ToolResult> {
       "You can stop now — do not wait. butchr will surface it to whoever operates " +
       "(the CTO/operator via API/CLI, or a human in the webapp) and, once answered, " +
       "RE-LAUNCH you in this same session with the answer so you can continue.",
+  });
+}
+
+/**
+ * `propose_plan` (PLAN-PREVIEW tasks): record the agent's implementation plan and
+ * park the task in `awaiting_input` for operator approval, then RETURN AT ONCE
+ * (non-blocking). REUSES the ASK handshake (markAwaitingInputFromAgent) — the plan is
+ * stored exactly like a clarifying question, and the operator's answer ('proceed' /
+ * steering notes) resumes the SAME Claude session via `--resume` (answerTask), at
+ * which point the agent implements + request_review as normal. The agent should exit
+ * after this call. A blank plan is an `isError` tool result so the agent re-proposes
+ * rather than parking an empty plan; a terminal task reports its status instead.
+ */
+async function runProposePlan(taskId: string, args: any): Promise<ToolResult> {
+  const plan: unknown = args.plan;
+  if (typeof plan !== "string" || !plan.trim()) {
+    return textResult("`propose_plan` requires a non-empty `plan` string.", true);
+  }
+
+  const state = markAwaitingInputFromAgent(taskId, plan.trim());
+  if (state !== "ok") {
+    return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
+  }
+  return toolResult({
+    status: "awaiting_input",
+    message:
+      "Your implementation plan has been recorded and this task is now awaiting " +
+      "operator approval. Stop now — do NOT start implementing and do not wait. " +
+      "butchr surfaces the plan to whoever operates and, once they answer 'proceed' " +
+      "(or send steering notes), RE-LAUNCHES you in this same session with their " +
+      "decision so you can implement the work and call request_review.",
   });
 }
