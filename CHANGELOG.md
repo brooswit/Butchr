@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   specific refactor scoped as an independent follow-up task, ranked by value/effort
   and flagged for same-file sequencing. Report only — no code changes.
 
+### Changed
+- **Auto-rebase and auto-merge now share one conflict-collection helper.** The
+  identical tail that both paths ran after a failed `git rebase` — gather the
+  conflicting files (via `--diff-filter=U`, falling back to scraping git's text),
+  abort the rebase, and decide whether the failure was a conflict — lived in two
+  copies that had to be kept in sync by hand. It's now a single internal helper, so
+  the conflict note handed back to the agent can't drift between the two paths.
+  Pure-internal refactor; no behavior change.
+
 ## [0.9.2] - 2026-06-10
 
 ### Added

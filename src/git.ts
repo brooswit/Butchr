@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
-import { run, runOrThrow } from "./exec.ts";
+import { run, runOrThrow, type ExecResult } from "./exec.ts";
 
 const git = config.gitBin;
 
@@ -204,6 +204,40 @@ function parseConflictFiles(output: string): string[] {
 }
 
 /**
+ * Tail shared by `merge()` and `rebaseOntoDefault()` when a `git rebase` fails:
+ * collect the conflicting file paths, abort the rebase, and decide whether the
+ * failure was a conflict.
+ *
+ * Ordering matters: collect the unmerged files BEFORE the abort (the abort clears
+ * them). Prefer `--diff-filter=U` over scraping git's text, falling back to the
+ * text scrape only when the porcelain list is empty. `conflict` is true if either
+ * signal fires.
+ */
+async function collectConflictAndAbort(
+  cwd: string,
+  rb: ExecResult,
+  base: string,
+): Promise<{ conflict: boolean; conflictFiles: string[]; message: string }> {
+  const unmerged = await run([
+    git, "-C", cwd, "diff", "--name-only", "--diff-filter=U",
+  ]);
+  let conflictFiles = unmerged.ok
+    ? unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+    : [];
+  if (conflictFiles.length === 0) {
+    conflictFiles = parseConflictFiles(rb.stdout + "\n" + rb.stderr);
+  }
+  await run([git, "-C", cwd, "rebase", "--abort"]);
+  const combined = rb.stdout + "\n" + rb.stderr;
+  const conflict = /conflict/i.test(combined) || conflictFiles.length > 0;
+  return {
+    conflict,
+    conflictFiles,
+    message: (rb.stderr || rb.stdout).trim() || `rebase onto ${base} failed`,
+  };
+}
+
+/**
  * Commit any uncommitted worktree changes, then REBASE the task branch onto the
  * current tip of the default branch and fast-forward the default branch to it.
  *
@@ -267,28 +301,12 @@ export async function merge(dir: string, taskId: string): Promise<MergeResult> {
   const rebaseDir = existsSync(wt) ? wt : dir;
   const rb = await run([git, "-C", rebaseDir, "rebase", base]);
   if (!rb.ok) {
-    // Conflict (or other rebase failure). Collect the unmerged files before we
-    // abort — `--diff-filter=U` is more reliable than scraping git's text.
-    const unmerged = await run([
-      git, "-C", rebaseDir, "diff", "--name-only", "--diff-filter=U",
-    ]);
-    let conflictFiles = unmerged.ok
-      ? unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
-      : [];
-    if (conflictFiles.length === 0) {
-      conflictFiles = parseConflictFiles(rb.stdout + "\n" + rb.stderr);
-    }
-    // Abort so the task branch + worktree are left CLEAN and the base UNTOUCHED.
-    // The agent (or a fresh one) integrates base and re-submits.
-    await run([git, "-C", rebaseDir, "rebase", "--abort"]);
-    const combined = rb.stdout + "\n" + rb.stderr;
-    const conflict = /conflict/i.test(combined) || conflictFiles.length > 0;
-    return {
-      ok: false,
-      conflict,
-      message: (rb.stderr || rb.stdout).trim() || `rebase onto ${base} failed`,
-      conflictFiles,
-    };
+    // Conflict (or other rebase failure). Abort so the task branch + worktree are
+    // left CLEAN and the base UNTOUCHED; the agent (or a fresh one) integrates
+    // base and re-submits.
+    const { conflict, conflictFiles, message } =
+      await collectConflictAndAbort(rebaseDir, rb, base);
+    return { ok: false, conflict, message, conflictFiles };
   }
 
   // Clean rebase — the task branch is now linear atop base. Capture the base tip
@@ -442,26 +460,16 @@ export async function rebaseOntoDefault(
     return noop({ rebased: true, message: `rebased ${taskId} onto ${base}` });
   }
 
-  // Conflict (or other rebase failure). Collect the unmerged files before aborting.
-  const unmerged = await run([
-    git, "-C", wt, "diff", "--name-only", "--diff-filter=U",
-  ]);
-  let conflictFiles = unmerged.ok
-    ? unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
-    : [];
-  if (conflictFiles.length === 0) {
-    conflictFiles = parseConflictFiles(rb.stdout + "\n" + rb.stderr);
-  }
-  // Abort so the branch + worktree are left CLEAN on their original base.
-  await run([git, "-C", wt, "rebase", "--abort"]);
-  const combined = rb.stdout + "\n" + rb.stderr;
-  const conflict = /conflict/i.test(combined) || conflictFiles.length > 0;
+  // Conflict (or other rebase failure). Abort so the branch + worktree are left
+  // CLEAN on their original base.
+  const { conflict, conflictFiles, message } =
+    await collectConflictAndAbort(wt, rb, base);
   return {
     ok: false,
     rebased: false,
     conflict,
     skippedDirty: false,
-    message: (rb.stderr || rb.stdout).trim() || `rebase onto ${base} failed`,
+    message,
     conflictFiles,
   };
 }
