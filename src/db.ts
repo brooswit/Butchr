@@ -304,6 +304,28 @@ ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
 // taskmd.renderAgentPrompt's plan-preview protocol.
 ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
 
+// IDEA → SPEC → BUILD STAGE. A task's `stage` places it on the work lifecycle:
+//   - 'build' (the DEFAULT every existing row backfills to) is today's behavior: an
+//     ordinary work task whose prompt IS the work — it dispatches, builds code, and
+//     runs the normal CI → review → merge flow, fully backward-compatible.
+//   - 'idea' is a SPEC-WRITING task: created from a short one-line brief, its agent
+//     does NOT write code — it produces a detailed, repo-grounded task prompt (a SPEC)
+//     for the brief and submits it via request_review (so REVIEWING it = reviewing the
+//     spec). renderAgentPrompt hands it the idea/spec protocol instead of the review one.
+//   - 'spec' is what an 'idea' task AUTO-advances to once its agent submits the spec for
+//     review (the idea→spec gate is automatic — see tasks.flipIdeaToSpec). It is a spec
+//     sitting in review awaiting the operator's sign-off.
+// THE SPEC GATE (the key leverage point): approving an idea/spec-stage task does NOT
+// merge code — it AUTO-CREATES a stage='build' task in the SAME directory whose PROMPT
+// is the approved spec (the agent's request_review summary), then completes the spec
+// task terminally (it merges nothing of its own, like a plan task), recording the build
+// id in `spawned_subtasks`. That build task then runs the normal flow. So idea→spec is
+// automatic; spec→build is GATED (approve the spec → spawn the build); build→merge is
+// the existing review. Set only at creation (default 'build'); orthogonal to `kind`,
+// `plan_preview`, and `status`. See tasks.createTask / approveTask (the SPEC GATE) /
+// taskmd.renderAgentPrompt (the idea/spec protocol).
+ensureColumn("tasks", "stage", "TEXT NOT NULL DEFAULT 'build'");
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -337,6 +359,12 @@ export type DirectoryRow = {
 // A task's KIND: an ordinary work task, or a PLAN task whose job is to decompose a
 // request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks).
 export type TaskKind = "task" | "plan";
+
+// A task's STAGE on the idea → spec → build lifecycle (see the `stage` column comment
+// above). 'build' is the default = today's ordinary work task. 'idea'/'spec' are the
+// spec-writing record (idea created from a brief; auto-advances to spec at review);
+// approving an idea/spec task spawns a stage='build' task carrying the approved spec.
+export type TaskStage = "idea" | "spec" | "build";
 
 // `awaiting_input` is a pause state for the ASK handshake: a running agent called
 // the MCP `ask` tool, so butchr stored its `question`, parked the task here, and the
@@ -440,6 +468,10 @@ export type TaskRow = {
   // the plan-preview gate (the agent proposes a plan and pauses for operator approval
   // before writing code), else 0. Surfaced on TaskView via the `...row` spread.
   plan_preview: number;
+  // IDEA → SPEC → BUILD STAGE (see the `stage` ensureColumn block above): 'build'
+  // (default = today's ordinary work task), or 'idea'/'spec' for a spec-writing record.
+  // Surfaced on TaskView via the `...row` spread (no extra plumbing in taskView).
+  stage: TaskStage;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

@@ -27,6 +27,8 @@ terminal/PTY/agent-session management to herdr.
    - [2.3 Orthogonal flags](#23-orthogonal-flags)
    - [2.4 Dependencies (blocked_by)](#24-dependencies-blocked_by)
    - [2.5 Plan / auto-decompose tasks](#25-plan--auto-decompose-tasks)
+   - [2.6 Plan-preview gate](#26-plan-preview-gate)
+   - [2.7 Idea → spec → build stage lifecycle](#27-idea--spec--build-stage-lifecycle)
 3. [Dispatch & agents](#3-dispatch--agents)
 4. [Review & merge](#4-review--merge)
 5. [Self-healing & ops](#5-self-healing--ops)
@@ -270,6 +272,49 @@ AWAITING-INPUT handshake** (§2.1 `awaiting_input`), so no new lifecycle state i
   creation** (API `plan_preview`, CLI `new --plan`, webapp checkbox) and stored on the
   task row + in `task.md` front matter (`plan_preview: true`).
 
+### 2.7 Idea → spec → build stage lifecycle
+
+The unit of work flows through **stages**, each worked by an agent: an **Idea** (an
+operator one-liner) → an agent writes a **Spec** → the operator approves the spec → an
+agent **Builds** → review → merge. The model is **linked records on the existing
+dependency graph**, *not* one mega state machine: a task carries a **`stage`** of
+`idea` | `spec` | `build`, **default `build`** — which is today's behavior, **fully
+backward-compatible**.
+
+- **`build` (default)** is an ordinary work task: its prompt *is* the work. It
+  dispatches, builds code, and runs the normal CI → review → merge flow. Creating a
+  `build` task directly with a full prompt is exactly today's flow (stages are opt-in).
+- **`idea`** is a **spec-writing** task, created from a short brief. Its agent writes
+  **no code**: on its first dispatch it is handed the **`IDEA_SPEC_PROTOCOL`**
+  (`taskmd.ts`) instead of the review protocol — it grounds itself in the repo (à la
+  `src/expand.ts`), writes a detailed, repo-grounded task **prompt (the spec)**, and
+  submits it as the **`summary`** of `request_review`. So **reviewing an idea/spec-stage
+  task = reviewing the spec.**
+- **`spec`** is what an `idea` task **auto-advances to** the moment its agent submits the
+  spec for review (`flipIdeaToSpec` — the **idea→spec gate is automatic**, no operator
+  action). The record now reads as "a spec sitting in review awaiting sign-off".
+
+**The spec gate (the key leverage point).** Approving an idea/spec-stage task does **not**
+merge code. `approveTask` branches on `stage !== "build"` into **`approveSpecStage`**,
+which:
+
+- **auto-creates a `stage="build"` task** in the **same directory** whose **prompt is the
+  approved spec** (the agent's `request_review` summary; it falls back to the idea task's
+  own prompt/brief if no summary was captured). The build task inherits the model
+  preference and runs the **normal** dispatch → CI → review → merge flow;
+- **completes the spec task terminally** to `merged` (it merges nothing of its own, like
+  a plan task), recording the build id in **`spawned_subtasks`** (reusing the plan→
+  sub-tasks linkage the webapp renders), tearing down its worktree + tab best-effort,
+  capturing token usage, and re-evaluating any task blocked on it.
+
+So the gates are: **idea→spec automatic**; **spec→build gated** (approve the spec → spawn
+the build — steer cheaply at the spec, not expensively at the diff); **build→merge** is
+the existing review. `stage` is set **only at creation** (API `stage`, webapp "Idea
+stage" checkbox) and stored on the task row + in `task.md` front matter (`stage:` is
+emitted only for a non-`build` stage, so existing `task.md` files parse back as `build`).
+Fan-out (one spec → **many** build tasks, absorbing auto-decompose) is a follow-on; this
+is the 1:1 foundation.
+
 ---
 
 ## 3. Dispatch & agents
@@ -503,10 +548,15 @@ review isn't resurrected).
 
 ### Approve → global merge queue → post-merge verify
 
-`approveTask` (only valid on `review`) runs inside a process-wide **global merge
-queue** (`runExclusiveMerge` — a never-rejecting promise chain) so concurrent
-approvals rebase + fast-forward one at a time against an up-to-date base tip instead
-of racing. Inside the exclusive section:
+`approveTask` (only valid on `review`) first checks the task's **stage** (§2.7): an
+idea/spec-stage task (`stage !== "build"`) carries a **spec**, not code, so it branches
+into the **spec gate** (`approveSpecStage`) — spawning a `build` task whose prompt is the
+approved spec and completing the spec task terminally — and never touches the merge queue
+below. A `build`-stage task (the default) proceeds to the merge path.
+
+The merge path runs inside a process-wide **global merge queue** (`runExclusiveMerge` —
+a never-rejecting promise chain) so concurrent approvals rebase + fast-forward one at a
+time against an up-to-date base tip instead of racing. Inside the exclusive section:
 
 1. Capture the default-branch tip (`priorTip`) for a possible revert.
 2. `git.merge` — auto-commit any dangling worktree changes (after a **conflict-marker
@@ -1132,6 +1182,7 @@ Deleting a directory **cascades** to its tasks (and their `task_events`).
 | `path_type` | TEXT | coarse path-based type of the changed files (`docs`/`webapp`/`core`/`mixed`), captured alongside `diff_lines`; the TYPE-bucket signal for estimates (§10). Null until/unless captured. |
 | `priority` | INTEGER (`0`) | dispatch priority — **higher = dispatched sooner**. The queued selection orders by `priority DESC, created_at ASC`, so an urgent task jumps the queue while ties stay FIFO (§3 *The tick loop*). Set at creation and updatable via `POST /api/tasks/:id/priority`; orthogonal to `status` (only affects `queued` dispatch order). |
 | `plan_preview` | INTEGER (`0`) | 1 when the task opts into the **plan-preview gate** (§2.6): its first dispatch hands the agent the `propose_plan` tool + plan-preview protocol, parking it in `awaiting_input` for operator approval before any code is written. Orthogonal to `kind`/`status`; set only at creation. Surfaced on `TaskView`, round-tripped in `task.md` (`plan_preview: true`). |
+| `stage` | TEXT (`'build'`) | the **idea → spec → build** stage (§2.7): `build` (default) = today's ordinary work task; `idea`/`spec` = a **spec-writing** record whose agent writes a spec (not code) and submits it via `request_review`. Approving an idea/spec-stage task **spawns a `build` task carrying the approved spec** (the spec gate) instead of merging. Orthogonal to `kind`/`plan_preview`/`status`; set only at creation. Surfaced on `TaskView`, round-tripped in `task.md` (`stage:` emitted only when non-`build`). |
 | `created_at` | TEXT | ISO creation time. |
 | `started_at` | TEXT | first `running` transition (never cleared). |
 | `completed_at` | TEXT | `running→review` transition. |

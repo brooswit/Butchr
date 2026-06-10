@@ -3,7 +3,7 @@
 import { config } from "./config.ts";
 import { triggerConformance } from "./conformance.ts";
 import { db, estimateRows, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
-import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
+import type { DirectoryRow, TaskKind, TaskRow, TaskStage, TaskStatus } from "./db.ts";
 import {
   classifyPathType,
   computeEstimateStats,
@@ -25,6 +25,7 @@ import {
   appendRejection,
   readTaskMd,
   taskMdPath,
+  updateTaskMdStage,
   updateTaskMdStatus,
   writeTaskMd,
 } from "./taskmd.ts";
@@ -522,6 +523,20 @@ export function validatePlanPreview(planPreview: unknown): boolean {
   return planPreview;
 }
 
+/**
+ * Validate the optional `stage` field from an API/CLI body. Returns the task's stage on
+ * the idea → spec → build lifecycle, defaulting to 'build' (today's ordinary work task)
+ * when unset/blank — so omitting it is fully backward-compatible. Rejects (400) any
+ * value that isn't one of the three stages. See the `stage` column in db.ts.
+ */
+export function validateStage(stage: unknown): TaskStage {
+  if (stage === undefined || stage === null || stage === "") return "build";
+  if (stage !== "idea" && stage !== "spec" && stage !== "build") {
+    throw new HttpError(400, `invalid stage "${stage}": must be 'idea', 'spec', or 'build'`);
+  }
+  return stage;
+}
+
 export async function createTask(
   directoryId: string,
   prompt: string,
@@ -532,6 +547,7 @@ export async function createTask(
   tags: string[] = [],
   priority: number | string | null = 0,
   planPreview: boolean = false,
+  stage: TaskStage | string | null = "build",
 ): Promise<TaskView> {
   const dir = getDirectory(directoryId);
   if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
@@ -543,6 +559,7 @@ export async function createTask(
   const taskTags = validateTags(tags);
   const taskPriority = validatePriority(priority);
   const taskPlanPreview = validatePlanPreview(planPreview);
+  const taskStage = validateStage(stage);
 
   // Normalize + validate the dependency set: every listed blocker must exist.
   const blockers = normalizeBlockedBy(blockedBy);
@@ -577,13 +594,14 @@ export async function createTask(
       model: taskModel,
       tags: taskTags,
       plan_preview: taskPlanPreview,
+      stage: taskStage,
     },
     prompt,
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, priority, plan_preview, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, priority, plan_preview, stage, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     directoryId,
@@ -594,6 +612,7 @@ export async function createTask(
     JSON.stringify(taskTags),
     taskPriority,
     taskPlanPreview ? 1 : 0,
+    taskStage,
     created,
   );
   recordTaskEvent(
@@ -1160,6 +1179,82 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   return { ok: true, rebased: res.rebased, conflict: false };
 }
 
+/**
+ * THE SPEC GATE: approve an idea/spec-stage task (it is in `review` holding a SPEC,
+ * not code). This AUTO-CREATES a stage='build' task in the SAME directory whose PROMPT
+ * is the approved spec, then completes this spec task terminally — it writes no code of
+ * its own, exactly like a PLAN task (proposeSubtasks), so there is nothing to merge.
+ * The spawned build task runs the normal dispatch → CI → review → merge flow.
+ *
+ * The spec is the agent's request_review `summary` (the idea/spec protocol instructs the
+ * agent to pass the COMPLETE spec there). If no summary was captured we fall back to the
+ * task's own prompt (the original brief) so a build task is always created with usable
+ * instructions. The build id is recorded in the spec task's `spawned_subtasks` (reusing
+ * the plan→sub-tasks linkage the webapp already renders).
+ */
+async function approveSpecStage(row: TaskRow, dir: DirectoryRow): Promise<ApproveOutcome> {
+  const id = row.id;
+  let spec = (row.summary ?? "").trim();
+  if (!spec) {
+    try {
+      spec = readTaskMd(dir.path, id).prompt.trim();
+    } catch {
+      /* best-effort — fall through to the placeholder below */
+    }
+  }
+  if (!spec) spec = `(spec task ${id} was approved but no spec text was captured)`;
+
+  // Spawn the build task carrying the approved spec as its prompt. Inherit the model
+  // preference; stage defaults to 'build' so it runs the normal flow. createTask owns
+  // the worktree + task.md + DB row + task.created event.
+  const build = await createTask(
+    row.directory_id,
+    spec,
+    [],
+    [],
+    "task",
+    row.model,
+    [],
+    0,
+    false,
+    "build",
+  );
+
+  // Complete the spec task terminally (mirrors proposeSubtasks): move to 'merged',
+  // record the spawned build id, capture the agent's output, and clear runtime fields.
+  // Guarded on status='review' so an abort that raced us wins.
+  const snapshot = readRunLogSnapshot(id);
+  const when = nowIso();
+  const res = db.query(
+    `UPDATE tasks SET status='merged', spawned_subtasks=?, herdr_pane_id=NULL, herdr_tab_id=NULL,
+       idle=0, conflict=0, output_snapshot=COALESCE(?, output_snapshot),
+       completed_at=COALESCE(completed_at, ?), merged_at=COALESCE(merged_at, ?)
+       WHERE id=? AND status='review'`,
+  ).run(JSON.stringify([build.id]), snapshot || null, when, when, id);
+  if (res.changes === 0) {
+    // Raced (e.g. aborted) between the guard above and here — the build task already
+    // exists; leave whatever terminal state won.
+    emitUpdated(id);
+    return { task: taskView(id)! };
+  }
+  recordTaskEvent(id, "review", "merged", `spec approved → spawned build task ${build.id}`);
+  updateTaskMdStatus(dir.path, id, "merged");
+  // Capture the spec agent's token usage / model before its worktree is discarded.
+  captureSessionUsage(id);
+  // Tear down the agent's tab/pane and discard the (codeless) worktree + branch in the
+  // background — best-effort, never blocking the caller (mirrors proposeSubtasks).
+  void (async () => {
+    await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id).catch(() => {});
+    await git.cleanup(dir.path, id).catch(() => {});
+  })();
+
+  emitUpdated(id);
+  // A task could have been blocked on this spec task; its completion may unblock it.
+  reevaluateAllBlocked();
+  console.log(`[butchr] spec task ${id} approved → spawned build task ${build.id}`);
+  return { task: taskView(id)! };
+}
+
 export async function approveTask(id: string): Promise<ApproveOutcome> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
@@ -1168,6 +1263,15 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   }
   const dir = getDirectory(row.directory_id);
   if (!dir) throw new HttpError(404, "directory not found");
+
+  // THE SPEC GATE. An idea/spec-stage task carries a SPEC (the agent's request_review
+  // summary), not code — approving it does NOT merge anything. Instead spawn a
+  // stage='build' task whose prompt IS the approved spec and complete this spec task
+  // terminally (see approveSpecStage). A stage='build' task (the default) falls through
+  // to the normal rebase → merge → verify path below, fully backward-compatible.
+  if (row.stage !== "build") {
+    return approveSpecStage(row, dir);
+  }
 
   // Serialize through the global merge queue so concurrent approvals rebase+ff
   // one-at-a-time against an up-to-date base tip instead of racing in parallel.
@@ -1557,6 +1661,24 @@ export async function captureDiffFootprint(id: string): Promise<void> {
   emitUpdated(id);
 }
 
+/**
+ * AUTO idea→spec advance: the first gate (idea→spec) is automatic. When an idea-stage
+ * task's agent submits its SPEC for review, advance its stage label from 'idea' to
+ * 'spec' (so the record now reads as "a spec awaiting the operator's sign-off"). No-op
+ * for any task not currently at stage='idea'. Keeps task.md's stage line in sync and
+ * emits a task.updated. Note the spec→build gate (approveTask) keys on stage!=='build',
+ * so this flip is safe either way — an idea task approved before the flip still spawns a
+ * build.
+ */
+function flipIdeaToSpec(id: string): void {
+  const res = db.query(`UPDATE tasks SET stage='spec' WHERE id=? AND stage='idea'`).run(id);
+  if (res.changes === 0) return;
+  const row = getTask(id);
+  const dir = row ? getDirectory(row.directory_id) : null;
+  if (dir) updateTaskMdStage(dir.path, id, "spec");
+  emitUpdated(id);
+}
+
 export function markReview(id: string, snapshot: string): void {
   // Guard on status='running' so a task aborted while its agent was finishing
   // isn't resurrected into 'review' after abortTask parked it as terminal. This is
@@ -1577,6 +1699,8 @@ export function markReview(id: string, snapshot: string): void {
   ) {
     return; // aborted (or otherwise moved) under us
   }
+  // AUTO idea→spec: a spec-writing task that just submitted its spec for review.
+  flipIdeaToSpec(id);
   // Capture the session's token usage / model now that the agent has finished.
   captureSessionUsage(id);
   // Capture the change footprint (size + path type) for duration estimates while the
@@ -1627,6 +1751,9 @@ export function markReviewFromAgent(
   // request_review call, which is review→review and changes no status).
   if (res.changes > 0 && row.status === "running") {
     recordTaskEvent(id, "running", "review", "agent requested review");
+    // AUTO idea→spec: a spec-writing task that just submitted its spec for review (only
+    // on a genuine running→review transition, not a duplicate request_review call).
+    flipIdeaToSpec(id);
   }
   const dir = getDirectory(row.directory_id);
   if (dir) updateTaskMdStatus(dir.path, id, "review");

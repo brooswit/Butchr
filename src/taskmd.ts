@@ -6,7 +6,7 @@
 // (zero dependencies). The shape is fixed and simple, so this is safe.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { TaskKind, TaskStatus } from "./db.ts";
+import type { TaskKind, TaskStage, TaskStatus } from "./db.ts";
 
 export type TaskMeta = {
   id: string;
@@ -33,6 +33,12 @@ export type TaskMeta = {
   // Absent/false reads back as the default (no plan-preview), keeping existing
   // task.md files unchanged.
   plan_preview?: boolean;
+  // IDEA → SPEC → BUILD stage (db.ts `stage` column). 'build' (the default) is an
+  // ordinary work task; 'idea'/'spec' is a spec-writing record whose FIRST prompt gets
+  // the idea/spec protocol (write a SPEC, submit via request_review) instead of the
+  // review protocol. Only emitted in the front matter when NOT 'build', so existing
+  // task.md files (which carry no `stage:` line) parse back as the 'build' default.
+  stage?: TaskStage;
 };
 
 export type TaskDoc = {
@@ -148,6 +154,53 @@ const PLAN_PREVIEW_PROTOCOL = [
   "session with the answer to continue.",
 ].join("\n");
 
+// Appended to an IDEA/SPEC-stage task's rendered prompt instead of REVIEW_PROTOCOL. An
+// idea/spec task writes NO code: its job is to turn the one-line brief above into a
+// detailed, repo-grounded task prompt (a SPEC) and submit THAT as its request_review
+// `summary`. Approving the spec (the SPEC GATE) spawns a stage='build' task whose prompt
+// IS the spec — so the operator steers cheaply at the spec, not expensively at the diff.
+// The grounding guidance mirrors src/expand.ts's brief→prompt expander (we can't import
+// it here — taskmd is below expand in the import graph — so the guidance is kept in sync
+// by hand). See tasks.approveTask (the SPEC GATE) / db.ts `stage`.
+const IDEA_SPEC_PROTOCOL = [
+  "# This is an IDEA/SPEC task — write a SPEC, do NOT build",
+  "",
+  "Do NOT implement anything or change any code. Your single job is to turn the brief",
+  "above into a PROPER, concrete engineering task prompt (a SPEC) for a separate coding",
+  "agent that will do the actual work in THIS repository afterward.",
+  "",
+  "First, GROUND yourself in the repo: use the Read / Grep / Glob tools to read its",
+  "SPEC.md, CONTRIBUTING.md, README, and the relevant source files so the spec names",
+  "real files, modules, and conventions that actually exist here. Do NOT invent files or",
+  "APIs.",
+  "",
+  "Then write ONE task prompt that:",
+  "  - is concrete and SCOPED — a single, reviewable unit of work, not a project;",
+  "  - names the specific files/areas to change and any tests to add/update;",
+  "  - respects the repo's existing conventions (read them, don't guess);",
+  "  - states what 'done' looks like, but does NOT over-specify implementation details",
+  "    the build agent should decide.",
+  "Write it in the imperative, addressed to the build agent.",
+  "",
+  "# How to submit your spec",
+  "",
+  "Submit the spec by calling the `request_review` tool provided by the **butchr** MCP",
+  "server, passing your COMPLETE spec as the `summary` argument (the spec IS the review",
+  "payload — the operator reviews it as your summary). request_review is NON-BLOCKING: it",
+  "records the spec and returns at once, after which you should STOP and exit.",
+  "",
+  "butchr owns everything after this: if the operator requests changes, butchr re-launches",
+  "you in the same session with their notes — revise the spec and call `request_review`",
+  "again. If the operator APPROVES, butchr automatically creates a separate BUILD task",
+  "whose prompt IS your approved spec; that agent does the implementation. You do not",
+  "build anything yourself.",
+  "",
+  "If anything about the brief is genuinely ambiguous, use the **butchr** MCP server's",
+  "`ask` tool to put a clarifying question before writing the spec — prefer asking over",
+  "guessing. `ask` is also non-blocking: it records your question and returns immediately,",
+  "after which you should STOP and exit.",
+].join("\n");
+
 /** Absolute path to a task's directory under .butchr/tasks/. */
 export function taskDir(directoryRoot: string, taskId: string): string {
   return join(directoryRoot, ".butchr", "tasks", taskId);
@@ -177,6 +230,9 @@ function serializeFrontMatter(meta: TaskMeta): string {
   // Only emit a plan_preview line when the gate is on — the default (off) omits it
   // and parses back as false, keeping existing task.md files unchanged.
   if (meta.plan_preview) lines.push(`plan_preview: true`);
+  // Only emit a stage line for a non-'build' stage — the default ('build') omits it and
+  // parses back as 'build', keeping existing task.md files unchanged.
+  if (meta.stage && meta.stage !== "build") lines.push(`stage: ${meta.stage}`);
   // Only emit a tags line when the task has labels — an empty/absent set omits it
   // and parses back as [], keeping existing task.md files unchanged.
   if (meta.tags && meta.tags.length) {
@@ -288,6 +344,26 @@ export function updateTaskMdStatus(
   writeFileSync(p, updated, "utf8");
 }
 
+/**
+ * Update (or insert) the `stage:` line in the front matter, in place. Used by the
+ * automatic idea→spec advance (tasks.flipIdeaToSpec). An idea task's task.md already
+ * carries a `stage: idea` line (serializeFrontMatter emits it for non-'build' stages),
+ * so the replace path is taken; the insert path (after the status line) is defensive.
+ */
+export function updateTaskMdStage(
+  directoryRoot: string,
+  taskId: string,
+  stage: TaskStage,
+): void {
+  const p = taskMdPath(directoryRoot, taskId);
+  if (!existsSync(p)) return;
+  const text = readFileSync(p, "utf8");
+  const updated = /^stage:.*$/m.test(text)
+    ? text.replace(/^stage:.*$/m, `stage: ${stage}`)
+    : text.replace(/^(status:.*)$/m, `$1\nstage: ${stage}`);
+  writeFileSync(p, updated, "utf8");
+}
+
 /** Parse a task.md file. Tolerant of minor formatting differences. */
 export function readTaskMd(directoryRoot: string, taskId: string): TaskDoc {
   const p = taskMdPath(directoryRoot, taskId);
@@ -305,6 +381,7 @@ export function parseTaskMd(raw: string): TaskDoc {
     model: null,
     tags: [],
     plan_preview: false,
+    stage: "build",
   };
 
   let rest = raw;
@@ -336,6 +413,8 @@ export function parseTaskMd(raw: string): TaskDoc {
       else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
       else if (key === "model") meta.model = val || null;
       else if (key === "plan_preview") meta.plan_preview = val === "true";
+      else if (key === "stage")
+        meta.stage = val === "idea" || val === "spec" ? val : "build";
       else if (key === "context" || key === "tags") {
         const target: "context" | "tags" = key;
         if (val === "") inList = target;
@@ -406,15 +485,20 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
   parts.push(body);
   // Hand the agent the matching protocol for this FIRST launch:
   //  - a PLAN task (kind='plan') decomposes the request via propose_subtasks;
+  //  - an IDEA/SPEC-stage task writes a SPEC (not code) and submits it via
+  //    request_review — approving it spawns the build task (the SPEC GATE);
   //  - a PLAN-PREVIEW task proposes a plan via propose_plan and pauses for approval
   //    BEFORE writing code (it implements on the answer-resume — renderAnswerPrompt);
-  //  - an ordinary task does the work and submits via request_review.
+  //  - an ordinary (stage='build') task does the work and submits via request_review.
+  const stage = doc.meta.stage ?? "build";
   parts.push(
     doc.meta.kind === "plan"
       ? PLAN_PROTOCOL
-      : doc.meta.plan_preview
-        ? PLAN_PREVIEW_PROTOCOL
-        : REVIEW_PROTOCOL,
+      : stage === "idea" || stage === "spec"
+        ? IDEA_SPEC_PROTOCOL
+        : doc.meta.plan_preview
+          ? PLAN_PREVIEW_PROTOCOL
+          : REVIEW_PROTOCOL,
   );
   return parts.join("\n\n---\n\n");
 }

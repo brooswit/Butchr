@@ -275,6 +275,10 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* A non-zero dispatch priority — shown only when set (priority 0 is the silent FIFO
    default). Reuse the running hue so it reads as an "acts sooner" signal. */
 .chip.priority { background: var(--running); }
+/* `stage` marks where a task sits on the idea→spec→build lifecycle — shown only for an
+   idea/spec-stage (spec-writing) task ('build' is the silent default). Reuse the
+   review/info hue, like `plan`, so it reads as an informational lifecycle badge. */
+.chip.stage { background: var(--review); }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {

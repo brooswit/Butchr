@@ -545,6 +545,10 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
   // Optional plan_preview: a boolean that opts the task into the PLAN-PREVIEW gate —
   // the agent proposes a plan and pauses for operator approval before writing code
   // (see tasks.createTask / taskmd.renderAgentPrompt). Validated inside createTask.
+  // Optional stage: 'idea' creates a SPEC-WRITING task (its agent turns the prompt/brief
+  // into a spec and submits it for review; approving the spec spawns a build task — the
+  // SPEC GATE). Omitted/'build' (the default) is today's ordinary work task, fully
+  // backward-compatible. Validated inside createTask. See db.ts `stage`.
   const view = await createTask(
     p.id!,
     prompt,
@@ -555,6 +559,7 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
     body.tags ?? [],
     body.priority ?? 0,
     body.plan_preview ?? false,
+    body.stage ?? "build",
   );
   return json(view, 201);
 });

@@ -69,6 +69,13 @@ function effStatus(t) {
 function taskChips(t, { plan = false } = {}) {
   return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
     + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
+    // STAGE badge (idea → spec → build). 'build' is the silent default (no badge); an
+    // idea/spec-stage task is a SPEC-WRITING record — approving its spec spawns the
+    // build task (the SPEC GATE). Always shown (not gated behind `plan`) so the board
+    // cards surface where a task sits on the lifecycle.
+    + (t.stage === "idea" || t.stage === "spec"
+        ? `<span class="chip stage" title="idea→spec→build lifecycle: this task writes a SPEC; approving it spawns the build task">${esc(t.stage)}</span> `
+        : "")
     + chip(effStatus(t))
     + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
@@ -805,6 +812,10 @@ function openNewTaskModal(directoryId) {
           <input type="checkbox" id="nt-plan-preview" />
           <span class="lbl" style="margin:0">Plan-preview — the agent proposes a plan and pauses for your approval before writing code</span>
         </label>
+        <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
+          <input type="checkbox" id="nt-idea" />
+          <span class="lbl" style="margin:0">Idea stage — the agent turns the prompt above into a SPEC (writes no code); approving the spec spawns the build task</span>
+        </label>
       </div>
     </div>`;
 
@@ -838,6 +849,7 @@ function openNewTaskModal(directoryId) {
   const priorityEl = body.querySelector("#nt-priority");
   const planEl = body.querySelector("#nt-plan");
   const planPreviewEl = body.querySelector("#nt-plan-preview");
+  const ideaEl = body.querySelector("#nt-idea");
   const tplEl = body.querySelector("#nt-template");
   const tplHintEl = body.querySelector("#nt-tpl-hint");
   // The idea box is the primary low-effort entry point, so start focus there.
@@ -914,6 +926,10 @@ function openNewTaskModal(directoryId) {
     // before writing code. Mutually independent of a plan task; ignored for one (a
     // plan task writes no code, so there is nothing to gate).
     const plan_preview = planPreviewEl.checked;
+    // Optional idea STAGE — create a SPEC-WRITING task: its agent turns the prompt above
+    // into a spec and submits it for review; approving the spec spawns the build task
+    // (the SPEC GATE). Omitted (unchecked) → stage 'build', today's ordinary work task.
+    const stage = ideaEl.checked ? "idea" : "build";
     // Optional model — omit when blank so the backend defaults it.
     const model = modelEl.value.trim() || null;
     // Optional tags — split the comma-separated list into trimmed, non-empty labels
@@ -931,8 +947,8 @@ function openNewTaskModal(directoryId) {
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview });
-      toast(kind === "plan" ? "plan task created" : plan_preview ? "plan-preview task created" : "task created");
+      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview, stage });
+      toast(kind === "plan" ? "plan task created" : stage === "idea" ? "idea task created" : plan_preview ? "plan-preview task created" : "task created");
       close();
       render();
     } catch (e) {
