@@ -263,7 +263,28 @@ wall of split panes in one tab. `tabCreate` is best-effort — on failure it ret
 5. Selects `queued` tasks whose `next_dispatch_at` is null or in the past (ISO
    strings compare correctly), oldest-first, and dispatches each that isn't already
    `dispatching`/`watching` — concurrently, no cap. The `dispatching`/`watching`
-   sets (keyed by task id) prevent double-dispatch across overlapping ticks.
+   sets (keyed by task id) prevent double-dispatch across overlapping ticks. This
+   selection runs through `selectQueuedForDispatch`, which returns **nothing while
+   dispatch is paused** (see below), so no new agent starts.
+
+### Pause / maintenance mode (drain-only)
+
+A global switch (`dispatcher.{isPaused,setPaused}`, toggled by `POST /api/pause` /
+`/api/resume`) stops **new** agent dispatch so the operator can hold for a
+restart / recovery / maintenance window. **Semantics when paused:**
+
+- Step 5's `selectQueuedForDispatch` returns an empty list → **no `queued` task is
+  launched**.
+- Steps 3–4 still run: the **auto-unblock pass still promotes** a `blocked` task
+  whose blockers all merged to `queued` (it just waits there, undispatched, until
+  resume), and the **auto-merge backstop still lands** CI-green low-risk `review`
+  tasks.
+- Everything in flight is **untouched** — `running`/`review`/`idle` tasks and their
+  watchers continue, so existing work drains to completion.
+
+The flag is **persisted** in the `settings` table (`dispatch_paused`), mirrored by
+an in-memory cache loaded at module init, so a pause **survives a restart** and
+stays in effect until explicitly resumed. `GET /health` reports it as `paused`.
 
 ### dispatch() — launching an agent
 
@@ -520,7 +541,9 @@ The last reap result (`{worktrees, husks, at}`) is exposed on `/health`.
 
 `GET /health` (alias `GET /api/health`) returns **200** when healthy, **503** when
 degraded. `healthy = db.ok && tick.alive`. Fields: `status`, `version`, `uptimeSec`,
-`db.ok` (trivial `SELECT 1`), `tick` (`alive`/`count`/`lastTickAt`/`ageMs`/
+`db.ok` (trivial `SELECT 1`), `paused` (**dispatcher pause** — true while new agent
+dispatch is halted for maintenance; running/review/idle tasks are unaffected), `tick`
+(`alive`/`count`/`lastTickAt`/`ageMs`/
 `staleAfterMs` — stale if it has ticked but not within `max(tickMs·5, 10s)`; a
 never-ticked loop is treated as *still starting*, not stalled), `tasks` (counts by
 status), `failedTasks`, `concurrency` (`active` = running+review+finalizing,
@@ -576,6 +599,8 @@ other paths fall through to static serving (SPA fallback to `index.html`).
 |--------|------|------|----------|
 | `GET` | `/api/fs?path=&files=1` | — | `{ path, parent, home, isGitRepo, entries:[{name,path,isDir,isGitRepo}] }`. Dirs first, alpha; dotfiles hidden. `files=1` also lists regular files (context-file picker). 404/400/403 on bad path. |
 | `GET` | `/api/health` (and bare `/health`) | — | health snapshot (see §5). 200 / 503. |
+| `POST` | `/api/pause` | `{}` | `{ paused: true }` — pause **new** agent dispatch (drain-only maintenance mode; running/review/idle untouched). Persisted; idempotent. Publishes a `dispatch.paused` SSE event. |
+| `POST` | `/api/resume` | `{}` | `{ paused: false }` — resume normal dispatch. Persisted; idempotent. Publishes a `dispatch.paused` SSE event. |
 | `GET` | `/api/metrics?days=N` | — | `Metrics` aggregate (see below). `days` 1–90, default 14. |
 | `GET` | `/api/directories` | — | `DirectoryView[]` (rows + `counts` by status, with `idle` peeled out of `running`). |
 | `POST` | `/api/directories` | `{ path, label? }` | `201` `DirectoryView`. 400 if not a git repo; 409 if already registered; 502 if the herdr workspace can't be created. |
@@ -610,8 +635,9 @@ denominator is 0, distinguishing real-0% from no-data).
 `{type:"hello", now}`, sends a `: keepalive` comment every 25 s, and forwards every
 `ButchrEvent` published by the in-process pub/sub (`src/events.ts`):
 `task.created` / `task.updated` / `task.deleted` (each carrying the `TaskView` or
-id) and `directory.created` / `directory.deleted`. The server runs with
-`idleTimeout: 0` so streams aren't dropped.
+id), `directory.created` / `directory.deleted`, and `dispatch.paused`
+(`{ paused }` — dispatcher pause toggled, so the webapp can reflect the PAUSED
+banner live). The server runs with `idleTimeout: 0` so streams aren't dropped.
 
 ### 6.3 MCP (per-task tools)
 
@@ -674,8 +700,11 @@ hash-routed and SSE-driven. Views/features:
 - **Metrics view** — `/api/metrics`: status bars, throughput sparkline, medians,
   and the conflict/revert/CI-pass/auto-merge rates.
 - **Chrome** — light/dark theme toggle (persisted, applied pre-paint), a live
-  connection LED, and an **attention indicator** + tab-title badge driven by
-  `needsAttention` (review + failed), with optional desktop notifications.
+  connection LED, an **attention indicator** + tab-title badge driven by
+  `needsAttention` (review + failed), with optional desktop notifications, and a
+  **pause/resume control** + **PAUSED banner** driven by `health.paused`
+  (`POST /api/pause` / `/api/resume`) so the operator can enter drain-only
+  maintenance mode and see it at a glance.
 
 ---
 
@@ -748,6 +777,14 @@ Append-only log of status transitions, one row per change:
 `id` (autoinc), `task_id` (FK, cascade), `at` (ISO), `from_status` (null for
 creation), `to_status`, `note`. Purely additive — nothing reads it to drive
 behavior; it powers the task-detail timeline (`GET /api/tasks/:id/events`).
+
+### `settings` (global key/value runtime state)
+
+A tiny `key`/`value` store (`getSetting` / `setSetting` in `db.ts`) for server-wide
+runtime state that must survive a restart but isn't per-task and isn't a static env
+knob. Currently holds `dispatch_paused` (`'1'`/`'0'`) — the **dispatcher pause**
+flag (see §3 *Pause / maintenance mode*), which is what keeps a pause in effect
+across a restart.
 
 ---
 

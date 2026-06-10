@@ -6,6 +6,9 @@ export type ButchrEvent =
   | { type: "task.deleted"; id: string }
   | { type: "directory.created"; directory: unknown }
   | { type: "directory.deleted"; id: string }
+  // Dispatcher pause/resume toggled — lets every connected webapp reflect the
+  // PAUSED banner + control live (see server POST /api/pause|resume).
+  | { type: "dispatch.paused"; paused: boolean }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;

@@ -20,10 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet. New work goes here — see the
 [living-docs convention](./CONTRIBUTING.md#6-living-docs-update-on-every-change)._
 
+## [0.9.2] - 2026-06-10
+
+### Added
+- **Dispatcher pause / maintenance mode (drain-only).** A global switch stops
+  **new** agent dispatch so the operator can hold for a restart / recovery /
+  maintenance window without disturbing work in flight: `running`, `review`, and
+  `idle` tasks (and their watchers) continue untouched, while `queued` tasks simply
+  wait. The auto-unblock and auto-merge passes keep running while paused — a
+  freshly-unblocked task is promoted to `queued` but just isn't dispatched until you
+  resume. Toggle it with **`POST /api/pause`** / **`POST /api/resume`**; `GET /health`
+  now reports a **`paused`** boolean. The webapp gains a topbar **pause/resume
+  control** and a clear **PAUSED banner**. The state is **persisted** (a new
+  `settings` key/value table, key `dispatch_paused`), so a pause survives a restart
+  and stays in effect until explicitly resumed.
+
 ## [0.9.1] - 2026-06-10
 
 ### Added
-
 - **Agent transcript viewer.** The task-detail page gains a collapsible **Agent
   transcript** panel that shows what the task's agent actually did — its prose,
   extended thinking, tool calls (name + a brief one-line arg summary), and
@@ -223,6 +237,8 @@ Initial butchr — the agent task harness on top of herdr.
   the external `git` and `herdr` binaries — no npm/runtime dependencies.
 
 [Unreleased]: https://github.com/
+[0.9.2]: https://github.com/
+[0.9.1]: https://github.com/
 [0.9.0]: https://github.com/
 [0.8.0]: https://github.com/
 [0.7.0]: https://github.com/

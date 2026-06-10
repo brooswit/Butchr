@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { config } from "./config.ts";
 import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
-import { dispatcherHealth } from "./dispatcher.ts";
+import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
   getDirectory,
@@ -12,7 +12,7 @@ import {
   registerDirectory,
   unregisterDirectory,
 } from "./directories.ts";
-import { subscribe } from "./events.ts";
+import { publish, subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
 import * as herdr from "./herdr.ts";
 import { handleMcp } from "./mcp.ts";
@@ -185,6 +185,11 @@ async function healthResponse(): Promise<Response> {
     status: healthy ? "ok" : "degraded",
     version: (pkg as { version?: string }).version ?? "unknown",
     uptimeSec: Math.round(process.uptime()),
+    // DISPATCHER PAUSE: true while NEW agent dispatch is halted (maintenance /
+    // drain-only mode). Running/review/idle tasks are unaffected; this only gates
+    // launching queued tasks. Persisted, so it survives a restart. The webapp keys
+    // its PAUSED banner + pause/resume control off this.
+    paused: isPaused(),
     db: { ok: dbOk },
     tick: {
       alive: tickAlive,
@@ -278,6 +283,21 @@ route("GET", "/api/fs", async (req) => {
 
 // Health (also exposed at the bare /health path — see fetch()).
 route("GET", "/api/health", async () => healthResponse());
+
+// DISPATCHER PAUSE / MAINTENANCE MODE. Pause stops NEW agent dispatch (drain-only)
+// so the operator can hold for a restart/recovery/maintenance window without
+// disturbing running/review/idle tasks, which continue untouched; resume restores
+// normal dispatch. The flag is persisted, so a pause survives a restart and stays
+// in effect until resumed. Both are idempotent. Each publishes a `dispatch.paused`
+// SSE event so every connected webapp reflects the change live. See
+// dispatcher.{isPaused,setPaused,selectQueuedForDispatch}.
+function setPauseResponse(value: boolean): Response {
+  setPaused(value);
+  publish({ type: "dispatch.paused", paused: value });
+  return json({ paused: value });
+}
+route("POST", "/api/pause", async () => setPauseResponse(true));
+route("POST", "/api/resume", async () => setPauseResponse(false));
 
 // Operational metrics for the webapp's Metrics view. Read-only aggregates over
 // all tasks (see db.computeMetrics): status counts, merged-per-day throughput,

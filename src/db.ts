@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS task_events (
   note        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, at);
+
+-- GLOBAL SETTINGS: a tiny key/value store for server-wide runtime state that must
+-- survive a restart but isn't per-task and isn't a static env knob (which lives in
+-- config.ts). Currently holds the DISPATCHER PAUSE flag ('dispatch_paused' =
+-- '1'/'0') — see dispatcher.{isPaused,setPaused}. Read/written through
+-- getSetting/setSetting below; persistence here is what keeps a pause in effect
+-- across a butchr restart (it stays paused until explicitly resumed).
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `);
 
 // Lightweight forward migrations: add columns introduced after the initial
@@ -304,6 +315,26 @@ export type TaskRow = {
 
 export function nowIso(): string {
   return new Date().toISOString();
+}
+
+// ---- GLOBAL SETTINGS (key/value runtime state) ----------------------------
+// Read a server-wide setting, or null if it was never set. Used for runtime state
+// that must persist across restarts but isn't per-task or a static env knob (e.g.
+// the dispatcher pause flag — see dispatcher.isPaused).
+export function getSetting(key: string): string | null {
+  const row = db
+    .query<{ value: string }, [string]>(`SELECT value FROM settings WHERE key=?`)
+    .get(key);
+  return row ? row.value : null;
+}
+
+// Upsert a server-wide setting. Single-row write, never throws by design — the
+// caller treats settings as best-effort durable state.
+export function setSetting(key: string, value: string): void {
+  db.query(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+  ).run(key, value);
 }
 
 // ---- PER-TASK AUDIT TIMELINE ----------------------------------------------

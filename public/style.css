@@ -137,6 +137,47 @@ a:hover { text-decoration: underline; }
 }
 .theme-toggle:hover { background: var(--panel-2); color: var(--text); }
 
+/* dispatcher pause / maintenance-mode control (topbar). Neutral ghost button that
+   turns warning-colored once dispatch is paused, so the running state reads at a
+   glance. */
+.pause-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 32px; padding: 0 11px;
+  font: inherit; font-size: 12px; font-weight: 600; line-height: 1;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  cursor: pointer; white-space: nowrap;
+}
+.pause-toggle:hover { background: var(--panel-2); color: var(--text); }
+.pause-toggle.paused {
+  color: #fff; background: var(--review); border-color: var(--review);
+}
+.pause-toggle.paused:hover { background: var(--review); filter: brightness(1.08); }
+
+/* PAUSED banner — a full-width warning strip under the topbar, shown only while
+   dispatch is paused. Sticky just below the (sticky) topbar so it stays visible. */
+.pause-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 20px;
+  background: var(--review); color: #fff;
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 52px; z-index: 9;
+  font-size: 13px;
+}
+.pause-banner[hidden] { display: none; }
+.pause-banner .pb-dot {
+  flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 6px rgba(255, 255, 255, 0.8);
+  animation: pause-pulse 1.6s ease-in-out infinite;
+}
+@keyframes pause-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.pause-banner .pb-text { flex: 1; }
+.pause-banner .pb-text b { letter-spacing: 0.04em; }
+.pause-banner .btn {
+  flex: 0 0 auto; background: #fff; color: var(--review);
+}
+.pause-banner .btn:hover { background: rgba(255, 255, 255, 0.88); }
+
 /* needs-attention header indicator — a count badge that appears only when tasks
    are waiting in review or have failed to dispatch. Links to the dashboard. */
 .attention {

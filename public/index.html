@@ -34,6 +34,13 @@
         ></a>
         <button
           type="button"
+          id="pause-toggle"
+          class="pause-toggle"
+          title="Pause new task dispatch (maintenance mode)"
+          aria-label="Pause new task dispatch"
+        >⏸ Pause</button>
+        <button
+          type="button"
           id="theme-toggle"
           class="theme-toggle"
           title="Toggle light / dark theme"
@@ -44,6 +51,14 @@
         </div>
       </div>
     </header>
+    <div id="pause-banner" class="pause-banner" hidden role="status" aria-live="polite">
+      <span class="pb-dot" aria-hidden="true"></span>
+      <span class="pb-text">
+        <b>PAUSED</b> — new task dispatch is halted (maintenance mode). Running,
+        review, and idle tasks continue; queued tasks wait until you resume.
+      </span>
+      <button type="button" id="pause-banner-resume" class="btn">Resume dispatch</button>
+    </div>
     <main id="app"><div class="loading">loading…</div></main>
     <script src="/app.js"></script>
   </body>

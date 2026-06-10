@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
-import { db } from "./db.ts";
+import { db, getSetting, setSetting } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
@@ -115,6 +115,37 @@ function withHerdrPaneLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   // lock for later tasks in the same workspace.
   herdrPaneLocks.set(key, result.then(() => {}, () => {}));
   return result;
+}
+
+// ---- DISPATCHER PAUSE / MAINTENANCE MODE ----------------------------------
+// A global switch that stops NEW agent dispatch (drain-only) so the operator can
+// pause for a restart / recovery / maintenance window WITHOUT disturbing in-flight
+// work. When paused:
+//   - the tick's NEW-DISPATCH gate (selectQueuedForDispatch) returns nothing, so
+//     no `queued` task is launched into an agent;
+//   - everything ELSE in the tick still runs — the blocked→queued auto-unblock
+//     promotion (a freshly-unblocked task simply waits in `queued` until resume),
+//     the auto-merge backstop, and every running/review/idle task's watcher are
+//     untouched, so existing work drains to completion normally.
+// The flag is persisted in the `settings` table (key 'dispatch_paused'), so a
+// pause SURVIVES a butchr restart and stays in effect until explicitly resumed.
+// An in-memory cache mirrors the persisted value (loaded once at module init) so
+// the per-tick check is a plain boolean read, not a DB hit.
+const PAUSE_KEY = "dispatch_paused";
+let paused = getSetting(PAUSE_KEY) === "1";
+
+/** Whether NEW agent dispatch is currently paused (maintenance / drain-only). */
+export function isPaused(): boolean {
+  return paused;
+}
+
+/**
+ * Pause or resume NEW agent dispatch. Updates the in-memory cache AND persists the
+ * flag so the state survives a restart (stays paused until resumed). Idempotent.
+ */
+export function setPaused(value: boolean): void {
+  paused = value;
+  setSetting(PAUSE_KEY, value ? "1" : "0");
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -244,6 +275,29 @@ export async function reconcileRunningTasks(
   return { adopted, rescued, skipped: 0 };
 }
 
+/**
+ * The tick's NEW-DISPATCH gate: the `queued` tasks eligible to launch an agent
+ * right now, oldest-first. Returns an EMPTY list when dispatch is PAUSED, which is
+ * how maintenance mode stops new work without touching anything in flight.
+ *
+ * Selection (when not paused): status='queued' AND the dispatch backoff has
+ * elapsed (next_dispatch_at IS NULL or <= now — ISO-8601 strings compare
+ * correctly), so a repeatedly-failing task can't hot-loop. Exported so the pause
+ * gate is exercised directly in tests (the same function the tick calls).
+ */
+export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
+  if (paused) return [];
+  return db
+    .query<QueuedRow, [string]>(
+      `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
+         FROM tasks t JOIN directories d ON d.id = t.directory_id
+         WHERE t.status='queued'
+           AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
+         ORDER BY t.created_at ASC`,
+    )
+    .all(nowStr);
+}
+
 let ticking = false;
 async function tick(): Promise<void> {
   if (ticking) return;
@@ -281,21 +335,12 @@ async function tick(): Promise<void> {
       }
     }
 
-    // Skip tasks waiting out a dispatch backoff: next_dispatch_at set and still in
-    // the future. ISO-8601 timestamps compare correctly as strings, so a simple
-    // `<=` against now selects only tasks whose backoff has elapsed (or that never
-    // failed, next_dispatch_at IS NULL). This is the gate that stops a repeatedly
-    // failing task from hot-looping every tick.
+    // The queued tasks eligible to launch this tick — empty while dispatch is
+    // PAUSED (drain-only maintenance mode), so no new agent starts even though the
+    // auto-unblock + auto-merge passes above keep running. See
+    // selectQueuedForDispatch.
     const nowStr = new Date().toISOString();
-    const rows = db
-      .query<QueuedRow, [string]>(
-        `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
-         FROM tasks t JOIN directories d ON d.id = t.directory_id
-         WHERE t.status='queued'
-           AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
-         ORDER BY t.created_at ASC`,
-      )
-      .all(nowStr);
+    const rows = selectQueuedForDispatch(nowStr);
 
     // Dispatch every queued task that isn't already being dispatched/watched —
     // fully concurrent, no cap. The `dispatching`/`watching` sets only guard

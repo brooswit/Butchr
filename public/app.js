@@ -1819,18 +1819,62 @@ function maybeNotify(na) {
 }
 
 async function updateAttention() {
-  let na;
+  let health;
   try {
-    const health = await api("GET", "/health");
-    na = health && health.needsAttention;
+    health = await api("GET", "/health");
   } catch (e) {
-    return; // transient (e.g. degraded /health 503) — keep the last badge
+    return; // transient (e.g. degraded /health 503) — keep the last badge/banner
   }
+  // Reflect the dispatcher PAUSE state (banner + topbar control) from the same
+  // /health payload, so it tracks pause/resume live regardless of which page is open.
+  if (health && typeof health.paused === "boolean") applyPauseState(health.paused);
+  const na = health && health.needsAttention;
   if (!na) return;
   applyTitleBadge(na.total);
   applyAttentionIndicator(na);
   maybeNotify(na);
   lastAttention = { review: na.review, failed: na.failed, total: na.total };
+}
+
+// ---------- dispatcher pause / maintenance mode ----------
+// A global switch that stops NEW agent dispatch (drain-only) for restarts /
+// recovery / maintenance, without disturbing running/review/idle tasks. The state
+// comes from GET /health (`paused`) and is reflected as a topbar toggle + a clear
+// PAUSED banner; clicking either control POSTs /api/pause|resume. The pause is
+// persisted server-side, so it survives a butchr restart until resumed.
+let pausedState = false;
+function applyPauseState(paused) {
+  pausedState = !!paused;
+  const banner = document.getElementById("pause-banner");
+  if (banner) banner.hidden = !pausedState;
+  const btn = document.getElementById("pause-toggle");
+  if (btn) {
+    btn.textContent = pausedState ? "▶ Resume" : "⏸ Pause";
+    btn.classList.toggle("paused", pausedState);
+    btn.title = pausedState
+      ? "Resume new task dispatch"
+      : "Pause new task dispatch (maintenance mode)";
+  }
+}
+
+async function togglePause() {
+  // Resume when currently paused, otherwise pause. The button + banner reflect the
+  // authoritative `paused` returned by the endpoint.
+  const path = pausedState ? "/resume" : "/pause";
+  try {
+    const r = await api("POST", path);
+    applyPauseState(r && r.paused);
+    toast(pausedState ? "dispatch paused — new tasks won't start" : "dispatch resumed");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function wirePause() {
+  const btn = document.getElementById("pause-toggle");
+  if (btn) btn.addEventListener("click", togglePause);
+  const resume = document.getElementById("pause-banner-resume");
+  if (resume) resume.addEventListener("click", togglePause);
 }
 
 // Clicking the header indicator opts into desktop notifications (requestPermission
@@ -1905,6 +1949,7 @@ function setupTheme() {
 window.addEventListener("hashchange", render);
 setupTheme();
 wireAttention();
+wirePause();
 updateAttention();
 render();
 connectSSE();
