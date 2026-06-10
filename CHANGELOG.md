@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and flagged for same-file sequencing. Report only — no code changes.
 
 ### Changed
+- **Internal: filled JSDoc gaps on a handful of exports.** `nowIso` / `metricRows`
+  (`src/db.ts`), `startDispatcher` / `stopDispatcher` (`src/dispatcher.ts`),
+  `startServer` (`src/server.ts`), and `getDirectory` / `getDirectoryByPath`
+  (`src/directories.ts`) each gained the one-line `/** … */` the rest of the file
+  uses, and `parseBlockedBy` (`src/tasks.ts`) now notes it's also reused to parse the
+  identically-shaped `spawned_subtasks` column. Comment-only — no behavior change
+  (CLEANUP C11).
 - **The directory task-list endpoint now returns the parsed `taskView` shape.**
   `GET /api/directories/:id/tasks` previously returned raw DB rows, where
   `blocked_by` / `spawned_subtasks` were JSON-**string** columns and the

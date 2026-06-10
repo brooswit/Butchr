@@ -125,7 +125,10 @@ export function getTask(id: string): TaskRow | null {
 /** Terminal states a blocker can be in that mean it will NEVER merge. */
 const DEAD_BLOCKER_STATES = new Set<TaskStatus>(["aborted", "rejected", "failed"]);
 
-/** Parse the JSON-array `blocked_by` column into a clean string[] of task ids. */
+/**
+ * Parse a JSON-array-of-task-ids column into a clean string[]. Named for `blocked_by`,
+ * but also reused to parse the identically-shaped `spawned_subtasks` column.
+ */
 export function parseBlockedBy(raw: string | null): string[] {
   if (!raw) return [];
   try {

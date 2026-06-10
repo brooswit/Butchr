@@ -333,6 +333,7 @@ export type TaskRow = {
   merged_at: string | null;
 };
 
+/** Current wall-clock time as an ISO-8601 string — the canonical timestamp format for all task/db columns. */
 export function nowIso(): string {
   return new Date().toISOString();
 }
@@ -421,6 +422,7 @@ export type MetricRow = {
   ci_status: string | null;
 };
 
+/** Fetch the raw per-task rows the metrics aggregation needs; computeMetrics() turns them into dashboard aggregates with no further DB access. */
 export function metricRows(): MetricRow[] {
   return db
     .query<MetricRow, []>(

@@ -150,6 +150,7 @@ export function setPaused(value: boolean): void {
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
+/** Start the dispatch loop: fire one tick immediately, then every `config.tickMs`. Idempotent — a no-op if already running. */
 export function startDispatcher(): void {
   if (timer) return;
   // Fire immediately, then on an interval.
@@ -157,6 +158,7 @@ export function startDispatcher(): void {
   timer = setInterval(tick, config.tickMs);
 }
 
+/** Stop the dispatch loop, clearing the interval timer. Idempotent. */
 export function stopDispatcher(): void {
   if (timer) clearInterval(timer);
   timer = null;

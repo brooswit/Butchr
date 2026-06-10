@@ -583,6 +583,7 @@ route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   return json(res);
 });
 
+/** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. */
 export function startServer(): void {
   const server = Bun.serve({
     hostname: config.host,

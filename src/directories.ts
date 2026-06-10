@@ -86,6 +86,7 @@ function counts(directoryId: string): Record<string, number> {
   return out;
 }
 
+/** Look up a registered directory by its id, or null if none matches. */
 export function getDirectory(id: string): DirectoryRow | null {
   return (
     db.query<DirectoryRow, [string]>(`SELECT * FROM directories WHERE id=?`).get(id) ??
@@ -93,6 +94,7 @@ export function getDirectory(id: string): DirectoryRow | null {
   );
 }
 
+/** Look up a registered directory by its absolute filesystem path, or null if none matches. */
 export function getDirectoryByPath(path: string): DirectoryRow | null {
   return (
     db.query<DirectoryRow, [string]>(`SELECT * FROM directories WHERE path=?`).get(path) ??
