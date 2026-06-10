@@ -2,7 +2,7 @@
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { config } from "./config.ts";
 import { triggerConformance } from "./conformance.ts";
-import { db, estimateRows, nowIso, recordTaskEvent } from "./db.ts";
+import { db, estimateRows, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
 import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import {
   classifyPathType,
@@ -322,25 +322,63 @@ export type TaskListView = Omit<
 >;
 
 /**
+ * The full searchable text for a task, for server-side `?q=` full-text search: its
+ * id, its DB-side `summary` (request_review summary) and `review_note` (the live
+ * change-request note), plus the prompt + accumulated review notes read from
+ * task.md on disk. task.md is read best-effort — a missing/unparseable file (or a
+ * task whose directory is gone) just contributes the DB fields — so a merged task
+ * (whose worktree is cleaned up but whose task.md under .butchr/tasks/ persists)
+ * still matches on its prompt. The pieces are joined with newlines for one
+ * case-insensitive substring scan (see db.matchesQuery).
+ */
+function taskSearchText(row: TaskRow, dirPath: string | null): string {
+  const parts: string[] = [row.id];
+  if (row.summary) parts.push(row.summary);
+  if (row.review_note) parts.push(row.review_note);
+  if (dirPath && existsSync(taskMdPath(dirPath, row.id))) {
+    try {
+      const doc = readTaskMd(dirPath, row.id);
+      parts.push(doc.prompt, doc.reviewNotes);
+    } catch {
+      /* ignore parse errors — fall back to the DB fields above */
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
  * List a directory's tasks in the taskView shape (newest first). Per CONTRIBUTING
  * §3, endpoints return the parsed projection rather than raw rows so the webapp and
  * CLI consume one consistent shape: blocked_by / spawned_subtasks come back as real
  * id arrays and each blocker's status is precomputed (blockerStates / deadBlockers).
  * A lighter sibling of taskView — it does NOT read task.md (no prompt/context
  * bodies) or compute the duration estimate, neither of which the list views use.
+ *
+ * Optional `q` is a case-insensitive FULL-TEXT SEARCH filter (server-side so huge
+ * prompts never ship to the client): only tasks whose searchable text — id +
+ * summary + review notes + the task.md prompt — contains `q` are returned (see
+ * taskSearchText / db.matchesQuery). A blank/absent `q` applies no filter and reads
+ * NO task.md (the light projection is preserved); a non-blank `q` reads each task's
+ * task.md to scan its prompt. The filter composes with the webapp/CLI status/tag
+ * filters, which narrow the returned set further.
  */
-export function taskListView(directoryId: string): TaskListView[] {
-  return listTasks(directoryId).map((row) => {
+export function taskListView(directoryId: string, q?: string): TaskListView[] {
+  const needle = (q ?? "").trim();
+  const dirPath = needle ? (getDirectory(directoryId)?.path ?? null) : null;
+  const out: TaskListView[] = [];
+  for (const row of listTasks(directoryId)) {
+    if (needle && !matchesQuery(taskSearchText(row, dirPath), needle)) continue;
     const blocked_by = parseBlockedBy(row.blocked_by);
-    return {
+    out.push({
       ...row,
       blocked_by,
       tags: parseTags(row.tags),
       spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
       blockerStates: blockerStatesOf(blocked_by),
       deadBlockers: deadBlockerIds(blocked_by),
-    };
-  });
+    });
+  }
+  return out;
 }
 
 function emitUpdated(id: string): void {

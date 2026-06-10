@@ -379,6 +379,19 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
+// ---- FULL-TEXT TASK SEARCH (predicate) ------------------------------------
+// The matching primitive behind server-side `?q=` task search (the directory
+// task-list endpoint + CLI `ls --search`). A task's searchable text — its prompt
+// and review notes (from task.md on disk) plus its DB summary / review_note and id
+// — is assembled in tasks.ts (taskSearchText) and tested here against this
+// predicate. Case-insensitive substring match; a blank/whitespace query matches
+// everything (no filter), so callers can pass an unset `q` through unconditionally.
+export function matchesQuery(haystack: string, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return haystack.toLowerCase().includes(needle);
+}
+
 // ---- GLOBAL SETTINGS (key/value runtime state) ----------------------------
 // Read a server-wide setting, or null if it was never set. Used for runtime state
 // that must persist across restarts but isn't per-task or a static env knob (e.g.

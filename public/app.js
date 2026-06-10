@@ -472,7 +472,9 @@ function dirCard(d) {
 async function renderDirectory(id) {
   const [dirs, tasks] = await Promise.all([
     api("GET", "/directories"),
-    api("GET", "/directories/" + id + "/tasks"),
+    // Carry the active full-text search so it survives SSE-driven re-renders; the
+    // server filters by `?q=` (see searchParam / buildFilterBar).
+    api("GET", "/directories/" + id + "/tasks" + searchParam()),
   ]);
   const dir = dirs.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "directory not found"));
@@ -508,12 +510,13 @@ async function renderDirectory(id) {
     } else {
       // search + status filter bar. Filter state lives in module-level vars
       // (taskSearch / statusFilter) so it survives the full re-render the app does
-      // on every SSE event. Typing/toggling rebuilds only the results region below
+      // on every SSE event. The full-text search runs SERVER-SIDE (?q=) — typing
+      // re-fetches the list (debounced) and repaints only the results region below
       // (not the bar itself), so the search input keeps focus while you type. The
       // split of active (queued/running/idle/review/finalizing) vs terminal-state
       // history (merged/aborted/rejected) happens inside renderResults.
       const results = el("div", { class: "results" });
-      body.appendChild(buildFilterBar(tasks, results));
+      body.appendChild(buildFilterBar(id, tasks, results));
       body.appendChild(results);
       renderResults(tasks, results);
     }
@@ -690,16 +693,31 @@ function historyOpen() {
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
 const FILTER_STATUSES = ["queued", "blocked", "running", "idle", "review", "finalizing", "failed", "merged", "aborted", "rejected"];
-let taskSearch = "";          // id substring filter (case-insensitive)
+// taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
+// endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
+// to the client), summary, review notes, and id. So the search runs on the server
+// and the directory list is re-fetched as you type (debounced); the status/tag
+// filters below still run client-side over whatever the server returned.
+let taskSearch = "";          // full-text query (server-side ?q=)
 let statusFilter = new Set(); // selected effStatus values; empty = all
 let tagFilter = new Set();    // selected tags; empty = all (ANY-match when non-empty)
+
+// The `?q=` query-string fragment for the current search (empty when not searching),
+// appended to every directory task-list fetch so the active search persists across
+// SSE-driven re-renders.
+function searchParam() {
+  const q = taskSearch.trim();
+  return q ? "?q=" + encodeURIComponent(q) : "";
+}
 
 function filterActive() {
   return taskSearch.trim() !== "" || statusFilter.size > 0 || tagFilter.size > 0;
 }
+// Client-side filter applied ON TOP of the server's full-text `?q=` result: the
+// status chips and tag chips. The text search itself is NOT re-checked here — the
+// server already narrowed the list by prompt/summary/notes/id, which the client
+// can't reproduce (it never receives the prompt bodies).
 function taskMatchesFilter(t) {
-  const q = taskSearch.trim().toLowerCase();
-  if (q && !String(t.id).toLowerCase().includes(q)) return false;
   if (statusFilter.size && !statusFilter.has(effStatus(t))) return false;
   // Tag filter is ANY-match: keep a task if it carries at least one selected tag.
   if (tagFilter.size) {
@@ -716,22 +734,44 @@ function allTags(tasks) {
   return [...set].sort();
 }
 
-// The filter bar: an id search box plus a row of toggleable status chips (reusing
-// the existing .chip color styling, dimmed when inactive). Handlers mutate the
-// module-level filter state and rebuild ONLY the results region — leaving the bar
-// (and the focused search input) untouched, so live-as-you-type works.
-function buildFilterBar(tasks, results) {
+// The filter bar: a full-text search box plus a row of toggleable status chips
+// (reusing the existing .chip color styling, dimmed when inactive). The search box
+// drives the SERVER-SIDE `?q=` filter — typing re-fetches the directory's task list
+// (debounced) and repaints ONLY the results region, so the bar (and the focused
+// search input) stay put and live-as-you-type works. The status/tag chip handlers
+// mutate the module-level filter state and re-filter the last-fetched set client-side.
+function buildFilterBar(dirId, tasks, results) {
   const bar = el("div", { class: "filter-bar" });
 
+  // The most recently fetched (server-filtered) task set the chips filter over.
+  // Starts as the list `tasks` painted with; a search re-fetch replaces it.
+  let currentTasks = tasks;
+
   const search = el("input", {
-    type: "text", class: "task-search", placeholder: "Filter by task id…",
-    "aria-label": "Filter tasks by id",
+    type: "text", class: "task-search", placeholder: "Search prompt, summary, notes, id…",
+    "aria-label": "Search tasks by prompt, summary, review notes, or id",
   });
   search.value = taskSearch;
+
+  // Debounced server search: the prompt lives in task.md on the server, so matching
+  // it means re-fetching the list with `?q=` rather than filtering in the browser.
+  let searchTimer = null;
+  function runSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      try {
+        currentTasks = await api("GET", "/directories/" + dirId + "/tasks" + searchParam());
+      } catch (e) {
+        toast(e.message, true);
+        return;
+      }
+      renderResults(currentTasks, results);
+    }, 180);
+  }
   search.addEventListener("input", () => {
     taskSearch = search.value;
-    renderResults(tasks, results);
     syncClear();
+    runSearch();
   });
 
   const chips = el("div", { class: "filter-chips" });
@@ -746,7 +786,7 @@ function buildFilterBar(tasks, results) {
       const on = statusFilter.has(s);
       c.classList.toggle("active", on);
       c.setAttribute("aria-pressed", on ? "true" : "false");
-      renderResults(tasks, results);
+      renderResults(currentTasks, results);
       syncClear();
     });
     chips.appendChild(c);
@@ -766,7 +806,8 @@ function buildFilterBar(tasks, results) {
       c.classList.remove("active");
       c.setAttribute("aria-pressed", "false");
     });
-    renderResults(tasks, results);
+    // Clearing the text query changes the server filter, so re-fetch the full list.
+    runSearch();
     syncClear();
   });
   function syncClear() { clear.style.display = filterActive() ? "" : "none"; }
@@ -796,7 +837,7 @@ function buildFilterBar(tasks, results) {
         const on = tagFilter.has(g);
         c.classList.toggle("active", on);
         c.setAttribute("aria-pressed", on ? "true" : "false");
-        renderResults(tasks, results);
+        renderResults(currentTasks, results);
         syncClear();
       });
       tagRow.appendChild(c);

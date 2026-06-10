@@ -22,6 +22,7 @@ COMMANDS
   health                          Server health snapshot (exit 1 if degraded).
   ls [--dir <id>] [--status <s>]  List tasks as a compact id/status/ci/tags table.
      [--tag a,b]                    Keep only tasks carrying any of the given tags.
+     [--search <text>]              Full-text match on prompt/summary/review notes/id.
   new <dir> -m <prompt>           Create a task in directory <dir> (id or path).
       [--blocked-by id,id]          Start it blocked on the given task ids.
       [--tag a,b]                   Attach organizational labels (comma-separated).
@@ -53,7 +54,7 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template", "--timeout"]);
+const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--template", "--timeout", "--search"]);
 
 // Boolean flags: present → true, consume no following token.
 const BOOLEAN_FLAGS = new Set(["--merge"]);
@@ -244,9 +245,14 @@ async function cmdLs(flags) {
     const dirs = await api("GET", "/api/directories");
     dirIds = dirs.map((d) => d.id);
   }
+  // --search <text> is a SERVER-SIDE full-text filter (?q=) over each task's
+  // prompt/summary/review notes/id — the prompt lives in task.md on the server, so
+  // matching it has to happen there, not in this client. Blank → no filter.
+  const search = (flags.search ?? "").trim();
+  const qs = search ? `?q=${encodeURIComponent(search)}` : "";
   let tasks = [];
   for (const id of dirIds) {
-    const list = await api("GET", `/api/directories/${encodeURIComponent(id)}/tasks`);
+    const list = await api("GET", `/api/directories/${encodeURIComponent(id)}/tasks${qs}`);
     tasks.push(...list);
   }
   if (flags.status) tasks = tasks.filter((t) => t.status === flags.status);

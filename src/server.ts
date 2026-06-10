@@ -448,9 +448,14 @@ route("DELETE", "/api/directories/:id", async (_req, p) => {
   return json({ ok: true });
 });
 
-route("GET", "/api/directories/:id/tasks", async (_req, p) => {
+// Optional `?q=` is a case-insensitive FULL-TEXT SEARCH over each task's prompt
+// (task.md), request_review summary, review notes, and id — filtered SERVER-SIDE so
+// huge prompt bodies never ship to the client (the list projection omits them). A
+// blank/absent q returns the full list unchanged. See tasks.taskListView.
+route("GET", "/api/directories/:id/tasks", async (req, p) => {
   if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
-  return json(taskListView(p.id!));
+  const q = new URL(req.url).searchParams.get("q") ?? undefined;
+  return json(taskListView(p.id!, q));
 });
 
 route("POST", "/api/directories/:id/tasks", async (req, p) => {
