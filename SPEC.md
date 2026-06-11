@@ -1167,7 +1167,11 @@ hash-routed and SSE-driven. Views/features:
   search** box that drives the server-side `?q=` filter over prompt/summary/review
   notes/id — re-fetching the list as you type — plus client-side status chips and a
   second row of **tag chips**, ANY-match), a queue line, a
-  collapsible history section, and a **new-task modal** redesigned for **low-effort
+  collapsible **"Finished"** history section that holds **only the terminal idle
+  states** (`merged`/`aborted`) — every non-terminal task, including the feedback
+  states awaiting the operator (`spec_review`/`in_review`/`needs_info`), stays in the
+  always-visible active list and is never collapsed under Finished — and a
+  **new-task modal** redesigned for **low-effort
   creation**: the default surface is just a one-line **idea** box with an **Expand**
   button (or an optional **template** picker — `GET /api/templates` — that fills the
   prompt textarea with a recipe's body and hints which `{{placeholders}}` to complete)

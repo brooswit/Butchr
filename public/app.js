@@ -707,8 +707,9 @@ async function renderDirectory(id) {
       // on every SSE event. The full-text search runs SERVER-SIDE (?q=) — typing
       // re-fetches the list (debounced) and repaints only the results region below
       // (not the bar itself), so the search input keeps focus while you type. The
-      // split of active (queued/running/idle/review/finalizing) vs terminal-state
-      // history (merged/aborted/rejected) happens inside renderResults.
+      // split of active (everything non-terminal, incl. the feedback states
+      // awaiting the operator) vs terminal-state history (merged/aborted only)
+      // happens inside renderResults.
       const results = el("div", { class: "results" });
       body.appendChild(buildFilterBar(id, tasks, results));
       body.appendChild(results);
@@ -1046,6 +1047,15 @@ function queueLine(tasks) {
 // Everything else (merged, aborted) is terminal and lives in History.
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
 const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "in_review", "finalizing"];
+// The ONLY two terminal idle states — these are what belongs in the collapsible
+// "Finished" section. Everything NOT in this allowlist is non-terminal and stays
+// VISIBLE in the active list: the feedback states awaiting the operator
+// (spec_review / in_review / needs_info) AND any legacy/non-canonical status a row
+// may still carry (e.g. `failed` / `rejected`, which historically backed a revert
+// or dispatch give-up). Defining Finished by an explicit allowlist — rather than as
+// the complement of ACTIVE_STATUSES — guarantees a needs-attention task can never be
+// hidden under Finished just because its status isn't in the active list.
+const TERMINAL_STATUSES = ["merged", "aborted"];
 const HISTORY_KEY = "butchr-history-open";
 
 // Directory page body mode: the task "List", the pipeline "Board", or the
@@ -1235,8 +1245,11 @@ function buildFilterBar(dirId, tasks, results) {
 function renderResults(tasks, container) {
   container.innerHTML = "";
   const filtering = filterActive();
-  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
-  const history = tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status));
+  // Finished holds ONLY terminal idle states (merged/aborted); everything else —
+  // including the feedback states awaiting the operator and any legacy `failed` /
+  // `rejected` row — stays in the visible active table so it's never hidden.
+  const active = tasks.filter((t) => !TERMINAL_STATUSES.includes(t.status));
+  const history = tasks.filter((t) => TERMINAL_STATUSES.includes(t.status));
   const activeMatch = active.filter(taskMatchesFilter);
   const historyMatch = history.filter(taskMatchesFilter);
 
@@ -1333,9 +1346,13 @@ function tasksTable(tasks) {
       : t.status === "needs_info" ? "answer →" : "open →";
     const termLink = isLive(t)
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
+    // Feedback states are awaiting the operator — surface the state-kind chip
+    // (e.g. "feedback: diff review") so a row that needs a human reads at a glance,
+    // rather than just sitting in the list looking like in-flight work.
+    const feedback = stateKind(effStatus(t)) === "feedback";
     tr.innerHTML = `
       <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
-      <td>${taskChips(t)}${tagChips(t)}</td>
+      <td>${taskChips(t, { kind: feedback })}${tagChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a>${
         herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
