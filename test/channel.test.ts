@@ -155,6 +155,49 @@ describe("channel: attention transitions → notifications", () => {
   });
 });
 
+describe("channel: per-directory scope", () => {
+  test("a scoped bridge emits ONLY its directory's transitions", () => {
+    // butchr launches one bridge per directory's CTO agent, passing BUTCHR_CHANNEL_DIR.
+    const bridge = new AttentionBridge("dir-1");
+
+    // A task in the SCOPED directory → a notification.
+    const inScope = bridge.consume(
+      taskUpdated({ id: "t-in", directory_id: "dir-1", status: "in_review", summary: "mine" }),
+    );
+    expect(inScope).not.toBeNull();
+    expect(inScope!.meta.dir).toBe("dir-1");
+
+    // A task in ANOTHER directory → dropped (only this directory's CTO sees it).
+    const outScope = bridge.consume(
+      taskUpdated({ id: "t-out", directory_id: "dir-2", status: "in_review", summary: "theirs" }),
+    );
+    expect(outScope).toBeNull();
+
+    // A task with no directory_id is also out of any non-empty scope.
+    const noDir = bridge.consume(
+      taskUpdated({ id: "t-none", status: "spec_review", summary: "x" }),
+    );
+    expect(noDir).toBeNull();
+  });
+
+  test("an unscoped bridge (no scope) still emits every directory's transitions", () => {
+    const bridge = new AttentionBridge(); // legacy global feed
+    expect(
+      bridge.consume(taskUpdated({ id: "a", directory_id: "dir-1", status: "in_review", summary: "x" })),
+    ).not.toBeNull();
+    expect(
+      bridge.consume(taskUpdated({ id: "b", directory_id: "dir-2", status: "in_review", summary: "y" })),
+    ).not.toBeNull();
+  });
+
+  test("an empty/whitespace scope is treated as unscoped", () => {
+    const bridge = new AttentionBridge("   ");
+    expect(
+      bridge.consume(taskUpdated({ id: "c", directory_id: "dir-9", status: "in_review", summary: "z" })),
+    ).not.toBeNull();
+  });
+});
+
 describe("channel: one-way capability (no tools)", () => {
   test("initialize advertises claude/channel and NO tools", () => {
     const res = channelInitializeResult("2025-06-18");

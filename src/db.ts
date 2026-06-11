@@ -66,33 +66,52 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-
--- MANAGED CTO AGENT (singleton). The CTO agent is a FIRST-CLASS, butchr-launched,
--- channel-connected Claude session — like a workspace agent but with NO worktree/
--- branch/review/merge — so its runtime handles are tracked in their OWN record,
--- entirely separate from tasks. Exactly ONE logical CTO agent exists, so this table
--- holds a SINGLE row keyed by the literal id 'singleton' (see db.CTO_AGENT_ID).
---   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
---     supervised relaunch + boot-adopt so the CTO never cold-starts (SPEC 6.8).
---   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the
---     pane backs the Open-CTO-terminal attach; positional pane ids may renumber).
---   - desired: 1 when the operator/boot wants it UP (supervisor relaunches on death),
---     0 when explicitly stopped (supervisor leaves it down -- survives a restart).
---   - restarts: count of supervised relaunches since the last fresh start.
---   - last_error: most recent launch/supervision failure, surfaced to the operator.
-CREATE TABLE IF NOT EXISTS cto_agent (
-  id              TEXT PRIMARY KEY,
-  session_id      TEXT,
-  herdr_pane_id   TEXT,
-  herdr_tab_id    TEXT,
-  herdr_workspace TEXT,
-  desired         INTEGER NOT NULL DEFAULT 0,
-  started_at      TEXT,
-  restarts        INTEGER NOT NULL DEFAULT 0,
-  last_error      TEXT,
-  updated_at      TEXT
-);
 `);
+
+// MANAGED CTO AGENT (PER-DIRECTORY). butchr runs ONE CTO agent per registered
+// directory (repo), in that repo's ROOT — a FIRST-CLASS, butchr-launched,
+// channel-connected Claude session, like a workspace agent but with NO worktree/
+// branch/review/merge. Each directory's runtime handles live in their OWN row, keyed
+// by directory_id with a FK cascade so a directory's CTO state dies with the
+// directory. (This SUPERSEDES the old GLOBAL SINGLETON table keyed by the literal id
+// 'singleton'; the migration below drops that shape — pre-1.0, destroying the old
+// singleton row is fine.)
+//   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
+//     supervised relaunch + boot-adopt so the CTO never cold-starts (SPEC 6.8).
+//   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the
+//     pane backs the Open-CTO-terminal attach; positional pane ids may renumber).
+//   - desired: 1 when the operator/boot wants it UP (supervisor relaunches on death),
+//     0 when explicitly stopped (supervisor leaves it down -- survives a restart).
+//   - restarts: count of supervised relaunches since the last fresh start.
+//   - last_error: most recent launch/supervision failure, surfaced to the operator.
+// The per-directory ENABLE flag is the `directories.cto_enabled` column (NULL =
+// inherit the global default config.ctoAgentEnabled, 1 = on, 0 = off — see below),
+// not a column here, so a directory can be enabled before its first launch.
+function migrateCtoAgentPerDirectory(): void {
+  const cols = db
+    .query<{ name: string }, []>(`PRAGMA table_info(cto_agent)`)
+    .all();
+  // An existing table with no `directory_id` column is the OLD singleton shape — drop
+  // it (pre-1.0: the priority is "works forward"; the old singleton row is discarded).
+  if (cols.length > 0 && !cols.some((c) => c.name === "directory_id")) {
+    db.exec(`DROP TABLE cto_agent`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cto_agent (
+      directory_id    TEXT PRIMARY KEY REFERENCES directories(id) ON DELETE CASCADE,
+      session_id      TEXT,
+      herdr_pane_id   TEXT,
+      herdr_tab_id    TEXT,
+      herdr_workspace TEXT,
+      desired         INTEGER NOT NULL DEFAULT 0,
+      started_at      TEXT,
+      restarts        INTEGER NOT NULL DEFAULT 0,
+      last_error      TEXT,
+      updated_at      TEXT
+    );
+  `);
+}
+migrateCtoAgentPerDirectory();
 
 // Lightweight forward migrations: add columns introduced after the initial
 // schema. Guarded so existing databases upgrade in place without data loss.
@@ -117,6 +136,17 @@ function ensureColumn(table: string, column: string, decl: string): void {
 // directories.directoryGateCmd and run via `bash -lc` in the relevant cwd. Settable
 // at register time and updatable via PATCH /api/directories/:id.
 ensureColumn("directories", "gate_cmd", "TEXT");
+
+// PER-DIRECTORY CTO-AGENT ENABLE. The managed CTO agent is now ONE PER DIRECTORY (it
+// runs in the repo root and IS that project's principal/dev agent — see the cto_agent
+// table). This column is that directory's master switch for boot auto-start +
+// crash supervision: NULL (the default every existing row backfills to) means "inherit
+// the GLOBAL default" config.ctoAgentEnabled (itself DEFAULT OFF); 1 forces it ON, 0
+// forces it OFF — so a directory's own setting WINS over the global default. Resolved
+// by cto-agent.isCtoEnabled; settable via PATCH /api/directories/:id. (The on-demand
+// /api/directories/:id/cto/* endpoints still work regardless, so an operator can start
+// one even when boot-auto-start is off.)
+ensureColumn("directories", "cto_enabled", "INTEGER");
 
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
@@ -398,6 +428,10 @@ export type DirectoryRow = {
   // the default (config.verifyCmd); a non-null value (incl. "" to disable) is used
   // verbatim by both the CI gate and the post-merge verify gate for this directory.
   gate_cmd: string | null;
+  // Per-directory CTO-agent enable (see the cto_enabled ensureColumn above). NULL =
+  // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by
+  // cto-agent.isCtoEnabled (per-directory WINS over the global default).
+  cto_enabled: number | null;
   created_at: string;
 };
 
@@ -651,12 +685,12 @@ export function setSetting(key: string, value: string): void {
   ).run(key, value);
 }
 
-// ---- MANAGED CTO AGENT (singleton record) ---------------------------------
-// The fixed primary key for the single cto_agent row.
-export const CTO_AGENT_ID = "singleton";
-
+// ---- MANAGED CTO AGENT (per-directory records) ----------------------------
+// One row per registered directory (keyed by directory_id), tracking that
+// directory's CTO agent runtime handles. See the cto_agent table comment above and
+// src/cto-agent.ts.
 export type CtoAgentRow = {
-  id: string;
+  directory_id: string;
   session_id: string | null;
   herdr_pane_id: string | null;
   herdr_tab_id: string | null;
@@ -668,26 +702,38 @@ export type CtoAgentRow = {
   updated_at: string | null;
 };
 
-/** The singleton CTO-agent record, or null if it has never been written. */
-export function getCtoAgentRow(): CtoAgentRow | null {
+/** A directory's CTO-agent record, or null if it has never been written. */
+export function getCtoAgentRow(directoryId: string): CtoAgentRow | null {
   return (
     db
-      .query<CtoAgentRow, [string]>(`SELECT * FROM cto_agent WHERE id=?`)
-      .get(CTO_AGENT_ID) ?? null
+      .query<CtoAgentRow, [string]>(`SELECT * FROM cto_agent WHERE directory_id=?`)
+      .get(directoryId) ?? null
   );
 }
 
+/** Every CTO-agent record (one per directory that has ever launched/been desired). */
+export function listCtoAgentRows(): CtoAgentRow[] {
+  return db.query<CtoAgentRow, []>(`SELECT * FROM cto_agent`).all();
+}
+
+/** Drop a directory's CTO-agent record (the directory DELETE also cascades this). */
+export function deleteCtoAgentRow(directoryId: string): void {
+  db.query(`DELETE FROM cto_agent WHERE directory_id=?`).run(directoryId);
+}
+
 /**
- * Upsert a partial patch onto the singleton CTO-agent record (stamping updated_at).
+ * Upsert a partial patch onto a directory's CTO-agent record (stamping updated_at).
  * Single-row write; the supervisor/lifecycle treat this as best-effort durable state
  * the same way settings are. Unspecified fields are left untouched on an existing row.
+ * Requires the directory to exist (the FK cascade keys the row to it).
  */
 export function saveCtoAgentRow(
-  patch: Partial<Omit<CtoAgentRow, "id">>,
+  directoryId: string,
+  patch: Partial<Omit<CtoAgentRow, "directory_id">>,
 ): void {
-  const cur = getCtoAgentRow();
+  const cur = getCtoAgentRow(directoryId);
   const next: CtoAgentRow = {
-    id: CTO_AGENT_ID,
+    directory_id: directoryId,
     session_id: cur?.session_id ?? null,
     herdr_pane_id: cur?.herdr_pane_id ?? null,
     herdr_tab_id: cur?.herdr_tab_id ?? null,
@@ -701,10 +747,10 @@ export function saveCtoAgentRow(
   };
   db.query(
     `INSERT INTO cto_agent
-       (id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
+       (directory_id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
         desired, started_at, restarts, last_error, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
+     ON CONFLICT(directory_id) DO UPDATE SET
        session_id=excluded.session_id,
        herdr_pane_id=excluded.herdr_pane_id,
        herdr_tab_id=excluded.herdr_tab_id,
@@ -715,7 +761,7 @@ export function saveCtoAgentRow(
        last_error=excluded.last_error,
        updated_at=excluded.updated_at`,
   ).run(
-    next.id,
+    next.directory_id,
     next.session_id,
     next.herdr_pane_id,
     next.herdr_tab_id,

@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { config } from "./config.ts";
+import { stopCtoAgent } from "./cto-agent.ts";
 import { db, nowIso } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
@@ -161,6 +162,28 @@ export function updateDirectoryGateCmd(id: string, gateCmd: unknown): DirectoryV
 }
 
 /**
+ * Set (or clear) a directory's per-directory CTO-agent enable and return the refreshed
+ * view. `true`/`false` forces the directory's CTO agent on/off (boot auto-start +
+ * supervision); `null`/`undefined` CLEARS the override so it inherits the global
+ * default config.ctoAgentEnabled. 404 if the directory is gone; 400 if the value is
+ * neither a boolean nor null. Takes effect on the next boot reconcile / supervision
+ * tick (and is reflected immediately in the directory's CTO status). See
+ * cto-agent.isCtoEnabled.
+ */
+export function setDirectoryCtoEnabled(id: string, value: unknown): DirectoryView {
+  const dir = getDirectory(id);
+  if (!dir) throw new HttpError(404, `directory not found: ${id}`);
+  let stored: number | null;
+  if (value === undefined || value === null) stored = null;
+  else if (typeof value === "boolean") stored = value ? 1 : 0;
+  else throw new HttpError(400, "cto_enabled must be a boolean (or null to use the default)");
+  db.query(`UPDATE directories SET cto_enabled=? WHERE id=?`).run(stored, id);
+  const view: DirectoryView = { ...getDirectory(id)!, counts: counts(id) };
+  publish({ type: "directory.updated", directory: view });
+  return view;
+}
+
+/**
  * Per-directory needs-attention rollup, the projection behind the cross-project
  * DASHBOARD (GET /api/dashboard). For every registered directory it folds the
  * per-status `counts` into the four operator-facing buckets the dashboard surfaces,
@@ -289,6 +312,11 @@ export async function registerDirectory(
 export async function unregisterDirectory(id: string): Promise<void> {
   const dir = getDirectory(id);
   if (!dir) throw new HttpError(404, `directory not found: ${id}`);
+
+  // Tear down this directory's managed CTO agent FIRST (close its tab/pane + free its
+  // name) so the DELETE below — which cascade-removes its cto_agent row — can't strand
+  // an orphaned CTO pane. Best-effort; never block unregister.
+  await stopCtoAgent(id).catch(() => {});
 
   // Best effort: clean up any worktrees for non-terminal tasks.
   const tasks = db

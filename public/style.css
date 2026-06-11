@@ -1066,8 +1066,11 @@ small.muted { font-size: 12px; }
 .sb-fill.rejected    { background: var(--rejected); }
 .sb-fill.failed      { background: var(--failed); }
 
-/* ---- managed CTO agent card (dashboard) ---- */
+/* ---- managed CTO agent (per-directory: panel on the directory view, mini-badge
+       on each dashboard card) ---- */
 .cto-card { margin-bottom: 18px; }
+.cto-mini { margin-top: 8px; }
+.cto-mini .cto-badge { margin-left: 0; }
 .cto-card .meta { color: var(--muted); font-size: 12.5px; }
 .cto-card .meta.err { color: var(--rejected); }
 .cto-badge {

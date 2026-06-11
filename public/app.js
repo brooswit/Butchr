@@ -270,21 +270,29 @@ async function openTaskTerminal(id, btn) {
   }
 }
 
-// ---------- managed CTO agent ----------
-// The dashboard card for butchr's first-class, managed CTO agent: a status line
-// (running/stopped, session, since, restarts) plus controls — Open CTO terminal
-// (reuses the workspace-agent attach), Start/Stop, Restart, and Restart fresh (a
-// brand-new session). Mirrors the task terminal button's UX.
-async function ctoCard() {
-  const s = await api("GET", "/cto");
-  const card = el("div", { class: "panel cto-card" });
+// ---------- managed CTO agent (PER-DIRECTORY) ----------
+// Each directory runs its OWN CTO agent (in that repo's root — its principal/dev
+// agent). This panel renders that directory's CTO agent: a status line (running/
+// stopped, session, since, restarts) plus controls — Open CTO terminal (reuses the
+// workspace-agent attach), Enable/Start/Stop, Restart, and Restart fresh (a brand-new
+// session) — all scoped to `dirId` via /api/directories/:id/cto/*.
+async function ctoPanel(dirId) {
+  const base = "/directories/" + dirId + "/cto";
+  let s;
+  try {
+    s = await api("GET", base);
+  } catch {
+    return el("div", { class: "panel cto-card", style: "margin-top:28px" },
+      el("small", { class: "muted" }, "CTO agent status unavailable"));
+  }
+  const card = el("div", { class: "panel cto-card", style: "margin-top:28px" });
   const state = s.running ? "running" : (s.desired ? "starting…" : "stopped");
   const stateCls = s.running ? "ok" : (s.desired ? "warn" : "off");
   const bits = [];
   if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
   if (s.since) bits.push(`since ${fmtTime(s.since)}`);
   if (s.restarts) bits.push(`${s.restarts} restart${s.restarts === 1 ? "" : "s"}`);
-  if (!s.enabled) bits.push("auto-start disabled (BUTCHR_CTO_AGENT)");
+  if (!s.enabled) bits.push("auto-start disabled");
   card.innerHTML = `
     <div class="row" style="justify-content:space-between; align-items:center; gap:10px">
       <div>
@@ -306,28 +314,36 @@ async function ctoCard() {
   };
   if (s.running && s.paneId) {
     controls.appendChild(btn("Open CTO terminal", "", async () => {
-      const r = await api("POST", "/cto/terminal");
+      const r = await api("POST", base + "/terminal");
       toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
     }));
   }
   if (s.running || s.desired) {
     controls.appendChild(btn("Restart", "ghost", async () => {
-      await api("POST", "/cto/restart");
+      await api("POST", base + "/restart");
       toast("CTO agent restarting (resuming session)");
     }));
     controls.appendChild(btn("Restart fresh", "ghost", async () => {
-      await api("POST", "/cto/restart?fresh=1");
+      await api("POST", base + "/restart?fresh=1");
       toast("CTO agent restarting with a fresh session");
     }));
     controls.appendChild(btn("Stop", "ghost danger-outline", async () => {
-      await api("POST", "/cto/stop");
+      await api("POST", base + "/stop");
       toast("CTO agent stopped");
     }));
   } else {
     controls.appendChild(btn("Start", "", async () => {
-      await api("POST", "/cto/start");
+      await api("POST", base + "/start");
       toast("CTO agent starting");
     }));
+    // Opt the directory into boot auto-start + supervision, and start it now.
+    if (!s.enabled) {
+      controls.appendChild(btn("Enable", "ghost", async () => {
+        await api("PATCH", "/directories/" + dirId, { cto_enabled: true });
+        await api("POST", base + "/start");
+        toast("CTO agent enabled + starting");
+      }));
+    }
   }
   return card;
 }
@@ -622,11 +638,6 @@ async function renderDashboard() {
     wrap.appendChild(sum);
   }
 
-  // Managed CTO agent status + controls (best-effort — never block the dashboard).
-  try {
-    wrap.appendChild(await ctoCard());
-  } catch { /* leave the card out if the status fetch fails */ }
-
   // add-directory form
   const form = el("div", { class: "panel" });
   form.innerHTML = `
@@ -721,10 +732,28 @@ function dirCard(d) {
     <div class="title">${esc(d.label || d.path)}</div>
     <div class="path">${esc(d.path)}</div>
     ${buckets}
-    <div class="counts">${pills}</div>`;
+    <div class="counts">${pills}</div>
+    <div class="cto-mini" data-cto="${esc(d.id)}"><span class="cto-badge off">CTO …</span></div>`;
   card.style.cursor = "pointer";
   card.addEventListener("click", () => (location.hash = "#/dir/" + d.id));
+  // Lazily fill in THIS directory's CTO-agent status badge (best-effort; a failed
+  // probe just leaves the placeholder). Scoped per-directory — one CTO per repo.
+  ctoMiniBadge(d.id, card.querySelector(".cto-mini"));
   return card;
+}
+
+// Fill a dashboard card's compact CTO badge from /api/directories/:id/cto. Pure
+// status — the card's own click navigates into the directory view (with full controls).
+async function ctoMiniBadge(dirId, slot) {
+  if (!slot) return;
+  try {
+    const s = await api("GET", "/directories/" + dirId + "/cto");
+    const state = s.running ? "running" : (s.desired ? "starting…" : "stopped");
+    const cls = s.running ? "ok" : (s.desired ? "warn" : "off");
+    slot.innerHTML = `<span class="cto-badge ${cls}">CTO ${esc(state)}</span>`;
+  } catch {
+    slot.innerHTML = "";
+  }
 }
 
 // ---------- directory view ----------
@@ -786,6 +815,14 @@ async function renderDirectory(id) {
   wrap.appendChild(buildViewToggle(paintBody));
   wrap.appendChild(body);
   paintBody();
+
+  // This directory's managed CTO agent (its principal/dev agent, running in the repo
+  // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
+  // directory. Best-effort: rendered async so a status-probe hiccup never blocks the
+  // page. Mounted in place once it resolves.
+  const ctoSlot = el("div");
+  wrap.appendChild(ctoSlot);
+  ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
 
   // build/test gate command panel — the command both the CI gate (in-worktree) and
   // the post-merge verify gate run for this directory. Shows the effective command +

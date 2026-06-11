@@ -100,9 +100,10 @@ export async function reapOrphans(
   }
 
   // herdr husks: a terminal-state task whose agent name is still registered. This is
-  // keyed strictly by TASK id, so the managed CTO agent (a singleton tracked in its
-  // own `cto_agent` record under config.ctoAgentName — never a task id) is never
-  // matched here and its pane is never orphaned/reaped. See src/cto-agent.ts.
+  // keyed strictly by TASK id, so the per-directory managed CTO agents (each tracked
+  // in its own `cto_agent` row under the name `<config.ctoAgentName>-<directoryId>` —
+  // never a task id) are never matched here and their panes are never orphaned/reaped.
+  // See src/cto-agent.ts.
   if (herdrUp) {
     const terminal = db
       .query<TaskRow, []>(

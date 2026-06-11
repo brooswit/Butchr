@@ -154,6 +154,16 @@ export class AttentionBridge {
   // stream (and optionally seeded once at startup). Used only for the content line;
   // meta.dir is always the stable directory_id.
   private dirLabels = new Map<string, string>();
+  // PER-DIRECTORY SCOPE. When set (the directory_id passed at construction — from
+  // BUTCHR_CHANNEL_DIR), the bridge emits notifications ONLY for tasks in THAT
+  // directory, so each per-repo CTO agent receives only its OWN directory's attention
+  // events. Unset (empty/undefined) → unscoped: every directory's events flow (the
+  // legacy global feed).
+  private readonly scopeDir: string;
+
+  constructor(scopeDir?: string) {
+    this.scopeDir = (scopeDir ?? "").trim();
+  }
 
   /** Seed the directory-label cache (best-effort, e.g. from GET /api/directories). */
   seedDirectoryLabels(dirs: Array<{ id?: unknown; label?: unknown }>): void {
@@ -204,6 +214,10 @@ export class AttentionBridge {
     if (prev === status) return null; // already in this state — not a fresh transition
 
     const dirId = typeof t.directory_id === "string" ? t.directory_id : "";
+    // PER-DIRECTORY SCOPE: drop transitions for OTHER directories (a directory's CTO
+    // agent only ever sees its own directory's attention events). We still update
+    // lastStatus above so an unscoped re-fire is suppressed identically.
+    if (this.scopeDir && dirId !== this.scopeDir) return null;
     const label = this.dirLabels.get(dirId) || dirId || "(unknown dir)";
     const text = attentionText(t, status);
     const content =
@@ -395,7 +409,12 @@ function elog(msg: string): void {
  */
 export async function main(): Promise<void> {
   const url = defaultSseUrl();
-  const bridge = new AttentionBridge();
+  // PER-DIRECTORY SCOPE: butchr launches one bridge per registered directory's CTO
+  // agent and passes that directory_id via BUTCHR_CHANNEL_DIR, so the bridge pushes
+  // only that directory's attention events. Unset → an unscoped (all-directories) feed.
+  const scopeDir = (process.env.BUTCHR_CHANNEL_DIR ?? "").trim();
+  const bridge = new AttentionBridge(scopeDir);
+  if (scopeDir) elog(`scoped to directory ${scopeDir}`);
   let stopped = false;
 
   // Best-effort seed of directory labels so the very first notifications carry a

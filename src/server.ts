@@ -14,10 +14,12 @@ import {
   getDirectoryByPath,
   listDirectories,
   registerDirectory,
+  setDirectoryCtoEnabled,
   unregisterDirectory,
   updateDirectoryGateCmd,
 } from "./directories.ts";
 import {
+  ctoAgentName,
   ctoAgentStatus,
   restartCtoAgent,
   startCtoAgent,
@@ -507,13 +509,25 @@ route("POST", "/api/directories", async (req) => {
   return json(view, 201);
 });
 
-// Update a directory's per-directory build/test gate command (the command both the
-// CI gate and the post-merge verify gate run for this directory). Body `{ gate_cmd }`:
-// a string sets it ("" disables the gate); null/omitted CLEARS the override so it
-// falls back to the default config.verifyCmd. 404 if the directory is gone.
+// Update a directory's per-directory settings. Two independent fields, handled by
+// KEY PRESENCE so updating one never clobbers the other:
+//  - `gate_cmd`: the build/test gate command both the CI gate and the post-merge
+//    verify gate run for this directory — a string sets it ("" disables the gate);
+//    null/omitted CLEARS the override so it falls back to the default config.verifyCmd.
+//  - `cto_enabled`: the per-directory CTO-agent enable (boot auto-start + supervision)
+//    — true/false forces it on/off; null CLEARS the override → inherit the global
+//    default config.ctoAgentEnabled.
+// 404 if the directory is gone. Publishes `directory.updated`.
 route("PATCH", "/api/directories/:id", async (req, p) => {
   const body = await readJson(req);
-  return json(updateDirectoryGateCmd(p.id!, body.gate_cmd ?? null));
+  let view;
+  if ("cto_enabled" in body) view = setDirectoryCtoEnabled(p.id!, body.cto_enabled);
+  // Preserve the legacy contract that PATCH with no cto_enabled key sets/clears the
+  // gate command (an omitted gate_cmd clears the override).
+  if ("gate_cmd" in body || !("cto_enabled" in body)) {
+    view = updateDirectoryGateCmd(p.id!, body.gate_cmd ?? null);
+  }
+  return json(view!);
 });
 
 route("DELETE", "/api/directories/:id", async (_req, p) => {
@@ -761,29 +775,42 @@ route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   return attachAgentTerminal(p.id!);
 });
 
-// ---- MANAGED CTO AGENT -----------------------------------------------------
-// The first-class, butchr-managed CTO agent (src/cto-agent.ts): a singleton,
-// channel-connected Claude session with no worktree/branch/review/merge. Status +
-// start/stop/restart controls + an 'Open CTO terminal' attach (reusing the same
-// pane-attach machinery as the workspace-agent terminal button). Each mutating route
-// returns the refreshed CtoStatus (the lifecycle calls also publish a `cto.updated`
-// SSE event so every dashboard reflects it live).
-route("GET", "/api/cto", async () => json(await ctoAgentStatus()));
-route("POST", "/api/cto/start", async () => json(await startCtoAgent()));
-route("POST", "/api/cto/stop", async () => json(await stopCtoAgent()));
+// ---- MANAGED CTO AGENT (PER-DIRECTORY) -------------------------------------
+// butchr runs ONE CTO agent PER REGISTERED DIRECTORY (src/cto-agent.ts) — a
+// first-class, channel-connected Claude session that runs in that repo's ROOT and IS
+// the project's principal/dev agent, with no worktree/branch/review/merge. These
+// routes are all SCOPED to a directory: status + start/stop/restart controls + an
+// 'Open CTO terminal' attach (reusing the same pane-attach machinery as the
+// workspace-agent terminal button). Each mutating route returns the refreshed
+// CtoStatus (the lifecycle calls also publish a `cto.updated` SSE event so every
+// dashboard reflects it live). 404 if the directory is gone.
+route("GET", "/api/directories/:id/cto", async (_req, p) => {
+  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  return json(await ctoAgentStatus(p.id!));
+});
+route("POST", "/api/directories/:id/cto/start", async (_req, p) => {
+  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  return json(await startCtoAgent(p.id!));
+});
+route("POST", "/api/directories/:id/cto/stop", async (_req, p) => {
+  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  return json(await stopCtoAgent(p.id!));
+});
 // `?fresh=1` cold-starts a BRAND-NEW session (the only way to do so — last-resort
 // context hygiene); otherwise it bounces, RESUMING the same session.
-route("POST", "/api/cto/restart", async (req) => {
+route("POST", "/api/directories/:id/cto/restart", async (req, p) => {
+  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
   const fresh = new URL(req.url).searchParams.get("fresh") === "1";
-  return json(await restartCtoAgent({ fresh }));
+  return json(await restartCtoAgent(p.id!, { fresh }));
 });
-// Open a GUI terminal attached to the CTO agent's live pane.
-route("POST", "/api/cto/terminal", async () => {
-  const s = await ctoAgentStatus();
+// Open a GUI terminal attached to this directory's CTO agent's live pane.
+route("POST", "/api/directories/:id/cto/terminal", async (_req, p) => {
+  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  const s = await ctoAgentStatus(p.id!);
   if (!s.running || !s.paneId) {
     throw new HttpError(409, "CTO agent has no live pane (not running)");
   }
-  return attachAgentTerminal(config.ctoAgentName);
+  return attachAgentTerminal(ctoAgentName(p.id!));
 });
 
 /** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. */

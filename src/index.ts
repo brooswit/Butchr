@@ -1,7 +1,7 @@
 // butchr entry point. Starts the dispatcher loop and the HTTP server, and wires
 // up clean shutdown. Run with `bun run src/index.ts` (see package.json scripts).
 import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts";
-import { reconcileCtoAgent, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
+import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import { initFileLogging } from "./log.ts";
 import { reapOrphans } from "./reaper.ts";
@@ -51,13 +51,14 @@ async function main(): Promise<void> {
     );
   }
 
-  // Managed CTO agent (default OFF — gated behind BUTCHR_CTO_AGENT). Reconcile its
-  // desired state ONCE (adopt a live pane that survived this restart, or (re)launch
-  // it RESUMING its session), then start the supervisor that relaunches it on death.
-  // No-op unless enabled.
-  const ctoAction = await reconcileCtoAgent(herdrUp);
-  if (ctoAction.action === "adopted" || ctoAction.action === "launched") {
-    console.log(`[butchr] CTO agent ${ctoAction.action}`);
+  // Managed CTO agents — ONE PER REGISTERED DIRECTORY (each default OFF unless that
+  // directory opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).
+  // Reconcile every enabled directory's desired state ONCE (adopt a live pane that
+  // survived this restart, or (re)launch it RESUMING its session), then start the
+  // supervisor that relaunches them on death.
+  const cto = await reconcileCtoAgents(herdrUp);
+  if (cto.adopted > 0 || cto.launched > 0) {
+    console.log(`[butchr] CTO agents: ${cto.adopted} adopted, ${cto.launched} launched`);
   }
   startCtoSupervisor();
 
@@ -76,9 +77,9 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log("\n[butchr] shutting down…");
     stopDispatcher();
-    // Stop SUPERVISING the CTO agent, but leave its pane alive — like workspace
-    // agents, the next boot re-adopts and resumes it (session continuity). The reaper
-    // tracks the CTO separately and never orphans its pane.
+    // Stop SUPERVISING the per-directory CTO agents, but leave their panes alive —
+    // like workspace agents, the next boot re-adopts and resumes each (session
+    // continuity). The reaper tracks the CTO agents separately and never orphans them.
     stopCtoSupervisor();
     stopBackupLoop();
     await snapshotOnShutdown();

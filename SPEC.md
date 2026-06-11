@@ -1132,7 +1132,7 @@ handler, while no-Origin callers (CLI / MCP / curl) and `GET` reads pass through
 | `GET` | `/api/templates` | — | `TemplateView[]` — the built-in task **templates** (recipes): each `{ name, description, body, placeholders }`, where `body` carries `{{placeholder}}` markers and `placeholders` lists their distinct names (first-seen order). Static built-ins from `src/templates.ts` (`feature`, `refactor-extract`, `webapp-panel`, `add-endpoint`, `rollback`). |
 | `POST` | `/api/expand-brief` | `{ brief, directory }` | `{ prompt }` — **BRIEF → EXPAND**: turns the operator's one-line `brief` into a proper, concrete, scoped task prompt **grounded in the target repo** by running a headless, READ-ONLY claude (`Read`/`Grep`/`Glob` over the repo — `config.expandBriefCmd`, reusing the spec-conformance reviewer's recipe; see `src/expand.ts`). `directory` is the registered directory's id (or its absolute path); the expander runs with that repo as cwd. The webapp drops `prompt` into the new-task prompt textarea for the operator to review/edit before Create. 400 on a blank brief; 404 on an unknown directory; 502 if expansion failed (spawn/timeout/empty — the operator keeps the brief and can retry or write the prompt by hand). Set `BUTCHR_EXPAND_BRIEF_CMD` empty to disable (→ 502). |
 | `POST` | `/api/directories` | `{ path, label?, gate_cmd? }` | `201` `DirectoryView`. `gate_cmd` sets the per-directory build/test gate command (omit/null → default; `""` → disable). 400 if not a git repo or `gate_cmd` isn't a string; 409 if already registered; 502 if the herdr workspace can't be created. |
-| `PATCH` | `/api/directories/:id` | `{ gate_cmd }` | `DirectoryView` — update the per-directory gate command (a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default). 404 if gone; 400 if not a string. Publishes a `directory.updated` SSE event. |
+| `PATCH` | `/api/directories/:id` | `{ gate_cmd?, cto_enabled? }` | `DirectoryView` — update per-directory settings (handled by KEY PRESENCE so one never clobbers the other). `gate_cmd`: a string sets it, `""` disables; null/omitted **clears** the override → falls back to the default. `cto_enabled`: `true`/`false` forces the directory's CTO agent on/off, `null` clears → inherit the global default (§6.8). 404 if gone; 400 if `gate_cmd` isn't a string or `cto_enabled` isn't a boolean/null. Publishes a `directory.updated` SSE event. |
 | `DELETE` | `/api/directories/:id` | — | `{ ok: true }`. Tears down each task's tab, cleans non-merged worktrees, closes the workspace, removes seeded `CTO.md`, cascade-deletes tasks. |
 | `GET` | `/api/directories/:id/tasks` | `?q=` (optional) | `TaskListView[]` (newest first) — the same parsed `taskView` shape as the detail route, minus the `task.md`-derived `prompt`/`context`/`review_notes` and the `estimate` (the list views don't need them): each task is the DB row with `blocked_by`/`spawned_subtasks`/`tags` as arrays plus precomputed `blockerStates`/`deadBlockers`. `?q=` is a case-insensitive FULL-TEXT SEARCH (server-side, so huge prompts never ship to the client): only tasks whose prompt (from `task.md`), `summary`, review notes (`review_note` + the `task.md` Review Notes), or id contain `q` are returned. A blank/absent `q` returns the full list and reads no `task.md`; a non-blank `q` reads each task's `task.md` to scan its prompt. 404 if directory gone. |
 | `POST` | `/api/directories/:id/tasks` | `{ prompt, context?, blocked_by?, kind?, model?, tags?, priority?, plan_preview?, idea?, template?, vars? }` | `201` `TaskView`. `kind:"plan"` → plan task. `plan_preview:true` → the agent proposes a plan and pauses for operator approval before writing code (§2.6). `idea:true` → create in the `idea` **front state** (the `prompt` is a one-line brief; the CTO-fork drafts the spec, then it advances to 'ready' — §2.7); a legacy `stage:"idea"` body is honored as `idea:true`. `tags` is an array of free-form organizational labels (trimmed/de-duped, ≤40 chars each). `priority` is an integer (higher = dispatched sooner; default 0). `template` creates **from a built-in template** (`src/templates.ts`): its body is rendered with `vars` substituted into the `{{placeholders}}` (un-supplied markers left visible) and the result becomes the prompt (any explicit `prompt` is then ignored). Validates blockers exist (404), cycle (400), model (400), tags shape (400), priority integer (400), plan_preview boolean (400), idea boolean (400), template name (404), `vars` shape (400), prompt required (400). |
@@ -1168,9 +1168,11 @@ denominator is 0, distinguishing real-0% from no-data).
 `ButchrEvent` published by the in-process pub/sub (`src/events.ts`):
 `task.created` / `task.updated` / `task.deleted` (each carrying the `TaskView` or
 id), `directory.created` / `directory.updated` (the refreshed `DirectoryView`, e.g.
-after a gate-command change) / `directory.deleted`, and `dispatch.paused`
+after a gate-command change) / `directory.deleted`, `dispatch.paused`
 (`{ paused }` — dispatcher pause toggled, so the webapp can reflect the PAUSED
-banner live). The server runs with `idleTimeout: 0` so streams aren't dropped.
+banner live), and `cto.updated` (`{ cto }` — a directory's managed CTO agent
+lifecycle changed; the payload carries that directory's refreshed `CtoStatus`, §6.8).
+The server runs with `idleTimeout: 0` so streams aren't dropped.
 
 ### 6.3 MCP (per-task tools)
 
@@ -1385,9 +1387,14 @@ tool, no `tools/call`, no permission relay**. The CTO acts on a notification thr
 the normal surfaces (`POST …/approve|reject|answer|requeue`, `butchr` CLI), not
 through this channel.
 
+**Per-directory scope.** Since butchr runs **one CTO agent per directory** (§6.8), each
+bridge is launched with **`BUTCHR_CHANNEL_DIR` = the directory_id** and emits ONLY that
+directory's transitions — a directory's CTO sees only its own attention events. Unset
+(no scope) yields the legacy all-directories feed.
+
 **What it pushes.** It subscribes to butchr's **existing** SSE stream
 (`GET /api/events`, §6.2) — *not* a new bus — and for every task that **ENTERS** a
-CTO attention state emits one channel notification. The attention states are the spec's
+CTO attention state (within its scope) emits one channel notification. The attention states are the spec's
 `spec_review` / `in_review` / `needs_info` / **`failed`**; since butchr folded the
 former `failed` state into the canonical terminal **`aborted`** (see §2.1 / the
 `["failed","aborted"]` migration in `db.ts`), `aborted` *is* "failed" here.
@@ -1455,34 +1462,41 @@ the running CTO session as `<butchr-cto-channel>` events to act on. (The compani
 **workspace-agent** channel for feedback-*answered* events is a separate, later phase
 — it needs a keep-alive lifecycle change — and is intentionally out of scope here.)
 
-### 6.8 Managed CTO agent
+### 6.8 Managed CTO agents (one per directory)
 
 The channel (§6.7) gives a CTO agent a PUSH feed, but something has to LAUNCH and keep
 that agent alive. `src/cto-agent.ts` makes the CTO a **first-class, butchr-managed,
-channel-connected agent** — butchr launches and supervises it exactly like a workspace
-agent, but it has **no worktree, branch, review, or merge**: it is an *operator*, not a
-*builder*. It runs with the repo **root** as cwd (already trusted) and acts on each
-attention event through the butchr **API** (`127.0.0.1:47800`) or **`bin/butchr`**
-(approve / reject / answer / requeue). It **never edits the butchr codebase directly** —
-all code changes go through tasks.
+channel-connected agent — ONE PER REGISTERED DIRECTORY (repo)**. Each runs in that
+repo's **root** (already trusted) and **IS that project's principal/dev agent**:
+butchr launches and supervises it exactly like a workspace agent, but it has **no
+worktree, branch, review, or merge** — it is an *operator*, not a *builder*. **There is
+NO global/top-level CTO**; butchr manages one CTO agent per directory, keyed by
+`directory_id`. Each acts on its directory's attention events through the butchr **API**
+(`127.0.0.1:47800`) or **`bin/butchr`** (approve / reject / answer / requeue) and
+**never edits the butchr codebase directly** — all code changes go through tasks.
 
-**Default OFF.** The whole feature is gated behind **`BUTCHR_CTO_AGENT`** (default off),
-so nothing surprise-launches a Claude session. With it unset, butchr never starts,
-reconciles, or supervises a CTO agent (existing behavior unchanged); the `/api/cto`
-endpoints still work so an operator can start it on demand.
+**Default OFF (per directory).** A directory's CTO agent is enabled by its
+**`directories.cto_enabled`** column: **NULL** inherits the global default
+**`BUTCHR_CTO_AGENT`** (itself default OFF), `1` forces it on, `0` off — the
+per-directory setting **wins**. With a directory not enabled, butchr never boot-starts,
+reconciles, or supervises its CTO agent; the on-demand
+`/api/directories/:id/cto/*` endpoints still work so an operator can start one anyway.
 
-**Lifecycle (singleton, butchr-managed).** Exactly **one** CTO agent is ever alive. It
-is launched through the **existing `AgentRunner`/harness seam** (`src/harness.ts` — *not*
-bypassing it) into a **dedicated herdr workspace + tab** under the fixed agent name
-**`config.ctoAgentName`** (default `butchr-cto-agent`), reusing the dispatcher's
-tab-create → agent-start → close-husk-pane → re-resolve-pane sequence (so a positional
-pane-id renumber can't strand it). Its runtime handles (session id, pane, tab, workspace)
-live in a dedicated **`cto_agent`** singleton record (§7), entirely separate from tasks.
+**Lifecycle (one per directory, butchr-managed).** At most **one** CTO agent is alive
+per directory. It is launched through the **existing `AgentRunner`/harness seam**
+(`src/harness.ts` — *not* bypassing it) into a **dedicated herdr tab in THAT DIRECTORY'S
+workspace**, with **cwd = the directory's repo root** (`directory.path`), under the agent
+name **`<config.ctoAgentName>-<directoryId>`** (default prefix `butchr-cto-agent`),
+reusing the dispatcher's tab-create → agent-start → close-husk-pane → re-resolve-pane
+sequence (so a positional pane-id renumber can't strand it). Its runtime handles
+(session id, pane, tab, workspace) live in that directory's **`cto_agent`** row (§7).
 
-**Launch.** The agent is started with the **channel attached**: butchr writes an MCP
-config registering the bridge as a stdio server named `butchr-cto-channel`
-(running `config.ctoChannelCmd` via `bash -lc`, with `BUTCHR_CHANNEL_SSE_URL` pointed at
-this butchr) and launches `claude` with that config plus
+**Launch.** The agent is started with the **channel attached and SCOPED to the
+directory**: butchr writes a per-directory MCP config registering the bridge as a stdio
+server named `butchr-cto-channel` (running `config.ctoChannelCmd` via `bash -lc`, with
+`BUTCHR_CHANNEL_SSE_URL` pointed at this butchr **and `BUTCHR_CHANNEL_DIR` = the
+directory_id**, so the bridge pushes **only that directory's** attention events) and
+launches `claude` with that config plus
 **`--dangerously-load-development-channels server:butchr-cto-channel`** (the
 research-preview flag for the custom channel) and
 **`--dangerously-skip-permissions`** (so it can call the butchr API/CLI unattended). It
@@ -1490,50 +1504,70 @@ runs under `script` for a PTY + log, just like task agents. It is primed by an
 **editable brief** — `config.ctoBriefPath`, or a documented default written once to
 `<dataDir>/cto-brief.md` — passed as the positional prompt.
 
-**Supervision.** A poll loop (`config.ctoSuperviseMs`) keeps **exactly one** alive: when
-the agent has died while still DESIRED-up it relaunches it with bounded exponential
-backoff (`config.ctoRestartBackoffBaseMs`·2ⁿ capped at `…CapMs`), giving up after
-`config.ctoMaxRestarts` consecutive failures until the operator intervenes — the same
-shape as the dispatcher's dispatch-retry. On boot, butchr **reconciles** once: it
-**adopts** an already-live pane that survived a restart, else **(re)launches** if enabled,
-honoring an explicit prior **stop** (a `cto_agent` row with `desired=0`).
+**Launch self-complete (READY unattended).** Every (re)launch/reboot must come up ready
+with no human present, but Claude Code can stop on a **blocking interactive startup
+prompt** the first time a session touches a workspace — the dev-channels consent (`1. I
+am using this for local development`), the **folder-trust** prompt, or any other yes/no
+or numbered confirmation. After the pane registers, butchr polls it (`src/startup-confirm.ts`,
+`config.ctoPromptPollMs` × `…MaxPolls`, stopping once prompt-free for `…QuietPolls`
+reads) and, whenever it **detects** such a prompt, **sends the safe confirming response**
+via the harness `send` capability. The detector is a **generic, extensible rule table**
+(not two hardcoded strings) and the loop is **idempotent** — it only ever sends while a
+prompt is actually on screen, so no stray keystroke leaks into the session once past it.
+Best-effort: it never fails a launch.
+
+**Supervision.** A single poll loop (`config.ctoSuperviseMs`) iterates every directory's
+`cto_agent` row and keeps **one alive per directory**: when an enabled directory's agent
+has died while still DESIRED-up it relaunches it with bounded **per-directory**
+exponential backoff (`config.ctoRestartBackoffBaseMs`·2ⁿ capped at `…CapMs`), giving up
+after `config.ctoMaxRestarts` consecutive failures until the operator intervenes. On
+boot, butchr **reconciles** once over **all** directories: per directory it **adopts** an
+already-live pane that survived a restart, else **(re)launches** if that directory is
+enabled, honoring an explicit prior **stop** (a `cto_agent` row with `desired=0`).
 
 **Session continuity.** Every supervised relaunch — after a crash, on boot-adopt, across
 a butchr restart — **RESUMES the same Claude session** via `claude --resume <id>` (never
 `--continue`, which is unreliable here), so the CTO keeps full context and **never
-cold-starts**. The persisted session id is the source of truth; on the **first** launch
-butchr resumes an operator-provided session (**`BUTCHR_CTO_SESSION_ID`** /
-`config.ctoSessionId`, seeded to today's live CTO session) when set, else starts fresh and
-captures the new id. A brand-new session happens **only** via an explicit
-`POST /api/cto/restart?fresh=1`.
+cold-starts**. Each directory has its **own** persisted session id (source of truth); on
+a directory's **first** launch butchr resumes that directory's **operator-seeded**
+session (**`BUTCHR_CTO_AGENT_SESSION_IDS`** = a `dir=session` map →
+`config.ctoAgentSessionSeeds[directoryId]`) when present, else starts fresh and captures
+the new id. A brand-new session happens **only** via an explicit
+`POST /api/directories/:id/cto/restart?fresh=1`. (The separate read-only spec-generator
+fork still uses its own `BUTCHR_CTO_SESSION_ID` — §2.7 — unrelated to this.)
 
-**Context hygiene** (the session is indefinite, so it can't grow unbounded): PREFER
+**Context hygiene** (a session is indefinite, so it can't grow unbounded): PREFER
 sending **`/compact`** to the live agent via the harness `send` capability when the
 session grows (backed by Claude Code's own auto-compaction); a **forced-fresh restart**
 (`restart?fresh=1`) is the last resort.
 
-**API.**
+**API (per directory).**
 
 | method | path | meaning |
 |--------|------|---------|
-| `GET`  | `/api/cto` | status: `{ enabled, desired, running, paneId, tabId, sessionId, since, restarts, lastError }`. |
-| `POST` | `/api/cto/start` | start (or **adopt** an already-live agent — single-instance), resuming the session. |
-| `POST` | `/api/cto/stop` | stop + tear down its tab/pane; marks it desired-down (survives a restart). |
-| `POST` | `/api/cto/restart` | bounce, **resuming** the session. `?fresh=1` cold-starts a **brand-new** session. |
-| `POST` | `/api/cto/terminal` | open a GUI terminal attached to its pane (reuses the workspace-agent attach). |
+| `GET`  | `/api/directories/:id/cto` | status: `{ directoryId, enabled, desired, running, paneId, tabId, sessionId, since, restarts, lastError }`. |
+| `POST` | `/api/directories/:id/cto/start` | start (or **adopt** an already-live agent — single-instance per directory), resuming the session. |
+| `POST` | `/api/directories/:id/cto/stop` | stop + tear down its tab/pane; marks it desired-down (survives a restart). |
+| `POST` | `/api/directories/:id/cto/restart` | bounce, **resuming** the session. `?fresh=1` cold-starts a **brand-new** session. |
+| `POST` | `/api/directories/:id/cto/terminal` | open a GUI terminal attached to its pane (reuses the workspace-agent attach). |
 
-Each mutating call publishes a **`cto.updated`** SSE event so every dashboard reflects it
-live.
+The per-directory enable is toggled via **`PATCH /api/directories/:id`** with
+`{ cto_enabled: true|false|null }` (null clears → inherit the global default). Each
+mutating call publishes a **`cto.updated`** SSE event (carrying the `directoryId`) so
+every dashboard reflects it live. (The old global `/api/cto*` routes are removed.)
 
-**Dashboard.** The dashboard shows a **CTO-agent card** (running/stopped, session, since,
-restart count, last error) with an **'Open CTO terminal'** button — the same pane-attach
-machinery as the workspace-agent terminal button (`attachAgentTerminal` → `herdr agent
-attach <name>`) — plus Start / Stop / Restart / Restart-fresh controls.
+**Dashboard.** Each **directory's view** shows its **CTO-agent panel** (running/stopped,
+session, since, restart count, last error) with an **'Open CTO terminal'** button — the
+same pane-attach machinery as the workspace-agent terminal button (`attachAgentTerminal`
+→ `herdr agent attach <name>`) — plus Start / Stop / Restart / Restart-fresh / Enable
+controls, all scoped to that directory; each **dashboard card** shows a compact CTO
+status badge for its directory.
 
-**Teardown.** On butchr shutdown the supervisor stops but the agent pane is **left alive**
-(like workspace agents) so the next boot re-adopts and resumes it. The startup **reaper**
-keys husk cleanup strictly by task id, so it never matches the CTO's name and never
-orphans its pane.
+**Teardown.** On butchr shutdown the supervisor stops but each agent's pane is **left
+alive** (like workspace agents) so the next boot re-adopts and resumes it. Unregistering
+a directory tears its CTO agent down first (so the `cto_agent` cascade-delete can't
+strand a pane). The startup **reaper** keys husk cleanup strictly by task id, so it never
+matches a per-directory CTO name (`<prefix>-<directoryId>`) and never orphans a pane.
 
 ---
 
@@ -1552,9 +1586,12 @@ schema are applied as guarded in-place `ALTER TABLE` migrations (`ensureColumn`)
 | `herdr_workspace` | TEXT | the herdr workspace id for this directory. |
 | `herdr_pane` | TEXT | the workspace's root pane id at creation. |
 | `gate_cmd` | TEXT | per-directory build/test gate command run by BOTH the CI gate (the task worktree) and the post-merge verify gate (the repo root). **NULL** = use the default (`BUTCHR_VERIFY_CMD`, still butchr's own command); a non-null value (incl. `""`, which **disables** the gate for this directory) is used verbatim via `bash -lc`. Set at register time, updatable via `PATCH /api/directories/:id`. Resolved by `directories.directoryGateCmd` — the single point both gates read, so they can't diverge. |
+| `cto_enabled` | INTEGER | per-directory **CTO-agent enable** (boot auto-start + supervision). **NULL** = inherit the global default `BUTCHR_CTO_AGENT` (itself default OFF); `1` = on; `0` = off — the directory's own setting **wins** over the global default. Resolved by `cto-agent.isCtoEnabled`; settable via `PATCH /api/directories/:id` (`{ cto_enabled }`). The on-demand `/api/directories/:id/cto/*` endpoints work regardless (§6.8). |
 | `created_at` | TEXT | ISO creation time. |
 
-Deleting a directory **cascades** to its tasks (and their `task_events`).
+Deleting a directory **cascades** to its tasks (and their `task_events`) **and to its
+`cto_agent` row** (§6.8 / below) — and butchr tears down that directory's live CTO
+pane first so unregister can't strand it.
 
 ### `tasks`
 
@@ -1625,24 +1662,32 @@ knob. Currently holds `dispatch_paused` (`'1'`/`'0'`) — the **dispatcher pause
 flag (see §3 *Pause / maintenance mode*), which is what keeps a pause in effect
 across a restart.
 
-### `cto_agent` (managed CTO agent, singleton)
+### `cto_agent` (managed CTO agents, **one row per directory**)
 
-A **single-row** record (PK = the literal `'singleton'`) tracking the butchr-managed
-**CTO agent** (§6.8), entirely separate from tasks — it has no worktree/branch/review.
-Read/written via `getCtoAgentRow` / `saveCtoAgentRow` in `db.ts`.
+One row **per registered directory** (PK = `directory_id`, FK→directories **ON DELETE
+CASCADE**) tracking that directory's butchr-managed **CTO agent** (§6.8) — its
+principal/dev agent, run in the repo root, entirely separate from tasks (no
+worktree/branch/review). Read/written via `getCtoAgentRow(directoryId)` /
+`saveCtoAgentRow(directoryId, …)` / `listCtoAgentRows()` in `db.ts`. This **supersedes**
+the old GLOBAL SINGLETON table (PK = the literal `'singleton'`); a one-time load-time
+migration (`migrateCtoAgentPerDirectory`) **drops** the old singleton-shaped table and
+recreates it keyed by `directory_id` — pre-1.0, the old singleton row is destroyed.
 
 | column | type | meaning |
 |--------|------|---------|
-| `id` | TEXT PK | always `'singleton'` (`CTO_AGENT_ID`). |
+| `directory_id` | TEXT PK, FK→directories (cascade) | the directory this CTO agent belongs to (one per directory). |
 | `session_id` | TEXT | the Claude session UUID, RESUMED (`--resume`) on every relaunch/adopt (§6.8 session continuity). |
 | `herdr_pane_id` | TEXT | its live herdr pane (positional; may renumber) — backs the 'Open CTO terminal' attach. |
-| `herdr_tab_id` | TEXT | its dedicated herdr tab. |
-| `herdr_workspace` | TEXT | its dedicated herdr workspace. |
+| `herdr_tab_id` | TEXT | its dedicated herdr tab (in the directory's workspace). |
+| `herdr_workspace` | TEXT | the directory's herdr workspace (shared with its task agents). |
 | `desired` | INTEGER | `1` = should be running (supervisor relaunches on death); `0` = explicitly stopped (stays down across a restart). |
 | `started_at` | TEXT | when the current run was (re)launched. |
 | `restarts` | INTEGER | supervised relaunches since the last fresh start. |
 | `last_error` | TEXT | most recent launch/supervision failure. |
 | `updated_at` | TEXT | last write. |
+
+The per-directory **enable** flag is `directories.cto_enabled` (above), not a column
+here — so a directory can be enabled before its first launch.
 
 ---
 
@@ -1693,16 +1738,17 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_EXPAND_BRIEF_TIMEOUT_MS` | `120000` | max wait for the brief expander before it's killed (→ expansion failure). |
 | `BUTCHR_SPEC_GEN_CMD` | `claude -p {{CTO_SESSION}} --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | the **CTO-fork spec generator** (§2.7): turns an `idea` task's brief into a repo-grounded spec, run via `bash -lc` in the task's worktree. Read-only, non-recursing. Placeholders: `{{CTO_SESSION}}` (→ `--resume <id> --fork-session` when `BUTCHR_CTO_SESSION_ID` is set, else empty), `{{PROMPT_FILE}}`. **Empty disables** spec generation (an idea task then fails to advance). |
 | `BUTCHR_SPEC_GEN_TIMEOUT_MS` | `300000` | max wait for the spec generator before it's killed (→ generation failure → retry/`failed`). |
-| `BUTCHR_CTO_SESSION_ID` | _(empty)_ | CTO session id. **Two uses:** (a) the spec generator's `{{CTO_SESSION}}` (**resume + fork**, §2.7); (b) the **first-launch** session the managed CTO agent **resumes** (§6.8). Empty → spec gen uses a fresh read-only session, and the CTO agent cold-starts a new session it then keeps. |
+| `BUTCHR_CTO_SESSION_ID` | _(empty)_ | CTO session id for the **spec generator's** `{{CTO_SESSION}}` (**resume + fork**, §2.7). Empty → spec gen uses a fresh read-only session. (No longer used by the managed CTO agent — that now seeds per-directory via `BUTCHR_CTO_AGENT_SESSION_IDS`.) |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command. Else auto-detect kitty/konsole/alacritty/xfce4-terminal/xterm/gnome-terminal/x-terminal-emulator (needs `DISPLAY`/`WAYLAND_DISPLAY`). |
-| `BUTCHR_CTO_AGENT` | `false` | **master switch** for the managed CTO agent (§6.8). Off → butchr never auto-starts/supervises it (the `/api/cto` endpoints still work for on-demand control). |
-| `BUTCHR_CTO_AGENT_NAME` | `butchr-cto-agent` | the herdr agent name the singleton CTO agent registers under (the `herdr agent attach` handle). Must not collide with a task id. |
-| `BUTCHR_CTO_AGENT_MODEL` | _(empty)_ | optional `--model` for the CTO agent (else claude's default). |
-| `BUTCHR_CTO_CWD` | _(butchr's cwd)_ | working directory the CTO agent runs in — the trusted repo **root** (not a task worktree). |
-| `BUTCHR_CTO_BRIEF` | _(`<dataDir>/cto-brief.md`)_ | path to the **editable** CTO system prompt/brief; a documented default is written once if unset. |
-| `BUTCHR_CTO_CHANNEL_CMD` | `bun run src/channel.ts` | command (`bash -lc`, cwd = `BUTCHR_CTO_CWD`) that runs the one-way channel bridge, registered as the `butchr-cto-channel` MCP stdio server. |
-| `BUTCHR_CTO_AGENT_CMD` | `claude --dangerously-skip-permissions {{MODEL_FLAG}} {{SESSION_FLAG}} --mcp-config {{MCP_CONFIG}} --dangerously-load-development-channels server:butchr-cto-channel -- "$(cat {{PROMPT_FILE}})"` | CTO agent launch template (`bash -lc`, under `script`). `{{SESSION_FLAG}}` → `--session-id <uuid>` (fresh) or `--resume <id>` (relaunch/adopt). |
-| `BUTCHR_CTO_SUPERVISE_MS` | `5000` | CTO-agent supervisor poll interval. |
+| `BUTCHR_CTO_AGENT` | `false` | **global default** for the per-directory CTO-agent enable (§6.8). A directory's own `cto_enabled` column **wins** (NULL → inherit this). Off → butchr never auto-starts/supervises a directory's CTO unless that directory opts in (the `/api/directories/:id/cto/*` endpoints still work for on-demand control). |
+| `BUTCHR_CTO_AGENT_NAME` | `butchr-cto-agent` | **name PREFIX** for a directory's CTO agent — the actual herdr agent name is `<prefix>-<directoryId>` (the `herdr agent attach` handle). Must not collide with a task id. |
+| `BUTCHR_CTO_AGENT_MODEL` | _(empty)_ | optional `--model` for the CTO agents (else claude's default). |
+| `BUTCHR_CTO_AGENT_SESSION_IDS` | _(empty)_ | per-directory CTO session SEEDS — a comma-separated `directoryId=sessionId` map. On a directory's **first** CTO launch (no persisted session) butchr **resumes** that directory's seeded session; every later relaunch resumes the persisted id (§6.8). |
+| `BUTCHR_CTO_BRIEF` | _(`<dataDir>/cto-brief.md`)_ | path to the **editable** CTO system prompt/brief (shared across directories); a documented default is written once if unset. |
+| `BUTCHR_CTO_CHANNEL_CMD` | `bun run src/channel.ts` | command (`bash -lc`, cwd = the directory's repo root) that runs the one-way channel bridge, registered as the `butchr-cto-channel` MCP stdio server. butchr sets `BUTCHR_CHANNEL_DIR` on it per-launch to scope it to the directory. |
+| `BUTCHR_CTO_AGENT_CMD` | `claude --dangerously-skip-permissions {{MODEL_FLAG}} {{SESSION_FLAG}} --mcp-config {{MCP_CONFIG}} --dangerously-load-development-channels server:butchr-cto-channel -- "$(cat {{PROMPT_FILE}})"` | CTO agent launch template (`bash -lc`, under `script`, cwd = the directory's repo root). `{{SESSION_FLAG}}` → `--session-id <uuid>` (fresh) or `--resume <id>` (relaunch/adopt). |
+| `BUTCHR_CTO_PROMPT_POLL_MS` / `BUTCHR_CTO_PROMPT_MAX_POLLS` / `BUTCHR_CTO_PROMPT_QUIET_POLLS` | `500` / `60` / `3` | **launch auto-confirm** (§6.8): poll cadence, max polls, and consecutive prompt-free reads before the agent is considered past startup. |
+| `BUTCHR_CTO_SUPERVISE_MS` | `5000` | CTO-agent supervisor poll interval (sweeps all directories). |
 | `BUTCHR_CTO_MAX_RESTARTS` | `5` | consecutive relaunch failures before the supervisor gives up (until an operator start/restart). |
 | `BUTCHR_CTO_RESTART_BACKOFF_BASE_MS` | `2000` | base for the CTO relaunch exponential backoff. |
 | `BUTCHR_CTO_RESTART_BACKOFF_CAP_MS` | `60000` | cap for the CTO relaunch backoff. |
