@@ -383,6 +383,98 @@ export const config = {
    * emulator (gnome-terminal, kitty, konsole, …).
    */
   terminalCmd: env("BUTCHR_TERMINAL_CMD", ""),
+
+  // ---- MANAGED CTO AGENT ----------------------------------------------------
+  // butchr can LAUNCH and SUPERVISE a single, long-lived CTO agent (a persistent
+  // Claude Code session that operates butchr via its API/CLI) into a herdr pane —
+  // a first-class, channel-connected agent, just like the per-task workspace
+  // agents but with NO worktree/branch/review/merge. It receives PUSH attention
+  // notifications via the one-way CTO channel (src/channel.ts) and the dashboard
+  // exposes an 'Open CTO terminal' button for it. See src/cto-agent.ts + SPEC §6.8.
+
+  /**
+   * MASTER SWITCH for the managed CTO agent. DEFAULT OFF so nothing surprise-
+   * launches a Claude session: with it unset/false butchr never starts, reconciles,
+   * or supervises a CTO agent (existing behavior is unchanged). Set to 1/true/yes/on
+   * to enable boot auto-start + crash supervision. The /api/cto endpoints still work
+   * when disabled (so an operator can start it on demand) but nothing auto-starts.
+   */
+  ctoAgentEnabled: envBool("BUTCHR_CTO_AGENT", false),
+
+  /**
+   * The herdr agent NAME the singleton CTO agent registers under (the stable handle
+   * `herdr agent attach <name>` uses, mirroring how a task's agent name is its id).
+   * Must NOT collide with any task id; the default is hyphenated like an id but with
+   * a reserved double-underscore-free, human prefix so it's unmistakable.
+   */
+  ctoAgentName: env("BUTCHR_CTO_AGENT_NAME", "butchr-cto-agent"),
+
+  /**
+   * Optional `--model` for the CTO agent (e.g. 'opus'/'sonnet' or a full 'claude-*'
+   * id). Empty → no flag (claude keeps its default). Threaded as `{{MODEL_FLAG}}`.
+   */
+  ctoAgentModel: env("BUTCHR_CTO_AGENT_MODEL", ""),
+
+  /**
+   * Working directory the CTO agent runs in — the repo ROOT (already trusted), NOT a
+   * task worktree. It is where the agent can run `bin/butchr` and where the channel
+   * server command (`ctoChannelCmd`) resolves `src/channel.ts`. Defaults to butchr's
+   * own process cwd (the repo root it was started from in the dogfooding setup).
+   */
+  ctoCwd: env("BUTCHR_CTO_CWD", process.cwd()),
+
+  /**
+   * Path to the EDITABLE CTO system prompt / brief that primes the agent on launch.
+   * When unset, butchr writes a documented default to `<dataDir>/cto-brief.md` (and
+   * reuses it thereafter) so an operator can edit it in place. The file's contents
+   * become the agent's positional prompt (`-- "$(cat …)"`). See cto-agent.ts.
+   */
+  ctoBriefPath: env("BUTCHR_CTO_BRIEF", ""),
+
+  /**
+   * Command (run via `bash -lc`, cwd = `ctoCwd`) that starts the ONE-WAY CTO
+   * notification channel bridge (src/channel.ts). It is registered as an MCP STDIO
+   * server named `butchr-cto-channel` in the CTO agent's generated MCP config and
+   * loaded as a development channel via `--dangerously-load-development-channels
+   * server:butchr-cto-channel`. The bridge derives its SSE URL from butchr's
+   * host/port (overridable via BUTCHR_CHANNEL_SSE_URL, which butchr sets on it).
+   */
+  ctoChannelCmd: env("BUTCHR_CTO_CHANNEL_CMD", "bun run src/channel.ts"),
+
+  /**
+   * Command template that LAUNCHES the CTO agent (run via `bash -lc`, wrapped under
+   * `script` for a PTY + log, cwd = `ctoCwd`). Placeholders, all substituted by
+   * cto-agent.ts:
+   *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (see `ctoAgentModel`).
+   *  - `{{SESSION_FLAG}}` → `--session-id <uuid>` on a FRESH start, or
+   *    `--resume <id>` on every supervised relaunch / boot-adopt so the CTO keeps
+   *    full context and never cold-starts (see SPEC §6.8 session continuity).
+   *  - `{{MCP_CONFIG}}`   → the generated MCP config registering the channel server.
+   *  - `{{PROMPT_FILE}}`  → the editable CTO brief file (`ctoBriefPath`).
+   * `--dangerously-skip-permissions` lets it call the butchr API/CLI without prompts.
+   * `--dangerously-load-development-channels server:butchr-cto-channel` attaches the
+   * custom channel (a research-preview flag — custom channels aren't allowlisted yet).
+   */
+  ctoAgentCmd: env(
+    "BUTCHR_CTO_AGENT_CMD",
+    "claude --dangerously-skip-permissions {{MODEL_FLAG}} {{SESSION_FLAG}} " +
+      "--mcp-config {{MCP_CONFIG}} " +
+      "--dangerously-load-development-channels server:butchr-cto-channel " +
+      '-- "$(cat {{PROMPT_FILE}})"',
+  ),
+
+  /**
+   * SUPERVISION cadence + bounded relaunch backoff for the CTO agent (mirrors the
+   * dispatch retry knobs). The supervisor polls every `ctoSuperviseMs`; when the
+   * agent has died it relaunches (RESUMING the same session) with exponential
+   * backoff `min(base * 2^(n-1), cap)`, giving up after `ctoMaxRestarts` consecutive
+   * failures (the operator must then start/restart it). A successful launch resets
+   * the counter.
+   */
+  ctoSuperviseMs: envInt("BUTCHR_CTO_SUPERVISE_MS", 5000),
+  ctoMaxRestarts: envInt("BUTCHR_CTO_MAX_RESTARTS", 5),
+  ctoRestartBackoffBaseMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_BASE_MS", 2000),
+  ctoRestartBackoffCapMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_CAP_MS", 60000),
 };
 
 export type Config = typeof config;

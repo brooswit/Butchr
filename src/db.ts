@@ -66,6 +66,32 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- MANAGED CTO AGENT (singleton). The CTO agent is a FIRST-CLASS, butchr-launched,
+-- channel-connected Claude session — like a workspace agent but with NO worktree/
+-- branch/review/merge — so its runtime handles are tracked in their OWN record,
+-- entirely separate from tasks. Exactly ONE logical CTO agent exists, so this table
+-- holds a SINGLE row keyed by the literal id 'singleton' (see db.CTO_AGENT_ID).
+--   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
+--     supervised relaunch + boot-adopt so the CTO never cold-starts (SPEC 6.8).
+--   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the
+--     pane backs the Open-CTO-terminal attach; positional pane ids may renumber).
+--   - desired: 1 when the operator/boot wants it UP (supervisor relaunches on death),
+--     0 when explicitly stopped (supervisor leaves it down -- survives a restart).
+--   - restarts: count of supervised relaunches since the last fresh start.
+--   - last_error: most recent launch/supervision failure, surfaced to the operator.
+CREATE TABLE IF NOT EXISTS cto_agent (
+  id              TEXT PRIMARY KEY,
+  session_id      TEXT,
+  herdr_pane_id   TEXT,
+  herdr_tab_id    TEXT,
+  herdr_workspace TEXT,
+  desired         INTEGER NOT NULL DEFAULT 0,
+  started_at      TEXT,
+  restarts        INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  updated_at      TEXT
+);
 `);
 
 // Lightweight forward migrations: add columns introduced after the initial
@@ -623,6 +649,83 @@ export function setSetting(key: string, value: string): void {
     `INSERT INTO settings (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
   ).run(key, value);
+}
+
+// ---- MANAGED CTO AGENT (singleton record) ---------------------------------
+// The fixed primary key for the single cto_agent row.
+export const CTO_AGENT_ID = "singleton";
+
+export type CtoAgentRow = {
+  id: string;
+  session_id: string | null;
+  herdr_pane_id: string | null;
+  herdr_tab_id: string | null;
+  herdr_workspace: string | null;
+  desired: number; // 1 = should be running (supervised), 0 = stopped
+  started_at: string | null;
+  restarts: number;
+  last_error: string | null;
+  updated_at: string | null;
+};
+
+/** The singleton CTO-agent record, or null if it has never been written. */
+export function getCtoAgentRow(): CtoAgentRow | null {
+  return (
+    db
+      .query<CtoAgentRow, [string]>(`SELECT * FROM cto_agent WHERE id=?`)
+      .get(CTO_AGENT_ID) ?? null
+  );
+}
+
+/**
+ * Upsert a partial patch onto the singleton CTO-agent record (stamping updated_at).
+ * Single-row write; the supervisor/lifecycle treat this as best-effort durable state
+ * the same way settings are. Unspecified fields are left untouched on an existing row.
+ */
+export function saveCtoAgentRow(
+  patch: Partial<Omit<CtoAgentRow, "id">>,
+): void {
+  const cur = getCtoAgentRow();
+  const next: CtoAgentRow = {
+    id: CTO_AGENT_ID,
+    session_id: cur?.session_id ?? null,
+    herdr_pane_id: cur?.herdr_pane_id ?? null,
+    herdr_tab_id: cur?.herdr_tab_id ?? null,
+    herdr_workspace: cur?.herdr_workspace ?? null,
+    desired: cur?.desired ?? 0,
+    started_at: cur?.started_at ?? null,
+    restarts: cur?.restarts ?? 0,
+    last_error: cur?.last_error ?? null,
+    updated_at: cur?.updated_at ?? null,
+    ...patch,
+  };
+  db.query(
+    `INSERT INTO cto_agent
+       (id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
+        desired, started_at, restarts, last_error, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       session_id=excluded.session_id,
+       herdr_pane_id=excluded.herdr_pane_id,
+       herdr_tab_id=excluded.herdr_tab_id,
+       herdr_workspace=excluded.herdr_workspace,
+       desired=excluded.desired,
+       started_at=excluded.started_at,
+       restarts=excluded.restarts,
+       last_error=excluded.last_error,
+       updated_at=excluded.updated_at`,
+  ).run(
+    next.id,
+    next.session_id,
+    next.herdr_pane_id,
+    next.herdr_tab_id,
+    next.herdr_workspace,
+    next.desired,
+    next.started_at,
+    next.restarts,
+    next.last_error,
+    nowIso(),
+  );
 }
 
 // ---- PER-TASK AUDIT TIMELINE ----------------------------------------------

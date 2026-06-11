@@ -1065,3 +1065,16 @@ small.muted { font-size: 12px; }
 .sb-fill.awaiting_input { background: var(--awaiting); }
 .sb-fill.rejected    { background: var(--rejected); }
 .sb-fill.failed      { background: var(--failed); }
+
+/* ---- managed CTO agent card (dashboard) ---- */
+.cto-card { margin-bottom: 18px; }
+.cto-card .meta { color: var(--muted); font-size: 12.5px; }
+.cto-card .meta.err { color: var(--rejected); }
+.cto-badge {
+  display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; vertical-align: middle; border: 1px solid currentColor;
+}
+.cto-badge.ok   { color: var(--merged); }
+.cto-badge.warn { color: var(--in_review); }
+.cto-badge.off  { color: var(--aborted); }
+.cto-controls { flex-wrap: wrap; justify-content: flex-end; }

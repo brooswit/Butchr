@@ -17,6 +17,12 @@ import {
   unregisterDirectory,
   updateDirectoryGateCmd,
 } from "./directories.ts";
+import {
+  ctoAgentStatus,
+  restartCtoAgent,
+  startCtoAgent,
+  stopCtoAgent,
+} from "./cto-agent.ts";
 import { publish, subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
 import { expandBrief } from "./expand.ts";
@@ -719,6 +725,22 @@ route("POST", "/api/tasks/:id/requeue", async (_req, p) => {
   return json(await requeueTask(p.id!));
 });
 
+// Shared pane-attach: spawn a GUI terminal attached to a herdr AGENT by name (a
+// task's agent name is its id; the managed CTO agent has its own fixed name). Used by
+// BOTH the task terminal button and the CTO terminal button so the attach machinery
+// lives in one place. Returns the OpenResult json or throws a 503 with the manual
+// fallback command.
+async function attachAgentTerminal(agentName: string): Promise<Response> {
+  const res = await openTerminal(attachArgv(agentName));
+  if (!res.ok) {
+    throw new HttpError(
+      503,
+      `couldn't open a terminal automatically — run this yourself: ${res.command}`,
+    );
+  }
+  return json(res);
+}
+
 // Open a GUI terminal attached to a task's live agent pane. Only `running` tasks
 // have a live pane to attach to — the agent exits after the non-blocking
 // request_review, so `review` (and queued/merged/aborted) have no pane.
@@ -730,15 +752,32 @@ route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   if (!t.herdr_pane_id) {
     throw new HttpError(409, `task has no live agent pane (status=${t.status})`);
   }
-  const argv = attachArgv(p.id!);
-  const res = await openTerminal(argv);
-  if (!res.ok) {
-    throw new HttpError(
-      503,
-      `couldn't open a terminal automatically — run this yourself: ${res.command}`,
-    );
+  return attachAgentTerminal(p.id!);
+});
+
+// ---- MANAGED CTO AGENT -----------------------------------------------------
+// The first-class, butchr-managed CTO agent (src/cto-agent.ts): a singleton,
+// channel-connected Claude session with no worktree/branch/review/merge. Status +
+// start/stop/restart controls + an 'Open CTO terminal' attach (reusing the same
+// pane-attach machinery as the workspace-agent terminal button). Each mutating route
+// returns the refreshed CtoStatus (the lifecycle calls also publish a `cto.updated`
+// SSE event so every dashboard reflects it live).
+route("GET", "/api/cto", async () => json(await ctoAgentStatus()));
+route("POST", "/api/cto/start", async () => json(await startCtoAgent()));
+route("POST", "/api/cto/stop", async () => json(await stopCtoAgent()));
+// `?fresh=1` cold-starts a BRAND-NEW session (the only way to do so — last-resort
+// context hygiene); otherwise it bounces, RESUMING the same session.
+route("POST", "/api/cto/restart", async (req) => {
+  const fresh = new URL(req.url).searchParams.get("fresh") === "1";
+  return json(await restartCtoAgent({ fresh }));
+});
+// Open a GUI terminal attached to the CTO agent's live pane.
+route("POST", "/api/cto/terminal", async () => {
+  const s = await ctoAgentStatus();
+  if (!s.running || !s.paneId) {
+    throw new HttpError(409, "CTO agent has no live pane (not running)");
   }
-  return json(res);
+  return attachAgentTerminal(config.ctoAgentName);
 });
 
 /** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. */

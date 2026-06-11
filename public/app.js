@@ -270,6 +270,68 @@ async function openTaskTerminal(id, btn) {
   }
 }
 
+// ---------- managed CTO agent ----------
+// The dashboard card for butchr's first-class, managed CTO agent: a status line
+// (running/stopped, session, since, restarts) plus controls — Open CTO terminal
+// (reuses the workspace-agent attach), Start/Stop, Restart, and Restart fresh (a
+// brand-new session). Mirrors the task terminal button's UX.
+async function ctoCard() {
+  const s = await api("GET", "/cto");
+  const card = el("div", { class: "panel cto-card" });
+  const state = s.running ? "running" : (s.desired ? "starting…" : "stopped");
+  const stateCls = s.running ? "ok" : (s.desired ? "warn" : "off");
+  const bits = [];
+  if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
+  if (s.since) bits.push(`since ${fmtTime(s.since)}`);
+  if (s.restarts) bits.push(`${s.restarts} restart${s.restarts === 1 ? "" : "s"}`);
+  if (!s.enabled) bits.push("auto-start disabled (BUTCHR_CTO_AGENT)");
+  card.innerHTML = `
+    <div class="row" style="justify-content:space-between; align-items:center; gap:10px">
+      <div>
+        <h2 style="margin:0">CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
+        <div class="meta" style="margin-top:4px">${bits.map(esc).join(" · ") || "not started"}</div>
+        ${s.lastError ? `<div class="meta err" style="margin-top:4px">last error: ${esc(s.lastError)}</div>` : ""}
+      </div>
+      <div class="row cto-controls" style="gap:8px"></div>
+    </div>`;
+  const controls = card.querySelector(".cto-controls");
+  const btn = (label, cls, fn) => {
+    const b = el("button", { class: "btn " + cls }, label);
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { await fn(); } catch (e) { toast(e.message || "failed", true); }
+      finally { b.disabled = false; render(); }
+    });
+    return b;
+  };
+  if (s.running && s.paneId) {
+    controls.appendChild(btn("Open CTO terminal", "", async () => {
+      const r = await api("POST", "/cto/terminal");
+      toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
+    }));
+  }
+  if (s.running || s.desired) {
+    controls.appendChild(btn("Restart", "ghost", async () => {
+      await api("POST", "/cto/restart");
+      toast("CTO agent restarting (resuming session)");
+    }));
+    controls.appendChild(btn("Restart fresh", "ghost", async () => {
+      await api("POST", "/cto/restart?fresh=1");
+      toast("CTO agent restarting with a fresh session");
+    }));
+    controls.appendChild(btn("Stop", "ghost danger-outline", async () => {
+      await api("POST", "/cto/stop");
+      toast("CTO agent stopped");
+    }));
+  } else {
+    controls.appendChild(btn("Start", "", async () => {
+      await api("POST", "/cto/start");
+      toast("CTO agent starting");
+    }));
+  }
+  return card;
+}
+
 // Shared modal scaffold. Builds the backdrop + modal, wires Escape and
 // backdrop-click to close, and mounts it on document.body — the identical ~12
 // lines every modal otherwise hand-rolls. Pass `title` for the standard head
@@ -559,6 +621,11 @@ async function renderDashboard() {
     sum.appendChild(stat("failed", totals.failed, "failed"));
     wrap.appendChild(sum);
   }
+
+  // Managed CTO agent status + controls (best-effort — never block the dashboard).
+  try {
+    wrap.appendChild(await ctoCard());
+  } catch { /* leave the card out if the status fetch fails */ }
 
   // add-directory form
   const form = el("div", { class: "panel" });

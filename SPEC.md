@@ -39,6 +39,7 @@ terminal/PTY/agent-session management to herdr.
    - [6.4 Operator CLI](#64-operator-cli-binbutchr)
    - [6.5 Webapp](#65-webapp-public)
    - [6.7 CTO notification channel (one-way)](#67-cto-notification-channel-one-way)
+   - [6.8 Managed CTO agent](#68-managed-cto-agent)
 7. [Data model](#7-data-model)
 8. [Configuration](#8-configuration)
 9. [On-disk layout](#9-on-disk-layout)
@@ -1398,6 +1399,86 @@ the running CTO session as `<butchr-cto-channel>` events to act on. (The compani
 **workspace-agent** channel for feedback-*answered* events is a separate, later phase
 — it needs a keep-alive lifecycle change — and is intentionally out of scope here.)
 
+### 6.8 Managed CTO agent
+
+The channel (§6.7) gives a CTO agent a PUSH feed, but something has to LAUNCH and keep
+that agent alive. `src/cto-agent.ts` makes the CTO a **first-class, butchr-managed,
+channel-connected agent** — butchr launches and supervises it exactly like a workspace
+agent, but it has **no worktree, branch, review, or merge**: it is an *operator*, not a
+*builder*. It runs with the repo **root** as cwd (already trusted) and acts on each
+attention event through the butchr **API** (`127.0.0.1:47800`) or **`bin/butchr`**
+(approve / reject / answer / requeue). It **never edits the butchr codebase directly** —
+all code changes go through tasks.
+
+**Default OFF.** The whole feature is gated behind **`BUTCHR_CTO_AGENT`** (default off),
+so nothing surprise-launches a Claude session. With it unset, butchr never starts,
+reconciles, or supervises a CTO agent (existing behavior unchanged); the `/api/cto`
+endpoints still work so an operator can start it on demand.
+
+**Lifecycle (singleton, butchr-managed).** Exactly **one** CTO agent is ever alive. It
+is launched through the **existing `AgentRunner`/harness seam** (`src/harness.ts` — *not*
+bypassing it) into a **dedicated herdr workspace + tab** under the fixed agent name
+**`config.ctoAgentName`** (default `butchr-cto-agent`), reusing the dispatcher's
+tab-create → agent-start → close-husk-pane → re-resolve-pane sequence (so a positional
+pane-id renumber can't strand it). Its runtime handles (session id, pane, tab, workspace)
+live in a dedicated **`cto_agent`** singleton record (§7), entirely separate from tasks.
+
+**Launch.** The agent is started with the **channel attached**: butchr writes an MCP
+config registering the bridge as a stdio server named `butchr-cto-channel`
+(running `config.ctoChannelCmd` via `bash -lc`, with `BUTCHR_CHANNEL_SSE_URL` pointed at
+this butchr) and launches `claude` with that config plus
+**`--dangerously-load-development-channels server:butchr-cto-channel`** (the
+research-preview flag for the custom channel) and
+**`--dangerously-skip-permissions`** (so it can call the butchr API/CLI unattended). It
+runs under `script` for a PTY + log, just like task agents. It is primed by an
+**editable brief** — `config.ctoBriefPath`, or a documented default written once to
+`<dataDir>/cto-brief.md` — passed as the positional prompt.
+
+**Supervision.** A poll loop (`config.ctoSuperviseMs`) keeps **exactly one** alive: when
+the agent has died while still DESIRED-up it relaunches it with bounded exponential
+backoff (`config.ctoRestartBackoffBaseMs`·2ⁿ capped at `…CapMs`), giving up after
+`config.ctoMaxRestarts` consecutive failures until the operator intervenes — the same
+shape as the dispatcher's dispatch-retry. On boot, butchr **reconciles** once: it
+**adopts** an already-live pane that survived a restart, else **(re)launches** if enabled,
+honoring an explicit prior **stop** (a `cto_agent` row with `desired=0`).
+
+**Session continuity.** Every supervised relaunch — after a crash, on boot-adopt, across
+a butchr restart — **RESUMES the same Claude session** via `claude --resume <id>` (never
+`--continue`, which is unreliable here), so the CTO keeps full context and **never
+cold-starts**. The persisted session id is the source of truth; on the **first** launch
+butchr resumes an operator-provided session (**`BUTCHR_CTO_SESSION_ID`** /
+`config.ctoSessionId`, seeded to today's live CTO session) when set, else starts fresh and
+captures the new id. A brand-new session happens **only** via an explicit
+`POST /api/cto/restart?fresh=1`.
+
+**Context hygiene** (the session is indefinite, so it can't grow unbounded): PREFER
+sending **`/compact`** to the live agent via the harness `send` capability when the
+session grows (backed by Claude Code's own auto-compaction); a **forced-fresh restart**
+(`restart?fresh=1`) is the last resort.
+
+**API.**
+
+| method | path | meaning |
+|--------|------|---------|
+| `GET`  | `/api/cto` | status: `{ enabled, desired, running, paneId, tabId, sessionId, since, restarts, lastError }`. |
+| `POST` | `/api/cto/start` | start (or **adopt** an already-live agent — single-instance), resuming the session. |
+| `POST` | `/api/cto/stop` | stop + tear down its tab/pane; marks it desired-down (survives a restart). |
+| `POST` | `/api/cto/restart` | bounce, **resuming** the session. `?fresh=1` cold-starts a **brand-new** session. |
+| `POST` | `/api/cto/terminal` | open a GUI terminal attached to its pane (reuses the workspace-agent attach). |
+
+Each mutating call publishes a **`cto.updated`** SSE event so every dashboard reflects it
+live.
+
+**Dashboard.** The dashboard shows a **CTO-agent card** (running/stopped, session, since,
+restart count, last error) with an **'Open CTO terminal'** button — the same pane-attach
+machinery as the workspace-agent terminal button (`attachAgentTerminal` → `herdr agent
+attach <name>`) — plus Start / Stop / Restart / Restart-fresh controls.
+
+**Teardown.** On butchr shutdown the supervisor stops but the agent pane is **left alive**
+(like workspace agents) so the next boot re-adopts and resumes it. The startup **reaper**
+keys husk cleanup strictly by task id, so it never matches the CTO's name and never
+orphans its pane.
+
 ---
 
 ## 7. Data model
@@ -1488,6 +1569,25 @@ knob. Currently holds `dispatch_paused` (`'1'`/`'0'`) — the **dispatcher pause
 flag (see §3 *Pause / maintenance mode*), which is what keeps a pause in effect
 across a restart.
 
+### `cto_agent` (managed CTO agent, singleton)
+
+A **single-row** record (PK = the literal `'singleton'`) tracking the butchr-managed
+**CTO agent** (§6.8), entirely separate from tasks — it has no worktree/branch/review.
+Read/written via `getCtoAgentRow` / `saveCtoAgentRow` in `db.ts`.
+
+| column | type | meaning |
+|--------|------|---------|
+| `id` | TEXT PK | always `'singleton'` (`CTO_AGENT_ID`). |
+| `session_id` | TEXT | the Claude session UUID, RESUMED (`--resume`) on every relaunch/adopt (§6.8 session continuity). |
+| `herdr_pane_id` | TEXT | its live herdr pane (positional; may renumber) — backs the 'Open CTO terminal' attach. |
+| `herdr_tab_id` | TEXT | its dedicated herdr tab. |
+| `herdr_workspace` | TEXT | its dedicated herdr workspace. |
+| `desired` | INTEGER | `1` = should be running (supervisor relaunches on death); `0` = explicitly stopped (stays down across a restart). |
+| `started_at` | TEXT | when the current run was (re)launched. |
+| `restarts` | INTEGER | supervised relaunches since the last fresh start. |
+| `last_error` | TEXT | most recent launch/supervision failure. |
+| `updated_at` | TEXT | last write. |
+
 ---
 
 ## 8. Configuration
@@ -1535,8 +1635,19 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_EXPAND_BRIEF_TIMEOUT_MS` | `120000` | max wait for the brief expander before it's killed (→ expansion failure). |
 | `BUTCHR_SPEC_GEN_CMD` | `claude -p {{CTO_SESSION}} --permission-mode dontAsk --allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"` | the **CTO-fork spec generator** (§2.7): turns an `idea` task's brief into a repo-grounded spec, run via `bash -lc` in the task's worktree. Read-only, non-recursing. Placeholders: `{{CTO_SESSION}}` (→ `--resume <id> --fork-session` when `BUTCHR_CTO_SESSION_ID` is set, else empty), `{{PROMPT_FILE}}`. **Empty disables** spec generation (an idea task then fails to advance). |
 | `BUTCHR_SPEC_GEN_TIMEOUT_MS` | `300000` | max wait for the spec generator before it's killed (→ generation failure → retry/`failed`). |
-| `BUTCHR_CTO_SESSION_ID` | _(empty)_ | optional CTO session id to **resume + fork** so the spec generator inherits the CTO's prior context (`{{CTO_SESSION}}` in `BUTCHR_SPEC_GEN_CMD`). Empty → a fresh read-only session. |
+| `BUTCHR_CTO_SESSION_ID` | _(empty)_ | CTO session id. **Two uses:** (a) the spec generator's `{{CTO_SESSION}}` (**resume + fork**, §2.7); (b) the **first-launch** session the managed CTO agent **resumes** (§6.8). Empty → spec gen uses a fresh read-only session, and the CTO agent cold-starts a new session it then keeps. |
 | `BUTCHR_TERMINAL_CMD` | _(auto-detect)_ | override for "Open terminal"; `{{CMD}}` → the shell-quoted `herdr agent attach` command. Else auto-detect kitty/konsole/alacritty/xfce4-terminal/xterm/gnome-terminal/x-terminal-emulator (needs `DISPLAY`/`WAYLAND_DISPLAY`). |
+| `BUTCHR_CTO_AGENT` | `false` | **master switch** for the managed CTO agent (§6.8). Off → butchr never auto-starts/supervises it (the `/api/cto` endpoints still work for on-demand control). |
+| `BUTCHR_CTO_AGENT_NAME` | `butchr-cto-agent` | the herdr agent name the singleton CTO agent registers under (the `herdr agent attach` handle). Must not collide with a task id. |
+| `BUTCHR_CTO_AGENT_MODEL` | _(empty)_ | optional `--model` for the CTO agent (else claude's default). |
+| `BUTCHR_CTO_CWD` | _(butchr's cwd)_ | working directory the CTO agent runs in — the trusted repo **root** (not a task worktree). |
+| `BUTCHR_CTO_BRIEF` | _(`<dataDir>/cto-brief.md`)_ | path to the **editable** CTO system prompt/brief; a documented default is written once if unset. |
+| `BUTCHR_CTO_CHANNEL_CMD` | `bun run src/channel.ts` | command (`bash -lc`, cwd = `BUTCHR_CTO_CWD`) that runs the one-way channel bridge, registered as the `butchr-cto-channel` MCP stdio server. |
+| `BUTCHR_CTO_AGENT_CMD` | `claude --dangerously-skip-permissions {{MODEL_FLAG}} {{SESSION_FLAG}} --mcp-config {{MCP_CONFIG}} --dangerously-load-development-channels server:butchr-cto-channel -- "$(cat {{PROMPT_FILE}})"` | CTO agent launch template (`bash -lc`, under `script`). `{{SESSION_FLAG}}` → `--session-id <uuid>` (fresh) or `--resume <id>` (relaunch/adopt). |
+| `BUTCHR_CTO_SUPERVISE_MS` | `5000` | CTO-agent supervisor poll interval. |
+| `BUTCHR_CTO_MAX_RESTARTS` | `5` | consecutive relaunch failures before the supervisor gives up (until an operator start/restart). |
+| `BUTCHR_CTO_RESTART_BACKOFF_BASE_MS` | `2000` | base for the CTO relaunch exponential backoff. |
+| `BUTCHR_CTO_RESTART_BACKOFF_CAP_MS` | `60000` | cap for the CTO relaunch backoff. |
 
 ---
 

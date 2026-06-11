@@ -12,6 +12,10 @@ export type ButchrEvent =
   // Dispatcher pause/resume toggled — lets every connected webapp reflect the
   // PAUSED banner + control live (see server POST /api/pause|resume).
   | { type: "dispatch.paused"; paused: boolean }
+  // The managed CTO agent's lifecycle state changed (started/stopped/restarted/
+  // adopted/relaunched) — carries the refreshed CtoStatus so the dashboard's CTO
+  // card reflects it live. See src/cto-agent.ts.
+  | { type: "cto.updated"; cto: unknown }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;
