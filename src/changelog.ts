@@ -10,6 +10,7 @@
 // auto-resolve pass. butchr now records the entry + bump itself, inside the
 // serialized merge lock, AFTER the rebase — so the edit lands on the latest base
 // content and two merges can't race the same lines.
+import { collapseWs } from "./text.ts";
 
 /**
  * The idempotency marker butchr stamps on every entry it generates, so re-merging
@@ -25,7 +26,7 @@ export function taskMarker(id: string): string {
  * agent left no summary.
  */
 export function summaryLine(summary: string | null | undefined, id: string): string {
-  const s = (summary ?? "").replace(/\s+/g, " ").trim();
+  const s = collapseWs(summary ?? "");
   return s || `Changes from task ${id}`;
 }
 

@@ -12,6 +12,7 @@
 // an ordered list of TranscriptItems — one per block, role-labelled, with long
 // bodies truncated — and skip everything else as noise.
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
+import { clipLine } from "./text.ts";
 import { findTranscript } from "./usage.ts";
 
 /** One renderable line of an agent transcript (one content block, in order). */
@@ -61,9 +62,7 @@ function briefValue(v: unknown): string | null {
   else if (Array.isArray(v)) val = `[${v.length}]`;
   else if (v && typeof v === "object") val = "{…}";
   else return null; // null / undefined — omit
-  val = val.replace(/\s+/g, " ").trim();
-  if (val.length > ARG_VALUE_CAP) val = val.slice(0, ARG_VALUE_CAP - 1) + "…";
-  return val;
+  return clipLine(val, ARG_VALUE_CAP);
 }
 
 /** One-line `key=value, …` summary of a tool_use input, capped for readability. */
@@ -265,9 +264,8 @@ function primaryArg(args?: string): string | null {
 
 /** Collapse to a single clipped line, or null if blank. */
 function oneLine(text: string | undefined, cap: number): string | null {
-  const t = (text ?? "").replace(/\s+/g, " ").trim();
-  if (!t) return null;
-  return t.length > cap ? t.slice(0, cap - 1) + "…" : t;
+  // clipLine collapses + clips; "" (blank input) is falsy → null, as before.
+  return clipLine(text ?? "", cap) || null;
 }
 
 /**

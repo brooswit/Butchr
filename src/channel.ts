@@ -21,9 +21,13 @@
 // import is `config` (for the default SSE URL); everything else is self-contained so
 // the pieces stay unit-testable without a live butchr or a real claude.
 import { config } from "./config.ts";
-
-// MCP protocol version we echo back (matches src/mcp.ts).
-const PROTOCOL_VERSION = "2025-06-18";
+import {
+  isNotificationOrIdless,
+  jsonRpcError,
+  jsonRpcResult,
+  PROTOCOL_VERSION,
+} from "./jsonrpc.ts";
+import { clipLine } from "./text.ts";
 
 // What the CTO's Claude Code sees as the channel source name + the human-facing
 // blurb describing what these notifications mean.
@@ -98,8 +102,7 @@ export function channelInitializeResult(requestedProtocol?: string): {
 /** Collapse whitespace + truncate a free-form field for a single-line notification. */
 function tidy(text: unknown, max = 280): string {
   if (typeof text !== "string") return "";
-  const s = text.replace(/\s+/g, " ").trim();
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  return clipLine(text, max);
 }
 
 /** First non-empty tidied string among the candidates ("" if none). */
@@ -355,21 +358,16 @@ export function handleRpc(msg: JsonRpcMessage): Record<string, unknown> | null {
   if (!msg || typeof msg.method !== "string") return null;
   switch (msg.method) {
     case "initialize":
-      return {
-        jsonrpc: "2.0",
-        id: msg.id ?? null,
-        result: channelInitializeResult(msg.params?.protocolVersion),
-      };
+      return jsonRpcResult(
+        msg.id,
+        channelInitializeResult(msg.params?.protocolVersion),
+      );
     case "ping":
-      return { jsonrpc: "2.0", id: msg.id ?? null, result: {} };
+      return jsonRpcResult(msg.id, {});
     default:
       // Notifications (notifications/initialized, etc.) carry no id → no reply.
-      if (msg.method.startsWith("notifications/") || msg.id == null) return null;
-      return {
-        jsonrpc: "2.0",
-        id: msg.id,
-        error: { code: -32601, message: `method not found: ${msg.method}` },
-      };
+      if (isNotificationOrIdless(msg)) return null;
+      return jsonRpcError(msg.id, -32601, `method not found: ${msg.method}`);
   }
 }
 

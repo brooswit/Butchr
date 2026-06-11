@@ -19,6 +19,12 @@
 import { HttpError } from "./directories.ts";
 import type { TaskRow } from "./db.ts";
 import {
+  isNotificationOrIdless,
+  jsonRpcError,
+  jsonRpcResult,
+  PROTOCOL_VERSION,
+} from "./jsonrpc.ts";
+import {
   getTask,
   markNeedsInfoFromAgent,
   markReviewFromAgent,
@@ -153,8 +159,6 @@ const PROPOSE_PLAN_TOOL = {
   },
 } as const;
 
-const PROTOCOL_VERSION = "2025-06-18";
-
 type JsonRpcMessage = {
   jsonrpc?: string;
   id?: string | number | null;
@@ -162,18 +166,17 @@ type JsonRpcMessage = {
   params?: any;
 };
 
+// HTTP transport: wrap a shared JSON-RPC body (see ./jsonrpc.ts) in a JSON Response.
 function rpcResult(id: unknown, result: unknown): Response {
-  return new Response(
-    JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result }),
-    { headers: { "content-type": "application/json" } },
-  );
+  return new Response(JSON.stringify(jsonRpcResult(id, result)), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
 function rpcError(id: unknown, code: number, message: string): Response {
-  return new Response(
-    JSON.stringify({ jsonrpc: "2.0", id: id ?? null, error: { code, message } }),
-    { headers: { "content-type": "application/json" } },
-  );
+  return new Response(JSON.stringify(jsonRpcError(id, code, message)), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
 // Wrap a value as an MCP tool result (one text block holding JSON).
@@ -255,7 +258,7 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
 
     default:
       // Notifications (e.g. notifications/initialized) carry no id → ack with 202.
-      if (msg.method.startsWith("notifications/") || msg.id == null) {
+      if (isNotificationOrIdless(msg)) {
         return new Response(null, { status: 202 });
       }
       return rpcError(msg.id, -32601, `method not found: ${msg.method}`);
@@ -309,6 +312,34 @@ async function handleToolCall(
 }
 
 /**
+ * Tool result reporting a task's CURRENT status, used when an agent action can't
+ * proceed because the task is no longer `ok` (merged/aborted out from under it).
+ */
+function terminalStatusResult(taskId: string): ToolResult {
+  return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
+}
+
+/**
+ * Shared AWAITING-INPUT handshake behind `ask` and `propose_plan`: validate the raw
+ * input, park the task in `awaiting_input` holding it (markNeedsInfoFromAgent), and
+ * return the non-blocking success result — or a terminal-status result if the task
+ * moved out from under the agent. The two tools differ ONLY in their input field
+ * (passed as `raw`), validation-error string (`field`), and success prose (`message`).
+ */
+async function awaitingInputTool(
+  taskId: string,
+  raw: unknown,
+  opts: { field: string; message: string },
+): Promise<ToolResult> {
+  if (typeof raw !== "string" || !raw.trim()) {
+    return textResult(opts.field, true);
+  }
+  const state = markNeedsInfoFromAgent(taskId, raw.trim());
+  if (state !== "ok") return terminalStatusResult(taskId);
+  return toolResult({ status: "needs_info", message: opts.message });
+}
+
+/**
  * `request_review`: record the review request and move the task to `review`, then
  * RETURN AT ONCE (non-blocking). If the task is already terminal (merged/aborted
  * out from under the agent), report that instead. The agent should exit after this
@@ -318,7 +349,7 @@ async function runRequestReview(taskId: string, args: any): Promise<ToolResult> 
   const summary: string | undefined = args.summary;
   const state = markReviewFromAgent(taskId, summary);
   if (state !== "ok") {
-    return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
+    return terminalStatusResult(taskId);
   }
   return toolResult({
     status: "submitted",
@@ -376,17 +407,8 @@ async function runProposeSubtasks(taskId: string, args: any): Promise<ToolResult
  * terminal (merged/aborted out from under the agent), report that instead.
  */
 async function runAsk(taskId: string, args: any): Promise<ToolResult> {
-  const question: unknown = args.question;
-  if (typeof question !== "string" || !question.trim()) {
-    return textResult("`ask` requires a non-empty `question` string.", true);
-  }
-
-  const state = markNeedsInfoFromAgent(taskId, question.trim());
-  if (state !== "ok") {
-    return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
-  }
-  return toolResult({
-    status: "needs_info",
+  return awaitingInputTool(taskId, args.question, {
+    field: "`ask` requires a non-empty `question` string.",
     message:
       "Your question has been recorded and this task is now awaiting an answer. " +
       "You can stop now — do not wait. butchr will surface it to whoever operates " +
@@ -406,17 +428,8 @@ async function runAsk(taskId: string, args: any): Promise<ToolResult> {
  * rather than parking an empty plan; a terminal task reports its status instead.
  */
 async function runProposePlan(taskId: string, args: any): Promise<ToolResult> {
-  const plan: unknown = args.plan;
-  if (typeof plan !== "string" || !plan.trim()) {
-    return textResult("`propose_plan` requires a non-empty `plan` string.", true);
-  }
-
-  const state = markNeedsInfoFromAgent(taskId, plan.trim());
-  if (state !== "ok") {
-    return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
-  }
-  return toolResult({
-    status: "needs_info",
+  return awaitingInputTool(taskId, args.plan, {
+    field: "`propose_plan` requires a non-empty `plan` string.",
     message:
       "Your implementation plan has been recorded and this task is now awaiting " +
       "operator approval. Stop now — do NOT start implementing and do not wait. " +
