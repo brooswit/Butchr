@@ -1,6 +1,6 @@
 // Git operations butchr owns directly. All run against a directory root that
 // is a git repository. Task branches/worktrees are named by task ID.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   bumpPatchVersion,
@@ -63,7 +63,90 @@ export async function listWorktrees(dir: string): Promise<string[]> {
   return paths.filter((p) => resolve(p) !== main);
 }
 
-/** Create a worktree on a new branch <taskId> at <dir>/<taskId>. */
+/**
+ * Whether the directory ALREADY present at a task's worktree path is a REUSABLE
+ * live worktree for branch <taskId> — as opposed to a stale/broken leftover (a
+ * crash, an interrupted cleanup, or a repo MOVE that broke the worktree's `.git`
+ * gitdir link). Reusing such a leftover is exactly what stranded agent work behind
+ * a broken link and once nearly REVERTED merged code from a stale base — so
+ * createWorktree validates before trusting an existing dir. Reusable iff ALL hold:
+ *
+ *  1. git recognizes it as a LIVE LINKED worktree — `rev-parse --git-dir` succeeds
+ *     from inside it (catches a broken/missing `.git` gitdir link) AND <path>
+ *     appears in the repo's `worktree list` (catches a dir absent from the admin
+ *     records, e.g. a half-pruned entry).
+ *  2. it is checked out on branch <taskId> (not some other / detached HEAD).
+ *  3. it is NOT a never-worked leftover on a STALE base. If the current default
+ *     tip is already contained in the branch, it's current → fine. If the branch
+ *     is BEHIND the tip, it's reusable ONLY when it carries real commits of its
+ *     own: those are live agent work the pre-dispatch / merge-time rebase replays
+ *     onto the tip (rebuilding would silently DISCARD them, so we must not). A
+ *     behind branch with NO commits is a stale leftover with nothing to preserve →
+ *     not reusable, so it's rebuilt fresh on the current tip.
+ *
+ * Best-effort: every probe is a plain `run` (no throw); a git error fails closed
+ * (returns false → rebuild), never throwing on a recoverable stale state.
+ */
+async function worktreeIsReusable(
+  dir: string,
+  taskId: string,
+  path: string,
+): Promise<boolean> {
+  // (1) Live linked worktree: recognized from inside AND present in the admin list.
+  const gitDir = await run([git, "-C", path, "rev-parse", "--git-dir"]);
+  if (!gitDir.ok) return false;
+  const listed = await listWorktrees(dir);
+  if (!listed.some((p) => resolve(p) === resolve(path))) return false;
+
+  // (2) Checked out on the task branch.
+  const head = await run([git, "-C", path, "symbolic-ref", "--short", "HEAD"]);
+  if (!head.ok || head.stdout.trim() !== taskId) return false;
+
+  // (3) Not a never-worked leftover on a stale base. Current tip already contained
+  // → current. Behind the tip → reusable only if the branch has its own commits
+  // (real work the rebase replays onto the tip; discarding it is the bug to avoid).
+  const base = await defaultBranch(dir);
+  const contained = await run([
+    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
+  ]);
+  if (contained.ok) return true;
+  const count = await run([
+    git, "-C", dir, "rev-list", "--count", `${base}..${taskId}`,
+  ]);
+  return count.ok && parseInt(count.stdout.trim(), 10) > 0;
+}
+
+/**
+ * Remove a stale/broken leftover at a task's worktree path AND its git admin entry
+ * + branch ref, so a fresh `git worktree add -b <taskId>` can recreate it. Only ever
+ * called when worktreeIsReusable() said no (broken link, wrong branch, or a
+ * never-worked stale base — never a branch carrying commits we'd lose). Best-effort
+ * and idempotent: try the clean `worktree remove --force`; if the dir survives
+ * (git no longer recognizes it, e.g. a broken `.git` link), delete it outright and
+ * `worktree prune` the dangling admin record; finally delete the branch so the
+ * recreate's `-b <taskId>` is free to make it again.
+ */
+async function removeStaleWorktree(
+  dir: string,
+  taskId: string,
+  path: string,
+): Promise<void> {
+  await run([git, "-C", dir, "worktree", "remove", "--force", path]);
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  await run([git, "-C", dir, "worktree", "prune"]);
+  await run([git, "-C", dir, "branch", "-D", taskId]);
+}
+
+/**
+ * Create a worktree on a new branch <taskId> at <dir>/<taskId>.
+ *
+ * VALIDATE-OR-REBUILD on an existing dir: a dir already at the worktree path is
+ * REUSED only when worktreeIsReusable() confirms it's a live, correct, non-stale
+ * worktree (preserving today's idempotent-dispatch behavior). A stale/broken/
+ * stale-base leftover is REBUILT — removed and recreated fresh on the current
+ * default tip — never silently reused (the root cause of two production
+ * near-misses). The normal no-leftover path is unchanged: `worktree add -b`.
+ */
 export async function createWorktree(
   dir: string,
   taskId: string,
@@ -73,7 +156,10 @@ export async function createWorktree(
   // repo (and can't be accidentally `git add`-ed). Uses .git/info/exclude, which
   // is local-only — we never touch the user's tracked .gitignore for this.
   await addLocalExclude(dir, `/${taskId}/`);
-  if (existsSync(path)) return path; // already created (idempotent dispatch)
+  if (existsSync(path)) {
+    if (await worktreeIsReusable(dir, taskId, path)) return path; // idempotent reuse
+    await removeStaleWorktree(dir, taskId, path); // stale/broken/stale-base → rebuild
+  }
   await runOrThrow([git, "-C", dir, "worktree", "add", "-b", taskId, path]);
   return path;
 }

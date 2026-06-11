@@ -435,8 +435,9 @@ For each task (`src/dispatcher.ts` → `dispatch`):
 
 1. **Heal workspace** (`ensureWorkspace`, deduped per-directory) — recreate the
    herdr workspace if herdr restarted / it was closed.
-2. **Ensure worktree** (`git.createWorktree`, idempotent). The worktree dir is
-   locally excluded via `.git/info/exclude` so it never shows as untracked.
+2. **Ensure worktree** (`git.createWorktree`, idempotent — **validate-or-rebuild**;
+   see below). The worktree dir is locally excluded via `.git/info/exclude` so it
+   never shows as untracked.
 3. **Auto-rebase before run** (`prepareBranchForDispatch`) — bring the branch up to
    the current default tip *before* the agent works, closing the chained-task
    conflict gap (a branch cut from a stale HEAD before its blockers merged). A cheap
@@ -481,6 +482,39 @@ For each task (`src/dispatcher.ts` → `dispatch`):
 `startAgentReconciling` self-heals an `agent_name_taken` collision: a lingering
 same-named orphan agent is `agentDeregister`'d (clears the name via
 `agent rename --clear`, closes pane/tab) and `agentStart` is retried once.
+
+### Worktree validate-or-rebuild (createWorktree)
+
+`git.createWorktree` is **idempotent** — re-dispatching a task (rework, resume,
+finalize, an overlapping tick) reuses the existing `<repo>/<taskId>` checkout. But
+it does **not blindly trust** a dir already sitting at that path: a leftover from a
+crash, an interrupted cleanup, or a repo **move** that broke the worktree's `.git`
+gitdir link must not be silently reused. Reusing one stranded agent work behind a
+broken link, and once nearly **reverted merged code** by re-dispatching a task into
+a leftover dir on a **stale base** (the branch missing commits that had since merged)
+— a revert that would have ridden in while CI stayed green.
+
+So before reusing an existing dir, `createWorktree` **validates** it
+(`worktreeIsReusable`); it is reused only when **all** hold:
+
+1. git recognizes it as a **live linked worktree** — `rev-parse --git-dir` succeeds
+   from inside it (catches a broken/missing `.git` link) **and** the path appears in
+   the repo's `git worktree list` (catches a half-pruned admin record);
+2. it is checked out on **branch `<taskId>`**;
+3. it is **not a never-worked leftover on a stale base** — the current default tip is
+   already contained in the branch, **or** the branch carries its own commits. A
+   branch that is behind the tip **with commits** is real agent work and is **reused**
+   (the pre-dispatch / merge-time rebase replays it onto the tip — `createWorktree`
+   must **never discard** committed work); a behind branch with **no** commits has
+   nothing to preserve and is treated as stale.
+
+If any check fails, the dir is **rebuilt**, not reused: `worktree remove --force`
+(falling back to deleting the dir + `worktree prune` when git no longer recognizes
+it) and `branch -D`, then a fresh `worktree add -b <taskId>` rooted at the **current
+default tip**. Everything is best-effort and idempotent — a recoverable stale state
+never throws — and the **normal no-leftover path is unchanged** (`worktree add -b`).
+The pre-dispatch auto-rebase below still runs afterward to move a reused behind-base
+branch (with commits) onto the tip.
 
 ### The watcher
 
