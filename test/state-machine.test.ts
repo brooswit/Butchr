@@ -1,7 +1,7 @@
 // Tests for the CANONICAL 9-STATE TASK STATE MACHINE (the CEO's exact model) and the
 // UNIFIED FEEDBACK MECHANISM. Covers:
 //   1. STATE METADATA — every state's kind (idle|agent|feedback) and, for agent states,
-//      its agentType (ceo-agent|workspace-agent), via db.STATE_META + the helpers.
+//      its agentType (ceo-agent|workspace-agent), via db.STATE_META, plus db.isTerminal.
 //   2. THE spec_review GATE — idea → spec_review (NOT auto-build); approve → in_progress;
 //      request-changes → idea (revise the spec, re-running the CEO/CTO-fork generator).
 //   3. in_review APPROVE → finalizing → merged (the workspace agent's 'final thoughts'
