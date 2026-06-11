@@ -21,8 +21,8 @@ import { db, getSetting, setSetting } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
-import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToReady, reevaluateBlockedTask, setIdle } from "./tasks.ts";
+import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderReworkPrompt } from "./taskmd.ts";
+import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
@@ -216,11 +216,15 @@ export function dispatcherHealth(): { lastTickAt: number; tickCount: number; tic
 export async function reconcileRunningTasks(
   herdrUp: boolean,
 ): Promise<{ adopted: number; rescued: number; skipped: number }> {
+  // A LIVE agent task is one in an agent phase (in_progress build, or finalizing
+  // wrap-up) that recorded a pane — i.e. it was RUNNING when butchr stopped. Ready
+  // (pane-NULL) agent tasks are never-launched/rework and are handled by the normal
+  // tick, not here.
   const rows = db
     .query<QueuedRow, []>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN directories d ON d.id = t.directory_id
-         WHERE t.status='running'`,
+         WHERE t.status IN ('in_progress','finalizing') AND t.herdr_pane_id IS NOT NULL`,
     )
     .all();
   if (rows.length === 0) return { adopted: 0, rescued: 0, skipped: 0 };
@@ -263,17 +267,24 @@ export async function reconcileRunningTasks(
       adopted++;
       console.log(`[butchr] re-adopted running task ${row.id} (pane ${paneId}, tab ${tabId})`);
     } else {
-      // Agent gone — it ended while butchr was offline. Rescue into review with
-      // whatever output was logged, closing its (now husk) tab defensively.
+      // Agent gone — it ended while butchr was offline. Rescue PHASE-AWARE: a build
+      // (in_progress) agent → in_review for a human; a finalize agent → land the merge
+      // directly (the operator already approved). Close its (now husk) tab defensively.
       await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
       const snapshot = readRunLogSnapshot(row.id);
-      markReview(
-        row.id,
-        `[butchr] moved to review automatically: the agent ended while butchr ` +
-          `was offline. Output captured as-is.\n\n${snapshot}`,
-      );
-      rescued++;
-      console.log(`[butchr] rescued task ${row.id} → review (agent gone while offline)`);
+      if (row.status === "finalizing") {
+        await finalizeMerge(row.id).catch(() => {});
+        rescued++;
+        console.log(`[butchr] finalized task ${row.id} (finalize agent gone while offline)`);
+      } else {
+        markInReview(
+          row.id,
+          `[butchr] moved to review automatically: the agent ended while butchr ` +
+            `was offline. Output captured as-is.\n\n${snapshot}`,
+        );
+        rescued++;
+        console.log(`[butchr] rescued task ${row.id} → in_review (agent gone while offline)`);
+      }
     }
   }
   return { adopted, rescued, skipped: 0 };
@@ -297,11 +308,17 @@ export async function reconcileRunningTasks(
  */
 export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
   if (paused) return [];
+  // READY agent-phase tasks: an `in_progress` (build) or `finalizing` (final-thoughts)
+  // task with NO live pane (herdr_pane_id IS NULL) is one the dispatcher should launch
+  // — a task with a pane already has a live agent. This single gate covers fresh
+  // builds, reworks/resumes, answer-resumes, and the post-approval finalize launch.
+  // Backoff (next_dispatch_at) and priority ordering apply uniformly.
   return db
     .query<QueuedRow, [string]>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN directories d ON d.id = t.directory_id
-         WHERE t.status='queued'
+         WHERE t.status IN ('in_progress','finalizing')
+           AND t.herdr_pane_id IS NULL
            AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
          ORDER BY t.priority DESC, t.created_at ASC`,
     )
@@ -357,7 +374,7 @@ async function tick(): Promise<void> {
     if (config.autoMergeEnabled) {
       for (const r of db
         .query<{ id: string }, []>(
-          `SELECT id FROM tasks WHERE status='review' AND ci_status='pass' AND auto_merged=0`,
+          `SELECT id FROM tasks WHERE status='in_review' AND ci_status='pass' AND auto_merged=0`,
         )
         .all()) {
         // Fire-and-forget — the tick must not block on a merge.
@@ -437,10 +454,15 @@ export async function generateSpecForIdea(dir: DirectoryRow, task: TaskRow): Pro
     // Ensure the worktree exists (idempotent) so the read-only spec writer can ground
     // itself against the repo's SPEC.md / code.
     const worktree = await git.createWorktree(dir.path, task.id);
-    const brief = readTaskMd(dir.path, task.id).prompt;
-    const spec = await generateSpec({ brief, cwd: worktree, taskId: task.id });
+    const doc = readTaskMd(dir.path, task.id);
+    const brief = doc.prompt;
+    // On a REVISE round (the operator requested spec changes via spec_review →
+    // request_changes), the accumulated review notes carry what to change; thread them
+    // into the generator so the regenerated spec addresses the feedback.
+    const notes = doc.reviewNotes?.trim() || undefined;
+    const spec = await generateSpec({ brief, cwd: worktree, taskId: task.id, notes });
     if (spec && spec.trim()) {
-      promoteIdeaToReady(task.id, spec);
+      promoteIdeaToSpecReview(task.id, spec);
     } else {
       markSpecGenFailure(
         task.id,
@@ -630,7 +652,11 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     // review notes.
     const doc = readTaskMd(dir.path, task.id);
     let rendered: string;
-    if (isResume && task.answer && task.answer.trim()) {
+    if (task.status === "finalizing") {
+      // FINALIZE phase: the workspace agent is resumed to do post-approval 'final
+      // thoughts' before butchr lands the merge (see renderFinalizePrompt).
+      rendered = renderFinalizePrompt();
+    } else if (isResume && task.answer && task.answer.trim()) {
       rendered = renderAnswerPrompt(task.answer);
     } else if (isResume) {
       rendered = renderReworkPrompt(dir.path, doc);
@@ -883,14 +909,14 @@ function spawnWatcher(
     let seenAlive = false;
     while (true) {
       if (abortSignals.has(taskId)) break;
-      // Release our slot the moment the task leaves `running`. Once it reaches
-      // `review` the agent has submitted (and is exiting) — there is nothing left
-      // to rescue. Any other state (queued after a reject, merged, aborted, or a
-      // vanished row) likewise means the task has been reclaimed elsewhere, so we
-      // stop looping; otherwise we'd hold the `watching` slot forever and tick()
-      // would skip the task, including blocking a reject's resume re-dispatch.
+      // Release our slot the moment the task leaves its live agent phase. Once it
+      // reaches in_review/needs_info/merged/aborted the agent has submitted/exited —
+      // there is nothing left to rescue. We watch BOTH agent phases that hold a live
+      // pane: `in_progress` (build) and `finalizing` (final thoughts). Any other state
+      // means the task was reclaimed elsewhere, so we stop looping; otherwise we'd hold
+      // the `watching` slot forever and tick() would skip the task.
       const cur = getTask(taskId)?.status;
-      if (cur !== "running") break;
+      if (cur !== "in_progress" && cur !== "finalizing") break;
       if (existsSync(doneFile)) break; // process exited
       if (Date.now() > deadline) {
         timedOut = true;
@@ -937,11 +963,12 @@ function spawnWatcher(
       return;
     }
 
-    // If the agent already submitted (status is `review`) or the task moved on
-    // (queued/merged/aborted), there is nothing to rescue. Only a task still
-    // sitting in `running` here means the agent ended WITHOUT submitting.
-    const status = getTask(taskId)?.status;
-    if (status !== "running") {
+    // If the agent already submitted (in_review / needs_info) or the task moved on
+    // (merged/aborted), there is nothing to rescue. Only a task still sitting in a
+    // live agent phase (in_progress/finalizing) here means the agent ended WITHOUT
+    // submitting. `phase` is captured for the phase-aware rescue below.
+    const phase = getTask(taskId)?.status;
+    if (phase !== "in_progress" && phase !== "finalizing") {
       watching.delete(taskId);
       return;
     }
@@ -1037,9 +1064,18 @@ function spawnWatcher(
       return;
     }
 
-    // Rescue the orphaned task into review so a human can inspect it.
-    markReview(taskId, snapshot);
-    watching.delete(taskId);
-    console.log(`[butchr] task ${taskId} → review (${reason})`);
+    // Rescue PHASE-AWARE: a build (in_progress) agent that ended without submitting →
+    // in_review for a human to inspect; a finalize agent that ended → land the merge
+    // directly (the operator already approved — see finalizeMerge). Re-read the phase
+    // in case it changed while we captured output.
+    if (getTask(taskId)?.status === "finalizing") {
+      void finalizeMerge(taskId).catch(() => {});
+      watching.delete(taskId);
+      console.log(`[butchr] task ${taskId} → finalized (${reason})`);
+    } else {
+      markInReview(taskId, snapshot);
+      watching.delete(taskId);
+      console.log(`[butchr] task ${taskId} → in_review (${reason})`);
+    }
   })();
 }

@@ -201,7 +201,7 @@ test("the 'Roll back' button's create flow yields a real rollback task", async (
   });
   const v = await tasksMod.createTask(DIR_ID, prompt, []);
 
-  expect(v.status === "queued" || v.status === "blocked").toBe(true);
+  expect(v.status === "in_progress" || v.status === "blocked").toBe(true);
   expect(v.prompt).toContain("Revert the changes introduced by task crimson-magpie-563b (commit deadbeefcafe).");
   // The prompt round-trips through task.md on disk for the agent to read.
   const doc = taskmdMod.readTaskMd(REPO_ROOT, v.id);

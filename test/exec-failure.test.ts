@@ -10,7 +10,7 @@
 //       and NO output never actually launched. dispatcher.isExecFailure factors
 //       out that decision, and the watcher routes such a launch through the
 //       dispatch retry/backoff path (markDispatchFailure) instead of masquerading
-//       it as an empty `review`.
+//       it as an empty `in_review`.
 //
 // These are pure / in-process: no real claude or herdr is spawned. As in the other
 // test files, BUTCHR_HERDR_BIN points at `true` so every herdr probe is a no-op.
@@ -75,7 +75,7 @@ describe("renderAgentPrompt does not inline context-file bodies", () => {
       meta: {
         id: "render-a",
         created: dbMod.nowIso(),
-        status: "queued" as const,
+        status: "in_progress" as const,
         context: ["context-a.md", "src-notes.txt"],
       },
       prompt: "Do the thing.",
@@ -99,7 +99,7 @@ describe("renderAgentPrompt does not inline context-file bodies", () => {
       meta: {
         id: "render-empty",
         created: dbMod.nowIso(),
-        status: "queued" as const,
+        status: "in_progress" as const,
         context: [],
       },
       prompt: "Just the prompt.",
@@ -136,25 +136,25 @@ describe("isExecFailure (the launch-failure decision)", () => {
   });
 });
 
-describe("an immediate exec failure routes to the dispatch-failure path, not review", () => {
-  test("markDispatchFailure on a running task re-queues with backoff (never review)", async () => {
+describe("an immediate exec failure routes to the dispatch-failure path, not in_review", () => {
+  test("markDispatchFailure on a LIVE in_progress task re-arms with backoff (never in_review)", async () => {
     // Plant a task as if it had just been markRunning'd (the state the watcher
-    // sees when the agent exec-fails immediately): running, with a pane/tab and a
-    // session id, attempts reset to 0.
+    // sees when the agent exec-fails immediately): LIVE `in_progress` (herdr_pane_id
+    // and herdr_tab_id set), with a session id, attempts reset to 0.
     const id = "execfail-route";
     const created = dbMod.nowIso();
     dbMod.db
       .query(
         `INSERT INTO tasks (id, directory_id, status, session_id, herdr_pane_id, herdr_tab_id, started_at, dispatch_attempts, created_at)
-         VALUES (?, ?, 'running', 'sess-x', 'pane-1', 'tab-1', ?, 0, ?)`,
+         VALUES (?, ?, 'in_progress', 'sess-x', 'pane-1', 'tab-1', ?, 0, ?)`,
       )
       .run(id, DIR_ID, created, created);
     taskmdMod.writeTaskMd(
       REPO_ROOT,
-      { id, created, status: "running", context: [] },
+      { id, created, status: "in_progress", context: [] },
       "Implement something.",
     );
-    taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "running");
+    taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_progress");
 
     // This is exactly the call the watcher makes when isExecFailure trips.
     await tasksMod.markDispatchFailure(
@@ -163,9 +163,9 @@ describe("an immediate exec failure routes to the dispatch-failure path, not rev
     );
 
     const row = dbRow(id);
-    // Under the attempt cap → re-queued with a future backoff, NOT moved to review.
-    expect(row.status).toBe("queued");
-    expect(row.status).not.toBe("review");
+    // Under the attempt cap → stays in_progress (pane cleared = READY), NOT moved to in_review.
+    expect(row.status).toBe("in_progress");
+    expect(row.status).not.toBe("in_review");
     expect(row.dispatch_attempts).toBe(1);
     expect(row.next_dispatch_at).toBeTruthy();
     expect(row.last_dispatch_error).toContain("failed to launch");

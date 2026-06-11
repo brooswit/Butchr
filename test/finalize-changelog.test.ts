@@ -106,9 +106,9 @@ async function seedReviewTask(file: string, content: string, summary: string): P
   g(["add", "-A"], wt);
   g(["commit", "-q", "-m", `add ${file}`], wt);
   dbMod.db
-    .query(`UPDATE tasks SET status='review', summary=? WHERE id=?`)
+    .query(`UPDATE tasks SET status='in_review', summary=? WHERE id=?`)
     .run(summary, id);
-  taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "review");
+  taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
   return id;
 }
 
@@ -118,7 +118,8 @@ describe("merge-time CHANGELOG entry + version bump", () => {
     const before = version(); // 0.3.7
 
     const id = await seedReviewTask("feature.ts", "export const x = 1;\n", "Add a shiny feature");
-    const out = await tasksMod.approveTask(id);
+    await tasksMod.approveTask(id); // in_review → finalizing
+    const out = await tasksMod.finalizeMerge(id); // finalizing → merged
     expect(out.task.status).toBe("merged");
 
     // The entry landed under [Unreleased] on main — derived from summary + id, and
@@ -153,7 +154,8 @@ describe("merge-time CHANGELOG entry + version bump", () => {
     const files = g(["diff", "--name-only", `${base}...${id}`]).split("\n").filter(Boolean);
     expect(files).toEqual(["other.ts"]);
 
-    await tasksMod.approveTask(id);
+    await tasksMod.approveTask(id); // in_review → finalizing
+    await tasksMod.finalizeMerge(id); // finalizing → merged
     expect(changelog()).toContain(`(task ${id})`);
     expect(version()).toBe("0.3.9"); // bumped again
   });
@@ -163,7 +165,8 @@ describe("merge-time CHANGELOG entry + version bump", () => {
     const vBefore = version(); // 0.3.9
 
     const id = await seedReviewTask("NOTES.md", "# notes\n", "Document a thing");
-    await tasksMod.approveTask(id);
+    await tasksMod.approveTask(id); // in_review → finalizing
+    await tasksMod.finalizeMerge(id); // finalizing → merged
 
     expect(changelog()).toContain(`(task ${id})`);
     expect(changelog()).toContain("Document a thing");

@@ -88,7 +88,7 @@ function seed(opts: {
       DIR_ID,
       opts.status,
       opts.summary ?? null,
-      opts.status === "running" || opts.status === "review" ? created : null,
+      opts.status === "in_progress" || opts.status === "in_review" ? created : null,
       created,
     );
   taskmdMod.writeTaskMd(
@@ -129,7 +129,7 @@ describe("triggerConformance persistence", () => {
   test("a CONFORMING change settles conformance_status='pass'", async () => {
     const id = seed({
       id: "conf-pass",
-      status: "review",
+      status: "in_review",
       prompt: "Add a /health endpoint returning 200 OK with the version.",
       summary: "Implemented the /health endpoint fully with the version field.",
     });
@@ -145,7 +145,7 @@ describe("triggerConformance persistence", () => {
   test("a STUB/INCOMPLETE change settles conformance_status='concern' with the reason", async () => {
     const id = seed({
       id: "conf-concern",
-      status: "review",
+      status: "in_review",
       prompt: "Implement login with input validation and session persistence.",
       summary: "Added a login handler stub; validation still TODO.",
     });
@@ -159,7 +159,7 @@ describe("triggerConformance persistence", () => {
   });
 
   test("a null verdict (reviewer couldn't decide) leaves conformance_status NULL", async () => {
-    const id = seed({ id: "conf-null", status: "review" });
+    const id = seed({ id: "conf-null", status: "in_review" });
     confMod.setConformanceRunner(async () => null);
 
     await confMod.triggerConformance(id); // must not throw
@@ -168,7 +168,7 @@ describe("triggerConformance persistence", () => {
   });
 
   test("a runner THROW is swallowed → conformance_status NULL (best-effort)", async () => {
-    const id = seed({ id: "conf-throw", status: "review" });
+    const id = seed({ id: "conf-throw", status: "in_review" });
     confMod.setConformanceRunner(async () => {
       throw new Error("claude blew up");
     });
@@ -179,7 +179,7 @@ describe("triggerConformance persistence", () => {
   });
 
   test("skips entirely (conformance_status stays NULL) when the task has no worktree", async () => {
-    const id = seed({ id: "conf-noworktree", status: "review", worktree: false });
+    const id = seed({ id: "conf-noworktree", status: "in_review", worktree: false });
     let called = 0;
     confMod.setConformanceRunner(async () => {
       called++;
@@ -193,7 +193,7 @@ describe("triggerConformance persistence", () => {
   });
 
   test("does NOT write a verdict onto a task that left review while the review ran", async () => {
-    const id = seed({ id: "conf-raced", status: "review" });
+    const id = seed({ id: "conf-raced", status: "in_review" });
     let resolveRun: (r: any) => void;
     let runnerStarted: () => void;
     const started = new Promise<void>((res) => { runnerStarted = res; });
@@ -218,14 +218,14 @@ describe("triggerConformance persistence", () => {
 });
 
 describe("review-transition trigger", () => {
-  test("markReviewFromAgent (running→review) kicks off the conformance gate", () => {
-    const id = seed({ id: "conf-trig-agent", status: "running" });
+  test("markReviewFromAgent (in_progress→in_review) kicks off the conformance gate", () => {
+    const id = seed({ id: "conf-trig-agent", status: "in_progress" });
     confMod.setConformanceRunner(() => new Promise(() => {})); // never resolves
     // The CI gate also fires on this transition — stub it so it doesn't spawn real bun.
     tasksMod.setCiRunner(() => new Promise(() => {}));
 
     expect(tasksMod.markReviewFromAgent(id)).toBe("ok");
-    expect(row(id).status).toBe("review");
+    expect(row(id).status).toBe("in_review");
     // The fire-and-forget gate's synchronous prefix already claimed the task → 'checking'.
     expect(row(id).conformance_status).toBe("checking");
   });
@@ -233,7 +233,7 @@ describe("review-transition trigger", () => {
   test("a duplicate request_review (review→review) does NOT re-run the gate", () => {
     // Seed already in review with NO conformance verdict; a duplicate request_review
     // must not kick the gate off (it would flip conformance_status to 'checking').
-    const id = seed({ id: "conf-trig-dup", status: "review" });
+    const id = seed({ id: "conf-trig-dup", status: "in_review" });
     confMod.setConformanceRunner(() => new Promise(() => {}));
     tasksMod.setCiRunner(() => new Promise(() => {}));
 

@@ -245,29 +245,34 @@ async function healthResponse(): Promise<Response> {
     }
   }
 
-  // Activity snapshot: an "active" task is one with a live dispatch footprint
-  // (status running | review | finalizing). Derived from the same status counts
-  // above so we issue no extra queries. Tasks dispatch uncapped — every queued
-  // task is launched as soon as it's seen.
+  // Activity snapshot: an "active" task is any non-terminal one (an AGENT phase or a
+  // FEEDBACK state awaiting the operator) — derived from the same status counts above
+  // so we issue no extra queries. Tasks dispatch uncapped. (Ready vs. running is not
+  // distinguishable from a GROUP-BY-status count — both are `in_progress` — so we
+  // report `blocked` as the queued-analog "waiting" bucket.)
   const concurrency = {
     active:
-      (tasks.running ?? 0) +
-      (tasks.review ?? 0) +
-      (tasks.awaiting_input ?? 0) +
+      (tasks.idea ?? 0) +
+      (tasks.spec_review ?? 0) +
+      (tasks.needs_info ?? 0) +
+      (tasks.in_progress ?? 0) +
+      (tasks.in_review ?? 0) +
       (tasks.finalizing ?? 0),
-    queued: tasks.queued ?? 0,
+    queued: tasks.blocked ?? 0,
   };
 
-  // Operator pull-signal: tasks that need a human's eyes right now — ones waiting
-  // in `review`, ones parked `awaiting_input` (an agent asked a question that needs
-  // answering), and ones that gave up dispatching (`failed`). The webapp turns this
-  // into a tab-title badge + header indicator so the operator gets pulled in rather
-  // than polling. Derived from the status counts above; no extra query.
+  // Operator pull-signal: tasks in a FEEDBACK state that need a human's eyes right now
+  // — a generated spec awaiting approval (`spec_review`), a diff awaiting review
+  // (`in_review`), or an agent question awaiting an answer (`needs_info`). The webapp
+  // turns this into a tab-title badge + header indicator. Derived from the status
+  // counts; no extra query. (`failed` is retained as 0 — the canonical model has no
+  // such state; a dispatch/finalize give-up lands in the terminal `aborted`.)
   const needsAttention = {
-    review: tasks.review ?? 0,
-    awaiting_input: tasks.awaiting_input ?? 0,
-    failed: tasks.failed ?? 0,
-    total: (tasks.review ?? 0) + (tasks.awaiting_input ?? 0) + (tasks.failed ?? 0),
+    spec_review: tasks.spec_review ?? 0,
+    in_review: tasks.in_review ?? 0,
+    needs_info: tasks.needs_info ?? 0,
+    failed: 0,
+    total: (tasks.spec_review ?? 0) + (tasks.in_review ?? 0) + (tasks.needs_info ?? 0),
   };
 
   // Tick-loop liveness: stale if we've ticked at least once but not within
@@ -331,10 +336,9 @@ async function healthResponse(): Promise<Response> {
       staleAfterMs: tickStaleAfterMs,
     },
     tasks,
-    // Convenience count of tasks that gave up dispatching (status='failed').
-    // The `tasks` map above already includes it via GROUP BY, but surface it
-    // directly so dispatch give-ups are visible at a glance.
-    failedTasks: tasks.failed ?? 0,
+    // Retained for API compatibility; always 0 (the canonical model has no `failed`
+    // state — a dispatch/finalize give-up lands in the terminal idle state `aborted`).
+    failedTasks: 0,
     concurrency,
     needsAttention,
     // Self-heal visibility: last startup reap of orphaned worktrees + herdr husks.

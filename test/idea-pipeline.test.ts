@@ -1,12 +1,13 @@
-// Tests for the UNIFIED task-state pipeline (idea → ready → in_progress → review →
-// merged, with the lateral states). The CEO retracted the earlier two-axis design (a
-// separate `stage` field orthogonal to `status`) in favor of this SINGLE state machine:
+// Tests for the UNIFIED task-state pipeline (idea → spec_review → in_progress →
+// in_review → finalizing → merged, with the lateral states). The CEO's SINGLE state
+// machine:
 //   - createTask({idea:true}) creates the task in the FRONT state `idea` (a one-line
 //     brief, no spec yet) — NOT a build agent.
 //   - the dispatcher runs the CTO-fork spec generator (src/cto.ts, mocked here) to turn
-//     the brief into a SPEC, then advances the task to `queued` ('ready') carrying the
-//     spec as its prompt (promoteIdeaToReady) — where it dispatches the build agent.
-//   - createTask() (no idea) creates directly in `queued` ('ready') as today — UNCHANGED.
+//     the brief into a SPEC via promoteIdeaToSpecReview, then advances the task to
+//     `spec_review` for the operator's sign-off — where the operator approves to
+//     in_progress.
+//   - createTask() (no idea) creates directly in `in_progress` ('ready') — CHANGED.
 //   - the retracted `stage` axis is folded out: the DB migration flips legacy stage='idea'
 //     rows to status='idea'; everything else is untouched; task.md `stage:` lines are
 //     ignored on parse.
@@ -81,10 +82,10 @@ function dirRow() {
   return dbMod.db.query<any, [string]>(`SELECT * FROM directories WHERE id=?`).get(DIR_ID)!;
 }
 
-describe("a normal task enters 'ready' (queued) directly", () => {
-  test("createTask() with no idea flag is unchanged: status=queued, normal review protocol", async () => {
+describe("a normal task enters 'ready' (in_progress) directly", () => {
+  test("createTask() with no idea flag is unchanged: status=in_progress, normal review protocol", async () => {
     const view = await tasksMod.createTask(DIR_ID, "Do some ordinary work.");
-    expect(view.status).toBe("queued"); // 'ready' (internal value kept)
+    expect(view.status).toBe("in_progress"); // 'ready' (no live agent yet)
     // No stage line is ever written, and the FIRST rendered prompt is the normal review
     // protocol — there is no idea/spec protocol anymore.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, view.id), "utf8");
@@ -119,8 +120,8 @@ describe("an idea task is created in the 'idea' front state", () => {
   });
 });
 
-describe("idea → (spec via CTO-fork, mocked) → ready", () => {
-  test("the CTO-fork spec generator advances an idea task to 'ready' carrying the spec", async () => {
+describe("idea → (spec via CTO-fork, mocked) → spec_review", () => {
+  test("the CTO-fork spec generator advances an idea task to 'spec_review' carrying the spec", async () => {
     const BRIEF = "add request logging";
     const SPEC =
       "Implement request logging: add a logging middleware in src/server.ts that records " +
@@ -148,9 +149,9 @@ describe("idea → (spec via CTO-fork, mocked) → ready", () => {
     expect(sawBrief).toBe(BRIEF);
     expect(sawCwd).toContain(idea.id);
 
-    // The task advanced to 'ready' (queued) carrying the SPEC as its prompt.
+    // The task advanced to 'spec_review' carrying the SPEC as its prompt.
     const after = tasksMod.taskView(idea.id)!;
-    expect(after.status).toBe("queued");
+    expect(after.status).toBe("spec_review");
     expect(after.prompt).toBe(SPEC);
 
     // task.md's Prompt section was rewritten brief → spec, so the build agent's rendered
@@ -158,12 +159,14 @@ describe("idea → (spec via CTO-fork, mocked) → ready", () => {
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, idea.id), "utf8");
     expect(md).toContain(SPEC);
     expect(md).not.toContain(BRIEF);
+    // After the operator approves spec_review → in_progress, the agent prompt contains
+    // the spec and the request_review protocol.
     const built = taskmdMod.renderAgentPrompt(REPO_ROOT, taskmdMod.readTaskMd(REPO_ROOT, idea.id));
     expect(built).toContain(SPEC);
     expect(built).toContain("request_review");
   });
 
-  test("a spec-generation FAILURE keeps the task in 'idea' (bounded retry) then gives up to 'failed'", async () => {
+  test("a spec-generation FAILURE keeps the task in 'idea' (bounded retry) then gives up to 'aborted'", async () => {
     // Make the generator fail (returns null).
     ctoMod.setSpecWriter(async () => null);
     const idea = await tasksMod.createTask(
@@ -177,17 +180,17 @@ describe("idea → (spec via CTO-fork, mocked) → ready", () => {
     expect(r.dispatch_attempts).toBe(1);
     expect(r.next_dispatch_at).toBeTruthy();
 
-    // Burn through the remaining attempts: at the cap it moves to 'failed'.
+    // Burn through the remaining attempts: at the cap it moves to 'aborted'.
     for (let i = 0; i < 10 && row(idea.id).status === "idea"; i++) {
       // Clear the backoff so markSpecGenFailure increments each call deterministically.
       dbMod.db.query(`UPDATE tasks SET next_dispatch_at=NULL WHERE id=?`).run(idea.id);
       await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
     }
-    expect(row(idea.id).status).toBe("failed");
+    expect(row(idea.id).status).toBe("aborted");
   });
 });
 
-describe("the full idea → ready → in_progress → review → merged pipeline", () => {
+describe("the full idea → spec_review → in_progress → in_review → finalizing → merged pipeline", () => {
   test("an idea flows through the single state machine end-to-end", async () => {
     const SPEC = "Add pipeline.txt containing the word built.";
     ctoMod.setSpecWriter(async () => SPEC);
@@ -198,14 +201,20 @@ describe("the full idea → ready → in_progress → review → merged pipeline
     );
     expect(row(t.id).status).toBe("idea");
 
-    // idea → ready (queued) via the CTO-fork
+    // idea → spec_review via the CTO-fork
     await dispatcherMod.generateSpecForIdea(dirRow(), row(t.id));
-    expect(row(t.id).status).toBe("queued");
+    expect(row(t.id).status).toBe("spec_review");
     expect(tasksMod.taskView(t.id)!.prompt).toBe(SPEC);
 
-    // ready → in_progress (running): simulate the dispatcher launching the build agent.
+    // spec_review → in_progress: operator approves the spec.
+    await tasksMod.approveTask(t.id);
+    expect(row(t.id).status).toBe("in_progress");
+    expect(row(t.id).herdr_pane_id).toBeNull();
+
+    // in_progress → running: simulate the dispatcher launching the build agent.
     tasksMod.markRunning(t.id, "pane-x", "idea-session-1234", "tab-x");
-    expect(row(t.id).status).toBe("running");
+    expect(row(t.id).status).toBe("in_progress");
+    expect(row(t.id).herdr_pane_id).toBe("pane-x");
 
     // The "agent" does the work in its worktree and commits a file.
     const wt = join(REPO_ROOT, t.id);
@@ -213,23 +222,37 @@ describe("the full idea → ready → in_progress → review → merged pipeline
     g(["add", "-A"], wt);
     g(["commit", "-q", "-m", "add pipeline.txt"], wt);
 
-    // in_progress → review: the agent calls request_review. NO stage flip happens — there
-    // is no second axis; review is of the CODE, not a spec.
+    // in_progress → in_review: the agent calls request_review.
     const state = tasksMod.markReviewFromAgent(t.id, "done");
     expect(state).toBe("ok");
-    expect(row(t.id).status).toBe("review");
+    expect(row(t.id).status).toBe("in_review");
 
-    // review → merged: approving runs the normal merge path (no spec gate, no spawn).
+    // in_review → finalizing: approving forwards to finalizing.
+    const approveOut = await tasksMod.approveTask(t.id);
+    expect(approveOut.task.status).toBe("finalizing");
+
+    // The finalize agent is recorded running.
+    tasksMod.markRunning(t.id, "pane-fin", "idea-session-fin", "tab-fin");
+
+    // finalizing → merged: the finalize agent calls markReviewFromAgent which fires
+    // finalizeMerge. Poll briefly for the merge.
     const tipBefore = g(["rev-parse", "HEAD"]);
-    const outcome = await tasksMod.approveTask(t.id);
-    expect(outcome.task.status).toBe("merged");
-    expect(outcome.task.spawned_subtasks).toEqual([]);
+    tasksMod.markReviewFromAgent(t.id, "wrapped up");
+    for (let i = 0; i < 100 && row(t.id).status !== "merged"; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(row(t.id).status).toBe("merged");
     expect(g(["rev-parse", "HEAD"])).not.toBe(tipBefore);
     expect(existsSync(join(REPO_ROOT, "pipeline.txt"))).toBe(true);
 
     // The transition timeline reflects the unified pipeline.
     const flow = dbMod.listTaskEvents(t.id).map((e) => e.to_status);
-    expect(flow).toEqual(["idea", "queued", "running", "review", "merged"]);
+    expect(flow).toContain("idea");
+    expect(flow).toContain("spec_review");
+    expect(flow).toContain("in_progress");
+    expect(flow).toContain("in_review");
+    expect(flow).toContain("finalizing");
+    expect(flow[flow.length - 1]).toBe("merged");
   });
 });
 
@@ -245,16 +268,23 @@ describe("the `stage` axis is folded out (backward compatibility)", () => {
         .query(`INSERT INTO tasks (id, directory_id, status, stage, created_at) VALUES (?, ?, ?, ?, ?)`)
         .run(id, DIR_ID, status, stage, dbMod.nowIso());
     };
+    // Insert rows with old-style status values; migrateStageAxisToStatus runs BEFORE
+    // migrateStatusModel renamed these, so we insert raw values and call both migrations.
     mk("legacy-idea-queued", "queued", "idea"); // pre-spec idea → should become 'idea'
-    mk("legacy-idea-running", "running", "idea"); // mid-flight → left alone
-    mk("legacy-spec-review", "review", "spec"); // a spec in review → left alone
+    mk("legacy-idea-running", "running", "idea"); // mid-flight → left alone by stage migration
+    mk("legacy-spec-review", "review", "spec"); // a spec in review → left alone by stage migration
     mk("legacy-build-merged", "merged", "build"); // ordinary task → left alone
 
+    // The stage migration turns stage='idea' + status='queued' → status='idea'.
     dbMod.migrateStageAxisToStatus();
+    // The status-rename migration maps remaining old names to the new canonical ones.
+    dbMod.migrateStatusModel();
 
     expect(row("legacy-idea-queued").status).toBe("idea");
-    expect(row("legacy-idea-running").status).toBe("running");
-    expect(row("legacy-spec-review").status).toBe("review");
+    // running → in_progress after migrateStatusModel
+    expect(row("legacy-idea-running").status).toBe("in_progress");
+    // review → in_review after migrateStatusModel
+    expect(row("legacy-spec-review").status).toBe("in_review");
     expect(row("legacy-build-merged").status).toBe("merged");
   });
 
@@ -263,7 +293,7 @@ describe("the `stage` axis is folded out (backward compatibility)", () => {
       "---",
       "id: legacy-md",
       "created: 2026-01-01T00:00:00.000Z",
-      "status: queued",
+      "status: in_progress",
       "stage: idea", // retracted axis — must be ignored, not crash
       "context: []",
       "---",
@@ -276,7 +306,7 @@ describe("the `stage` axis is folded out (backward compatibility)", () => {
       "",
     ].join("\n");
     const doc = taskmdMod.parseTaskMd(raw);
-    expect(doc.meta.status).toBe("queued");
+    expect(doc.meta.status).toBe("in_progress");
     expect((doc.meta as any).stage).toBeUndefined();
     expect(doc.prompt).toBe("Some legacy idea prompt.");
   });

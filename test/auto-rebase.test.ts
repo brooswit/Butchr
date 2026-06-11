@@ -86,13 +86,14 @@ function setStatus(id: string, status: string) {
 const headOf = (dir: string) => g(["rev-parse", "HEAD"], dir);
 const wtOf = (id: string) => join(REPO_ROOT, id);
 
-describe("auto-rebase: a blocked task promoted to queued ends up on the current tip", () => {
+describe("auto-rebase: a blocked task promoted to in_progress ends up on the current tip", () => {
   test("a fresh blocked task created on a stale base is reset onto the tip at dispatch", async () => {
     // Blocker seeded as a plain DB row (no worktree needed to satisfy createTask).
+    // In the new model, a LIVE agent task is `in_progress` with herdr_pane_id set.
     const blocker = "ar-blocker";
     dbMod.db
-      .query(`INSERT INTO tasks (id, directory_id, status, created_at) VALUES (?, ?, ?, ?)`)
-      .run(blocker, DIR_ID, "running", dbMod.nowIso());
+      .query(`INSERT INTO tasks (id, directory_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(blocker, DIR_ID, "in_progress", "pane-blocker", dbMod.nowIso());
 
     // Dependent task: its worktree branches from the CURRENT (soon-to-be stale) tip.
     const dep = (await tasksMod.createTask(DIR_ID, "dependent work", [], [blocker])).id;
@@ -107,10 +108,10 @@ describe("auto-rebase: a blocked task promoted to queued ends up on the current 
     // The dependent is now genuinely behind its (stale) creation-time base.
     expect(await gitMod.isBehindDefault(REPO_ROOT, dep)).toBe(true);
 
-    // Promote it (auto-unblock) — DB state flips to queued, branch still stale...
+    // Promote it (auto-unblock) — DB state flips to in_progress (READY), branch still stale...
     setStatus(blocker, "merged");
     expect(tasksMod.reevaluateBlockedTask(dep)).toBe(true);
-    expect(dbRow(dep).status).toBe("queued");
+    expect(dbRow(dep).status).toBe("in_progress"); // READY: no pane yet
     expect(headOf(wtOf(dep))).toBe(staleBase); // not moved yet
 
     // ...then the dispatch-time prep brings it onto the CURRENT tip (not the stale
@@ -132,7 +133,7 @@ describe("auto-rebase: a behind-base branch WITH commits is rebased before dispa
     writeFileSync(join(wt, "feature.txt"), "feature\n");
     g(["add", "--", "feature.txt"], wt);
     g(["commit", "-q", "-m", "add feature"], wt);
-    setStatus(id, "running"); // it has run (started_at-style state)
+    setStatus(id, "in_progress"); // it has run (LIVE agent-phase state)
 
     // Meanwhile the default branch advances on an UNRELATED file.
     commitOnMain("mainline.txt", "mainline\n", "mainline work");
@@ -175,7 +176,7 @@ describe("auto-rebase: a conflicting rebase is surfaced, not silently dispatched
     g(["add", "--", "README.md"], wt);
     g(["commit", "-q", "-m", "agent edits README"], wt);
     const originalHead = headOf(wt); // the branch tip AFTER the agent's commit
-    setStatus(id, "running");
+    setStatus(id, "in_progress");
 
     // The default branch edits the SAME file differently -> rebase will conflict.
     commitOnMain("README.md", "main change\n", "main edits README");

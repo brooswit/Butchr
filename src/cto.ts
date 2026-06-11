@@ -34,6 +34,12 @@ export type SpecGenInput = {
   cwd: string;
   /** The idea task's id — used only to name the temp prompt file. */
   taskId: string;
+  /**
+   * REVISION notes from the operator (spec_review → request_changes). When present the
+   * generator is told to REVISE its prior spec to address them, rather than write a
+   * fresh one. Absent on the first generation.
+   */
+  notes?: string;
 };
 
 /**
@@ -72,7 +78,17 @@ async function defaultSpecWriter(input: SpecGenInput): Promise<string | null> {
 
   mkdirSync(specDir, { recursive: true });
   const promptFile = join(specDir, `${input.taskId}.md`);
-  writeFileSync(promptFile, buildExpandPrompt(input.brief), "utf8");
+  // On a REVISE round, append the operator's change requests so the regenerated spec
+  // addresses them (the base brief grounds the spec; the notes steer the revision).
+  let prompt = buildExpandPrompt(input.brief);
+  if (input.notes && input.notes.trim()) {
+    prompt +=
+      `\n\n=== SPEC CHANGES REQUESTED BY THE OPERATOR ===\n` +
+      `Your previous spec was reviewed and changes were requested. REVISE the spec to ` +
+      `address the following, keeping everything else that was correct:\n\n` +
+      input.notes.trim();
+  }
+  writeFileSync(promptFile, prompt, "utf8");
   const cmd = tmpl
     .replaceAll("{{CTO_SESSION}}", ctoSessionFlag(config.ctoSessionId))
     .replaceAll("{{PROMPT_FILE}}", promptFile);

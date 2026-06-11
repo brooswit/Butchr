@@ -14,12 +14,12 @@ import * as herdr from "./herdr.ts";
 
 const git = config.gitBin;
 
-// A task in one of these states is DONE — its worktree/branch/herdr pane are
-// safe to reap. Everything else (queued/blocked/running/review, plus the legacy
-// transient `finalizing`) is still live and must be left alone. In particular
-// `blocked` is a pre-dispatch WAITING state, not terminal: its worktree (and the
-// session it will resume into) must survive until its blockers merge.
-const TERMINAL = new Set(["merged", "aborted", "rejected"]);
+// A task in one of these terminal idle states is DONE — its worktree/branch/herdr
+// pane are safe to reap. Everything else (idea/spec_review/blocked/needs_info/
+// in_progress/in_review/finalizing) is still live and must be left alone. In
+// particular `blocked` is a pre-dispatch WAITING state, not terminal: its worktree
+// (and the session it will resume into) must survive until its blockers merge.
+const TERMINAL = new Set(["merged", "aborted"]);
 
 // Most recent reapOrphans outcome, retained so /health can surface self-heal
 // activity at a glance (see server.healthResponse). `at` is null until the first
@@ -103,7 +103,7 @@ export async function reapOrphans(
   if (herdrUp) {
     const terminal = db
       .query<TaskRow, []>(
-        `SELECT * FROM tasks WHERE status IN ('merged','aborted','rejected')`,
+        `SELECT * FROM tasks WHERE status IN ('merged','aborted')`,
       )
       .all();
     for (const t of terminal) {

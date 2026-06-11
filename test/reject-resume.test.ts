@@ -9,7 +9,7 @@
 // re-entry is verified separately by the operator (it needs a live stack).
 //
 // What this exercises:
-//   1. tasks.rejectTask — note validation, review -> queued transition, note
+//   1. tasks.rejectTask — note validation, in_review -> in_progress transition, note
 //      persistence, and (critically) that the existing session_id is PRESERVED
 //      so the dispatcher will `--resume` rather than start fresh.
 //   2. taskmd.renderReworkPrompt — the focused rework prompt the resumed agent
@@ -89,7 +89,7 @@ function seedTask(opts: {
     { id: opts.id, created, status: opts.status as any, context: [] },
     `Implement feature for ${opts.id}.`,
   );
-  // Front matter starts "queued"; align it with the seeded DB status.
+  // Front matter starts "in_progress"; align it with the seeded DB status.
   taskmdMod.updateTaskMdStatus(REPO_ROOT, opts.id, opts.status as any);
   return opts.id;
 }
@@ -101,17 +101,17 @@ function dbRow(id: string) {
 }
 
 describe("rejectTask", () => {
-  test("review -> queued, persists note, PRESERVES session_id", async () => {
+  test("in_review -> in_progress, persists note, PRESERVES session_id", async () => {
     const SESSION = "sess-preserve-1111-2222-3333";
-    const id = seedTask({ id: "rej-ok", status: "review", sessionId: SESSION });
+    const id = seedTask({ id: "rej-ok", status: "in_review", sessionId: SESSION });
     const note = "Please fix the off-by-one in the loop bound.";
 
     const view = await tasksMod.rejectTask(id, note);
 
-    // Returned view + DB row both flipped to queued (re-queued for --resume).
-    expect(view.status).toBe("queued");
+    // Returned view + DB row both flipped to in_progress (re-queued for --resume).
+    expect(view.status).toBe("in_progress");
     const row = dbRow(id);
-    expect(row.status).toBe("queued");
+    expect(row.status).toBe("in_progress");
 
     // The note is persisted on the row for the resumed agent / UI.
     expect(row.review_note).toBe(note);
@@ -120,17 +120,17 @@ describe("rejectTask", () => {
     // dispatcher will `--resume` the same Claude session (not start fresh).
     expect(row.session_id).toBe(SESSION);
 
-    // task.md records the rejection note and the queued status.
+    // task.md records the rejection note and the in_progress status.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, id), "utf8");
     expect(md).toContain(note);
-    expect(md).toContain("status: queued");
+    expect(md).toContain("status: in_progress");
     expect(md).toContain("### Rejection");
   });
 
   test("note flows into renderReworkPrompt for the resumed agent", async () => {
     const id = seedTask({
       id: "rej-prompt",
-      status: "review",
+      status: "in_review",
       sessionId: "sess-prompt-abcd",
     });
     const note = "Rename `foo` to `bar` and add a unit test.";
@@ -146,7 +146,7 @@ describe("rejectTask", () => {
   test("empty / whitespace note is rejected with HttpError 400", async () => {
     const id = seedTask({
       id: "rej-empty",
-      status: "review",
+      status: "in_review",
       sessionId: "sess-empty",
     });
 
@@ -160,14 +160,14 @@ describe("rejectTask", () => {
       expect(err).toBeDefined();
       expect(err.status).toBe(400);
     }
-    // Task untouched — still in review, session id intact.
+    // Task untouched — still in_review, session id intact.
     const row = dbRow(id);
-    expect(row.status).toBe("review");
+    expect(row.status).toBe("in_review");
     expect(row.session_id).toBe("sess-empty");
   });
 
-  test("rejecting a task not in `review` errors with 409", async () => {
-    for (const status of ["queued", "merged", "running"]) {
+  test("rejecting a task not in a feedback state errors with 409", async () => {
+    for (const status of ["in_progress", "merged", "aborted"]) {
       const id = seedTask({
         id: `rej-bad-${status}`,
         status,
@@ -206,7 +206,7 @@ describe("renderReworkPrompt", () => {
         "---",
         "id: rw-1",
         "created: 2026-01-01T00:00:00.000Z",
-        "status: queued",
+        "status: in_progress",
         "context: []",
         "---",
         "",
@@ -234,7 +234,7 @@ describe("renderReworkPrompt", () => {
         "---",
         "id: rw-2",
         "created: 2026-01-01T00:00:00.000Z",
-        "status: queued",
+        "status: in_progress",
         "context: []",
         "---",
         "",

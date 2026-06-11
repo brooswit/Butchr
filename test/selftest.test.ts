@@ -96,11 +96,11 @@ test("happy path (no merge): resolve→create→dispatch→review→abort cleanu
   let aborted = false;
   const { api, calls } = mockApi({
     directories: [SANDBOX],
-    created: { id: "probe-1", status: "queued" },
+    created: { id: "probe-1", status: "in_progress" },
     taskSequence: [
-      { id: "probe-1", status: "queued" },
-      { id: "probe-1", status: "running" },
-      { id: "probe-1", status: "review", ci_status: "pass" },
+      { id: "probe-1", status: "in_progress" },
+      { id: "probe-1", status: "in_progress" },
+      { id: "probe-1", status: "in_review", ci_status: "pass" },
     ],
     onAbort: () => (aborted = true),
   });
@@ -126,13 +126,13 @@ test("happy path (no merge): resolve→create→dispatch→review→abort cleanu
 test("dispatch observed even when polling skips straight to review", async () => {
   const { api } = mockApi({
     directories: [SANDBOX],
-    taskSequence: [{ id: "probe-1", status: "review", ci_status: "pass" }],
+    taskSequence: [{ id: "probe-1", status: "in_review", ci_status: "pass" }],
   });
   const result = await runSelftest({ api, sleep: noSleep, now: fakeClock(), marker: "m2" });
   expect(result.ok).toBe(true);
   const dispatch = result.stages.find((s) => s.name === "dispatch");
   expect(dispatch?.ok).toBe(true);
-  expect(dispatch?.detail).toContain("via review");
+  expect(dispatch?.detail).toContain("via in_review");
 });
 
 test("--merge: approves, confirms merge, then reverts to clean the sandbox", async () => {
@@ -141,11 +141,13 @@ test("--merge: approves, confirms merge, then reverts to clean the sandbox", asy
   const { api, calls } = mockApi({
     directories: [SANDBOX],
     taskSequence: [
-      { id: "probe-1", status: "running" },
-      { id: "probe-1", status: "review", ci_status: "pass" },
+      { id: "probe-1", status: "in_progress" },
+      { id: "probe-1", status: "in_review", ci_status: "pass" },
+      { id: "probe-1", status: "finalizing" },
+      { id: "probe-1", status: "merged", merge_base_sha: "base0", merged_sha: "tip9" },
     ],
-    // The approved task carries its recorded merge range so cleanup can revert it.
-    approve: { id: "probe-1", status: "merged", merge_base_sha: "base0", merged_sha: "tip9" },
+    // Approve succeeds (no conflictSentBack); merge range comes from the polled merged task.
+    approve: { task: { id: "probe-1", status: "finalizing" } },
     onAbort: () => (aborted = true),
   });
   const result = await runSelftest({
@@ -173,8 +175,8 @@ test("--merge failure: a conflict-sent-back approve fails AND still cleans up", 
   let aborted = false;
   const { api } = mockApi({
     directories: [SANDBOX],
-    taskSequence: [{ id: "probe-1", status: "review", ci_status: "pass" }],
-    approve: { task: { id: "probe-1", status: "running" }, conflictSentBack: true },
+    taskSequence: [{ id: "probe-1", status: "in_review", ci_status: "pass" }],
+    approve: { task: { id: "probe-1", status: "in_progress" }, conflictSentBack: true },
     onAbort: () => (aborted = true),
   });
   const result = await runSelftest({
@@ -195,14 +197,14 @@ test("probe failing before review is reported and cleaned up", async () => {
   const { api } = mockApi({
     directories: [SANDBOX],
     taskSequence: [
-      { id: "probe-1", status: "running" },
-      { id: "probe-1", status: "failed", last_dispatch_error: "herdr down" },
+      { id: "probe-1", status: "in_progress" },
+      { id: "probe-1", status: "aborted", last_dispatch_error: "herdr down" },
     ],
     onAbort: () => (aborted = true),
   });
   const result = await runSelftest({ api, sleep: noSleep, now: fakeClock(), marker: "m5" });
   expect(result.ok).toBe(false);
-  expect(result.error).toMatch(/failed.*herdr down/);
+  expect(result.error).toMatch(/aborted.*herdr down/);
   expect(aborted).toBe(true);
 });
 
@@ -210,8 +212,8 @@ test("timeout waiting for review fails and still cleans up", async () => {
   let aborted = false;
   const { api } = mockApi({
     directories: [SANDBOX],
-    // Never advances past queued → the deadline is crossed.
-    taskSequence: [{ id: "probe-1", status: "queued" }],
+    // Never advances past in_progress → the deadline is crossed.
+    taskSequence: [{ id: "probe-1", status: "in_progress" }],
     onAbort: () => (aborted = true),
   });
   const result = await runSelftest({
@@ -232,7 +234,7 @@ test("a failed run whose cleanup ALSO fails surfaces the cleanup failure", async
     if (method === "GET" && path === "/api/directories") return [SANDBOX];
     if (method === "POST" && /\/tasks$/.test(path)) return { id: "probe-1", status: "queued" };
     if (method === "GET" && /\/api\/tasks\//.test(path)) {
-      return { id: "probe-1", status: "failed", last_dispatch_error: "boom" };
+      return { id: "probe-1", status: "aborted", last_dispatch_error: "boom" };
     }
     if (method === "POST" && /\/abort$/.test(path)) throw new Error("abort 500");
     throw new Error(`unexpected ${method} ${path}`);

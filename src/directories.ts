@@ -72,20 +72,22 @@ function counts(directoryId: string): Record<string, number> {
       `SELECT status, COUNT(*) AS n FROM tasks WHERE directory_id=? GROUP BY status`,
     )
     .all(directoryId);
+  // One bucket per canonical status (see db.STATE_META), plus the orthogonal `idle`
+  // pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
   const out: Record<string, number> = {
-    idea: 0, queued: 0, blocked: 0, running: 0, idle: 0, review: 0, finalizing: 0,
-    merged: 0, rejected: 0, aborted: 0, failed: 0,
+    idea: 0, spec_review: 0, blocked: 0, needs_info: 0, in_progress: 0, idle: 0,
+    in_review: 0, finalizing: 0, merged: 0, aborted: 0,
   };
   for (const r of rows) out[r.status] = r.n;
-  // `idle` is a flag on running tasks, not a status — peel it out of the running
-  // count so the dashboard shows active vs. quiet agents separately.
+  // `idle` is a flag on a LIVE build agent (in_progress with a pane), not a status —
+  // peel it out of the in_progress count so the dashboard shows active vs. quiet agents.
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE directory_id=? AND status='running' AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE directory_id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1`,
     )
     .get(directoryId)!.n;
   out.idle = idle;
-  out.running -= idle;
+  out.in_progress -= idle;
   return out;
 }
 
@@ -165,11 +167,13 @@ export function updateDirectoryGateCmd(id: string, gateCmd: unknown): DirectoryV
  * plus the directory's effective gate command, and accumulates a `totals` row. The
  * buckets (a task can fall in more than one — `needsAttention` is the operator
  * pull-signal, deliberately overlapping `review`/`failed`, matching /health):
- *  - `active`         — in-flight work needing no human: idea + queued + blocked +
- *                       running + idle + finalizing.
- *  - `review`         — waiting for a human to review/merge.
- *  - `failed`         — gave up dispatching / auto-reverted off main.
- *  - `needsAttention` — review + failed (what to look at right now).
+ *  - `active`         — in-flight work needing no human (idle/agent, non-feedback):
+ *                       idea + blocked + in_progress + idle + finalizing.
+ *  - `review`         — FEEDBACK states awaiting a human: spec_review + in_review +
+ *                       needs_info (kept under the `review` field name for the API).
+ *  - `failed`         — retained field; always 0 (the canonical model has no `failed`
+ *                       state — a dispatch/finalize give-up or revert lands in `aborted`).
+ *  - `needsAttention` — what to look at right now (= review).
  */
 export type DashboardDirectory = {
   id: string;
@@ -204,9 +208,10 @@ export function dashboard(): Dashboard {
   const directories = rows.map((d) => {
     const c = counts(d.id);
     const active =
-      (c.idea ?? 0) + (c.queued ?? 0) + (c.blocked ?? 0) + (c.running ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
-    const review = c.review ?? 0;
-    const failed = c.failed ?? 0;
+      (c.idea ?? 0) + (c.blocked ?? 0) + (c.in_progress ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
+    // FEEDBACK states awaiting a human (kept under the `review` field name).
+    const review = (c.spec_review ?? 0) + (c.in_review ?? 0) + (c.needs_info ?? 0);
+    const failed = 0; // no `failed` state in the canonical model — see comment above
     const needsAttention = review + failed;
     totals.active += active;
     totals.review += review;

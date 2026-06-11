@@ -1,4 +1,4 @@
-// Regression test for butchr's ASK -> AWAITING-INPUT -> ANSWER -> RESUME path —
+// Regression test for butchr's ASK -> NEEDS_INFO -> ANSWER -> RESUME path —
 // the unified non-blocking handshake that replaced the old auto-answer-via-CTO
 // mechanism (src/cto.ts, now retired).
 //
@@ -10,10 +10,10 @@
 // verified separately by the operator (it needs a live stack).
 //
 // What this exercises:
-//   1. tasks.markAwaitingInputFromAgent — the MCP `ask` tool's core: running ->
-//      awaiting_input, stores the question, clears the pane (the agent exits), and
+//   1. tasks.markNeedsInfoFromAgent — the MCP `ask` tool's core: in_progress ->
+//      needs_info, stores the question, clears the pane (the agent exits), and
 //      reports terminal/notfound for non-running tasks. NON-blocking, no CTO Claude.
-//   2. tasks.answerTask — answer validation, awaiting_input -> queued transition,
+//   2. tasks.answerTask — answer validation, needs_info -> in_progress transition,
 //      answer persistence (the `answer` column the dispatcher injects), question
 //      clearing, task.md Q&A logging, and (critically) that session_id is PRESERVED
 //      so the dispatcher will `--resume` rather than start fresh.
@@ -104,84 +104,84 @@ function dbRow(id: string) {
     .get(id)!;
 }
 
-describe("markAwaitingInputFromAgent (the `ask` tool core)", () => {
-  test("running -> awaiting_input: stores the question, clears the pane", () => {
+describe("markNeedsInfoFromAgent (the `ask` tool core)", () => {
+  test("in_progress -> needs_info: stores the question, clears the pane", () => {
     const id = seedTask({
       id: "ask-ok",
-      status: "running",
+      status: "in_progress",
       sessionId: "sess-ask-1",
       paneId: "pane-7",
     });
     const question = "Should the cache be per-user or global?";
 
-    const state = tasksMod.markAwaitingInputFromAgent(id, question);
+    const state = tasksMod.markNeedsInfoFromAgent(id, question);
     expect(state).toBe("ok");
 
     const row = dbRow(id);
-    expect(row.status).toBe("awaiting_input");
+    expect(row.status).toBe("needs_info");
     expect(row.question).toBe(question);
-    // The agent is exiting — no live pane is held for an awaiting_input task.
+    // The agent is exiting — no live pane is held for a needs_info task.
     expect(row.herdr_pane_id).toBeNull();
     // Session id is untouched (it's what the answer-resume will `--resume`).
     expect(row.session_id).toBe("sess-ask-1");
 
     // task.md mirrors the new status.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, id), "utf8");
-    expect(md).toContain("status: awaiting_input");
+    expect(md).toContain("status: needs_info");
   });
 
-  test("a duplicate ask (already awaiting_input) stays ok and keeps the question", () => {
-    const id = seedTask({ id: "ask-dup", status: "running", sessionId: "sess-dup" });
-    expect(tasksMod.markAwaitingInputFromAgent(id, "first?")).toBe("ok");
-    expect(tasksMod.markAwaitingInputFromAgent(id, "second?")).toBe("ok");
+  test("a duplicate ask (already needs_info) stays ok and keeps the question", () => {
+    const id = seedTask({ id: "ask-dup", status: "in_progress", sessionId: "sess-dup" });
+    expect(tasksMod.markNeedsInfoFromAgent(id, "first?")).toBe("ok");
+    expect(tasksMod.markNeedsInfoFromAgent(id, "second?")).toBe("ok");
     const row = dbRow(id);
-    expect(row.status).toBe("awaiting_input");
+    expect(row.status).toBe("needs_info");
     expect(row.question).toBe("second?");
   });
 
   test("a terminal task reports `terminal` and is left untouched", () => {
     for (const status of ["merged", "aborted"]) {
       const id = seedTask({ id: `ask-term-${status}`, status });
-      expect(tasksMod.markAwaitingInputFromAgent(id, "q?")).toBe("terminal");
+      expect(tasksMod.markNeedsInfoFromAgent(id, "q?")).toBe("terminal");
       expect(dbRow(id).status).toBe(status);
       expect(dbRow(id).question).toBeNull();
     }
   });
 
   test("an unknown task reports `notfound`", () => {
-    expect(tasksMod.markAwaitingInputFromAgent("no-such", "q?")).toBe("notfound");
+    expect(tasksMod.markNeedsInfoFromAgent("no-such", "q?")).toBe("notfound");
   });
 });
 
 describe("answerTask", () => {
-  test("awaiting_input -> queued: stores answer, clears question, PRESERVES session_id", async () => {
+  test("needs_info -> in_progress: stores answer, clears question, PRESERVES session_id", async () => {
     const SESSION = "sess-answer-aaaa-bbbb";
-    const id = seedTask({ id: "ans-ok", status: "running", sessionId: SESSION });
-    tasksMod.markAwaitingInputFromAgent(id, "Per-user or global cache?");
+    const id = seedTask({ id: "ans-ok", status: "in_progress", sessionId: SESSION });
+    tasksMod.markNeedsInfoFromAgent(id, "Per-user or global cache?");
 
     const answer = "Per-user — keyed by the authenticated user id.";
     const view = await tasksMod.answerTask(id, answer);
 
     // Re-queued for the --resume relaunch.
-    expect(view.status).toBe("queued");
+    expect(view.status).toBe("in_progress");
     const row = dbRow(id);
-    expect(row.status).toBe("queued");
+    expect(row.status).toBe("in_progress");
     // The answer is held for the dispatcher to inject; the question is cleared.
     expect(row.answer).toBe(answer);
     expect(row.question).toBeNull();
     // The whole point of resume: the session id is untouched.
     expect(row.session_id).toBe(SESSION);
 
-    // task.md records the Q&A and the queued status.
+    // task.md records the Q&A and the in_progress status.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, id), "utf8");
     expect(md).toContain("Clarifications");
     expect(md).toContain("Per-user or global cache?");
     expect(md).toContain(answer);
-    expect(md).toContain("status: queued");
+    expect(md).toContain("status: in_progress");
   });
 
-  test("answering a task NOT awaiting input errors with 409", async () => {
-    for (const status of ["queued", "running", "review", "merged"]) {
+  test("answering a task NOT in needs_info errors with 409", async () => {
+    for (const status of ["in_progress", "in_review", "merged"]) {
       const id = seedTask({ id: `ans-bad-${status}`, status, sessionId: "s" });
       let err: any;
       try {
@@ -195,9 +195,9 @@ describe("answerTask", () => {
     }
   });
 
-  test("empty / whitespace answer is rejected with 400; task stays awaiting_input", async () => {
-    const id = seedTask({ id: "ans-empty", status: "running", sessionId: "s" });
-    tasksMod.markAwaitingInputFromAgent(id, "q?");
+  test("empty / whitespace answer is rejected with 400; task stays needs_info", async () => {
+    const id = seedTask({ id: "ans-empty", status: "in_progress", sessionId: "s" });
+    tasksMod.markNeedsInfoFromAgent(id, "q?");
     for (const bad of ["", "   ", "\n\t "]) {
       let err: any;
       try {
@@ -209,7 +209,7 @@ describe("answerTask", () => {
       expect(err.status).toBe(400);
     }
     const row = dbRow(id);
-    expect(row.status).toBe("awaiting_input");
+    expect(row.status).toBe("needs_info");
     expect(row.question).toBe("q?");
     expect(row.answer).toBeNull();
   });
@@ -237,14 +237,14 @@ describe("renderAnswerPrompt", () => {
 });
 
 describe("answer-resume relaunch (dispatcher.resolveLaunchCommand)", () => {
-  // After answerTask the row is queued, carries an `answer`, and keeps started_at +
+  // After answerTask the row is in_progress, carries an `answer`, and keeps started_at +
   // session_id — so the dispatcher resumes the SAME claude session and injects the
   // answer prompt. We assert resolveLaunchCommand picks the --resume path; the
   // answer-vs-rework prompt selection itself is renderAnswerPrompt (above).
   test("an answered task resumes its existing session via --resume", async () => {
     const SESSION = "11111111-2222-3333-4444-aaaaaaaaaaaa";
-    const id = seedTask({ id: "ans-resume", status: "running", sessionId: SESSION });
-    tasksMod.markAwaitingInputFromAgent(id, "Which db?");
+    const id = seedTask({ id: "ans-resume", status: "in_progress", sessionId: SESSION });
+    tasksMod.markNeedsInfoFromAgent(id, "Which db?");
     await tasksMod.answerTask(id, "SQLite.");
 
     const row = dbRow(id);

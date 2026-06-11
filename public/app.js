@@ -52,15 +52,19 @@ function fmtTime(iso) {
   if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
-// CONCEPTUAL STATUS LABELS for the unified pipeline (idea → ready → in progress →
-// review → merged, with the lateral states). The internal status VALUES are kept as-is
-// to minimize churn (`queued`/`running` are NOT renamed in the DB); the webapp just
-// surfaces friendlier labels. The chip's CSS CLASS stays the raw status (so colors
-// don't drift); only the display TEXT is mapped. Any status not listed shows verbatim.
+// CANONICAL STATUS LABELS for the 9-state model. Maps internal status keys to their
+// friendly display labels. Any status not listed shows verbatim (fallback for
+// unknown values from historical audit logs). The chip CSS class stays the raw status.
 const STATUS_LABELS = {
-  queued: "ready",
-  running: "in progress",
-  awaiting_input: "awaiting input",
+  spec_review: "spec review",
+  in_progress: "in progress",
+  in_review: "in review",
+  needs_info: "needs info",
+  finalizing: "finalizing",
+  idea: "idea",
+  blocked: "blocked",
+  merged: "merged",
+  aborted: "aborted",
 };
 function statusLabel(status) {
   return STATUS_LABELS[status] || status;
@@ -68,10 +72,40 @@ function statusLabel(status) {
 function chip(status) {
   return `<span class="chip ${esc(status)}">${esc(statusLabel(status))}</span>`;
 }
-// `idle` is a flag on a running task (agent alive but its CLI has gone quiet),
-// not a real lifecycle status. Render it as its own chip in place of "running".
+// STATE-KIND helpers — mirror STATE_META from src/db.ts so the UI can show whether
+// a state is agent-driven, feedback-awaiting, or idle (terminal/blocked).
+const STATE_KIND = {
+  idea: "agent",
+  spec_review: "feedback",
+  blocked: "idle",
+  needs_info: "feedback",
+  in_progress: "agent",
+  in_review: "feedback",
+  finalizing: "agent",
+  merged: "idle",
+  aborted: "idle",
+};
+const AGENT_TYPE = {
+  idea: "ceo-agent",
+  in_progress: "workspace-agent",
+  finalizing: "workspace-agent",
+};
+// What an operator is awaiting for each feedback state (shown as a chip hint).
+const AWAITED_LABEL = {
+  spec_review: "spec approval",
+  in_review: "diff review",
+  needs_info: "answer to question",
+};
+function stateKind(status) {
+  return STATE_KIND[status] || "idle";
+}
+function awaitedLabel(status) {
+  return AWAITED_LABEL[status] || null;
+}
+// `idle` is a flag on an in_progress task (agent alive but its CLI has gone quiet),
+// not a real lifecycle status. Render it as its own chip in place of "in progress".
 function effStatus(t) {
-  return t.status === "running" && t.idle ? "idle" : t.status;
+  return t.status === "in_progress" && t.idle ? "idle" : t.status;
 }
 // Renders a task's badge cluster — the status chip plus the optional plan /
 // conflict badges — as an HTML string. Each badge's markup lives here only, so how
@@ -79,11 +113,26 @@ function effStatus(t) {
 // caller's call (History/table stay lean, the detail header shows all), passed via
 // opts; taskChips renders exactly the set requested. The conflict badge is always
 // included when set — every view already shows it.
-function taskChips(t, { plan = false } = {}) {
+// `kind` shows a small state-kind chip (agent/feedback/idle) plus for feedback states
+// the awaited artifact label — surfacing the canonical 3-kind model in the UI.
+function taskChips(t, { plan = false, kind = false } = {}) {
+  const st = effStatus(t);
+  const kindStr = stateKind(st);
+  const awaited = awaitedLabel(st);
+  const kindChip = kind
+    ? ` <span class="chip state-kind state-kind-${esc(kindStr)}" title="${esc(
+        kindStr === "feedback"
+          ? "feedback state — awaiting " + (awaited || "operator response")
+          : kindStr === "agent"
+          ? "agent state — " + (AGENT_TYPE[st] || "agent") + " is running"
+          : "idle state"
+      )}">${esc(kindStr)}${awaited ? ": " + esc(awaited) : ""}</span>`
+    : "";
   return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
     + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
-    + chip(effStatus(t))
-    + (t.conflict ? ' <span class="chip rejected">conflict</span>' : "")
+    + chip(st)
+    + kindChip
+    + (t.conflict ? ' <span class="chip aborted">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
     // (priority 0 is the silent FIFO default, shown on no card).
     + (Number(t.priority) ? ` <span class="chip priority" title="dispatch priority — higher runs sooner">prio ${esc(String(t.priority))}</span>` : "");
@@ -388,9 +437,9 @@ function stopActivity() {
 }
 
 // A task whose agent is live enough to have transcript activity worth pulsing:
-// running (incl. the idle sub-state, which is still status==="running").
+// in_progress (incl. the idle sub-state, which is still status==="in_progress").
 function isPulsing(t) {
-  return t.status === "running";
+  return t.status === "in_progress";
 }
 
 // The pulse markup embedded into a card/row's innerHTML. Pre-fills the last-known
@@ -576,17 +625,17 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["idea", "blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted"]
+  const pills = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "idle", "in_review", "finalizing", "merged", "aborted"]
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
-        : s === "running" && c[s] ? "count-pill has-running"
+        : s === "in_progress" && c[s] ? "count-pill has-running"
         : s === "idle" && c[s] ? "count-pill has-idle"
-        : s === "review" && c[s] ? "count-pill has-review"
-        : s === "awaiting_input" && c[s] ? "count-pill has-awaiting"
+        : s === "in_review" && c[s] ? "count-pill has-review"
+        : s === "spec_review" && c[s] ? "count-pill has-review"
+        : s === "needs_info" && c[s] ? "count-pill has-awaiting"
         : s === "finalizing" && c[s] ? "count-pill has-finalizing"
-        : s === "failed" && c[s] ? "count-pill has-failed" : "count-pill";
-      const label = s === "awaiting_input" ? "awaiting" : statusLabel(s);
-      return `<span class="${cls}">${label} <b>${c[s] || 0}</b></span>`;
+        : "count-pill";
+      return `<span class="${cls}">${statusLabel(s)} <b>${c[s] || 0}</b></span>`;
     }).join("");
   // Aggregate bucket badges (active / review / needs-attention / failed) when the
   // card comes from the dashboard rollup (those fields are absent on a plain
@@ -973,26 +1022,30 @@ function openNewTaskModal(directoryId) {
 }
 
 function queueLine(tasks) {
-  const q = tasks.filter((t) => t.status === "queued").length;
+  const idea = tasks.filter((t) => t.status === "idea").length;
+  const specRev = tasks.filter((t) => t.status === "spec_review").length;
   const b = tasks.filter((t) => t.status === "blocked").length;
-  const r = tasks.filter((t) => t.status === "running" && !t.idle).length;
-  const i = tasks.filter((t) => t.status === "running" && t.idle).length;
+  const ni = tasks.filter((t) => t.status === "needs_info").length;
+  const r = tasks.filter((t) => t.status === "in_progress" && !t.idle).length;
+  const i = tasks.filter((t) => t.status === "in_progress" && t.idle).length;
+  const inRev = tasks.filter((t) => t.status === "in_review").length;
   const f = tasks.filter((t) => t.status === "finalizing").length;
-  const aw = tasks.filter((t) => t.status === "awaiting_input").length;
   const parts = [];
-  if (r) parts.push(`${r} running`);
+  if (r) parts.push(`${r} in progress`);
   if (i) parts.push(`${i} idle`);
-  if (aw) parts.push(`${aw} awaiting answer`);
   if (f) parts.push(`${f} finalizing`);
+  if (inRev) parts.push(`${inRev} in review`);
+  if (specRev) parts.push(`${specRev} spec review`);
+  if (ni) parts.push(`${ni} needs info`);
   if (b) parts.push(`${b} blocked`);
-  if (q) parts.push(`${q} queued`);
+  if (idea) parts.push(`${idea} idea`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
 // Lifecycle statuses still in flight — these stay in the main directory list.
-// Everything else (merged, aborted, rejected) is terminal and lives in History.
+// Everything else (merged, aborted) is terminal and lives in History.
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
-const ACTIVE_STATUSES = ["idea", "blocked", "queued", "running", "review", "awaiting_input", "finalizing"];
+const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "in_review", "finalizing"];
 const HISTORY_KEY = "butchr-history-open";
 
 // Directory page body mode: the task "List", the pipeline "Board", or the
@@ -1019,7 +1072,7 @@ function historyOpen() {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["idea", "blocked", "queued", "running", "idle", "review", "awaiting_input", "finalizing", "failed", "merged", "aborted", "rejected"];
+const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "idle", "in_review", "finalizing", "merged", "aborted"];
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
@@ -1275,8 +1328,9 @@ function tasksTable(tasks) {
   const tb = el("tbody");
   for (const t of tasks) {
     const tr = el("tr");
-    const action = t.status === "review" ? "review →"
-      : t.status === "awaiting_input" ? "answer →" : "open →";
+    const action = t.status === "in_review" ? "review →"
+      : t.status === "spec_review" ? "review spec →"
+      : t.status === "needs_info" ? "answer →" : "open →";
     const termLink = isLive(t)
       ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
     tr.innerHTML = `
@@ -1525,12 +1579,13 @@ function renderGraph(tasks) {
 // they live in the List view's Finished section. Re-rendered wholesale on every
 // SSE event by the directory view, so it live-updates for free.
 const BOARD_LANES = [
-  { key: "review", title: "Ready to merge", hint: "ready to merge", match: (t) => t.status === "review" },
-  { key: "awaiting_input", title: "Awaiting answer", hint: "awaiting answer", match: (t) => t.status === "awaiting_input" },
-  { key: "finalizing", title: "Merging", hint: "merging", match: (t) => t.status === "finalizing" },
-  { key: "running", title: "In progress", hint: "running", match: (t) => t.status === "running" },
+  { key: "spec_review", title: "Spec review", hint: "spec review", match: (t) => t.status === "spec_review" },
+  { key: "in_review", title: "In review", hint: "in review", match: (t) => t.status === "in_review" },
+  { key: "needs_info", title: "Needs info", hint: "needs info", match: (t) => t.status === "needs_info" },
+  { key: "finalizing", title: "Finalizing", hint: "finalizing", match: (t) => t.status === "finalizing" },
+  { key: "in_progress", title: "In progress", hint: "in progress", match: (t) => t.status === "in_progress" },
   { key: "blocked", title: "Blocked", hint: "blocked", match: (t) => t.status === "blocked" },
-  { key: "queued", title: "Queued", hint: "queued", match: (t) => t.status === "queued" },
+  { key: "idea", title: "Idea", hint: "idea", match: (t) => t.status === "idea" },
 ];
 
 function renderBoard(tasks) {
@@ -1555,9 +1610,9 @@ function renderBoard(tasks) {
 
   for (const lane of BOARD_LANES) {
     const items = active.filter(lane.match).sort(byCreated);
-    // Always render the four core lanes so the pipeline skeleton stays visible;
-    // the finalizing lane only appears when something is actually merging.
-    if (lane.key === "finalizing" && items.length === 0) continue;
+    // Always render the five core lanes so the pipeline skeleton stays visible;
+    // the finalizing and spec_review lanes only appear when something is present.
+    if ((lane.key === "finalizing" || lane.key === "spec_review") && items.length === 0) continue;
     board.appendChild(boardLane(lane, items, byId));
   }
   return board;
@@ -1611,7 +1666,7 @@ function boardCard(t, lane, byId) {
       for (const bid of ids) {
         const b = byId.get(bid);
         const st = b ? effStatus(b) : "unknown";
-        const stuck = st === "aborted" || st === "rejected";
+        const stuck = st === "aborted";
         const row = el("a", {
           class: "bc-blocker" + (stuck ? " stuck" : ""),
           href: "#/task/" + esc(bid),
@@ -1969,11 +2024,11 @@ async function renderTask(id) {
     headerRight.appendChild(term);
   }
   headerRight.appendChild(el("div", {
-    html: taskChips(t, { plan: true }),
+    html: taskChips(t, { plan: true, kind: true }),
   }));
-  // Abort is available from any non-terminal state EXCEPT finalizing, whose merge
-  // already landed in main (it auto-completes to merged).
-  const canAbort = !["merged", "aborted", "finalizing"].includes(t.status);
+  // Abort is available from any non-terminal state. Terminal states are merged/aborted.
+  // finalizing is an agent state (still in flight) — it IS abortable.
+  const canAbort = !["merged", "aborted"].includes(t.status);
   if (canAbort) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
@@ -2084,16 +2139,12 @@ async function renderTask(id) {
   wrap.appendChild(el("h2", {}, "Prompt"));
   wrap.appendChild(el("pre", { class: "block", html: esc(t.prompt || "—") }));
 
-  // failed dispatch — the agent never got off the ground after the dispatcher
-  // exhausted its retries. Surface why (last_dispatch_error) and how many tries
-  // it took, plus a Re-queue action that clears the retry state and dispatches
-  // again. On success the task flips back to `queued` and this panel disappears.
-  // A `failed` task carrying a revert_reason isn't a dispatch failure — its merge
-  // fast-forwarded into main but the post-merge verify gate (build + tests) came
-  // back RED, so the merge was auto-reverted off main. Surface that distinctly,
-  // with the failing build/test output. Re-queue re-launches the agent (worktree
-  // + branch were kept) to fix it.
-  if (t.status === "failed" && t.revert_reason) {
+  // aborted with revert_reason — the task's merge was fast-forwarded into main but the
+  // post-merge verify gate (build + tests) came back RED, so the merge was auto-reverted
+  // off main and the task flagged as aborted. Surface that distinctly with the failing
+  // build/test output. Re-queue re-launches the agent (worktree + branch were kept).
+  // An aborted task WITHOUT revert_reason was a dispatch give-up or operator abort.
+  if (t.status === "aborted" && t.revert_reason) {
     const panel = el("div", { class: "panel failed-panel" });
     panel.innerHTML = `
       <h2 style="margin-top:0">Merge auto-reverted off main</h2>
@@ -2104,7 +2155,7 @@ async function renderTask(id) {
         <small class="muted">Re-launches the agent (in-context) to fix the breakage, then it can be re-reviewed.</small>
       </div>`;
     wrap.appendChild(panel);
-  } else if (t.status === "failed") {
+  } else if (t.status === "aborted" && t.last_dispatch_error) {
     const n = t.dispatch_attempts || 0;
     const panel = el("div", { class: "panel failed-panel" });
     panel.innerHTML = `
@@ -2182,10 +2233,10 @@ async function renderTask(id) {
   // on first open (transcripts get large) and paged via a "Load more" button.
   if (t.session_id) wrap.appendChild(renderTranscriptPanel(t.id));
 
-  // diff + review controls (when in review)
-  if (t.status === "review") {
+  // diff + review controls (when in_review)
+  if (t.status === "in_review") {
     // CI GATE badge — shown BEFORE the diff. Reflects the build/test job butchr
-    // runs in the task's worktree on the review transition; updates live via the
+    // runs in the task's worktree on the in_review transition; updates live via the
     // SSE-driven re-render when CI flips running→pass/fail.
     wrap.appendChild(ciBadge(t));
     // SPEC-CONFORMANCE badge — next to the CI badge. Reflects the read-only reviewer
@@ -2216,11 +2267,30 @@ async function renderTask(id) {
     wrap.appendChild(controls);
   }
 
-  // awaiting-input answer box — the agent paused mid-task by calling the MCP `ask`
+  // spec_review — the CEO agent generated a spec; operator approves to start the
+  // workspace agent, or requests changes to revise the spec (back to idea).
+  if (t.status === "spec_review") {
+    const controls = el("div", { class: "panel", style: "margin-top:18px" });
+    controls.innerHTML = `
+      <h2 style="margin-top:0">Review spec</h2>
+      <p class="muted" style="margin:0 0 10px">The CTO-fork agent has drafted a spec from the idea. Approve to dispatch the workspace agent, or request changes to revise the spec.</p>
+      <label class="field" style="margin-bottom:6px">
+        <span class="lbl">change request note (required if requesting changes)</span>
+        <textarea id="rnote" placeholder="What needs to change in the spec?"></textarea>
+      </label>
+      <div class="row">
+        <button class="btn success" id="approve">Approve spec</button>
+        <button class="btn danger" id="reject">Request changes</button>
+        <div class="spacer"></div>
+      </div>`;
+    wrap.appendChild(controls);
+  }
+
+  // needs_info answer box — the agent paused mid-task by calling the MCP `ask`
   // tool, so the task holds a pending question. Mirrors the review change-request
   // box: show the question, take an answer, and POST it. On answer butchr re-launches
   // the SAME agent session via `--resume` with the answer injected.
-  if (t.status === "awaiting_input") {
+  if (t.status === "needs_info") {
     if (t.question) {
       wrap.appendChild(el("h2", {}, "Agent's question"));
       wrap.appendChild(el("pre", { class: "block", html: esc(t.question) }));
@@ -2241,7 +2311,7 @@ async function renderTask(id) {
 
   mount(wrap);
 
-  if (t.status === "failed") {
+  if (t.status === "aborted" && (t.revert_reason || t.last_dispatch_error)) {
     document.getElementById("requeue").addEventListener("click", (ev) => {
       action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
     });
@@ -2249,8 +2319,8 @@ async function renderTask(id) {
 
   if (canAbort) {
     document.getElementById("abort").addEventListener("click", (ev) => {
-      const msg = t.status === "running"
-        ? "Abort this running task? The agent is stopped and its worktree + branch are discarded without merging."
+      const msg = t.status === "in_progress"
+        ? "Abort this in-progress task? The agent is stopped and its worktree + branch are discarded without merging."
         : "Abort this task? Its worktree + branch are discarded without merging.";
       if (!confirm(msg)) return;
       action(ev.target, () => api("POST", "/tasks/" + id + "/abort"), { success: "task aborted" });
@@ -2278,7 +2348,7 @@ async function renderTask(id) {
     });
   }
 
-  if (t.status === "review") {
+  if (t.status === "in_review") {
     document.getElementById("approve").addEventListener("click", (ev) => {
       // CI gate is advisory, not a hard block: warn on a failed build/tests but let
       // the operator proceed if they confirm.
@@ -2295,7 +2365,7 @@ async function renderTask(id) {
       action(ev.target, async () => {
         const r = await api("POST", "/tasks/" + id + "/approve");
         // A merge conflict isn't an error — it's sent back to the live agent to
-        // resolve in-context. The SSE refresh will show the task back in running.
+        // resolve in-context. The SSE refresh will show the task back in in_progress.
         if (r && r.conflictSentBack) {
           toast("Merge conflict — sent back to the agent to resolve");
         } else if (r && r.revertedOnRed) {
@@ -2316,7 +2386,22 @@ async function renderTask(id) {
     });
   }
 
-  if (t.status === "awaiting_input") {
+  if (t.status === "spec_review") {
+    document.getElementById("approve").addEventListener("click", (ev) => {
+      action(ev.target, async () => {
+        await api("POST", "/tasks/" + id + "/approve");
+        toast("spec approved ✓ — dispatching workspace agent");
+      }, { onDone: () => backToDirectory(t.directory_id) });
+    });
+    document.getElementById("reject").addEventListener("click", (ev) => {
+      const note = (document.getElementById("rnote").value || "").trim();
+      if (!note) return toast("add a note describing what to change in the spec", true);
+      action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
+        { success: "spec changes requested — revising", onDone: () => backToDirectory(t.directory_id) });
+    });
+  }
+
+  if (t.status === "needs_info") {
     document.getElementById("sendAnswer").addEventListener("click", (ev) => {
       const answer = document.getElementById("answer").value.trim();
       if (!answer) return toast("an answer is required", true);
@@ -2879,28 +2964,29 @@ function applyAttentionIndicator(na) {
     return;
   }
   const parts = [];
-  if (na.review) parts.push(`${na.review} review`);
-  if (na.awaiting_input) parts.push(`${na.awaiting_input} awaiting answer`);
-  if (na.failed) parts.push(`${na.failed} failed`);
+  if (na.in_review) parts.push(`${na.in_review} in review`);
+  if (na.spec_review) parts.push(`${na.spec_review} spec review`);
+  if (na.needs_info) parts.push(`${na.needs_info} needs info`);
+  // `na.total` is the authoritative sum; use it for the badge
   node.textContent = String(na.total);
-  node.title = "Needs attention: " + parts.join(", ");
+  node.title = "Needs attention: " + (parts.length ? parts.join(", ") : na.total + " tasks");
   node.hidden = false;
 }
 
-// Fire a desktop notification when a task NEWLY enters review/failed (count went
+// Fire a desktop notification when a task NEWLY enters a feedback state (count went
 // up since the last poll). Fully gated on granted permission, so it's silent until
 // the operator opts in by clicking the header indicator (see wireAttention).
 function maybeNotify(na) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   if (!lastAttention) return; // first poll — establish a baseline, don't alert
-  const newReview = na.review - lastAttention.review;
-  const newAwaiting = (na.awaiting_input || 0) - (lastAttention.awaiting_input || 0);
-  const newFailed = na.failed - lastAttention.failed;
-  if (newReview <= 0 && newAwaiting <= 0 && newFailed <= 0) return;
+  const newInReview = (na.in_review || 0) - (lastAttention.in_review || 0);
+  const newSpecReview = (na.spec_review || 0) - (lastAttention.spec_review || 0);
+  const newNeedsInfo = (na.needs_info || 0) - (lastAttention.needs_info || 0);
+  if (newInReview <= 0 && newSpecReview <= 0 && newNeedsInfo <= 0) return;
   const bits = [];
-  if (newReview > 0) bits.push(`${newReview} ready for review`);
-  if (newAwaiting > 0) bits.push(`${newAwaiting} awaiting an answer`);
-  if (newFailed > 0) bits.push(`${newFailed} failed to dispatch`);
+  if (newInReview > 0) bits.push(`${newInReview} ready for review`);
+  if (newSpecReview > 0) bits.push(`${newSpecReview} spec ready for review`);
+  if (newNeedsInfo > 0) bits.push(`${newNeedsInfo} awaiting an answer`);
   try {
     new Notification("butchr — needs attention", { body: bits.join(", "), tag: "butchr-attention" });
   } catch (e) { /* notifications unavailable — ignore */ }
@@ -2921,7 +3007,12 @@ async function updateAttention() {
   applyTitleBadge(na.total);
   applyAttentionIndicator(na);
   maybeNotify(na);
-  lastAttention = { review: na.review, awaiting_input: na.awaiting_input || 0, failed: na.failed, total: na.total };
+  lastAttention = {
+    in_review: na.in_review || 0,
+    spec_review: na.spec_review || 0,
+    needs_info: na.needs_info || 0,
+    total: na.total,
+  };
 }
 
 // ---------- dispatcher pause / maintenance mode ----------

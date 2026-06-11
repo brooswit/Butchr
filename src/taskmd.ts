@@ -324,7 +324,7 @@ export function parseTaskMd(raw: string): TaskDoc {
   const meta: TaskMeta = {
     id: "",
     created: "",
-    status: "queued",
+    status: "in_progress",
     context: [],
     kind: "task",
     model: null,
@@ -357,7 +357,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       const val = kv[2]!.trim();
       if (key === "id") meta.id = val;
       else if (key === "created") meta.created = val;
-      else if (key === "status") meta.status = (val as TaskStatus) || "queued";
+      else if (key === "status") meta.status = (val as TaskStatus) || "in_progress";
       else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
       else if (key === "model") meta.model = val || null;
       else if (key === "plan_preview") meta.plan_preview = val === "true";
@@ -469,6 +469,26 @@ export function renderReworkPrompt(directoryRoot: string, doc: TaskDoc): string 
     : `Changes were requested on your previous submission. Review your work, ` +
       `make the necessary fixes, then call \`request_review\` again.`;
   return [`# Changes requested`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
+}
+
+/**
+ * Build the prompt for the FINALIZING phase. The operator APPROVED the task in
+ * `in_review`; the workspace agent is resumed (`claude --resume <session-id>`, so it
+ * still has the full task + review history in context) to do POST-APPROVAL 'final
+ * thoughts' — a last wrap-up pass (tidy comments/docs, remove stray debug, a final
+ * self-check) BEFORE butchr finalizes the merge. This is a focused message: it tells
+ * the agent its work was approved and to call `request_review` again the moment its
+ * wrap-up is done (which signals butchr to land the merge). Best-effort: butchr
+ * finalizes regardless of whether the agent makes further changes.
+ */
+export function renderFinalizePrompt(): string {
+  const body =
+    `Your work was APPROVED. Before butchr lands the merge, do a brief FINAL pass: ` +
+    `tidy up comments/docs touched by this change, remove any stray debugging, and ` +
+    `give the diff one last self-review. Keep it minimal — do NOT start new work. ` +
+    `When you're done (or if there's nothing to wrap up), call \`request_review\` ` +
+    `again to signal butchr to finalize and merge your branch.`;
+  return [`# Approved — final thoughts before merge`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
 }
 
 /** Ensure a parent directory exists for a given file path. */

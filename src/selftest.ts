@@ -102,7 +102,7 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min: generous room for a real a
 const DEFAULT_POLL_MS = 2000;
 
 /** Statuses a probe may pass THROUGH on its way to review (non-terminal, expected). */
-const TRANSIENT = new Set(["queued", "blocked", "running"]);
+const TRANSIENT = new Set(["in_progress", "blocked", "needs_info"]);
 
 /**
  * Build the throwaway probe's agent prompt. It asks for the SMALLEST possible
@@ -228,14 +228,14 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     let reachedReview: any = null;
     while (now() < deadline) {
       const t = await api("GET", `/api/tasks/${encodeURIComponent(task.id)}`);
-      if (t.status === "running" && !sawRunning) {
+      if (t.status === "in_progress" && !sawRunning) {
         sawRunning = true;
-        mark("dispatch", true, "running");
+        mark("dispatch", true, "in_progress");
       }
-      if (t.status === "review") {
-        // Dispatch may have been so quick we polled straight past `running`; the
+      if (t.status === "in_review") {
+        // Dispatch may have been so quick we polled straight past `in_progress`; the
         // probe is in review, so dispatch demonstrably happened — record it.
-        if (!sawRunning) mark("dispatch", true, "observed via review");
+        if (!sawRunning) mark("dispatch", true, "observed via in_review");
         reachedReview = t;
         break;
       }
@@ -250,25 +250,43 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     }
     mark("review", true, `ci=${reachedReview.ci_status ?? "-"}`);
 
-    // (4) Optionally approve + confirm the merge. approveTask is synchronous: on a
-    // clean merge it returns the task already in `merged`; a conflict or a
-    // post-merge-verify revert come back flagged and are failures for the probe.
+    // (4) Optionally approve, then confirm the FINALIZE → MERGE. Approving an
+    // in_review task forwards it to `finalizing` (the workspace agent does post-approval
+    // 'final thoughts'), after which butchr finalizes the merge → `merged`. So we
+    // approve and then POLL for the terminal merged state (a conflict bounces back to
+    // in_progress, and a post-merge-verify revert lands the probe in `aborted` — both
+    // are failures for the probe).
     if (options.merge) {
       const r = await api("POST", `/api/tasks/${encodeURIComponent(task.id)}/approve`, {});
       if (r && r.conflictSentBack) {
         throw new Error("approve hit a merge conflict (sent back to the agent)");
       }
-      if (r && r.revertedOnRed) {
-        throw new Error("merged then AUTO-REVERTED (post-merge verify failed)");
+      const mergeDeadline = now() + timeoutMs;
+      let mergedTask: any = null;
+      while (now() < mergeDeadline) {
+        const t = await api("GET", `/api/tasks/${encodeURIComponent(task.id)}`);
+        if (t.status === "merged") {
+          mergedTask = t;
+          break;
+        }
+        if (t.status === "aborted") {
+          const why = t.revert_reason || t.last_dispatch_error || "(no detail)";
+          throw new Error(`probe aborted during finalize (post-merge verify or give-up): ${why}`);
+        }
+        // in_progress (a finalize conflict bounced back), finalizing, needs_info are
+        // expected on the way; anything else is unexpected.
+        if (!["finalizing", "in_progress", "needs_info"].includes(t.status)) {
+          throw new Error(`probe reached '${t.status}' during finalize`);
+        }
+        await sleep(pollMs);
       }
-      const t = r && r.task ? r.task : r;
-      if (!t || t.status !== "merged") {
-        throw new Error(`approve did not merge the probe (status=${t ? t.status : "unknown"})`);
+      if (!mergedTask) {
+        throw new Error(`timed out after ${timeoutMs}ms waiting for the probe to merge`);
       }
       merged = true;
       // Record the merge range so cleanup can revert exactly these commits.
-      if (t.merge_base_sha && t.merged_sha) {
-        mergedRange = { from: t.merge_base_sha, to: t.merged_sha };
+      if (mergedTask.merge_base_sha && mergedTask.merged_sha) {
+        mergedRange = { from: mergedTask.merge_base_sha, to: mergedTask.merged_sha };
       }
       mark("merge", true, "merged into default branch");
     }

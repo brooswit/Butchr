@@ -20,7 +20,7 @@ import { HttpError } from "./directories.ts";
 import type { TaskRow } from "./db.ts";
 import {
   getTask,
-  markAwaitingInputFromAgent,
+  markNeedsInfoFromAgent,
   markReviewFromAgent,
   proposeSubtasks,
 } from "./tasks.ts";
@@ -381,12 +381,12 @@ async function runAsk(taskId: string, args: any): Promise<ToolResult> {
     return textResult("`ask` requires a non-empty `question` string.", true);
   }
 
-  const state = markAwaitingInputFromAgent(taskId, question.trim());
+  const state = markNeedsInfoFromAgent(taskId, question.trim());
   if (state !== "ok") {
     return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
   }
   return toolResult({
-    status: "awaiting_input",
+    status: "needs_info",
     message:
       "Your question has been recorded and this task is now awaiting an answer. " +
       "You can stop now — do not wait. butchr will surface it to whoever operates " +
@@ -411,12 +411,12 @@ async function runProposePlan(taskId: string, args: any): Promise<ToolResult> {
     return textResult("`propose_plan` requires a non-empty `plan` string.", true);
   }
 
-  const state = markAwaitingInputFromAgent(taskId, plan.trim());
+  const state = markNeedsInfoFromAgent(taskId, plan.trim());
   if (state !== "ok") {
     return toolResult({ status: getTask(taskId)?.status ?? "unknown" });
   }
   return toolResult({
-    status: "awaiting_input",
+    status: "needs_info",
     message:
       "Your implementation plan has been recorded and this task is now awaiting " +
       "operator approval. Stop now — do NOT start implementing and do not wait. " +

@@ -82,9 +82,9 @@ async function seedReviewTaskWithWork(file: string, content: string): Promise<st
   writeFileSync(join(wt, file), content);
   g(["add", "-A"], wt);
   g(["commit", "-q", "-m", `add ${file}`], wt);
-  // Move to review (the state approveTask requires) in both the DB and task.md.
-  dbMod.db.query(`UPDATE tasks SET status='review' WHERE id=?`).run(id);
-  taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "review");
+  // Move to in_review (the state approveTask requires) in both the DB and task.md.
+  dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(id);
+  taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
   return id;
 }
 
@@ -94,11 +94,12 @@ describe("post-merge verify gate", () => {
     const id = await seedReviewTaskWithWork("feature.txt", "feature\n");
     const tipBefore = g(["rev-parse", "HEAD"]);
 
-    const out = await tasksMod.approveTask(id);
+    await tasksMod.approveTask(id); // in_review → finalizing
+    const out = await tasksMod.finalizeMerge(id); // finalizing → merge attempt → revert
 
     // Decision: reverted, not merged.
     expect(out.revertedOnRed).toBe(true);
-    expect(out.task.status).toBe("failed");
+    expect(out.task.status).toBe("aborted");
 
     // The default branch is back exactly at its pre-merge tip — the bad commit
     // did NOT survive on main, and its file is gone from the repo root worktree.
@@ -108,12 +109,12 @@ describe("post-merge verify gate", () => {
     // The task is flagged with the failing output, and its work is preserved
     // (branch + worktree kept) for inspection / a fixup re-run.
     const row = dbRow(id);
-    expect(row.status).toBe("failed");
+    expect(row.status).toBe("aborted");
     expect(row.revert_reason).toContain("boom");
     expect(row.last_dispatch_error).toContain("boom");
     expect(g(["rev-parse", "--verify", id])).toBeTruthy(); // task branch still exists
     expect(existsSync(join(REPO_ROOT, id))).toBe(true); // worktree kept
-    expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("failed");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("aborted");
   });
 
   test("GREEN verify lets the merge stand (task merged, branch cleaned up)", async () => {
@@ -121,7 +122,8 @@ describe("post-merge verify gate", () => {
     const id = await seedReviewTaskWithWork("greenfile.txt", "green\n");
     const tipBefore = g(["rev-parse", "HEAD"]);
 
-    const out = await tasksMod.approveTask(id);
+    await tasksMod.approveTask(id); // in_review → finalizing
+    const out = await tasksMod.finalizeMerge(id); // finalizing → merged
 
     expect(out.revertedOnRed).toBeFalsy();
     expect(out.task.status).toBe("merged");
@@ -149,13 +151,15 @@ describe("post-merge verify gate", () => {
     verifyMod.setVerifyRunner(async () => ({ ok: false, output: "still red" }));
     const redId = await seedReviewTaskWithWork("red.txt", "red\n");
     const tip0 = g(["rev-parse", "HEAD"]);
-    const redOut = await tasksMod.approveTask(redId);
+    await tasksMod.approveTask(redId);
+    const redOut = await tasksMod.finalizeMerge(redId);
     expect(redOut.revertedOnRed).toBe(true);
     expect(g(["rev-parse", "HEAD"])).toBe(tip0); // main restored
 
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
     const greenId = await seedReviewTaskWithWork("after.txt", "after\n");
-    const greenOut = await tasksMod.approveTask(greenId);
+    await tasksMod.approveTask(greenId);
+    const greenOut = await tasksMod.finalizeMerge(greenId);
     expect(greenOut.task.status).toBe("merged");
     expect(existsSync(join(REPO_ROOT, "after.txt"))).toBe(true);
   });
@@ -168,7 +172,8 @@ describe("verify runner default (disabled when verifyCmd is empty)", () => {
     // via a stub that mirrors the skip behavior, then confirm approveTask merges.
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "", skipped: true }));
     const id = await seedReviewTaskWithWork("skip.txt", "skip\n");
-    const out = await tasksMod.approveTask(id);
+    await tasksMod.approveTask(id); // in_review → finalizing
+    const out = await tasksMod.finalizeMerge(id); // finalizing → merged
     expect(out.task.status).toBe("merged");
     expect(existsSync(join(REPO_ROOT, "skip.txt"))).toBe(true);
   });

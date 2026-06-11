@@ -18,19 +18,29 @@
   --accent: #425eff;   /* blue-500 (interactive primary) */
   --accent-2: #3144d9; /* blue-600 (interactive text / hover) */
 
-  /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible */
-  --idea: #9333ea;       /* purple-600 (front state — a raw idea, spec not written yet) */
-  --queued: #6c727a;     /* gray-500 (neutral) — surfaced as 'ready' */
-  --blocked: #7c3aed;    /* violet-600 (waiting on dependencies) */
-  --running: #425eff;    /* blue-500 */
-  --idle: #0e7490;       /* cyan-700 (running but quiet) */
-  --review: #a35901;     /* brand-orange-dark (warning) */
-  --awaiting: #be185d;   /* pink-700 (agent asked a question — needs an answer) */
-  --finalizing: #4f46e5; /* indigo-600 (merging) */
-  --merged: #006933;     /* green-600 (success) */
-  --rejected: #b6073c;   /* red-600 (error) */
-  --failed: #8a1322;     /* red-800 (dispatch give-up — darker than reject) */
-  --aborted: #545a62;    /* gray-600 (neutral) */
+  /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible.
+     CANONICAL 9-STATE MODEL: idea | spec_review | blocked | needs_info | in_progress |
+     in_review | finalizing | merged | aborted (+ pseudo-state `idle` for a quiet agent).
+     Feedback states (spec_review / in_review / needs_info) use amber/orange — they need
+     attention. Agent states (idea / in_progress / finalizing) use blue/indigo — working.
+     Terminal idle (merged = green, aborted = gray). `blocked` = violet (waiting). */
+  --idea: #9333ea;         /* purple-600 (front state — a raw idea, spec not written yet) */
+  --spec_review: #a35901;  /* brand-orange-dark (feedback — operator approves spec) */
+  --blocked: #7c3aed;      /* violet-600 (waiting on dependencies) */
+  --needs_info: #be185d;   /* pink-700 (feedback — agent asked a question) */
+  --in_progress: #425eff;  /* blue-500 (agent building code) */
+  --idle: #0e7490;         /* cyan-700 (in_progress but quiet) */
+  --in_review: #a35901;    /* brand-orange-dark (feedback — operator reviews diff) */
+  --finalizing: #4f46e5;   /* indigo-600 (agent doing post-approval wrap-up) */
+  --merged: #006933;       /* green-600 (success) */
+  --aborted: #545a62;      /* gray-600 (neutral) */
+  /* Legacy aliases kept for backward-compat with any code paths still referencing them */
+  --queued: #6c727a;       /* gray-500 — old "queued"/"ready" state */
+  --running: #425eff;      /* blue-500 — old "running" state */
+  --review: #a35901;       /* old "review" state */
+  --awaiting: #be185d;     /* old "awaiting_input" state */
+  --rejected: #b6073c;     /* red-600 — old "rejected" (now aborted) */
+  --failed: #8a1322;       /* red-800 — old "failed" (now aborted) */
 
   /* diff add/del — themeable so they read on both light and dark surfaces */
   --diff-add-text: #006933;
@@ -64,16 +74,23 @@ html[data-theme="dark"] {
   --accent: #425eff;   /* blue-500 */
   --accent-2: #7084ff; /* blue-400 (interactive text, dark) */
 
-  --queued: #6c727a;
-  --blocked: #9466f0;    /* violet, lifted for dark surfaces */
-  --running: #425eff;
-  --idle: #22a7c2;       /* cyan, lifted for dark surfaces */
-  --review: #a35901;
-  --finalizing: #6366f1; /* indigo, lifted for dark surfaces */
+  /* Canonical 9-state model — lifted mid-tones for dark surfaces */
+  --spec_review: #c47a0a;  /* orange, lifted for dark */
+  --blocked: #9466f0;      /* violet, lifted for dark surfaces */
+  --needs_info: #db2777;   /* pink, lifted for dark surfaces */
+  --in_progress: #425eff;  /* blue-500 */
+  --idle: #22a7c2;         /* cyan, lifted for dark surfaces */
+  --in_review: #c47a0a;    /* orange, lifted for dark */
+  --finalizing: #6366f1;   /* indigo, lifted for dark surfaces */
   --merged: #006933;
-  --rejected: #b6073c;
-  --failed: #c0263a;     /* red, lifted for dark surfaces */
   --aborted: #545a62;
+  /* Legacy */
+  --queued: #6c727a;
+  --running: #425eff;
+  --review: #a35901;
+  --awaiting: #be185d;
+  --rejected: #b6073c;
+  --failed: #c0263a;       /* red, lifted for dark surfaces */
 
   --diff-add-text: #1ecb6a; /* green-300 */
   --diff-del-text: #f84f6e; /* red-400 */
@@ -242,24 +259,54 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   border-radius: var(--radius-md);
   color: #fff;
 }
+/* Canonical 9-state model chips */
 .chip.idea { background: var(--idea); }
-.chip.queued { background: var(--queued); }
+.chip.spec_review { background: var(--spec_review); }
 .chip.blocked { background: var(--blocked); }
-.chip.running { background: var(--running); }
+.chip.needs_info { background: var(--needs_info); }
+.chip.in_progress { background: var(--in_progress); }
 .chip.idle { background: var(--idle); }
-.chip.review { background: var(--review); }
-.chip.awaiting_input { background: var(--awaiting); }
+.chip.in_review { background: var(--in_review); }
 .chip.finalizing { background: var(--finalizing); }
 .chip.merged { background: var(--merged); }
+.chip.aborted { background: var(--aborted); }
+/* Legacy status chips — kept for audit timeline backward-compat */
+.chip.queued { background: var(--queued); }
+.chip.running { background: var(--running); }
+.chip.review { background: var(--review); }
+.chip.awaiting_input { background: var(--awaiting); }
 .chip.rejected { background: var(--rejected); }
 .chip.failed { background: var(--failed); }
-.chip.aborted { background: var(--aborted); }
 /* `unknown` blocker — a dependency that isn't among the current directory's tasks
    (so its status can't be resolved). Neutral muted fill. */
 .chip.unknown { background: var(--muted); }
+/* STATE-KIND chips — small secondary badge on the task detail header showing the
+   canonical kind (idle / agent / feedback) and for feedback states the awaited artifact.
+   Distinct from status chips: outlined, not filled, with lighter text weight. */
+.chip.state-kind {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 10px;
+}
+.chip.state-kind-feedback {
+  border-color: var(--in_review);
+  color: var(--in_review);
+}
+.chip.state-kind-agent {
+  border-color: var(--in_progress);
+  color: var(--in_progress);
+}
+.chip.state-kind-idle {
+  border-color: var(--muted);
+  color: var(--muted);
+}
 /* `plan` is a task KIND, not a lifecycle status — a decomposition task that spawns
-   sub-tasks. Reuse the review/info hue so it reads as an informational badge. */
-.chip.plan { background: var(--review); }
+   sub-tasks. Reuse the spec_review/info hue so it reads as an informational badge. */
+.chip.plan { background: var(--spec_review); }
 /* `tag` is a free-form organizational LABEL, not a status — render it as a neutral
    outlined pill (no uppercase, accent text) so it reads distinctly from the colored
    status chips. */
@@ -275,8 +322,8 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tag-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 4px; vertical-align: middle; }
 .bc-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
 /* A non-zero dispatch priority — shown only when set (priority 0 is the silent FIFO
-   default). Reuse the running hue so it reads as an "acts sooner" signal. */
-.chip.priority { background: var(--running); }
+   default). Reuse the in_progress hue so it reads as an "acts sooner" signal. */
+.chip.priority { background: var(--in_progress); }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
@@ -286,12 +333,11 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .count-pill b { color: var(--text); }
 .count-pill.has-blocked { border-color: var(--blocked); color: var(--blocked); }
-.count-pill.has-running { border-color: var(--running); color: var(--running); }
+.count-pill.has-running { border-color: var(--in_progress); color: var(--in_progress); }
 .count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
-.count-pill.has-review { border-color: var(--review); color: var(--review); }
-.count-pill.has-awaiting { border-color: var(--awaiting); color: var(--awaiting); }
+.count-pill.has-review { border-color: var(--in_review); color: var(--in_review); }
+.count-pill.has-awaiting { border-color: var(--needs_info); color: var(--needs_info); }
 .count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
-.count-pill.has-failed { border-color: var(--failed); color: var(--failed); }
 
 /* cross-project dashboard summary — the four operator buckets aggregated across all
    registered directories. */
@@ -397,19 +443,27 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   flex: 0 0 auto;
   width: 12px; height: 12px; margin-top: 2px;
   border-radius: 50%;
-  background: var(--queued);
+  background: var(--in_progress);
   box-shadow: 0 0 0 3px var(--panel);
 }
-.tl-dot.queued     { background: var(--queued); }
-.tl-dot.blocked    { background: var(--blocked); }
-.tl-dot.running    { background: var(--running); }
-.tl-dot.review     { background: var(--review); }
+/* Canonical 9-state timeline dots */
+.tl-dot.idea        { background: var(--idea); }
+.tl-dot.spec_review { background: var(--spec_review); }
+.tl-dot.blocked     { background: var(--blocked); }
+.tl-dot.needs_info  { background: var(--needs_info); }
+.tl-dot.in_progress { background: var(--in_progress); }
+.tl-dot.idle        { background: var(--idle); }
+.tl-dot.in_review   { background: var(--in_review); }
+.tl-dot.finalizing  { background: var(--finalizing); }
+.tl-dot.merged      { background: var(--merged); }
+.tl-dot.aborted     { background: var(--aborted); }
+/* Legacy timeline dots — kept for audit-log backward-compat */
+.tl-dot.queued      { background: var(--queued); }
+.tl-dot.running     { background: var(--running); }
+.tl-dot.review      { background: var(--review); }
 .tl-dot.awaiting_input { background: var(--awaiting); }
-.tl-dot.finalizing { background: var(--finalizing); }
-.tl-dot.merged     { background: var(--merged); }
-.tl-dot.rejected   { background: var(--rejected); }
-.tl-dot.failed     { background: var(--failed); }
-.tl-dot.aborted    { background: var(--aborted); }
+.tl-dot.rejected    { background: var(--rejected); }
+.tl-dot.failed      { background: var(--failed); }
 .tl-body { flex: 1 1 auto; min-width: 0; }
 .tl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tl-transition { display: inline-flex; align-items: center; gap: 6px; }
@@ -514,7 +568,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 
 .tg-node { cursor: pointer; }
 .tg-node .tg-rect {
-  fill: var(--queued); stroke: rgba(0, 0, 0, 0.18); stroke-width: 1;
+  fill: var(--in_progress); stroke: rgba(0, 0, 0, 0.18); stroke-width: 1;
   transition: filter 0.12s;
 }
 .tg-node:hover .tg-rect { filter: brightness(1.12); }
@@ -532,18 +586,24 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* sub-tree merge-progress bar drawn inside nodes that gate dependents */
 .tg-node .tg-prog-track { fill: rgba(0, 0, 0, 0.28); }
 .tg-node .tg-prog-fill { fill: rgba(255, 255, 255, 0.92); }
-.tg-node.idea .tg-rect { fill: var(--idea); }
-.tg-node.queued .tg-rect { fill: var(--queued); }
-.tg-node.blocked .tg-rect { fill: var(--blocked); }
-.tg-node.running .tg-rect { fill: var(--running); }
-.tg-node.idle .tg-rect { fill: var(--idle); }
-.tg-node.review .tg-rect { fill: var(--review); }
+/* Canonical 9-state graph nodes */
+.tg-node.idea .tg-rect        { fill: var(--idea); }
+.tg-node.spec_review .tg-rect { fill: var(--spec_review); }
+.tg-node.blocked .tg-rect     { fill: var(--blocked); }
+.tg-node.needs_info .tg-rect  { fill: var(--needs_info); }
+.tg-node.in_progress .tg-rect { fill: var(--in_progress); }
+.tg-node.idle .tg-rect        { fill: var(--idle); }
+.tg-node.in_review .tg-rect   { fill: var(--in_review); }
+.tg-node.finalizing .tg-rect  { fill: var(--finalizing); }
+.tg-node.merged .tg-rect      { fill: var(--merged); }
+.tg-node.aborted .tg-rect     { fill: var(--aborted); }
+/* Legacy graph nodes — kept for backward-compat */
+.tg-node.queued .tg-rect       { fill: var(--queued); }
+.tg-node.running .tg-rect      { fill: var(--running); }
+.tg-node.review .tg-rect       { fill: var(--review); }
 .tg-node.awaiting_input .tg-rect { fill: var(--awaiting); }
-.tg-node.finalizing .tg-rect { fill: var(--finalizing); }
-.tg-node.merged .tg-rect { fill: var(--merged); }
-.tg-node.rejected .tg-rect { fill: var(--rejected); }
-.tg-node.failed .tg-rect { fill: var(--failed); }
-.tg-node.aborted .tg-rect { fill: var(--aborted); }
+.tg-node.rejected .tg-rect     { fill: var(--rejected); }
+.tg-node.failed .tg-rect       { fill: var(--failed); }
 
 /* pipeline / merge-train board (directory view) — active tasks grouped into
    pipeline-order lanes, each with a status-colored left accent. */
@@ -552,14 +612,21 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 
 .board-lane {
   background: var(--panel); border: 1px solid var(--border);
-  border-left: 3px solid var(--queued); border-radius: 8px;
+  border-left: 3px solid var(--in_progress); border-radius: 8px;
   padding: 12px 14px;
 }
-.board-lane.lane-review     { border-left-color: var(--review); }
-.board-lane.lane-finalizing { border-left-color: var(--finalizing); }
-.board-lane.lane-running    { border-left-color: var(--running); }
-.board-lane.lane-queued     { border-left-color: var(--queued); }
-.board-lane.lane-blocked    { border-left-color: var(--blocked); }
+/* Canonical 9-state board lanes */
+.board-lane.lane-spec_review { border-left-color: var(--spec_review); }
+.board-lane.lane-in_review   { border-left-color: var(--in_review); }
+.board-lane.lane-needs_info  { border-left-color: var(--needs_info); }
+.board-lane.lane-finalizing  { border-left-color: var(--finalizing); }
+.board-lane.lane-in_progress { border-left-color: var(--in_progress); }
+.board-lane.lane-blocked     { border-left-color: var(--blocked); }
+.board-lane.lane-idea        { border-left-color: var(--idea); }
+/* Legacy board lanes */
+.board-lane.lane-review      { border-left-color: var(--review); }
+.board-lane.lane-running     { border-left-color: var(--running); }
+.board-lane.lane-queued      { border-left-color: var(--queued); }
 
 .board-lane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .board-lane-head .bl-title { font-weight: 600; font-size: 14px; }
@@ -612,7 +679,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .pulse .pulse-dot {
   flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--running); box-shadow: 0 0 5px var(--running);
+  background: var(--in_progress); box-shadow: 0 0 5px var(--in_progress);
   animation: pulse-blink 1.6s ease-in-out infinite;
 }
 .pulse .pulse-action {
@@ -967,18 +1034,23 @@ small.muted { font-size: 12px; }
   flex: 1; height: 10px; background: var(--panel-2);
   border-radius: var(--radius-sm); overflow: hidden;
 }
-.status-bar-row .sb-fill { height: 100%; background: var(--queued); border-radius: var(--radius-sm); }
+.status-bar-row .sb-fill { height: 100%; background: var(--in_progress); border-radius: var(--radius-sm); }
 .status-bar-row .sb-count { flex: 0 0 auto; font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 28px; text-align: right; }
-/* fill colors mirror the chip palette */
-.sb-fill.idea { background: var(--idea); }
-.sb-fill.queued { background: var(--queued); }
-.sb-fill.blocked { background: var(--blocked); }
-.sb-fill.running { background: var(--running); }
-.sb-fill.idle { background: var(--idle); }
-.sb-fill.review { background: var(--review); }
+/* fill colors mirror the chip palette — canonical 9-state model */
+.sb-fill.idea        { background: var(--idea); }
+.sb-fill.spec_review { background: var(--spec_review); }
+.sb-fill.blocked     { background: var(--blocked); }
+.sb-fill.needs_info  { background: var(--needs_info); }
+.sb-fill.in_progress { background: var(--in_progress); }
+.sb-fill.idle        { background: var(--idle); }
+.sb-fill.in_review   { background: var(--in_review); }
+.sb-fill.finalizing  { background: var(--finalizing); }
+.sb-fill.merged      { background: var(--merged); }
+.sb-fill.aborted     { background: var(--aborted); }
+/* Legacy sb-fill — kept for metrics view backward-compat with old status values */
+.sb-fill.queued      { background: var(--queued); }
+.sb-fill.running     { background: var(--running); }
+.sb-fill.review      { background: var(--review); }
 .sb-fill.awaiting_input { background: var(--awaiting); }
-.sb-fill.finalizing { background: var(--finalizing); }
-.sb-fill.merged { background: var(--merged); }
-.sb-fill.rejected { background: var(--rejected); }
-.sb-fill.failed { background: var(--failed); }
-.sb-fill.aborted { background: var(--aborted); }
+.sb-fill.rejected    { background: var(--rejected); }
+.sb-fill.failed      { background: var(--failed); }

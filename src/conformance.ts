@@ -271,7 +271,7 @@ export async function triggerConformance(id: string): Promise<void> {
   const summary = result ? (result.reason || (status === "pass" ? "conforms" : "")) : null;
   const res = db
     .query(
-      `UPDATE tasks SET conformance_status=?, conformance_summary=? WHERE id=? AND status='review'`,
+      `UPDATE tasks SET conformance_status=?, conformance_summary=? WHERE id=? AND status='in_review'`,
     )
     .run(status, summary, id);
   if (res.changes === 0) return;

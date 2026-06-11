@@ -122,35 +122,65 @@ Task ids are `adjective-noun-4hex` (e.g. `swift-falcon-3a2f`), generated in
 `src/ids.ts`, immutable, and double as the branch + worktree directory name (so the
 wordlists are lowercase-`a-z` only). Directory ids are `dir-<8hex>`.
 
-### 2.1 States
+### 2.1 States — the canonical 9-state model
 
-`TaskStatus` (`src/db.ts`) is a **single, unified pipeline** — `idea → ready →
-in_progress → review → merged`, with the lateral states `blocked`, `awaiting_input`,
-`failed`, `aborted`, `rejected`. There is **no second axis** (an earlier two-axis design
-that added a separate `stage` field orthogonal to `status` was **retracted** as
-over-complicated; see §2.7). To minimize churn the internal status **values**
-`queued`/`running` are **kept** (not renamed), and the webapp surfaces the friendly
-labels **'ready'** (`queued`) and **'in progress'** (`running`).
+`TaskStatus` (`src/db.ts`) is **exactly nine states**. Every state has a **kind** —
+one of three — and an **agent** state additionally has a **type** (which agent runs
+it). This 3-kind / 2-agent-type categorization is the single source of truth in
+**`STATE_META`** (`src/db.ts`); logic (dispatcher / reconcile / feedback) and the UI
+both derive their behavior from it rather than hard-coding status lists.
 
-| status | terminal? | active? | meaning |
-|--------|-----------|---------|---------|
-| `idea` | no | pending | the **front state**: a task created from a one-line operator **brief** with **no spec yet**. Its first "dispatch" is **not** a build agent — the dispatcher runs the **CTO-fork spec generator** (`src/cto.ts`) to turn the brief into a spec, then advances the task to `queued` ('ready') carrying that spec as its prompt. See §2.7. |
-| `queued` | no | pending | (UI: **'ready'**) worktree + `task.md` exist with a spec/prompt; waiting for the dispatcher to launch an agent. |
-| `blocked` | no | pending | has ≥1 not-yet-merged blocker (`blocked_by`); a **pre-dispatch waiting** state — no agent runs. Promoted to `queued` when all blockers merge. |
-| `running` | no | yes | (UI: **'in progress'**) an interactive agent is executing in the worktree. |
-| `review` | no | yes | work submitted for human review (agent called `request_review`, or was rescued). Pure DB state — **no live process**. |
-| `awaiting_input` | no | yes | a running agent called `ask` to pose a clarifying question (stored in `question`); the agent exited. Pure DB state — **no live process**, exactly like `review`. Needs an operator/CTO answer (API/CLI/webapp); on answer it re-queues for a `--resume` re-launch with the answer injected. |
-| `merged` | **yes** | — | branch fast-forwarded into the default branch; worktree + branch removed. (Also the terminal state for a completed **plan** task, which merges nothing of its own.) |
-| `aborted` | **yes** | — | abandoned from any non-terminal state; worktree + branch discarded, **nothing merged**. `task.md` kept. |
-| `failed` | terminal-ish | no | dispatch gave up after `BUTCHR_MAX_DISPATCH_ATTEMPTS` consecutive failures, **or** a merge was auto-reverted off main by the post-merge verify gate (carries `revert_reason`). Leaves only via `requeue`. |
-| `rejected` | (legacy) | — | retained in the type union and treated as a dead/terminal blocker state; the live reject path re-queues instead (see below). Counted as a "dead blocker." |
-| `finalizing` | (legacy) | — | obsolete transient state from the old blocking-agent model; **no longer produced**. Startup recovery flushes any leftover `finalizing` rows to `merged`. |
+**The three KINDS:**
 
-> **Note on `rejected`:** the current `rejectTask` path does **not** park a task in
-> `rejected` — it re-queues to `queued` for a `--resume` rework. `rejected` survives
-> only in the status union and the dead-blocker set (`DEAD_BLOCKER_STATES =
-> {aborted, rejected, failed}`), so a dependency on such a task is flagged as
-> never-merging.
+- **`idle`** — no agent is running and butchr awaits nothing from the operator (the
+  task is terminal, or waiting on something mechanical).
+- **`agent`** — an agent is (or is about to be) running for the task.
+- **`feedback`** — butchr has surfaced an **artifact** and awaits an **operator
+  response**. The three feedback states share **one code path** (§2.1.1).
+
+**The two AGENT TYPES:**
+
+- **`ceo-agent`** — the headless, read-only **CTO-fork** spec writer (`src/cto.ts`).
+- **`workspace-agent`** — the interactive agent that builds the code in the worktree.
+
+| status | kind | agent type | terminal? | meaning |
+|--------|------|------------|-----------|---------|
+| `idea` | agent | ceo-agent | no | the **front state**: a task from a one-line operator **brief** with no spec yet. The CEO agent (CTO-fork, `src/cto.ts`) writes the SPEC, then advances to `spec_review`. See §2.7. |
+| `spec_review` | **feedback** | — | no | the generated **spec** is the artifact. Operator **approves** → `in_progress`, or **requests changes** → revise the spec (back to `idea`, re-running the generator with the notes). |
+| `blocked` | idle | — | no | has ≥1 not-yet-merged blocker (`blocked_by`); a pre-dispatch waiting state — no agent runs. Promoted to `in_progress` when all blockers merge. |
+| `needs_info` | **feedback** | — | no | an agent called `ask` to pose a clarifying **question** (stored in `question`) and exited. The ad-hoc feedback stage **any agent state** can enter. On `/answer` the agent resumes. |
+| `in_progress` | agent | workspace-agent | no | the workspace agent builds the code. **Ready vs. running** is carried by `herdr_pane_id`: NULL = ready (the dispatcher will launch it), set = a live agent. |
+| `in_review` | **feedback** | — | no | the **diff** is the artifact (agent called `request_review`, or was rescued). Operator **approves** → `finalizing`, or **requests changes** → resume the workspace agent (`in_progress`). Pure DB state — no live process. |
+| `finalizing` | agent | workspace-agent | no | post-approval: the workspace agent does **'final thoughts'** (a wrap-up pass), then the system **finalizes** (rebase + merge + post-merge verify) → `merged`. Same ready-vs-running pane rule as `in_progress`. |
+| `merged` | idle | — | **yes** | branch fast-forwarded into the default branch; worktree + branch removed. (Also the terminal state for a completed **plan** task, which merges nothing of its own.) |
+| `aborted` | idle | — | **yes** | abandoned from any non-terminal state; worktree + branch discarded, **nothing merged**. `task.md` kept. Also where a **dispatch give-up** (after `BUTCHR_MAX_DISPATCH_ATTEMPTS`) and a **post-merge-verify revert** (carries `revert_reason`) land — there is no separate `failed` state. |
+
+> **No `queued`/`running`/`review`/`awaiting_input`/`rejected`/`failed` statuses.**
+> The earlier model's `queued`+`running` collapse into **`in_progress`** (ready-vs-running
+> = `herdr_pane_id` NULL-vs-set, which is restart-safe); `review`→`in_review`;
+> `awaiting_input`→`needs_info`; a request-changes loops back (no `rejected` state); a
+> dispatch/finalize give-up or a post-merge revert lands in the terminal idle
+> `aborted`. The only dead-blocker state is now `aborted`
+> (`DEAD_BLOCKER_STATES = {aborted}`).
+
+**Happy path:** `idea → spec_review → in_progress → in_review → finalizing → merged`.
+`needs_info` is the ad-hoc feedback stage any agent state can enter, then resume.
+
+#### 2.1.1 The unified feedback mechanism
+
+`spec_review`, `in_review`, and `needs_info` are **one concept**, not three. Each
+**surfaces an artifact** (spec / diff / question), **awaits an operator response**
+(`approve` / `request_changes` / `answer`), and then **forwards** the task or
+**resumes** the agent. They share a single code path — **`respondToFeedback(id,
+response)`** in `src/tasks.ts` — and a single descriptor, **`feedbackInfo(status)`**,
+that the UI reads to show *what's awaited*. `approveTask` / `rejectTask` / `answerTask`
+are thin public wrappers over it:
+
+| state | artifact | `approve` → | `request_changes` → | `answer` → |
+|-------|----------|-------------|---------------------|------------|
+| `spec_review` | spec | `in_progress` (or `blocked`) | `idea` (re-generate the spec with the notes) | — |
+| `in_review` | diff | `finalizing` | `in_progress` (resume the agent) | — |
+| `needs_info` | question | — | — | `in_progress` (resume the agent) |
 
 ### 2.2 Transitions
 
@@ -160,56 +190,59 @@ the `task_events` audit log via `recordTaskEvent`.
 | from → to | trigger | code |
 |-----------|---------|------|
 | (none) → `idea` | task created with `idea: true` (a one-line brief, no spec yet) | `createTask` |
-| (none) → `queued` | task created with no/already-merged blockers | `createTask` |
+| (none) → `in_progress` | task created with a spec + no/already-merged blockers (ready) | `createTask` |
 | (none) → `blocked` | task created with ≥1 unmerged blocker | `createTask` |
-| `idea` → `queued`/`blocked` | CTO-fork spec generator produced the spec → advance to 'ready' (or `blocked` if it carries unmerged blockers); the brief in `task.md` is rewritten to the spec | `promoteIdeaToReady` (via dispatcher `generateSpecForIdea`) |
+| `idea` → `spec_review` | the CEO/CTO-fork spec generator produced the spec; `task.md`'s prompt is rewritten brief → spec | `promoteIdeaToSpecReview` (via dispatcher `generateSpecForIdea`) |
 | `idea` → `idea` (backoff) | spec generation failed, under the attempt cap → stamp `next_dispatch_at` | `markSpecGenFailure` |
-| `idea` → `failed` | spec generation failed at/over the cap | `markSpecGenFailure` |
-| `blocked` → `queued` | all blockers merged (auto-unblock), or operator clears deps | `reevaluateBlockedTask` / `setBlockedBy` |
-| `queued`/`running`/`review`/`awaiting_input` → `blocked` | operator adds an unmerged blocker (kill-on-block if a live agent) | `setBlockedBy` |
-| `queued` → `running` | dispatcher launched the agent | `markRunning` |
-| `running` → `review` | agent called `request_review` (live path) | `markReviewFromAgent` |
-| `running` → `review` | watcher rescue (agent ended without submitting / runaway / timeout / vanished / never-started; or reconcile of a dead agent) | `markReview` |
-| `running` → `awaiting_input` | agent called `ask` (non-blocking) → parks holding the question, agent exits | `markAwaitingInputFromAgent` |
-| `awaiting_input` → `queued` | operator/CTO/human answered → re-queue for a `--resume` re-launch with the answer injected (clears retry state) | `answerTask` |
-| `running`/`review` → `queued` | reviewer rejected, or merge conflict kicked back to agent (clears retry state) | `requestChanges` (via `rejectTask` / `approveTask`) |
-| `queued` → `queued` (backoff) | dispatch failed, under the attempt cap → stamp `next_dispatch_at` | `markDispatchFailure` |
-| any non-terminal → `failed` | dispatch failed at/over the cap | `markDispatchFailure` |
-| `review` → `merged` | reviewer approved + merge fast-forwarded + post-merge verify green | `approveTask` |
-| `review` → `failed` | approved, merge ff'd, but post-merge verify RED → auto-revert | `approveTask` (`revertedOnRed`) |
-| `review` → `queued` | approve hit a merge conflict → kicked back to agent | `approveTask` (`conflictSentBack`) |
-| `running`/`review`/`queued`/`blocked` → `merged` | **plan** task submitted its decomposition | `proposeSubtasks` |
+| `idea` → `aborted` | spec generation gave up at/over the cap | `markSpecGenFailure` |
+| `spec_review` → `in_progress`/`blocked` | operator **approved** the spec (the deferred blocker check applies) | `approveTask` / `respondToFeedback` |
+| `spec_review` → `idea` | operator **requested spec changes** → revise (re-run the generator with the notes) | `rejectTask` / `respondToFeedback` |
+| `blocked` → `in_progress` | all blockers merged (auto-unblock), or operator clears deps | `reevaluateBlockedTask` / `setBlockedBy` |
+| any non-terminal → `blocked` | operator adds an unmerged blocker (kill-on-block if a live agent) | `setBlockedBy` |
+| `in_progress` (pane set) | dispatcher launched the build agent — records `herdr_pane_id` (status unchanged: ready → running) | `markRunning` |
+| `in_progress` → `in_review` | agent called `request_review` (live path); or watcher/reconcile rescue of a dead agent | `markReviewFromAgent` / `markInReview` |
+| `in_progress`/`finalizing` → `needs_info` | agent called `ask` (non-blocking) → parks holding the question, agent exits | `markNeedsInfoFromAgent` |
+| `needs_info` → `in_progress` | operator/CTO/human answered → resume the `--resume` re-launch with the answer injected | `answerTask` / `respondToFeedback` |
+| `in_review` → `finalizing` | operator **approved** → the workspace agent does 'final thoughts' before the merge | `approveTask` / `respondToFeedback` |
+| `in_review` → `in_progress` | operator **requested changes**, or a finalize-time merge conflict kicked back to the agent | `requestChanges` (via `rejectTask` / `finalizeMerge`) |
+| `finalizing` (pane set) | dispatcher launched the finalize agent — records `herdr_pane_id` | `markRunning` |
+| `finalizing` → `merged` | finalize agent done (or ended/recovered) → rebase + merge + post-merge verify GREEN | `finalizeMerge` (via `markReviewFromAgent` / watcher / `recoverFinalizingTasks`) |
+| `finalizing` → `aborted` | finalized, merge ff'd, but post-merge verify RED → auto-revert (carries `revert_reason`) | `finalizeMerge` (`revertedOnRed`) |
+| `in_progress`/`finalizing` → `in_progress`/`aborted` (backoff/give-up) | dispatch failed: under the cap keep the phase + stamp `next_dispatch_at`; at the cap an `in_progress` give-up → `aborted` (a `finalizing` give-up instead lands the merge) | `markDispatchFailure` |
+| `in_progress`/`needs_info` → `merged` | **plan** task submitted its decomposition | `proposeSubtasks` |
 | any non-terminal → `aborted` | operator aborted | `abortTask` |
-| `failed`/stuck non-terminal → `queued` | operator re-queued (resets retry state) | `requeueTask` |
-| `finalizing` → `merged` | startup recovery of legacy state | `finalizeTask` / `recoverFinalizingTasks` |
+| stuck non-terminal → `in_progress` | operator re-queued (resets retry state; terminal tasks refused) | `requeueTask` |
 
 A `merged` task can be **rolled back** by creating a deliberate **rollback task**
 from the built-in `rollback` template (the webapp's "Roll back" button); that task
 reverts the change and repairs any fallout through the standard pipeline (see §4).
 
-**Timestamp semantics** (used by metrics): `started_at` = first `running`
-transition (COALESCE — never cleared on rework); `completed_at` = `running→review`;
-`merged_at` = merge into default branch.
+**Timestamp semantics** (used by metrics): `started_at` = first agent launch
+(`markRunning` records the pane; COALESCE — never cleared on rework); `completed_at`
+= `in_progress→in_review`; `merged_at` = merge into default branch.
 
 ### 2.3 Orthogonal flags
 
 These are columns set *alongside* a status, not states themselves; each is only
 meaningful within its owning status and is cleared as the task moves on:
 
-- **`idle`** (on `running`) — agent alive but its CLI produced no output for
-  `BUTCHR_IDLE_MS`. Owned by the dispatcher watcher; set/cleared via `setIdle`,
-  which only writes (and emits) on a genuine flip.
-- **`conflict`** (on `review`) — a non-conflict merge failure surfaced to the human
-  (set by `approveTask` on an unusual merge error).
-- **`ci_status` / `ci_summary`** (on `review`) — the advisory CI gate result
+- **`herdr_pane_id`** (on `in_progress`/`finalizing`) — **not just bookkeeping**: a
+  NULL pane means the task is **ready** (the dispatcher launches it); a set pane means
+  a **live agent**. This is the restart-safe ready-vs-running signal (§2.1).
+- **`idle`** (on a live `in_progress` agent) — agent alive but its CLI produced no
+  output for `BUTCHR_IDLE_MS`. Owned by the dispatcher watcher; set/cleared via
+  `setIdle`, which only writes (and emits) on a genuine flip.
+- **`conflict`** (on `in_review`) — a non-conflict merge failure surfaced to the human
+  (set by `finalizeMerge` on an unusual merge error).
+- **`ci_status` / `ci_summary`** (on `in_review`) — the advisory CI gate result
   (`running` | `pass` | `fail` | null) plus a badge label + output tail.
-- **`conformance_status` / `conformance_summary`** (on `review`) — the advisory
+- **`conformance_status` / `conformance_summary`** (on `in_review`) — the advisory
   **spec-conformance** gate result (`checking` | `pass` | `concern` | null) plus the
   reviewer's short reason. Whether the diff actually *satisfies the prompt* (complete +
   on-spec), orthogonal to CI's build/test signal.
-- **`revert_reason`** (on `failed`) — failing build/test output when a merge was
-  auto-reverted off main. Its presence is what the UI keys on to render a "reverted
-  from main" panel (distinct from a dispatch failure).
+- **`revert_reason`** (on `aborted`) — failing build/test output when a merge was
+  auto-reverted off main by the post-merge verify gate. Its presence is what the UI
+  keys on to render a "reverted from main" panel (distinct from an operator abort).
 - **`auto_merged`** (on `merged`) — 1 when butchr auto-approved + merged (CI-green +
   low-risk) rather than a human.
 - **`dispatch_attempts` / `last_dispatch_error` / `next_dispatch_at`** — bounded
@@ -221,13 +254,13 @@ meaningful within its owning status and is cleared as the task moves on:
 `parseBlockedBy`). Semantics:
 
 - **Blocking.** A task with any not-yet-merged blocker starts in `blocked` and no
-  agent runs for it. An empty / all-merged set is immediately `queued`.
-- **Auto-unblock.** `reevaluateBlockedTask` promotes a `blocked` task to `queued`
+  agent runs for it. An empty / all-merged set is immediately `in_progress` (ready).
+- **Auto-unblock.** `reevaluateBlockedTask` promotes a `blocked` task to `in_progress`
   the moment **all** blockers reach `merged`. It runs both as a per-tick backstop
   (every `blocked` task is re-checked at the top of `tick`) and immediately after
   any merge / plan completion (`reevaluateAllBlocked`) for promptness.
-- **Dead-blocker hold.** A blocker in a terminal non-merged state (`aborted`,
-  `rejected`, `failed`) or gone entirely (`getTask` → null) will **never** merge, so
+- **Dead-blocker hold.** A blocker in the terminal non-merged state `aborted` or gone
+  entirely (`getTask` → null) will **never** merge, so
   the dependent stays `blocked` indefinitely. These are surfaced as `deadBlockers`
   on the task view and logged once each (deduped via `loggedDeadBlockers`) with
   "edit blocked_by to proceed." The operator must edit the set to make progress.
@@ -235,7 +268,7 @@ meaningful within its owning status and is cleared as the task moves on:
   from each proposed blocker; a self-reference or any path back to the task is
   rejected (HTTP 400) at both `createTask` and `setBlockedBy`.
 - **Kill-on-block.** `setBlockedBy`, when it transitions a task *into* `blocked`
-  from `running`/`review`/`queued` and the task has a live agent, tears the agent
+  from a non-terminal state and the task has a live agent, tears the agent
   down (`teardownTask`) and clears the running/herdr fields — but **keeps**
   `session_id` and the worktree, so the task resumes with full context when it later
   unblocks. This is *not* a dispatch failure (retry state untouched). Editing deps
@@ -266,14 +299,14 @@ decomposition. It is created via `POST …/tasks` with `kind: "plan"`.
 A task created with **`plan_preview: true`** opts into the **plan-preview gate**. This
 is *orthogonal* to `kind`: a plan-preview task is an **ordinary work task that writes
 code** — it just gets the operator's sign-off on its approach *first*. It **reuses the
-AWAITING-INPUT handshake** (§2.1 `awaiting_input`), so no new lifecycle state is added.
+NEEDS-INFO handshake** (§2.1 `needs_info`), so no new lifecycle state is added.
 
 - On its **first** dispatch the agent is handed the **`PLAN_PREVIEW_PROTOCOL`**
   (`taskmd.ts`) instead of the review protocol, plus the **`propose_plan`** MCP tool.
   It is told to analyze the request, submit a **concise implementation plan** via
   `propose_plan`, and **stop** — *before* writing any code.
-- `propose_plan` calls `markAwaitingInputFromAgent` (the same core the `ask` tool
-  uses), parking the task in **`awaiting_input`** holding the plan (stored in
+- `propose_plan` calls `markNeedsInfoFromAgent` (the same core the `ask` tool
+  uses), parking the task in **`needs_info`** holding the plan (stored in
   `question`); it returns immediately and the agent exits.
 - The operator reviews the plan (webapp answer box / CLI `answer` / API) and answers
   **`proceed`** or steering notes. `answerTask` re-queues for a **`--resume`** re-launch
@@ -283,19 +316,14 @@ AWAITING-INPUT handshake** (§2.1 `awaiting_input`), so no new lifecycle state i
   creation** (API `plan_preview`, CLI `new --plan`, webapp checkbox) and stored on the
   task row + in `task.md` front matter (`plan_preview: true`).
 
-### 2.7 The `idea` front state (CTO-fork spec generation)
+### 2.7 The `idea` front state (CEO/CTO-fork spec generation)
 
-**The unified pipeline has ONE state machine** (§2.1): a single task flows `idea → ready
-→ in_progress → review → merged`. The `idea` front state collapses what an earlier design
-modelled as a separate `stage` axis (`idea | spec | build`) into the status itself.
-
-> **Retraction note.** A prior task (`playful-rabbit-0405`) added a SECOND axis: a `stage`
-> field orthogonal to `status`, where an `idea`-stage *agent* wrote a spec, an operator
-> approved it through a **spec gate**, and that **spawned a separate `build` task**. The
-> CEO **retracted** that as over-complicated. It is **folded out**: there is no `stage`
-> field, no spec gate, and no spawned build task — one task carries the work from idea to
-> merge. (The `stage` DB column is left orphaned on old DBs, never read/written; see the
-> migration below.)
+**One state machine, one task** (§2.1): a single task flows `idea → spec_review →
+in_progress → in_review → finalizing → merged`. The `idea` front state collapses what an
+even-earlier design modelled as a separate `stage` axis (`idea | spec | build`) into the
+status itself — there is **no second axis** and **no spawned build task**; one task
+carries the work from idea to merge. (The orphaned `stage` DB column on old DBs is never
+read/written.)
 
 **How `idea` works.** An `idea` task is created from a one-line operator **brief** (the
 "New Idea" path; `createTask({idea:true})`), starting in status `idea` with the brief as
@@ -310,24 +338,26 @@ its prompt. It is **not** dispatched as a build agent. Instead the dispatcher
   without mutating the real session. It has **no `--mcp-config`** (can't recurse into
   butchr's own tools) and **no write tools** (can't mutate the repo). This **revives** the
   retired CTO-fork mechanism (the human-ask change had retired the old CTO auto-answer).
-- On **success** (`promoteIdeaToReady`): the task's `task.md` Prompt section is rewritten
-  brief → **spec**, and the task advances to `queued` ('ready') — or `blocked` if it
-  carries unmerged blockers (the blocker check deferred at creation now applies). From
-  there it dispatches the **build agent** through the normal flow, so `review` is of the
-  **code**, exactly like any other task. There is no separate spec-review step.
+- On **success** (`promoteIdeaToSpecReview`): the task's `task.md` Prompt section is
+  rewritten brief → **spec**, and the task advances to **`spec_review`** — the feedback
+  gate where the spec is the artifact (§2.1.1). The operator **approves** (→ `in_progress`,
+  where it dispatches the **workspace agent**) or **requests changes** (→ back to `idea`,
+  re-running the generator with the notes via `input.notes`, then → `spec_review` again).
 - On **failure** (`markSpecGenFailure`): the same bounded retry/backoff as a dispatch
   failure, except the task stays in `idea` between retries; at the attempt cap it goes to
-  `failed`.
+  the terminal `aborted` (carrying `last_dispatch_error`).
 
-**`build` is just the default.** Creating a task with a full prompt (the "New task" path,
-`idea` omitted/false) enters `queued` ('ready') directly and runs exactly as today —
-nothing about the non-idea flow changed.
+**A spec'd task is just the default.** Creating a task with a full prompt (the "New task"
+path, `idea` omitted/false) enters `in_progress` (ready) directly and runs exactly as a
+normal build task — it skips `idea`/`spec_review` because it already carries a spec.
 
-**Migration (backward-compatible).** On startup `db.migrateStageAxisToStatus()` flips any
-legacy `stage='idea'` row that hadn't been dispatched (`queued`/`blocked`) to status
-`idea`; every other row keeps its current status. A legacy `stage:` line in a `task.md`
-front matter is simply ignored on parse. Old DBs keep the orphaned `stage` column (we
-don't risk a destructive `ALTER`); fresh DBs never have it.
+**Migration (backward-compatible, forward-only).** Two startup migrations run in
+`src/db.ts`: `migrateStageAxisToStatus()` flips any legacy `stage='idea'` row that hadn't
+been dispatched to status `idea`; then `migrateStatusModel()` renames the OLD status
+values into the canonical model (`queued`/`running`→`in_progress`, `review`→`in_review`,
+`awaiting_input`→`needs_info`, `rejected`/`failed`→`aborted`). Both are no-ops once
+converged. A legacy `stage:` line in `task.md` front matter is ignored on parse; the
+orphaned `stage` DB column is left in place (no destructive `ALTER`).
 
 ---
 
@@ -348,12 +378,15 @@ wall of split panes in one tab. `tabCreate` is best-effort — on failure it ret
 1. Stamps `lastTickAt` / `tickCount` (liveness, before any early-out).
 2. If herdr is **down**, returns silently (no error spam — it may come back).
 3. **Auto-unblock pass:** re-evaluates every `blocked` task.
-4. **Auto-merge backstop:** if enabled, re-checks every `review` task with
+4. **Auto-merge backstop:** if enabled, re-checks every `in_review` task with
    `ci_status='pass'` and `auto_merged=0` (deduped + serialized downstream).
-5. Selects `queued` tasks whose `next_dispatch_at` is null or in the past (ISO
-   strings compare correctly), ordered by **`priority DESC, created_at ASC`** — a
-   higher-`priority` task jumps the queue ahead of older lower-priority ones, and
-   ties stay FIFO (oldest first; every task defaults to priority `0`). Dispatches
+4b. **Idea pass:** runs the CEO/CTO-fork spec generator for every eligible `idea` task.
+5. Selects **READY agent-phase** tasks — `status IN ('in_progress','finalizing')` with
+   **`herdr_pane_id IS NULL`** (no live agent) — whose `next_dispatch_at` is null or in
+   the past, ordered by **`priority DESC, created_at ASC`** — a higher-`priority` task
+   jumps the queue ahead of older lower-priority ones, and ties stay FIFO (oldest first;
+   every task defaults to priority `0`). This single gate covers fresh builds,
+   reworks/resumes, answer-resumes, AND the post-approval finalize launch. Dispatches
    each that isn't already `dispatching`/`watching` — concurrently, no cap. The
    `dispatching`/`watching` sets (keyed by task id) prevent double-dispatch across
    overlapping ticks. This selection runs through `selectQueuedForDispatch`, which
@@ -365,11 +398,11 @@ A global switch (`dispatcher.{isPaused,setPaused}`, toggled by `POST /api/pause`
 `/api/resume`) stops **new** agent dispatch so the operator can hold for a
 restart / recovery / maintenance window. **Semantics when paused:**
 
-- Step 5's `selectQueuedForDispatch` returns an empty list → **no `queued` task is
+- Step 5's `selectQueuedForDispatch` returns an empty list → **no ready task is
   launched**.
 - Steps 3–4 still run: the **auto-unblock pass still promotes** a `blocked` task
-  whose blockers all merged to `queued` (it just waits there, undispatched, until
-  resume), and the **auto-merge backstop still lands** CI-green low-risk `review`
+  whose blockers all merged to `in_progress` (it just waits there, undispatched, until
+  resume), and the **auto-merge backstop still lands** CI-green low-risk `in_review`
   tasks.
 - Everything in flight is **untouched** — `running`/`review`/`idle` tasks and their
   watchers continue, so existing work drains to completion.
@@ -452,30 +485,35 @@ exit). It breaks and acts on:
 On the `.done` path it also checks **exec failure** (`isExecFailure`): exit code
 `126`/`127` with **no captured output** means the launch command itself failed to
 `exec` (most notably **E2BIG** — argv exceeding ~128 KB `MAX_ARG_STRLEN`), so the
-agent never started. This is routed to `markDispatchFailure` (retry/backoff/`failed`)
-rather than masquerading as an empty review. All other end conditions → `markReview`
-with an explanatory note prefixing the captured output.
+agent never started. This is routed to `markDispatchFailure` (retry/backoff/give-up)
+rather than masquerading as an empty review. All other end conditions are **phase-aware**:
+a dead `in_progress` agent → `markInReview` (with an explanatory note prefixing the
+captured output); a dead `finalizing` agent → `finalizeMerge` (the operator already
+approved, so land the merge).
 
 `refreshIdle` toggles the `idle` flag from the run log's mtime (the agent runs under
 `script -f`, so the log mtime tracks live output).
 
-### Retry, backoff, and `failed`
+### Retry, backoff, and give-up
 
 `markDispatchFailure` is the **only** path that increments `dispatch_attempts`:
 
 - Always: tear down any half-created herdr agent/tab, increment the count, store
   `last_dispatch_error`.
 - **Under the cap** (`dispatch_attempts < BUTCHR_MAX_DISPATCH_ATTEMPTS`, default 5):
-  stay `queued` but set `next_dispatch_at = now + backoff`, where
+  keep the current agent phase (`in_progress`/`finalizing`) with the pane cleared (→
+  ready again) and set `next_dispatch_at = now + backoff`, where
   `backoff(n) = min(base · 2^(n-1), cap)` (`dispatchBackoffMs`; base 1 s, cap 30 s).
   The tick loop skips the task until then — no more hot-looping.
-- **At/over the cap:** move to `failed`, clear `next_dispatch_at`. The dispatcher
-  stops retrying.
+- **At/over the cap:** an `in_progress` give-up → terminal `aborted` (no `failed`
+  state); a `finalizing` give-up instead **lands the merge** via `finalizeMerge` (the
+  operator already approved — don't strand approved work).
 
 A clean re-queue (`backToQueued`) and a rework re-queue (`requestChanges`) **reset**
 the retry state — they are fresh intent, not failures. `POST …/requeue`
-(`requeueTask`) is the operator escape hatch that revives a `failed` (or otherwise
-stuck non-terminal) task by clearing the retry state and re-queuing.
+(`requeueTask`) is the operator escape hatch that revives a stuck **non-terminal** task
+by clearing the retry state and re-arming it as ready `in_progress` (a dispatch give-up
+is now the terminal `aborted`, so it is recreated rather than requeued).
 
 ---
 
@@ -483,33 +521,37 @@ stuck non-terminal) task by clearing the retry state and re-queuing.
 
 ### Non-blocking review
 
-`request_review` (MCP) is **non-blocking**: `markReviewFromAgent` records the
-request, moves the task `running → review`, stores the optional summary, clears the
-pane (it's about to close), captures the run-log snapshot, captures session token
-usage, and triggers the CI gate — then returns immediately. The agent then **exits**;
-review is pure DB state with no live process held open. This is what makes review
-durable across an agent or butchr restart (an MCP server can't wake an idle Claude
-Code client, so butchr never parks a call).
+`request_review` (MCP) is **non-blocking** and **status-aware**: `markReviewFromAgent`
+from `in_progress` records the request, moves the task `in_progress → in_review`, stores
+the optional summary, clears the pane (it's about to close), captures the run-log
+snapshot + session token usage, and triggers the CI + conformance gates — then returns
+immediately. (Called from `finalizing` — the 'final thoughts' agent signalling done — it
+instead kicks off `finalizeMerge`.) The agent then **exits**; review is pure DB state
+with no live process held open. This is what makes review durable across an agent or
+butchr restart (an MCP server can't wake an idle Claude Code client, so butchr never
+parks a call).
 
-### Non-blocking ask (the awaiting-input handshake)
+### Non-blocking ask (the needs-info handshake)
 
 `ask` (MCP) follows the **same non-blocking shape** as `request_review`, applied to
-a mid-task clarifying question. `markAwaitingInputFromAgent` records the agent's
-`question`, moves the task `running → awaiting_input`, clears the pane, captures the
+a mid-task clarifying question — the ad-hoc feedback stage **any agent state** can enter.
+`markNeedsInfoFromAgent` records the agent's `question`, moves the task
+`in_progress`/`finalizing` `→ needs_info`, clears the pane, captures the
 run-log snapshot + token usage — then returns immediately. The agent **exits**;
-awaiting-input is pure DB state with no live process (no CTO Claude is consulted —
+needs-info is pure DB state with no live process (no CTO Claude is consulted —
 that auto-answer mechanism was retired). butchr surfaces the question through **one
 unified surface** — `/health` `needsAttention`, the webapp answer box, the
 `POST /api/tasks/:id/answer` endpoint, and `butchr answer <id> -m …` — so whoever
 operates answers: the operator/CTO via API/CLI when running unattended, or a human
-in the webapp on a project they want to be in the loop on. `answerTask` then logs
-the Q&A to `task.md`, re-queues the task, and the dispatcher **re-launches the SAME
-Claude session** via `--resume <session_id>` with the answer injected (rendered by
-`renderAnswerPrompt`) — the exact mirror of the reject→resume rework path.
+in the webapp on a project they want to be in the loop on. `answerTask` (the `answer`
+arm of the unified feedback mechanism) then logs the Q&A to `task.md`, resumes the task
+to `in_progress` (pane NULL), and the dispatcher **re-launches the SAME Claude session**
+via `--resume <session_id>` with the answer injected (rendered by `renderAnswerPrompt`) —
+the exact mirror of the request-changes→resume rework path.
 
 ### CI gate (pre-merge, in-worktree, advisory)
 
-On a genuine `running → review` transition, `triggerCi` runs the directory's
+On a genuine `in_progress → in_review` transition, `triggerCi` runs the directory's
 **build/test gate command in the task's worktree**, fire-and-forget — review never
 blocks on it. The command is the directory's **per-directory `gate_cmd`** (or the
 default `BUTCHR_VERIFY_CMD`), resolved via `directories.directoryGateCmd` and run as a
@@ -534,7 +576,7 @@ CI proves a task **builds and its tests pass** — it does **not** prove the tas
 **what was asked**. (We hit exactly this: a task reached review CI-green but was
 half-implemented; only a manual diff-read caught it.) The **spec-conformance gate**
 closes that hole with a second, orthogonal signal. On the same genuine
-`running → review` transition, `triggerConformance` (`src/conformance.ts`) runs a
+`in_progress → in_review` transition, `triggerConformance` (`src/conformance.ts`) runs a
 **read-only reviewer** that judges whether the task's **diff actually satisfies its
 prompt** (complete + on-spec), fire-and-forget — review never blocks on it.
 
@@ -557,17 +599,23 @@ or an unparseable verdict all leave `conformance_status` **null**. The runner is
 overridable in tests (`setConformanceRunner`). Like the CI gate it is **advisory** —
 a `concern` **never hard-blocks** approval; the webapp warns on approve (mirroring
 the CI-fail warning) but lets the operator proceed. A result is only written back
-while the task is still in `review` (a task that merged/aborted under the in-flight
+while the task is still in `in_review` (a task that moved on under the in-flight
 review isn't resurrected).
 
-### Approve → global merge queue → post-merge verify
+### Approve → finalizing → global merge queue → post-merge verify
 
-`approveTask` (only valid on `review`) merges the task's code. (There is no longer a
-separate "spec gate": in the unified pipeline an `idea` task generates its spec
-automatically and continues as the SAME task — see §2.7 — so by the time anything reaches
-`review` it is always code to merge.)
+Approving an `in_review` task is the `approve` arm of the unified feedback mechanism: it
+forwards the task to **`finalizing`** (it does **not** merge synchronously). The
+dispatcher then launches the **workspace agent** one more time (a `--resume` with
+`renderFinalizePrompt`) to do **post-approval 'final thoughts'** — a brief wrap-up pass.
+When that agent calls `request_review` (or ends / can't launch / is recovered on
+restart), **`finalizeMerge`** lands the merge. So the merge is **best-effort wrapped** by
+the final-thoughts pass but always converges (a finalize give-up lands the merge
+directly; a finalizing task with no live agent is finalized by `recoverFinalizingTasks`
+on boot).
 
-The merge path runs inside a process-wide **global merge queue** (`runExclusiveMerge` —
+`finalizeMerge` (only valid on `finalizing`) runs inside a process-wide **global merge
+queue** (`runExclusiveMerge` —
 a never-rejecting promise chain) so concurrent approvals rebase + fast-forward one at a
 time against an up-to-date base tip instead of racing. Inside the exclusive section:
 
@@ -589,13 +637,13 @@ Outcomes (`ApproveOutcome`):
 - **merged** — verify green → status `merged`, worktree + branch cleaned up, snapshot
   captured, `merge_base_sha`/`merged_sha`/`merged_at` recorded, blocked dependents
   re-evaluated.
-- **`revertedOnRed`** — verify RED, merge auto-reverted → status `failed` with
-  `revert_reason` = the failing output. The worktree + branch are **kept** for
+- **`revertedOnRed`** — verify RED, merge auto-reverted → terminal status `aborted`
+  with `revert_reason` = the failing output. The worktree + branch are **kept** for
   inspection / a fixup re-run. (HTTP 200 with a flag.)
 - **`conflictSentBack`** — `git.merge` reported a content conflict (the rebase was
   aborted, tree left clean). Instead of dumping it on the human, butchr appends an
   actionable conflict note and **kicks it back to the agent** via `requestChanges`
-  (→ `queued`, re-dispatched as a `--resume` so the agent integrates the base and
+  (→ `in_progress`, re-dispatched as a `--resume` so the agent integrates the base and
   re-submits). (HTTP 200 with a flag.) Because the merge gate **rebases** the branch
   onto the default tip (no merge commit), the note instructs the agent to integrate
   by **`git rebase <base>`** (resolve + `--continue`) or **`git reset --soft <base>`**
@@ -684,20 +732,23 @@ the revert is itself **VERIFIED** before it lands. There is no `POST …/rollbac
 route and no `rolled_back_at` flag; a rollback is just another task with its own
 review and merge.
 
-### Reject
+### Request changes (reject)
 
-`rejectTask` (only on `review`, note required) appends the note to `task.md`'s
-Review Notes, then `requestChanges` re-queues the task (`→ queued`, retry state
-cleared). The dispatcher re-launches the **same** Claude session via
-`--resume <session_id>` with the focused rework prompt, so the agent re-enters with
-full prior context. Any lingering pane/tab is torn down defensively.
+`rejectTask` (the `request_changes` arm of the unified feedback mechanism; note
+required) appends the note to `task.md`'s Review Notes. On an **`in_review`** task,
+`requestChanges` resumes the agent (`→ in_progress`, retry state cleared) and the
+dispatcher re-launches the **same** Claude session via `--resume <session_id>` with the
+focused rework prompt, so the agent re-enters with full prior context. On a
+**`spec_review`** task it instead sends the task back to **`idea`** so the CEO agent
+**re-generates the spec** addressing the notes (→ `spec_review` again). Any lingering
+pane/tab is torn down defensively.
 
-### Answer (the awaiting-input handshake)
+### Answer (the needs-info handshake)
 
-`answerTask` (only on `awaiting_input`, answer required) is the **mirror of reject**
+`answerTask` (only on `needs_info`, answer required) is the **mirror of request-changes**
 for a clarifying question an agent posed via the MCP `ask` tool. It logs the Q&A to
 `task.md`'s Clarifications section, stores the answer in the `answer` column, clears
-the pending `question`, and re-queues the task (`→ queued`, retry state cleared,
+the pending `question`, and resumes the task (`→ in_progress`, retry state cleared,
 `session_id` kept). The dispatcher re-launches the **same** Claude session via
 `--resume <session_id>`; because the row carries a pending `answer`,
 `dispatch` renders the **answer-resume** prompt (`renderAnswerPrompt`) instead of the
@@ -717,34 +768,34 @@ the task in terminal `aborted` (clearing all live fields). `task.md` is kept.
 
 ### Startup reconcile (`reconcileRunningTasks`, run once in `index.ts`)
 
-For every task still marked `running` after a restart (its in-memory watcher was
-lost):
+For every task that was **running** when butchr stopped — an agent-phase task
+(`in_progress` or `finalizing`) with a recorded **`herdr_pane_id`** — whose in-memory
+watcher was lost:
 
 - **herdr up + agent still alive** → **re-adopt**: record its (possibly renumbered)
   pane + tab and re-spawn a watcher. The agent keeps working; completion/idle
   detection resumes.
-- **herdr up + agent gone** → **rescue** to `review` with an "agent ended while
-  butchr was offline" snapshot.
-- **herdr down** → leave the tasks `running` as-is (can't distinguish live from
-  dead without risking orphaning/false-rescue); reconcile on a later restart with
-  herdr up. (There is deliberately **no** blind `running → queued` re-queue, which
-  would collide on `agent_name_taken`.)
-
-### Finalize recovery (`recoverFinalizingTasks`)
-
-Flushes any task stranded in the legacy `finalizing` state (branch already merged)
-to `merged` — closes the tab, cleans up, stamps merged. Idempotent.
+- **herdr up + agent gone** → **rescue, phase-aware**: a dead `in_progress` agent →
+  `in_review` with an "agent ended while butchr was offline" snapshot; a dead
+  `finalizing` agent → `finalizeMerge` (land the approved merge).
+- **herdr down** → leave the tasks as-is (can't distinguish live from dead without
+  risking orphaning/false-rescue); reconcile on a later restart with herdr up. (There
+  is deliberately **no** blind re-queue, which would collide on `agent_name_taken`.)
+- **`recoverFinalizingTasks`** (run after reconcile) lands any `finalizing` task with
+  **no live agent** (pane NULL) via `finalizeMerge`, so approved-but-unlanded work
+  isn't stranded across a restart.
 
 ### The reaper (`reapOrphans`, conservative, once on boot)
 
-Self-heals artifacts leaked by tasks that reached a **terminal** state
-(`merged`/`aborted`/`rejected`) or that no longer have a DB row:
+Self-heals artifacts leaked by tasks that reached a **terminal** idle state
+(`merged`/`aborted`) or that no longer have a DB row:
 
 - **Worktrees + branches** — for each registered repo, scans
   `git worktree list --porcelain` and reaps any **direct child** worktree
   `<repo>/<taskId>` whose task is terminal or missing (`worktree remove --force` +
   `branch -D`, `prune` on failure). It **never** touches the main worktree or a
-  worktree whose task is still queued/blocked/running/review/awaiting_input/finalizing.
+  worktree whose task is still non-terminal (idea/spec_review/blocked/needs_info/
+  in_progress/in_review/finalizing).
 - **herdr husks** — a terminal-state task whose agent name is still registered gets
   `agentDeregister`'d. **Skipped when herdr is down** (worktree reaping still runs).
 

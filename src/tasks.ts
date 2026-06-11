@@ -2,7 +2,7 @@
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { config } from "./config.ts";
 import { triggerConformance } from "./conformance.ts";
-import { db, estimateRows, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
+import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
 import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import {
   classifyPathType,
@@ -62,7 +62,7 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks" | "tags">
 // --- DURATION ESTIMATES (rough, history-derived) ---------------------------
 
 /** Terminal states that don't get a forward duration estimate (work is done). */
-const ESTIMATE_TERMINAL = new Set<TaskStatus>(["merged", "aborted", "failed"]);
+const ESTIMATE_TERMINAL = new Set<TaskStatus>(["merged", "aborted"]);
 
 /**
  * Assemble the estimator's input rows from the tasks table (parsing the raw
@@ -128,8 +128,10 @@ export function getTask(id: string): TaskRow | null {
 
 // --- task dependencies / blocking ------------------------------------------
 
-/** Terminal states a blocker can be in that mean it will NEVER merge. */
-const DEAD_BLOCKER_STATES = new Set<TaskStatus>(["aborted", "rejected", "failed"]);
+/** Terminal states a blocker can be in that mean it will NEVER merge. The only
+ * terminal-non-merged state is `aborted` (the former `rejected`/`failed` both fold
+ * into it now — see the canonical state model in db.ts). */
+const DEAD_BLOCKER_STATES = new Set<TaskStatus>(["aborted"]);
 
 /**
  * Parse a JSON-array-of-task-ids column into a clean string[]. Named for `blocked_by`,
@@ -580,15 +582,16 @@ export async function createTask(
 
   const created = nowIso();
   // FRONT STATE: an `idea` task (created from a one-line brief, no spec yet) starts in
-  // `idea` — its first dispatch runs the CTO-fork spec generator, then it advances to
-  // `queued`/`blocked` (see promoteIdeaToReady). Any blockers are recorded but only
-  // gate the post-spec `queued` transition, not the spec-writing front state.
-  // Otherwise start `blocked` if any blocker is not yet merged; else `queued` as today
-  // (an empty set or all-merged blockers are immediately eligible to dispatch).
+  // `idea` — its first dispatch runs the CEO/CTO-fork spec generator, then it advances
+  // to `spec_review` for the operator's sign-off (see promoteIdeaToSpecReview). Any
+  // blockers are recorded but only gate the post-approval `in_progress` transition, not
+  // the spec-writing front state. A 'New task' (already carrying a spec) starts directly
+  // in `in_progress` (ready — no live agent yet) unless it has unmerged blockers, in
+  // which case it waits in `blocked` and auto-unblocks to `in_progress` later.
   const status: TaskStatus = taskIdea
     ? "idea"
     : allBlockersMerged(blockers)
-      ? "queued"
+      ? "in_progress"
       : "blocked";
 
   // Filesystem artifact first: worktree + task.md. If either fails, no DB row.
@@ -827,7 +830,7 @@ export async function proposeSubtasks(
     `UPDATE tasks SET status='merged', spawned_subtasks=?, summary=COALESCE(?, summary),
        output_snapshot=COALESCE(?, output_snapshot), herdr_pane_id=NULL, idle=0, conflict=0,
        completed_at=COALESCE(completed_at, ?), merged_at=COALESCE(merged_at, ?)
-       WHERE id=? AND status IN ('running','review','queued')`,
+       WHERE id=? AND status IN ('in_progress','needs_info')`,
   ).run(
     JSON.stringify(created),
     summary ?? null,
@@ -879,9 +882,10 @@ export function reevaluateBlockedTask(id: string): boolean {
   if (!row || row.status !== "blocked") return false;
   const ids = parseBlockedBy(row.blocked_by);
   if (allBlockersMerged(ids)) {
-    // Promote to queued. Clear any stale backoff so it dispatches on the next tick.
+    // Promote to in_progress (ready — no live agent yet, herdr_pane_id stays NULL so
+    // the dispatcher launches it). Clear any stale backoff so it dispatches next tick.
     if (
-      !setStatus(id, "queued", {
+      !setStatus(id, "in_progress", {
         from: "blocked",
         note: "all blockers merged",
         set: { next_dispatch_at: null },
@@ -889,7 +893,7 @@ export function reevaluateBlockedTask(id: string): boolean {
     ) {
       return false; // moved under us
     }
-    console.log(`[butchr] task ${id} unblocked → queued (all blockers merged)`);
+    console.log(`[butchr] task ${id} unblocked → in_progress (all blockers merged)`);
     return true;
   }
   // Still blocked — surface any dead (never-merging) blockers.
@@ -925,15 +929,9 @@ export async function setBlockedBy(
 ): Promise<TaskView> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
-  // Only non-terminal, pre-merge states may have their dependencies edited.
-  const editable = new Set<TaskStatus>([
-    "queued",
-    "blocked",
-    "running",
-    "review",
-    "awaiting_input",
-  ]);
-  if (!editable.has(row.status)) {
+  // Only non-terminal states may have their dependencies edited (everything except the
+  // two terminal idle states, merged/aborted).
+  if (isTerminal(row.status)) {
     throw new HttpError(409, `cannot edit blocked_by on a ${row.status} task`);
   }
 
@@ -959,15 +957,15 @@ export async function setBlockedBy(
   const dir = getDirectory(row.directory_id);
 
   if (eligible) {
-    // No outstanding blockers. A blocked task becomes eligible → queued; anything
-    // else (queued/running/review) is already past the block, so leave it.
+    // No outstanding blockers. A blocked task becomes eligible → in_progress (ready);
+    // anything else (in_progress/in_review/…) is already past the block, so leave it.
     if (row.status === "blocked") {
       const res = db.query(
-        `UPDATE tasks SET status='queued', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
+        `UPDATE tasks SET status='in_progress', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
       ).run(id);
       if (res.changes > 0) {
-        recordTaskEvent(id, "blocked", "queued", "dependencies cleared by operator");
-        if (dir) updateTaskMdStatus(dir.path, id, "queued");
+        recordTaskEvent(id, "blocked", "in_progress", "dependencies cleared by operator");
+        if (dir) updateTaskMdStatus(dir.path, id, "in_progress");
       }
     }
     emitUpdated(id);
@@ -1062,22 +1060,26 @@ async function requestChanges(
   tabId: string | null,
   eventNote: string,
 ): Promise<void> {
-  // Non-blocking model: the agent already exited after request_review, so there
-  // is no live call to resolve — just re-queue for a `--resume` re-launch. Tear
-  // down any lingering tab defensively (a misbehaving agent that didn't exit would
-  // otherwise strand an orphan that collides on `agent_name_taken`), and clear the
-  // stored tab id since that tab is now gone; the re-dispatch spins up a fresh one.
+  // RESUME the workspace agent: move the task back to `in_progress` (ready — pane
+  // NULL) so the dispatcher re-launches the SAME Claude session via `--resume` with
+  // the notes. The agent already exited after the non-blocking request_review, so
+  // there is no live call to resolve; tear down any lingering tab defensively (a
+  // misbehaving agent that didn't exit would otherwise strand an orphan that collides
+  // on `agent_name_taken`), and clear the stored tab id since the re-dispatch spins
+  // up a fresh one. Shared by the in_review request-changes path and the
+  // finalize-time merge-conflict kick-back.
+  const from = getTask(id)?.status ?? "in_review";
   await herdr.teardownTask(tabId, id, paneId);
-  // This is a REWORK re-queue (a human reject or a conflict kick-back), NOT a
+  // This is a REWORK re-queue (a request-changes or a conflict kick-back), NOT a
   // dispatch failure — it's a fresh intent to run, so clear the dispatch retry
   // state (attempts / last error / backoff) so prior dispatch failures don't
   // count against the resume and a stale backoff can't delay it.
   db.query(
-    `UPDATE tasks SET status='queued', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0,
+    `UPDATE tasks SET status='in_progress', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0,
        dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(note, id);
-  recordTaskEvent(id, "review", "queued", eventNote);
-  updateTaskMdStatus(dirPath, id, "queued");
+  recordTaskEvent(id, from, "in_progress", eventNote);
+  updateTaskMdStatus(dirPath, id, "in_progress");
 }
 
 /** Actionable change-request note for a merge conflict, naming the files + steps. */
@@ -1191,24 +1193,25 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   return { ok: true, rebased: res.rebased, conflict: false };
 }
 
-// --- IDEA → READY: the CTO-fork spec generation handshake -------------------
+// --- IDEA → SPEC_REVIEW: the CEO/CTO-fork spec generation handshake ----------
 //
-// The unified pipeline's FRONT state is `idea`: a task created from a one-line brief with
-// no spec yet (see createTask). The dispatcher runs the CTO-fork spec generator
-// (src/cto.ts, headless + read-only) to turn the brief into a repo-grounded SPEC, then
-// calls promoteIdeaToReady to advance the task to `queued` ('ready') carrying that spec —
-// where it dispatches the build agent through the normal flow. A generation FAILURE goes
-// through markSpecGenFailure (bounded backoff/retry, then give-up to `failed`).
+// The pipeline's FRONT state is `idea`: a task created from a one-line brief with no
+// spec yet (see createTask). The dispatcher runs the CEO agent — the CTO-fork spec
+// generator (src/cto.ts, headless + read-only) — to turn the brief into a repo-grounded
+// SPEC, then calls promoteIdeaToSpecReview to advance the task to `spec_review`, where
+// the operator approves the spec (→ in_progress) or requests changes (→ revise the spec,
+// back to idea). A generation FAILURE goes through markSpecGenFailure (bounded
+// backoff/retry, then give-up to `aborted`). The blocker check is deferred to the
+// spec_review approval (see respondToFeedback).
 
 /**
- * Advance an `idea` task to the dispatchable `ready` state once its spec is generated.
- * Rewrites the task.md prompt from the operator's brief to the full SPEC (so the build
- * agent's rendered prompt IS the spec), then transitions idea→queued — or idea→blocked
- * when the task carries not-yet-merged blockers (the blocker check that was deferred at
- * creation now applies). Clears any spec-gen backoff/error. Guarded on status='idea' so a
+ * Advance an `idea` task to `spec_review` once its spec is generated. Rewrites the
+ * task.md prompt from the operator's brief to the full SPEC (so the SPEC becomes the
+ * task's prompt AND the artifact the operator reviews), then transitions idea →
+ * spec_review. Clears any spec-gen backoff/error. Guarded on status='idea' so a
  * concurrent abort wins. Returns true iff it advanced the task.
  */
-export function promoteIdeaToReady(id: string, spec: string): boolean {
+export function promoteIdeaToSpecReview(id: string, spec: string): boolean {
   const row = getTask(id);
   if (!row || row.status !== "idea") return false;
   const clean = (spec ?? "").trim();
@@ -1216,28 +1219,22 @@ export function promoteIdeaToReady(id: string, spec: string): boolean {
   const dir = getDirectory(row.directory_id);
   if (dir) updateTaskMdPrompt(dir.path, id, clean);
 
-  // Apply the deferred blocker check: an idea task with outstanding blockers becomes
-  // `blocked` (auto-unblocks to queued later); otherwise it is `ready` (queued).
-  const blockers = parseBlockedBy(row.blocked_by);
-  const to: TaskStatus = allBlockersMerged(blockers) ? "queued" : "blocked";
   if (
-    !setStatus(id, to, {
+    !setStatus(id, "spec_review", {
       from: "idea",
-      note:
-        to === "queued"
-          ? "spec generated — ready to build"
-          : "spec generated — waiting on blockers",
+      note: "spec generated — awaiting operator approval",
       set: {
         dispatch_attempts: 0,
         last_dispatch_error: null,
         next_dispatch_at: null,
+        // Clear any prior change-request note now that a fresh spec exists.
+        review_note: null,
       },
     })
   ) {
     return false; // moved under us (e.g. aborted)
   }
-  if (to === "blocked") logDeadBlockers(id, blockers);
-  console.log(`[butchr] idea task ${id} → ${to} (spec generated)`);
+  console.log(`[butchr] idea task ${id} → spec_review (spec generated)`);
   return true;
 }
 
@@ -1256,11 +1253,13 @@ export function markSpecGenFailure(id: string, err: string): void {
   const attempts = (row.dispatch_attempts ?? 0) + 1;
 
   if (attempts >= config.maxDispatchAttempts) {
-    // setStatus mirrors the new status into task.md + records the audit event.
-    setStatus(id, "failed", {
+    // setStatus mirrors the new status into task.md + records the audit event. A
+    // spec-generation give-up maps to the terminal idle state `aborted` (there is no
+    // `failed` state in the canonical model); last_dispatch_error explains why.
+    setStatus(id, "aborted", {
       from: "idea",
       note: `spec generation gave up after ${attempts} attempt${attempts === 1 ? "" : "s"}`,
-      set: { dispatch_attempts: attempts, last_dispatch_error: err, next_dispatch_at: null },
+      set: { dispatch_attempts: attempts, last_dispatch_error: err, next_dispatch_at: null, completed_at: keep(nowIso()) },
     });
     console.error(`[butchr] idea task ${id} spec generation failed after ${attempts} attempts: ${err}`);
     return;
@@ -1277,12 +1276,181 @@ export function markSpecGenFailure(id: string, err: string): void {
   emitUpdated(id);
 }
 
-export async function approveTask(id: string): Promise<ApproveOutcome> {
+// ===========================================================================
+// THE UNIFIED FEEDBACK MECHANISM (spec_review / in_review / needs_info).
+// ===========================================================================
+// The three FEEDBACK states share ONE shape and ONE code path: butchr surfaces an
+// ARTIFACT, awaits an OPERATOR RESPONSE, then either FORWARDS the task to the next
+// state or RESUMES the agent. They differ only in (artifact, which responses are
+// valid, where each response routes):
+//
+//   state        artifact   approve →            request_changes →        answer →
+//   -----------  ---------  -------------------  -----------------------  -----------------
+//   spec_review  spec       in_progress/blocked  idea (re-generate spec)  —
+//   in_review    diff       finalizing           in_progress (resume)     —
+//   needs_info   question   —                    —                        in_progress (resume)
+//
+// respondToFeedback is that single path; approveTask / rejectTask / answerTask are
+// thin public wrappers over it (kept for the existing API / CLI / test surface).
+
+export type FeedbackArtifact = "spec" | "diff" | "question";
+export type FeedbackResponseType = "approve" | "request_changes" | "answer";
+
+/**
+ * Describe a feedback state's artifact + the responses it accepts (or null when the
+ * status is not a feedback state). The single definition the UI reads to show "what's
+ * awaited" and that respondToFeedback validates against.
+ */
+export function feedbackInfo(
+  status: TaskStatus,
+): { artifact: FeedbackArtifact; awaiting: string; accepts: FeedbackResponseType[] } | null {
+  switch (status) {
+    case "spec_review":
+      return { artifact: "spec", awaiting: "operator approval of the generated spec", accepts: ["approve", "request_changes"] };
+    case "in_review":
+      return { artifact: "diff", awaiting: "operator review of the diff", accepts: ["approve", "request_changes"] };
+    case "needs_info":
+      return { artifact: "question", awaiting: "an answer to the agent's question", accepts: ["answer"] };
+    default:
+      return null;
+  }
+}
+
+export type FeedbackResponse =
+  | { type: "approve" }
+  | { type: "request_changes"; note: string }
+  | { type: "answer"; answer: string };
+
+/**
+ * THE unified feedback handler. Validates that `id` is in a feedback state that
+ * accepts `response.type`, then forwards or resumes per the table above. Returns an
+ * ApproveOutcome (its `task` is the post-transition view). Note that an in_review
+ * APPROVE no longer merges synchronously — it forwards to `finalizing`; the actual
+ * merge happens in finalizeMerge once the finalize agent wraps up. A merge conflict /
+ * post-merge revert therefore surface from finalizeMerge, not here.
+ */
+export async function respondToFeedback(
+  id: string,
+  response: FeedbackResponse,
+): Promise<ApproveOutcome> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
-  if (row.status !== "review") {
-    throw new HttpError(409, `task is not in review (status=${row.status})`);
+  const info = feedbackInfo(row.status);
+  if (!info) {
+    throw new HttpError(409, `task is not awaiting feedback (status=${row.status})`);
   }
+  if (!info.accepts.includes(response.type)) {
+    throw new HttpError(
+      409,
+      `a ${row.status} task does not accept '${response.type}' — it awaits ${info.awaiting}`,
+    );
+  }
+  const dir = getDirectory(row.directory_id);
+  if (!dir) throw new HttpError(404, "directory not found");
+
+  // ---- APPROVE ----
+  if (response.type === "approve") {
+    if (row.status === "spec_review") {
+      // FORWARD: the spec is approved → build it. The blocker check deferred at
+      // creation now applies: with outstanding blockers the task waits in `blocked`
+      // (auto-unblocks to in_progress later); else it's ready in `in_progress`.
+      const blockers = parseBlockedBy(row.blocked_by);
+      const to: TaskStatus = allBlockersMerged(blockers) ? "in_progress" : "blocked";
+      setStatus(id, to, {
+        from: "spec_review",
+        note: to === "in_progress" ? "spec approved — ready to build" : "spec approved — waiting on blockers",
+        set: { review_note: null, next_dispatch_at: null },
+      });
+      if (to === "blocked") logDeadBlockers(id, blockers);
+      return { task: taskView(id)! };
+    }
+    // in_review APPROVE → FORWARD to `finalizing`. The workspace agent is resumed to
+    // do 'final thoughts' (post-approval wrap-up — see dispatcher + renderFinalizePrompt),
+    // after which the system finalizes the merge (finalizeMerge). Clear the pane so the
+    // dispatcher's finalize pass launches the resume agent.
+    setStatus(id, "finalizing", {
+      from: "in_review",
+      note: "approved — finalizing (final thoughts before merge)",
+      set: {
+        review_note: null,
+        herdr_pane_id: null,
+        herdr_tab_id: null,
+        idle: 0,
+        conflict: 0,
+        dispatch_attempts: 0,
+        last_dispatch_error: null,
+        next_dispatch_at: null,
+      },
+    });
+    return { task: taskView(id)! };
+  }
+
+  // ---- REQUEST CHANGES ----
+  if (response.type === "request_changes") {
+    const note = (response.note ?? "").trim();
+    if (!note) throw new HttpError(400, "a change-request note is required");
+    appendRejection(dir.path, id, note, nowIso());
+    if (row.status === "spec_review") {
+      // REVISE the spec: log the note and send the task back to `idea` so the CEO
+      // agent re-runs the spec generator addressing it (then → spec_review again).
+      setStatus(id, "idea", {
+        from: "spec_review",
+        note: "spec changes requested — regenerating",
+        set: {
+          review_note: note,
+          dispatch_attempts: 0,
+          last_dispatch_error: null,
+          next_dispatch_at: null,
+        },
+      });
+      emitUpdated(id);
+      return { task: taskView(id)! };
+    }
+    // in_review REQUEST CHANGES → RESUME the workspace agent with the notes.
+    await requestChanges(
+      id,
+      dir.path,
+      note,
+      row.herdr_pane_id,
+      row.herdr_tab_id,
+      "changes requested by reviewer",
+    );
+    emitUpdated(id);
+    return { task: taskView(id)! };
+  }
+
+  // ---- ANSWER (needs_info) ----
+  const answer = (response.answer ?? "").trim();
+  if (!answer) throw new HttpError(400, "answer is required");
+  await resumeWithAnswer(id, dir.path, row, answer);
+  return { task: taskView(id)! };
+}
+
+/**
+ * Approve a feedback task (spec_review → build, or in_review → finalizing). Thin
+ * wrapper over the unified feedback mechanism. Returns an ApproveOutcome; for the
+ * in_review case the merge happens later in finalizeMerge (see respondToFeedback).
+ */
+export async function approveTask(id: string): Promise<ApproveOutcome> {
+  return respondToFeedback(id, { type: "approve" });
+}
+
+/**
+ * FINALIZE a task in `finalizing`: rebase + merge its branch into the default branch
+ * and run the post-merge verify gate, landing it as `merged`. Invoked when the
+ * finalize ('final thoughts') agent signals done (request_review while finalizing),
+ * when that agent ends / can't launch (best-effort — the operator already approved),
+ * and by auto-merge / startup recovery. Serialized through the global merge queue.
+ *  - clean merge → merged.
+ *  - merge conflict → kicked back to the workspace agent (in_progress) to resolve.
+ *  - post-merge verify RED → auto-reverted off main; task → aborted (revert_reason set).
+ * A no-op (returns the current view) unless the task is still `finalizing`, so it is
+ * safe to call from more than one path.
+ */
+export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (row.status !== "finalizing") return { task: taskView(id)! };
   const dir = getDirectory(row.directory_id);
   if (!dir) throw new HttpError(404, "directory not found");
 
@@ -1377,10 +1545,10 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
         `default branch; main restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
     );
     const res = db.query(
-      `UPDATE tasks SET status='failed', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
+      `UPDATE tasks SET status='aborted', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
          output_snapshot=COALESCE(?, output_snapshot), revert_reason=?, last_dispatch_error=?,
          completed_at=COALESCE(completed_at, ?)
-         WHERE id=? AND status='review'`,
+         WHERE id=? AND status='finalizing'`,
     ).run(snapshot || null, reason, reason, nowIso(), id);
     if (res.changes === 0) {
       // Raced (e.g. aborted) between the gate and here — leave whatever won.
@@ -1389,20 +1557,18 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
     }
     recordTaskEvent(
       id,
-      "review",
-      "failed",
+      "finalizing",
+      "aborted",
       "merge auto-reverted off main (post-merge verify failed)",
     );
-    updateTaskMdStatus(dir.path, id, "failed");
+    updateTaskMdStatus(dir.path, id, "aborted");
     emitUpdated(id);
     return { task: taskView(id)!, revertedOnRed: true };
   }
 
-  // Merge succeeded. There is no live agent to wait on (the non-blocking
-  // request_review path means the agent already exited), so close the task to
-  // `merged` directly — no "finalizing" phase, no idle/timeout wait, no hang. The
-  // branch is already in main; capture whatever the agent logged, tear down the
-  // worktree + branch, and stamp merged.
+  // Merge succeeded. The finalize ('final thoughts') agent has already wrapped up and
+  // exited, so close the task to `merged` directly. The branch is already in main;
+  // capture whatever the agent logged, tear down the worktree + branch, and stamp merged.
   const snapshot = readRunLogSnapshot(id);
   // Close the agent's dedicated tab (best-effort — usually already gone since the
   // agent exited after request_review, but removes any empty husk tab).
@@ -1410,8 +1576,8 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
   await git.cleanup(dir.path, id).catch(() => {});
   if (
     !setStatus(id, "merged", {
-      from: "review",
-      note: "approved & merged into the default branch",
+      from: "finalizing",
+      note: "finalized & merged into the default branch",
       set: {
         conflict: 0,
         idle: 0,
@@ -1440,83 +1606,24 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
 
 /**
  * Legacy: complete a task left in the obsolete `finalizing` state by a
- * pre-redesign butchr (the branch already merged to main). The current approve
- * path never produces `finalizing`; this exists only so startup recovery can
- * flush such stragglers to `merged` after an upgrade. Idempotent — guarded on
- * status='finalizing'.
+ * Request changes on a feedback task (in_review → resume the workspace agent, or
+ * spec_review → revise the spec). Thin public wrapper over the unified feedback
+ * mechanism — kept under the historical name for the existing API / CLI / test
+ * surface. Returns the post-transition task view. 409 if the task isn't in a feedback
+ * state that accepts request-changes; 400 on a blank note.
  */
-export async function finalizeTask(id: string): Promise<TaskView | null> {
-  const row = getTask(id);
-  if (!row) return null;
-  if (row.status !== "finalizing") return taskView(id); // already finalized / moved
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
-
-  const snapshot = readRunLogSnapshot(id);
-  // Close the agent's tab (kills the now-finished agent and removes the tab so it
-  // doesn't linger).
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
-  // The agent no longer needs its worktree cwd — tear down worktree + branch.
-  await git.cleanup(dir.path, id).catch(() => {});
-
-  if (
-    !setStatus(id, "merged", {
-      from: "finalizing",
-      note: "finalized (legacy wrap-up)",
-      set: {
-        conflict: 0,
-        idle: 0,
-        herdr_pane_id: null,
-        herdr_tab_id: null,
-        output_snapshot: snapshot || null,
-        merged_at: keep(nowIso()),
-      },
-    })
-  ) {
-    return taskView(id); // finalized under us
-  }
-  return taskView(id)!;
-}
-
 export async function rejectTask(id: string, note: string): Promise<TaskView> {
-  const row = getTask(id);
-  if (!row) throw new HttpError(404, `task not found: ${id}`);
-  if (row.status !== "review") {
-    throw new HttpError(409, `task is not in review (status=${row.status})`);
-  }
-  if (!note || !note.trim()) throw new HttpError(400, "rejection note is required");
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
-
-  const when = nowIso();
-  // Persist the note to task.md (visible in the UI; survives restarts and is what
-  // the resumed agent reads as its rework prompt — see renderReworkPrompt).
-  appendRejection(dir.path, id, note, when);
-
-  // Re-queue for rework. The dispatcher re-launches the agent's existing Claude
-  // session via `--resume <session_id>` with the notes — full prior context, no
-  // context loss. The agent already exited after the non-blocking request_review;
-  // requestChanges tears down any lingering tab defensively.
-  await requestChanges(
-    id,
-    dir.path,
-    note.trim(),
-    row.herdr_pane_id,
-    row.herdr_tab_id,
-    "changes requested by reviewer",
-  );
-
-  emitUpdated(id);
-  return taskView(id)!;
+  const outcome = await respondToFeedback(id, { type: "request_changes", note });
+  return outcome.task;
 }
 
 /**
  * Abort a task without merging: discard its worktree + branch and move it to the
- * terminal `aborted` state. Works from any non-terminal state (queued, running,
- * review). For a running task we first signal its watcher to bail and close the
- * herdr pane so the agent stops before we tear the worktree down. A task in
- * `review` has no live process (the agent exited after request_review), so abort
- * just discards its DB state + worktree.
+ * terminal idle `aborted` state. Works from any non-terminal state. For a task with a
+ * LIVE agent (in_progress/finalizing with a pane) we first signal its watcher to bail
+ * and close the herdr pane so the agent stops before we tear the worktree down. A
+ * feedback/blocked task has no live process, so abort just discards its DB state +
+ * worktree.
  */
 export async function abortTask(id: string): Promise<TaskView> {
   const row = getTask(id);
@@ -1562,48 +1669,44 @@ export function markRunning(
   sessionId: string,
   tabId?: string,
 ): void {
-  // Guard on status='queued' so a task aborted in the same tick it was dispatched
-  // isn't dragged back to 'running' behind abortTask. `session_id` is set with
-  // COALESCE so it sticks to the FIRST id assigned: a fresh task records the new
-  // uuid; a re-launched (rejected) task keeps its existing id, which is exactly
-  // the one the dispatcher just `--resume`d. The tab id is the dedicated herdr tab
-  // the agent runs in (one tab per task).
-  // A successful launch clears the dispatch retry state: this run got off the
-  // ground, so any earlier consecutive-failure count / backoff / error is stale.
-  if (
-    !setStatus(id, "running", {
-      from: "queued",
-      note: "agent launched",
-      set: {
-        herdr_pane_id: paneId,
-        herdr_tab_id: tabId ?? null,
-        session_id: keep(sessionId),
-        started_at: keep(nowIso()),
-        dispatch_attempts: 0,
-        last_dispatch_error: null,
-        next_dispatch_at: null,
-        // Consume any pending ASK answer: it has been injected into this launch's
-        // rendered prompt (see dispatcher.dispatch), so clear it now that the agent
-        // is (re-)running, exactly as the answer-resume handshake intends.
-        answer: null,
-      },
-    })
-  ) {
-    return; // aborted (or otherwise moved) under us
+  const row = getTask(id);
+  if (!row) return;
+  // The task being launched is an AGENT-state task with NO live pane yet — i.e. a
+  // READY `in_progress` (build) task or a READY `finalizing` (final-thoughts) task.
+  // Recording the pane is what flips it from "ready" to "running" (the status itself
+  // does not change — the ready-vs-running distinction is carried by herdr_pane_id).
+  // The `herdr_pane_id IS NULL` guard makes this a no-op if the task was aborted /
+  // already launched / moved under us in the same tick. `session_id` is set with
+  // COALESCE so it sticks to the FIRST id assigned (a resume keeps its existing id);
+  // a successful launch clears the dispatch retry state and consumes any pending ASK
+  // answer (it has been injected into this launch's rendered prompt).
+  const res = db.query(
+    `UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=?, session_id=COALESCE(session_id, ?),
+       started_at=COALESCE(started_at, ?), dispatch_attempts=0, last_dispatch_error=NULL,
+       next_dispatch_at=NULL, answer=NULL
+       WHERE id=? AND status IN ('in_progress','finalizing') AND herdr_pane_id IS NULL`,
+  ).run(paneId, tabId ?? null, sessionId, nowIso(), id);
+  if (res.changes === 0) return; // aborted / already running / moved under us
+  // Record a launch event on the FIRST launch only (its status is unchanged, so this
+  // is the one audit-trail marker that the agent started); reworks/relaunches/the
+  // finalize relaunch don't spam the timeline.
+  if (!row.started_at) {
+    recordTaskEvent(id, row.status, row.status, "agent launched");
   }
+  emitUpdated(id);
 }
 
 /**
- * Record a re-adopted running task's current herdr pane + tab id. Used by the
- * startup reconcile (dispatcher.reconcileRunningTasks) when an agent it re-adopts
- * now lives on a different pane/tab than the one stored before butchr restarted.
- * Guarded on status='running' so a concurrent transition isn't clobbered. A
- * missing tabId leaves the stored value untouched (COALESCE) rather than nulling
- * a still-valid tab.
+ * Record a re-adopted agent task's current herdr pane + tab id. Used by the startup
+ * reconcile (dispatcher.reconcileRunningTasks) when an agent it re-adopts now lives on
+ * a different pane/tab than the one stored before butchr restarted. Guarded on the
+ * agent states (in_progress/finalizing) so a concurrent transition isn't clobbered. A
+ * missing tabId leaves the stored value untouched (COALESCE) rather than nulling a
+ * still-valid tab.
  */
 export function adoptPane(id: string, paneId: string, tabId?: string): void {
   const res = db.query(
-    `UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=COALESCE(?, herdr_tab_id) WHERE id=? AND status='running'`,
+    `UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=COALESCE(?, herdr_tab_id) WHERE id=? AND status IN ('in_progress','finalizing')`,
   ).run(paneId, tabId ?? null, id);
   if (res.changes === 0) return;
   emitUpdated(id);
@@ -1669,19 +1772,22 @@ export async function captureDiffFootprint(id: string): Promise<void> {
   }
   const pathType = classifyPathType(stat.files);
   db.query(
-    `UPDATE tasks SET diff_lines=?, path_type=? WHERE id=? AND status='review'`,
+    `UPDATE tasks SET diff_lines=?, path_type=? WHERE id=? AND status='in_review'`,
   ).run(stat.changedLines, pathType, id);
   emitUpdated(id);
 }
 
-export function markReview(id: string, snapshot: string): void {
-  // Guard on status='running' so a task aborted while its agent was finishing
-  // isn't resurrected into 'review' after abortTask parked it as terminal. This is
-  // the dead-agent fallback (the live request_review path is markReviewFromAgent),
-  // so the agent's tab is already being torn down by the caller — clear its id.
+/**
+ * DEAD-AGENT FALLBACK: move an `in_progress` task to `in_review` because its agent
+ * ended WITHOUT calling request_review (the watcher / startup reconcile rescue path;
+ * the live path is markReviewFromAgent). Guarded on the build phase being live
+ * (in_progress + a pane) so a task aborted while its agent was finishing isn't
+ * resurrected. The caller is already tearing down the tab — we clear the ids.
+ */
+export function markInReview(id: string, snapshot: string): void {
   if (
-    !setStatus(id, "review", {
-      from: "running",
+    !setStatus(id, "in_review", {
+      from: "in_progress",
       note: "agent finished — submitted for review",
       set: {
         completed_at: nowIso(),
@@ -1709,14 +1815,17 @@ export function markReview(id: string, snapshot: string): void {
 }
 
 /**
- * Move a task to `review` because its agent called the MCP `request_review` tool.
- * In the non-blocking model the agent EXITS right after this returns, so review is
- * pure DB state with no live process — we clear herdr_pane_id (its pane is about
- * to close; herdr destroys a pane the instant its command exits). Stores the
- * agent's optional summary.
+ * The agent called the MCP `request_review` tool. STATUS-AWARE (the same tool serves
+ * both workspace-agent phases):
+ *  - in_progress → in_review: the build is done; surface the diff for operator review
+ *    (runs the CI + conformance gates + footprint, non-blocking). The agent EXITS
+ *    right after, so we clear herdr_pane_id (its pane is about to close).
+ *  - finalizing → the 'final thoughts' agent finished its wrap-up → FINALIZE the merge
+ *    (finalizeMerge, fire-and-forget — the call returns at once so the agent exits).
+ *  - in_review (duplicate call) → no-op ok.
  *
  * Returns:
- *  - "ok"        → transitioned to review (or already in review).
+ *  - "ok"        → handled (transitioned, finalize kicked off, or a duplicate).
  *  - "terminal"  → task is merged/aborted; nothing to do.
  *  - "notfound"  → no such task.
  */
@@ -1733,54 +1842,67 @@ export function markReviewFromAgent(
   // review is conducted against.
   const snapshot = readRunLogSnapshot(id);
 
-  // running → review (normal), or review → review (a duplicate call). Clear the
-  // pane: the agent is exiting and review holds no live process.
+  // FINALIZE PHASE: the post-approval 'final thoughts' agent signalled done. Record
+  // its summary/output, then land the merge (fire-and-forget so this returns at once).
+  if (row.status === "finalizing") {
+    db.query(
+      `UPDATE tasks SET summary=COALESCE(?, summary), output_snapshot=?, idle=0 WHERE id=? AND status='finalizing'`,
+    ).run(summary ?? null, snapshot || null, id);
+    emitUpdated(id);
+    captureSessionUsage(id);
+    void finalizeMerge(id);
+    return "ok";
+  }
+
+  // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a
+  // duplicate call). Clear the pane: the agent is exiting and review holds no live
+  // process.
   const res = db.query(
-    `UPDATE tasks SET status='review', completed_at=COALESCE(completed_at, ?), summary=?, idle=0,
+    `UPDATE tasks SET status='in_review', completed_at=COALESCE(completed_at, ?), summary=?, idle=0,
        herdr_pane_id=NULL, output_snapshot=?
-       WHERE id=? AND status IN ('running','review')`,
+       WHERE id=? AND status IN ('in_progress','in_review')`,
   ).run(nowIso(), summary ?? null, snapshot || null, id);
-  // Record only the genuine running→review transition (not a duplicate
-  // request_review call, which is review→review and changes no status).
-  if (res.changes > 0 && row.status === "running") {
-    recordTaskEvent(id, "running", "review", "agent requested review");
+  if (res.changes === 0) {
+    // Not in a phase we can submit (e.g. needs_info/blocked/aborted under us).
+    return getTask(id)?.status === "merged" || getTask(id)?.status === "aborted"
+      ? "terminal"
+      : "ok";
+  }
+  // Record only the genuine in_progress→in_review transition (not a duplicate
+  // request_review call, which is in_review→in_review and changes no status).
+  if (row.status === "in_progress") {
+    recordTaskEvent(id, "in_progress", "in_review", "agent requested review");
   }
   const dir = getDirectory(row.directory_id);
-  if (dir) updateTaskMdStatus(dir.path, id, "review");
+  if (dir) updateTaskMdStatus(dir.path, id, "in_review");
   emitUpdated(id);
   // Capture the session's token usage / model now that the agent has finished this
   // turn (re-read each call so a rework's added turns are reflected too).
   captureSessionUsage(id);
-  // Capture the change footprint (size + path type) for duration estimates while the
-  // worktree still exists, but only on a genuine running→review transition (not a
-  // duplicate request_review). Fire-and-forget — advisory, never blocks the handshake.
-  if (row.status === "running") void captureDiffFootprint(id);
-  // CI GATE: only run on a genuine running→review transition. A duplicate
-  // request_review call (review→review) shouldn't re-run the build/test job. Fire-
-  // and-forget so the (already non-blocking) request_review handshake stays instant.
-  if (row.status === "running") void triggerCi(id);
-  // SPEC-CONFORMANCE GATE: same trigger discipline — only on a genuine running→review
-  // transition (not a duplicate request_review), fire-and-forget. Judges whether the
-  // diff satisfies the prompt; orthogonal to CI.
-  if (row.status === "running") void triggerConformance(id);
+  // The gates + footprint run only on a genuine in_progress→in_review transition (not
+  // a duplicate request_review). Fire-and-forget — review never blocks on them.
+  if (row.status === "in_progress") {
+    void captureDiffFootprint(id);
+    void triggerCi(id);
+    void triggerConformance(id);
+  }
   return "ok";
 }
 
 /**
- * Move a running task to `awaiting_input` because its agent called the MCP `ask`
- * tool. Mirrors markReviewFromAgent's non-blocking shape exactly: the agent EXITS
- * right after this returns, so awaiting_input is pure DB state with no live process
- * (we clear herdr_pane_id — its pane is about to close). Stores the agent's
- * `question` for the operator to answer (surfaced in /health + the webapp) and
- * captures the run-log snapshot so the answerer has the agent's context. Unlike
- * review this is NOT a completion: no completed_at, no CI gate, no diff footprint.
+ * Park an AGENT-state task in `needs_info` because its agent called the MCP `ask`
+ * tool (the ad-hoc feedback stage ANY agent state can enter — in_progress or
+ * finalizing). Mirrors markReviewFromAgent's non-blocking shape: the agent EXITS
+ * right after this returns, so needs_info is pure DB state with no live process (we
+ * clear herdr_pane_id — its pane is about to close). Stores the agent's `question`
+ * (surfaced in /health + the webapp) and the run-log snapshot for the answerer.
  *
  * Returns:
- *  - "ok"        → parked in awaiting_input (or already there — duplicate ask).
+ *  - "ok"        → parked in needs_info (or already there — a duplicate ask).
  *  - "terminal"  → task is merged/aborted; nothing to do.
  *  - "notfound"  → no such task.
  */
-export function markAwaitingInputFromAgent(
+export function markNeedsInfoFromAgent(
   id: string,
   question: string,
 ): "ok" | "terminal" | "notfound" {
@@ -1792,26 +1914,26 @@ export function markAwaitingInputFromAgent(
   // so the snapshot is what the answerer sees of where the agent got stuck.
   const snapshot = readRunLogSnapshot(id);
 
-  // running → awaiting_input (normal), or awaiting_input → awaiting_input (a
+  // in_progress/finalizing → needs_info (normal), or needs_info → needs_info (a
   // duplicate ask). Clear the pane: the agent is exiting and this state holds no
   // live process.
   const res = db.query(
-    `UPDATE tasks SET status='awaiting_input', question=?, idle=0,
+    `UPDATE tasks SET status='needs_info', question=?, idle=0,
        herdr_pane_id=NULL, output_snapshot=?
-       WHERE id=? AND status IN ('running','awaiting_input')`,
+       WHERE id=? AND status IN ('in_progress','finalizing','needs_info')`,
   ).run(question, snapshot || null, id);
   if (res.changes === 0) {
-    // Not in a state we can park (e.g. it was rejected/aborted out from under the
-    // agent) — report the current status so the tool surfaces it.
+    // Not in a state we can park (e.g. it was aborted out from under the agent) —
+    // report the current status so the tool surfaces it.
     return getTask(id)?.status === "merged" || getTask(id)?.status === "aborted"
       ? "terminal"
       : "ok";
   }
-  if (row.status === "running") {
-    recordTaskEvent(id, "running", "awaiting_input", "agent asked a clarifying question");
+  if (row.status !== "needs_info") {
+    recordTaskEvent(id, row.status, "needs_info", "agent asked a clarifying question");
   }
   const dir = getDirectory(row.directory_id);
-  if (dir) updateTaskMdStatus(dir.path, id, "awaiting_input");
+  if (dir) updateTaskMdStatus(dir.path, id, "needs_info");
   emitUpdated(id);
   // Capture the session's token usage / model now that the agent has paused this turn.
   captureSessionUsage(id);
@@ -1819,48 +1941,39 @@ export function markAwaitingInputFromAgent(
 }
 
 /**
- * Answer a task parked in `awaiting_input` (operator/CTO via API/CLI, or a human via
- * the webapp) and re-queue it for a `--resume` re-launch with the answer injected —
- * the exact mirror of rejectTask→requestChanges, but for the ASK handshake. Only
- * valid on `awaiting_input` (409 otherwise); a blank answer is rejected (400).
- *
- * The answer is logged to task.md's Clarifications section (audit/UI) and stored in
- * the `answer` column, which dispatcher.dispatch reads to render the answer-resume
- * prompt (then markRunning consumes it). The pending `question` is cleared and
- * session_id is KEPT so the dispatcher resumes the SAME Claude session with full
- * prior context. Retry state is reset (fresh intent, not a dispatch failure).
+ * RESUME an agent with an operator answer (the needs_info → in_progress resume — the
+ * answer half of the unified feedback mechanism). Logs the Q&A to task.md, stores the
+ * `answer` (which dispatcher.dispatch injects into the `--resume` prompt and markRunning
+ * consumes), clears the pending question, resets the dispatch retry state, and re-arms
+ * the task as a READY `in_progress` (pane NULL) KEEPING session_id + worktree so the
+ * dispatcher resumes the SAME Claude session with full prior context.
  */
-export async function answerTask(id: string, answer: string): Promise<TaskView> {
-  const row = getTask(id);
-  if (!row) throw new HttpError(404, `task not found: ${id}`);
-  if (row.status !== "awaiting_input") {
-    throw new HttpError(409, `task is not awaiting input (status=${row.status})`);
-  }
-  if (!answer || !answer.trim()) throw new HttpError(400, "answer is required");
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
-
-  const when = nowIso();
-  const clean = answer.trim();
-  // Log the Q&A to task.md for the durable record (visible in the UI; survives
-  // restarts), mirroring how appendRejection logs review notes.
-  appendAnswer(dir.path, id, row.question ?? "", clean, when);
-
-  // Tear down any lingering tab defensively (normally none — the agent exited after
-  // the non-blocking ask), then re-queue for a `--resume` re-launch. Store the answer
-  // for the dispatcher to inject, clear the pending question, and reset the dispatch
-  // retry state (this is a fresh intent to run, not a dispatch failure) while KEEPING
-  // session_id + the worktree for full-context resume.
+async function resumeWithAnswer(
+  id: string,
+  dirPath: string,
+  row: TaskRow,
+  answer: string,
+): Promise<void> {
+  appendAnswer(dirPath, id, row.question ?? "", answer, nowIso());
   await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
   db.query(
-    `UPDATE tasks SET status='queued', answer=?, question=NULL,
+    `UPDATE tasks SET status='in_progress', answer=?, question=NULL,
        herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, idle=0,
        dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
-  ).run(clean, id);
-  recordTaskEvent(id, "awaiting_input", "queued", "question answered by operator");
-  updateTaskMdStatus(dir.path, id, "queued");
+  ).run(answer, id);
+  recordTaskEvent(id, "needs_info", "in_progress", "question answered by operator");
+  updateTaskMdStatus(dirPath, id, "in_progress");
   emitUpdated(id);
-  return taskView(id)!;
+}
+
+/**
+ * Answer a task parked in `needs_info` (operator/CTO via API/CLI, or a human via the
+ * webapp). Thin public wrapper over the unified feedback mechanism (the `answer`
+ * response). 409 if the task isn't awaiting info; 400 on a blank answer.
+ */
+export async function answerTask(id: string, answer: string): Promise<TaskView> {
+  const outcome = await respondToFeedback(id, { type: "answer", answer });
+  return outcome.task;
 }
 
 // --- CI GATE: build + test on the review transition ------------------------
@@ -1992,7 +2105,7 @@ export async function triggerCi(id: string): Promise<void> {
   // Only write back while the task is still in review — if it merged/aborted while
   // CI ran, don't resurrect stale CI state onto it.
   const res = db
-    .query(`UPDATE tasks SET ci_status=?, ci_summary=? WHERE id=? AND status='review'`)
+    .query(`UPDATE tasks SET ci_status=?, ci_summary=? WHERE id=? AND status='in_review'`)
     .run(result.status, summary, id);
   if (res.changes === 0) return;
   emitUpdated(id);
@@ -2078,7 +2191,7 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
 
   const row = getTask(id);
   if (!row) return false;
-  if (row.status !== "review") return false;
+  if (row.status !== "in_review") return false;
   if (row.ci_status !== "pass") return false;
   if (row.conflict) return false; // already-known conflict → human handles it
   if (row.auto_merged) return false; // already auto-merged (defensive)
@@ -2108,9 +2221,13 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
     console.log(
       `[butchr] auto-merging task ${id}: CI green + low-risk ` +
         `(${stat.files.length} file(s), ${stat.changedLines} changed line(s) ` +
-        `<= ${config.autoMergeMaxChangedLines}); running the approve+merge path`,
+        `<= ${config.autoMergeMaxChangedLines}); running the approve+finalize path`,
     );
-    const outcome = await approveTask(id);
+    // Approve (in_review → finalizing) then land it directly. Auto-merge skips the
+    // human AND the interactive 'final thoughts' agent — finalizeMerge runs the same
+    // rebase + post-merge-verify gate a human-driven finalize would.
+    await approveTask(id);
+    const outcome = await finalizeMerge(id);
     // Only a genuine merge counts. A conflict kicked back to the agent
     // (conflictSentBack) or a post-merge-verify revert (revertedOnRed) did NOT land.
     if (outcome.conflictSentBack || outcome.revertedOnRed) {
@@ -2142,16 +2259,16 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
 }
 
 /**
- * Flag/unflag a running task as `idle` (agent alive but no recent CLI output).
- * Owned by the dispatcher watcher. Guarded on status='running' so a lagging
- * watcher can't stamp the flag onto a task that has already moved to
- * review/merged/aborted, and on a value change so we only emit when it actually
- * flips (no per-second event spam).
+ * Flag/unflag a running build task as `idle` (agent alive but no recent CLI output).
+ * Owned by the dispatcher watcher. Guarded on a LIVE build agent (status='in_progress'
+ * with a pane) so a lagging watcher can't stamp the flag onto a task that has already
+ * moved on, and on a value change so we only emit when it actually flips (no
+ * per-second event spam).
  */
 export function setIdle(id: string, idle: boolean): void {
   const want = idle ? 1 : 0;
   const res = db.query(
-    `UPDATE tasks SET idle=? WHERE id=? AND status='running' AND idle<>?`,
+    `UPDATE tasks SET idle=? WHERE id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle<>?`,
   ).run(want, id, want);
   if (res.changes === 0) return;
   emitUpdated(id);
@@ -2162,18 +2279,17 @@ export async function backToQueued(id: string): Promise<void> {
   // failed dispatch never strands an orphan agent (or its tab) that would later
   // collide on `agent_name_taken`. Re-dispatch creates a fresh tab.
   //
-  // This is a CLEAN re-queue (fresh intent) — it clears the dispatch retry state
-  // so it never counts as a dispatch failure. A genuine dispatch failure goes
-  // through markDispatchFailure instead, which is what implements the bounded
-  // retry + backoff + give-up.
+  // This is a CLEAN re-queue (fresh intent) → READY `in_progress` (pane NULL), so the
+  // dispatcher relaunches it. It clears the dispatch retry state so it never counts as
+  // a dispatch failure. A genuine dispatch failure goes through markDispatchFailure.
   const row = getTask(id);
   await herdr.teardownTask(row?.herdr_tab_id, id, row?.herdr_pane_id);
   db.query(
-    `UPDATE tasks SET status='queued', herdr_pane_id=NULL, herdr_tab_id=NULL,
+    `UPDATE tasks SET status='in_progress', herdr_pane_id=NULL, herdr_tab_id=NULL,
        dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(id);
-  if (row && row.status !== "queued") {
-    recordTaskEvent(id, row.status, "queued", "re-queued");
+  if (row && row.status !== "in_progress") {
+    recordTaskEvent(id, row.status, "in_progress", "re-queued");
   }
   emitUpdated(id);
 }
@@ -2195,13 +2311,16 @@ export function dispatchBackoffMs(attempts: number): number {
  *
  *  - Always: increment `dispatch_attempts`, store `last_dispatch_error`, and tear
  *    down any half-created herdr agent/tab (mirrors the old backToQueued cleanup).
- *  - Under the cap (`dispatch_attempts < maxDispatchAttempts`): keep status
- *    `queued` but stamp `next_dispatch_at = now + backoff(attempts)`. The tick
+ *  - Under the cap (`dispatch_attempts < maxDispatchAttempts`): KEEP the current
+ *    agent-phase status (in_progress/finalizing) with the pane cleared (so it is
+ *    READY again) and stamp `next_dispatch_at = now + backoff(attempts)`. The tick
  *    loop skips the task until that time, so it no longer hot-loops.
- *  - At/over the cap: move to `failed` and clear `next_dispatch_at`. The
- *    dispatcher stops retrying; only POST /api/tasks/:id/requeue revives it.
+ *  - At/over the cap: a build (in_progress) give-up moves to the terminal idle state
+ *    `aborted` (there is no `failed` state in the canonical model). A FINALIZE give-up
+ *    instead lands the merge directly (the operator already approved — don't strand
+ *    approved work), via finalizeMerge.
  *
- * This is the ONLY path that increments dispatch_attempts. Reject / conflict
+ * This is the ONLY path that increments dispatch_attempts. Request-changes / conflict
  * kick-back (requestChanges) and the clean backToQueued re-queue reset it instead.
  */
 export async function markDispatchFailure(id: string, err: string): Promise<void> {
@@ -2215,17 +2334,34 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
   const dir = getDirectory(row.directory_id);
 
   if (attempts >= config.maxDispatchAttempts) {
+    if (row.status === "finalizing") {
+      // FINALIZE give-up: don't strand approved work — land the merge directly.
+      db.query(
+        `UPDATE tasks SET dispatch_attempts=?, last_dispatch_error=?, next_dispatch_at=NULL,
+           herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
+      ).run(attempts, err, id);
+      console.warn(
+        `[butchr] finalize dispatch gave up for ${id} after ${attempts} attempts; ` +
+          `finalizing the merge directly (operator already approved): ${err}`,
+      );
+      await finalizeMerge(id).catch((e) =>
+        console.error(`[butchr] direct finalize of ${id} failed: ${(e as Error).message}`),
+      );
+      emitUpdated(id);
+      return;
+    }
     db.query(
-      `UPDATE tasks SET status='failed', dispatch_attempts=?, last_dispatch_error=?,
-         next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
-    ).run(attempts, err, id);
+      `UPDATE tasks SET status='aborted', dispatch_attempts=?, last_dispatch_error=?,
+         next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL,
+         completed_at=COALESCE(completed_at, ?) WHERE id=?`,
+    ).run(attempts, err, nowIso(), id);
     recordTaskEvent(
       id,
       row.status,
-      "failed",
+      "aborted",
       `dispatch gave up after ${attempts} attempt${attempts === 1 ? "" : "s"}`,
     );
-    if (dir) updateTaskMdStatus(dir.path, id, "failed");
+    if (dir) updateTaskMdStatus(dir.path, id, "aborted");
     console.error(
       `[butchr] task ${id} failed to dispatch after ${attempts} attempts: ${err}`,
     );
@@ -2233,9 +2369,10 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
     return;
   }
 
+  // Under the cap: keep the current agent-phase status; clear the pane → READY again.
   const nextAt = new Date(Date.now() + dispatchBackoffMs(attempts)).toISOString();
   db.query(
-    `UPDATE tasks SET status='queued', dispatch_attempts=?, last_dispatch_error=?,
+    `UPDATE tasks SET dispatch_attempts=?, last_dispatch_error=?,
        next_dispatch_at=?, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
   ).run(attempts, err, nextAt, id);
   console.warn(
@@ -2246,19 +2383,21 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
 }
 
 /**
- * Operator escape hatch: revive a `failed` (or otherwise stuck non-terminal) task
- * by clearing the dispatch retry state and putting it back to `queued`, so the
- * dispatcher retries it fresh. Refuses genuinely terminal tasks (merged/aborted).
+ * Operator escape hatch: revive a stuck NON-terminal task (e.g. one waiting out a
+ * dispatch backoff) by clearing its dispatch retry state and re-arming it as a READY
+ * `in_progress` task, so the dispatcher retries it fresh. Refuses terminal tasks
+ * (merged/aborted) — a dispatch give-up now lands in the terminal `aborted` state, so
+ * recreate the task instead.
  */
 export async function requeueTask(id: string): Promise<TaskView> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
-  if (row.status === "merged" || row.status === "aborted") {
+  if (isTerminal(row.status)) {
     throw new HttpError(409, `task is ${row.status}; cannot re-queue`);
   }
   // Tear down any lingering agent/tab defensively before a fresh dispatch.
   await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
-  setStatus(id, "queued", {
+  setStatus(id, "in_progress", {
     note: "manually re-queued by operator",
     set: {
       dispatch_attempts: 0,
@@ -2272,15 +2411,18 @@ export async function requeueTask(id: string): Promise<TaskView> {
 }
 
 /**
- * On startup, any task left in `finalizing` (service killed mid-wrap-up) has lost
- * its finalize-watcher. The branch already merged to main, so just complete the
- * finalize: capture whatever wrap-up was logged, close the pane, clean up, and
- * mark merged. Returns how many were recovered.
+ * On startup, any task left in `finalizing` with NO live agent (its finalize-watcher
+ * was lost when butchr stopped — the operator had already approved it) is LANDED
+ * directly via finalizeMerge so approved work isn't stranded. A finalizing task whose
+ * agent is still alive was re-adopted by reconcileRunningTasks (it has a pane) and is
+ * skipped here. Returns how many were finalized.
  */
 export async function recoverFinalizingTasks(): Promise<number> {
   const rows = db
-    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='finalizing'`)
+    .query<TaskRow, []>(
+      `SELECT * FROM tasks WHERE status='finalizing' AND herdr_pane_id IS NULL`,
+    )
     .all();
-  for (const r of rows) await finalizeTask(r.id).catch(() => {});
+  for (const r of rows) await finalizeMerge(r.id).catch(() => {});
   return rows.length;
 }

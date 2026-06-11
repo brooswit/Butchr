@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS directories (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- idea | queued | blocked | running | review | awaiting_input | merged | rejected | aborted | failed
+  status          TEXT NOT NULL,            -- CANONICAL 9-state model: idea | spec_review | blocked | needs_info | in_progress | in_review | finalizing | merged | aborted (see TaskStatus / STATE_META)
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -331,6 +331,37 @@ export function migrateStageAxisToStatus(): void {
 }
 migrateStageAxisToStatus();
 
+// CANONICAL STATE-MODEL MIGRATION (one-time, forward-only). The status set was
+// replaced by the CEO's canonical 9-state model (see TaskStatus / STATE_META).
+// The OLD status values fold into the new ones (pre-1.0 — migrate/destroy freely;
+// priority = works forward):
+//   queued        → in_progress  (ready — a build task with no live agent yet; the
+//                                  ready-vs-running distinction is now carried by
+//                                  herdr_pane_id being NULL vs set, not by status)
+//   running       → in_progress  (a live build agent — keeps its pane)
+//   review        → in_review
+//   awaiting_input→ needs_info
+//   rejected      → aborted       (no `rejected` state — request-changes loops back)
+//   failed        → aborted       (a dispatch/finalize give-up maps to an idle state)
+// idea / spec_review / blocked / needs_info / in_progress / in_review / finalizing /
+// merged / aborted are already canonical and untouched. Runs every boot but is a
+// no-op once converged (no old values remain). We do NOT rewrite task_events history
+// (from_status/to_status are an immutable audit log of what actually happened).
+export function migrateStatusModel(): void {
+  const renames: [string, string][] = [
+    ["queued", "in_progress"],
+    ["running", "in_progress"],
+    ["review", "in_review"],
+    ["awaiting_input", "needs_info"],
+    ["rejected", "aborted"],
+    ["failed", "aborted"],
+  ];
+  for (const [from, to] of renames) {
+    db.query(`UPDATE tasks SET status=? WHERE status=?`).run(to, from);
+  }
+}
+migrateStatusModel();
+
 export type DirectoryRow = {
   id: string;
   path: string;
@@ -344,53 +375,127 @@ export type DirectoryRow = {
   created_at: string;
 };
 
-// `finalizing` is a legacy transient state from the old blocking-agent model. It
-// is no longer produced; the union keeps it only so startup migration can flush
-// any leftover `finalizing` rows from a pre-redesign database (see
-// recoverFinalizingTasks in tasks.ts).
-//
-// `failed` is the dispatch give-up state: a task whose dispatch() failed
-// MAX_DISPATCH_ATTEMPTS times in a row. It is NOT active (the dispatcher stops
-// retrying it) and is terminal-ish — it only leaves via the operator's
-// POST /api/tasks/:id/requeue escape hatch (see tasks.requeueTask), which resets
-// the retry state and puts it back to `queued`.
-//
-// `blocked` is a pre-dispatch WAITING state: the task has one or more blocker
-// tasks (see `blocked_by`) that have not all merged yet. It behaves like `queued`
-// EXCEPT the dispatcher never launches an agent for it; it is promoted to `queued`
-// the moment every blocker has merged (auto-unblock — see the dispatcher tick and
-// tasks.reevaluateBlockedTask). It is non-terminal and groups with active/pending
-// work in the webapp; the reaper must NOT treat it as terminal.
 // A task's KIND: an ordinary work task, or a PLAN task whose job is to decompose a
 // request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks).
 export type TaskKind = "task" | "plan";
 
-// `awaiting_input` is a pause state for the ASK handshake: a running agent called
-// the MCP `ask` tool, so butchr stored its `question`, parked the task here, and the
-// agent exited. Like `review` it is non-terminal with NO live process — it waits for
-// an operator/CTO answer (API/CLI/webapp), then re-queues for a `--resume` re-launch
-// that injects the answer (see tasks.markAwaitingInputFromAgent / answerTask). It is
-// NOT terminal (the reaper leaves its worktree alone) and needs operator attention.
-// `idea` is the FRONT state of the unified pipeline (idea → ready → in_progress →
-// review → merged, with the lateral states below). A task in `idea` has NO spec yet:
-// it was created from a one-line operator brief, and its "dispatch" is NOT a build
-// agent — the dispatcher runs the CTO-fork spec generator (src/cto.ts) to turn the
-// brief into a repo-grounded spec, then advances the task to `queued` ('ready')
-// carrying that spec as its prompt, where it dispatches the build agent as usual. The
-// internal status values `queued`/`running` are KEPT (not mass-renamed) to minimize
-// risk; the webapp surfaces the friendly labels 'ready'/'in progress'.
+// ===========================================================================
+// THE CANONICAL TASK STATE MACHINE (the CEO's exact model).
+// ===========================================================================
+// Every task is in exactly one of NINE states. Each state has a KIND — one of three
+// kinds — and an AGENT state additionally has a TYPE (which agent runs it):
+//
+//   KIND      meaning
+//   --------  ----------------------------------------------------------------
+//   idle      no agent is running and butchr awaits nothing from the operator —
+//             the task is either terminal or waiting on something mechanical.
+//   agent     an agent is (or is about to be) running for this task.
+//   feedback  butchr has surfaced an ARTIFACT and is awaiting an OPERATOR response.
+//
+//   AGENT TYPE     which agent
+//   -------------  -------------------------------------------------------------
+//   ceo-agent      the headless, read-only CTO-fork (src/cto.ts) that writes specs.
+//   workspace-agent the interactive agent that builds the code in the worktree.
+//
+// THE 9 STATES (happy path: idea → spec_review → in_progress → in_review →
+// finalizing → merged; needs_info is an ad-hoc feedback stage ANY agent state can
+// enter and then resume):
+//
+//   idea         agent/ceo-agent     — the CEO agent writes the SPEC from the brief.
+//   spec_review  feedback (spec)      — operator approves → in_progress, or requests
+//                                       changes → revise the spec (back to idea).
+//   blocked      idle                 — waiting on blocked_by dependencies.
+//   needs_info   feedback (question)  — an agent asked the operator a question; on
+//                                       /answer the agent resumes.
+//   in_progress  agent/workspace-agent— the workspace agent builds the code.
+//   in_review    feedback (diff)      — operator approves → finalizing, or requests
+//                                       changes → resume the workspace agent.
+//   finalizing   agent/workspace-agent— the workspace agent does post-approval
+//                                       'final thoughts'; then the system finalizes
+//                                       (rebase + post-merge-verify) → merged.
+//   merged       idle (terminal)      — landed on the default branch.
+//   aborted      idle (terminal)      — discarded (operator abort, or a dispatch /
+//                                       finalize give-up, or a post-merge revert).
+//
+// NOTE on the ready-vs-running distinction: there is NO separate `queued`/`running`
+// status. A task in `in_progress` (or `finalizing`) whose `herdr_pane_id` is NULL is
+// READY — the dispatcher will (re-)launch its agent; one whose `herdr_pane_id` is set
+// has a LIVE agent. This is restart-safe (the pane field is persisted) and is the
+// single internal signal the dispatcher/reconcile/watcher key off.
 export type TaskStatus =
   | "idea"
-  | "queued"
+  | "spec_review"
   | "blocked"
-  | "running"
-  | "review"
-  | "awaiting_input"
+  | "needs_info"
+  | "in_progress"
+  | "in_review"
   | "finalizing"
   | "merged"
-  | "rejected"
-  | "aborted"
-  | "failed";
+  | "aborted";
+
+/** The three kinds of state. */
+export type StateKind = "idle" | "agent" | "feedback";
+/** Which agent runs an `agent`-kind state. */
+export type AgentType = "ceo-agent" | "workspace-agent";
+/** A state's category: its kind, and (for agent states) which agent runs it. */
+export type StateMeta = { kind: StateKind; agentType?: AgentType };
+
+/**
+ * The single source of truth categorizing each canonical state — its KIND, and for
+ * AGENT states the agent TYPE. Logic (dispatcher/reconcile/feedback) and the UI both
+ * derive their behavior from this map rather than hard-coding status lists, so the
+ * 3-kind / 2-agent-type model has exactly ONE definition.
+ */
+export const STATE_META: Record<TaskStatus, StateMeta> = {
+  idea: { kind: "agent", agentType: "ceo-agent" },
+  spec_review: { kind: "feedback" },
+  blocked: { kind: "idle" },
+  needs_info: { kind: "feedback" },
+  in_progress: { kind: "agent", agentType: "workspace-agent" },
+  in_review: { kind: "feedback" },
+  finalizing: { kind: "agent", agentType: "workspace-agent" },
+  merged: { kind: "idle" },
+  aborted: { kind: "idle" },
+};
+
+/** Every canonical status (stable order: roughly the happy-path order). */
+export const ALL_STATUSES: TaskStatus[] = [
+  "idea",
+  "spec_review",
+  "blocked",
+  "needs_info",
+  "in_progress",
+  "in_review",
+  "finalizing",
+  "merged",
+  "aborted",
+];
+
+/** The state's kind (idle | agent | feedback). */
+export function stateKind(status: TaskStatus): StateKind {
+  return STATE_META[status]?.kind ?? "idle";
+}
+/** Which agent runs an agent-kind state (undefined for idle/feedback states). */
+export function agentTypeOf(status: TaskStatus): AgentType | undefined {
+  return STATE_META[status]?.agentType;
+}
+/** Is this an AGENT state (an agent is/should be running)? */
+export function isAgentState(status: TaskStatus): boolean {
+  return stateKind(status) === "agent";
+}
+/** Is this a FEEDBACK state (awaiting an operator response to an artifact)? */
+export function isFeedbackState(status: TaskStatus): boolean {
+  return stateKind(status) === "feedback";
+}
+/** The two terminal states. */
+export function isTerminal(status: TaskStatus): boolean {
+  return status === "merged" || status === "aborted";
+}
+
+/** The feedback states, in happy-path order (spec_review, in_review, needs_info). */
+export const FEEDBACK_STATES: TaskStatus[] = ALL_STATUSES.filter(isFeedbackState);
+/** The agent states (idea, in_progress, finalizing). */
+export const AGENT_STATES: TaskStatus[] = ALL_STATUSES.filter(isAgentState);
 
 export type TaskRow = {
   id: string;

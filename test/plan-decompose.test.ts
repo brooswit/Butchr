@@ -76,7 +76,7 @@ describe("createTask with kind='plan'", () => {
   test("a plan task is recorded as kind='plan' in the DB and task.md", async () => {
     const view = await tasksMod.createTask(DIR_ID, "decompose me", [], [], "plan");
     expect((view as any).kind).toBe("plan");
-    expect(view.status).toBe("queued");
+    expect(view.status).toBe("in_progress");
     expect(view.spawned_subtasks).toEqual([]);
     expect(row(view.id).kind).toBe("plan");
     // task.md carries the kind so the dispatcher renders the plan protocol.
@@ -92,10 +92,10 @@ describe("createTask with kind='plan'", () => {
 
   test("renderAgentPrompt gives a plan task the decomposition protocol", () => {
     const plan = taskmdMod.parseTaskMd(
-      ["---", "id: p1", "created: x", "status: queued", "kind: plan", "---", "", "## Prompt", "", "do it"].join("\n"),
+      ["---", "id: p1", "created: x", "status: in_progress", "kind: plan", "---", "", "## Prompt", "", "do it"].join("\n"),
     );
     const ordinary = taskmdMod.parseTaskMd(
-      ["---", "id: t1", "created: x", "status: queued", "---", "", "## Prompt", "", "do it"].join("\n"),
+      ["---", "id: t1", "created: x", "status: in_progress", "---", "", "## Prompt", "", "do it"].join("\n"),
     );
     const planPrompt = taskmdMod.renderAgentPrompt(REPO_ROOT, plan);
     const ordinaryPrompt = taskmdMod.renderAgentPrompt(REPO_ROOT, ordinary);
@@ -157,8 +157,8 @@ describe("proposeSubtasks", () => {
     expect(tasksMod.parseBlockedBy(row(b).blocked_by)).toEqual([a]);
     expect(tasksMod.parseBlockedBy(row(c).blocked_by).sort()).toEqual([a, b].sort());
 
-    // A has no blockers → queued; B and C have unmerged blockers → blocked.
-    expect(row(a).status).toBe("queued");
+    // A has no blockers → in_progress; B and C have unmerged blockers → blocked.
+    expect(row(a).status).toBe("in_progress");
     expect(row(b).status).toBe("blocked");
     expect(row(c).status).toBe("blocked");
 
@@ -187,8 +187,8 @@ describe("proposeSubtasks", () => {
     expect(err.status).toBe(400);
     // No sub-tasks were created.
     expect(allRows().length).toBe(before);
-    // The plan task is untouched (still queued, not merged).
-    expect(row(plan.id).status).toBe("queued");
+    // The plan task is untouched (still in_progress, not merged).
+    expect(row(plan.id).status).toBe("in_progress");
     expect(tasksMod.parseBlockedBy(row(plan.id).spawned_subtasks)).toEqual([]);
   });
 
@@ -203,7 +203,7 @@ describe("proposeSubtasks", () => {
       }
       expect(err?.status).toBe(400);
     }
-    expect(row(plan.id).status).toBe("queued");
+    expect(row(plan.id).status).toBe("in_progress");
   });
 
   test("proposing on a NON-plan task is rejected (409)", async () => {

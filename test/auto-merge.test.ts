@@ -109,9 +109,9 @@ async function seedGreenReviewTask(
   g(["add", "-A"], wt);
   g(["commit", "-q", "-m", "task work"], wt);
   dbMod.db
-    .query(`UPDATE tasks SET status='review', ci_status='pass' WHERE id=?`)
+    .query(`UPDATE tasks SET status='in_review', ci_status='pass' WHERE id=?`)
     .run(id);
-  taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "review");
+  taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
   return id;
 }
 
@@ -168,7 +168,7 @@ describe("maybeAutoMerge", () => {
 
     expect(merged).toBe(false);
     const row = dbRow(id);
-    expect(row.status).toBe("review");
+    expect(row.status).toBe("in_review");
     expect(row.auto_merged).toBe(0);
   });
 
@@ -181,7 +181,7 @@ describe("maybeAutoMerge", () => {
     const merged = await tasksMod.maybeAutoMerge(id);
 
     expect(merged).toBe(false);
-    expect(dbRow(id).status).toBe("review");
+    expect(dbRow(id).status).toBe("in_review");
   });
 
   test("DEFAULT-OFF: a qualifying task does NOT auto-merge when disabled", async () => {
@@ -192,7 +192,7 @@ describe("maybeAutoMerge", () => {
     const merged = await tasksMod.maybeAutoMerge(id);
 
     expect(merged).toBe(false);
-    expect(dbRow(id).status).toBe("review");
+    expect(dbRow(id).status).toBe("in_review");
     expect(dbRow(id).auto_merged).toBe(0);
   });
 
@@ -206,7 +206,7 @@ describe("maybeAutoMerge", () => {
     const merged = await tasksMod.maybeAutoMerge(id);
 
     expect(merged).toBe(false);
-    expect(dbRow(id).status).toBe("review");
+    expect(dbRow(id).status).toBe("in_review");
   });
 
   test("a CONFLICT never auto-merges — it routes back to the agent, not main", async () => {
@@ -226,7 +226,7 @@ describe("maybeAutoMerge", () => {
     // Nothing landed on main; the conflicting content did not overwrite it.
     expect(g(["rev-parse", "HEAD"])).toBe(tipBefore);
     expect(g(["show", "HEAD:README.md"])).toBe("main change");
-    // approveTask's conflict path kicked it back (requestChanges → queued), and it
+    // finalizeMerge's conflict path kicked it back (requestChanges → in_progress), and it
     // is certainly NOT merged / auto_merged.
     const row = dbRow(id);
     expect(row.status).not.toBe("merged");

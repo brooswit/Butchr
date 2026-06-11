@@ -85,7 +85,7 @@ function seed(opts: {
       opts.id,
       DIR_ID,
       opts.status,
-      opts.status === "running" || opts.status === "review" ? created : null,
+      opts.status === "in_progress" || opts.status === "in_review" ? created : null,
       created,
     );
   taskmdMod.writeTaskMd(
@@ -108,7 +108,7 @@ function setStatus(id: string, status: string) {
 
 describe("triggerCi persistence", () => {
   test("a PASS result lands in ci_status + ci_summary (label on the first line)", async () => {
-    const id = seed({ id: "ci-pass", status: "review", worktree: true });
+    const id = seed({ id: "ci-pass", status: "in_review", worktree: true });
     tasksMod.setCiRunner(async () => ({
       status: "pass",
       label: "build + 5 tests",
@@ -124,7 +124,7 @@ describe("triggerCi persistence", () => {
   });
 
   test("a FAIL result lands in ci_status + ci_summary", async () => {
-    const id = seed({ id: "ci-fail", status: "review", worktree: true });
+    const id = seed({ id: "ci-fail", status: "in_review", worktree: true });
     tasksMod.setCiRunner(async () => ({
       status: "fail",
       label: "3 test failures",
@@ -140,7 +140,7 @@ describe("triggerCi persistence", () => {
   });
 
   test("a runner error is recorded as a CI failure (never throws)", async () => {
-    const id = seed({ id: "ci-error", status: "review", worktree: true });
+    const id = seed({ id: "ci-error", status: "in_review", worktree: true });
     tasksMod.setCiRunner(async () => {
       throw new Error("bun blew up");
     });
@@ -154,7 +154,7 @@ describe("triggerCi persistence", () => {
   });
 
   test("skips entirely (ci_status stays NULL) when the task has no worktree", async () => {
-    const id = seed({ id: "ci-noworktree", status: "review", worktree: false });
+    const id = seed({ id: "ci-noworktree", status: "in_review", worktree: false });
     let called = 0;
     tasksMod.setCiRunner(async () => {
       called++;
@@ -168,7 +168,7 @@ describe("triggerCi persistence", () => {
   });
 
   test("does NOT write a result onto a task that left review while CI ran", async () => {
-    const id = seed({ id: "ci-raced", status: "review", worktree: true });
+    const id = seed({ id: "ci-raced", status: "in_review", worktree: true });
     let resolveRun: (r: any) => void;
     tasksMod.setCiRunner(
       () => new Promise((res) => { resolveRun = res; }),
@@ -189,8 +189,8 @@ describe("triggerCi persistence", () => {
 });
 
 describe("review-transition trigger", () => {
-  test("markReviewFromAgent (running→review) kicks off CI", () => {
-    const id = seed({ id: "trig-agent", status: "running", worktree: true });
+  test("markReviewFromAgent (in_progress→in_review) kicks off CI", () => {
+    const id = seed({ id: "trig-agent", status: "in_progress", worktree: true });
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
       calls.push(taskId);
@@ -200,26 +200,28 @@ describe("review-transition trigger", () => {
     expect(tasksMod.markReviewFromAgent(id)).toBe("ok");
     // CI was kicked off synchronously by the transition.
     expect(calls).toEqual([id]);
-    expect(row(id).status).toBe("review");
+    expect(row(id).status).toBe("in_review");
     expect(row(id).ci_status).toBe("running");
   });
 
-  test("markReview (dead-agent rescue path) kicks off CI", () => {
-    const id = seed({ id: "trig-rescue", status: "running", worktree: true });
+  test("markInReview (dead-agent rescue path) kicks off CI", () => {
+    const id = seed({ id: "trig-rescue", status: "in_progress", worktree: true });
+    // markInReview requires in_progress + a pane set (simulates a live agent that ended).
+    dbMod.db.query(`UPDATE tasks SET herdr_pane_id='rescue-pane' WHERE id=?`).run(id);
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
       calls.push(taskId);
       return new Promise(() => {});
     });
 
-    tasksMod.markReview(id, "[butchr] rescued");
+    tasksMod.markInReview(id, "[butchr] rescued");
     expect(calls).toEqual([id]);
-    expect(row(id).status).toBe("review");
+    expect(row(id).status).toBe("in_review");
     expect(row(id).ci_status).toBe("running");
   });
 
   test("a duplicate request_review (review→review) does NOT re-run CI", () => {
-    const id = seed({ id: "trig-dup", status: "review", worktree: true });
+    const id = seed({ id: "trig-dup", status: "in_review", worktree: true });
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
       calls.push(taskId);
@@ -230,7 +232,7 @@ describe("review-transition trigger", () => {
     expect(calls).toEqual([]); // no re-trigger on a non-transition
   });
 
-  test("markReview is a no-op (no CI) on a non-running task", () => {
+  test("markInReview is a no-op (no CI) on a non-in_progress task", () => {
     const id = seed({ id: "trig-aborted", status: "aborted", worktree: true });
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
@@ -238,7 +240,7 @@ describe("review-transition trigger", () => {
       return new Promise(() => {});
     });
 
-    tasksMod.markReview(id, "should be ignored");
+    tasksMod.markInReview(id, "should be ignored");
     expect(calls).toEqual([]);
     expect(row(id).status).toBe("aborted");
   });
@@ -278,7 +280,7 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
 
   test("fail-then-pass: a retry that passes settles ci_status='pass'", async () => {
     configMod.config.ciRetries = 1;
-    const id = seed({ id: "ci-retry-pass", status: "review", worktree: true });
+    const id = seed({ id: "ci-retry-pass", status: "in_review", worktree: true });
     const { runner, calls } = sequenceRunner(["fail", "pass"]);
     tasksMod.setCiRunner(runner);
 
@@ -290,7 +292,7 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
 
   test("fail-twice: an exhausted retry settles ci_status='fail'", async () => {
     configMod.config.ciRetries = 1;
-    const id = seed({ id: "ci-retry-fail", status: "review", worktree: true });
+    const id = seed({ id: "ci-retry-fail", status: "in_review", worktree: true });
     const { runner, calls } = sequenceRunner(["fail", "fail"]);
     tasksMod.setCiRunner(runner);
 
@@ -303,7 +305,7 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
 
   test("a first-run PASS never retries", async () => {
     configMod.config.ciRetries = 1;
-    const id = seed({ id: "ci-retry-clean", status: "review", worktree: true });
+    const id = seed({ id: "ci-retry-clean", status: "in_review", worktree: true });
     const { runner, calls } = sequenceRunner(["pass"]);
     tasksMod.setCiRunner(runner);
 
@@ -315,7 +317,7 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
 
   test("ciRetries=0 disables retries — the first FAIL settles immediately", async () => {
     configMod.config.ciRetries = 0;
-    const id = seed({ id: "ci-retry-off", status: "review", worktree: true });
+    const id = seed({ id: "ci-retry-off", status: "in_review", worktree: true });
     const { runner, calls } = sequenceRunner(["fail", "pass"]);
     tasksMod.setCiRunner(runner);
 
@@ -327,7 +329,7 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
 
   test("ciRetries=2 retries twice — fail,fail,pass settles 'pass'", async () => {
     configMod.config.ciRetries = 2;
-    const id = seed({ id: "ci-retry-twice", status: "review", worktree: true });
+    const id = seed({ id: "ci-retry-twice", status: "in_review", worktree: true });
     const { runner, calls } = sequenceRunner(["fail", "fail", "pass"]);
     tasksMod.setCiRunner(runner);
 

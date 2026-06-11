@@ -50,13 +50,13 @@ afterAll(() => {
   rmSync(REPO_ROOT, { recursive: true, force: true });
 });
 
-/** Seed a bare task row in a directory with a given status (+ optional idle flag). */
-function seedTask(id: string, dir: string, status: string, idle = 0) {
+/** Seed a bare task row in a directory with a given status (+ optional idle flag + optional pane id). */
+function seedTask(id: string, dir: string, status: string, idle = 0, paneId: string | null = null) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, idle, created_at) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, directory_id, status, idle, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, dir, status, idle, dbMod.nowIso());
+    .run(id, dir, status, idle, paneId, dbMod.nowIso());
 }
 
 describe("directoryGateCmd resolution", () => {
@@ -108,7 +108,7 @@ describe("triggerCi threads the resolved gate command into the runner", () => {
   test("passes the directory's own gate command to the CI runner", async () => {
     dirsMod.updateDirectoryGateCmd(DIR_B, "npm run ci");
     const id = "gate-ci-own";
-    seedTask(id, DIR_B, "review");
+    seedTask(id, DIR_B, "in_review");
     mkdirSync(join(REPO_ROOT, DIR_B, id), { recursive: true }); // worktree so CI runs
 
     let seen: string | undefined;
@@ -123,7 +123,7 @@ describe("triggerCi threads the resolved gate command into the runner", () => {
   test("with no override, passes the default command to the CI runner", async () => {
     dirsMod.updateDirectoryGateCmd(DIR_B, null); // clear → default
     const id = "gate-ci-default";
-    seedTask(id, DIR_B, "review");
+    seedTask(id, DIR_B, "in_review");
     mkdirSync(join(REPO_ROOT, DIR_B, id), { recursive: true });
 
     let seen: string | undefined;
@@ -143,27 +143,28 @@ describe("dashboard aggregation", () => {
     dbMod.db
       .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(DIR_C, join(REPO_ROOT, DIR_C), "Dash C", dbMod.nowIso());
-    seedTask("dc-q", DIR_C, "queued");
-    seedTask("dc-b", DIR_C, "blocked");
-    seedTask("dc-r", DIR_C, "running");
-    seedTask("dc-i", DIR_C, "running", 1); // idle (running + idle flag)
-    seedTask("dc-f", DIR_C, "finalizing");
-    seedTask("dc-rev", DIR_C, "review");
-    seedTask("dc-fail", DIR_C, "failed");
-    seedTask("dc-merged", DIR_C, "merged"); // terminal — not counted in any bucket
-    seedTask("dc-abort", DIR_C, "aborted"); // terminal
+    seedTask("dc-q", DIR_C, "in_progress");          // ready (no pane) → in_progress bucket
+    seedTask("dc-b", DIR_C, "blocked");              // blocked bucket
+    seedTask("dc-r", DIR_C, "in_progress", 0, "pane-dc-r"); // live agent (non-idle) → in_progress
+    seedTask("dc-i", DIR_C, "in_progress", 1, "pane-dc-i"); // idle (in_progress + pane + idle flag)
+    seedTask("dc-f", DIR_C, "finalizing");           // finalizing bucket
+    seedTask("dc-rev", DIR_C, "in_review");          // review/feedback bucket
+    seedTask("dc-merged", DIR_C, "merged");          // terminal — not counted in any bucket
+    seedTask("dc-abort", DIR_C, "aborted");          // terminal
   });
 
   test("folds per-status counts into active / review / failed / needs-attention", () => {
     const d = dirsMod.dashboard();
     const c = d.directories.find((x) => x.id === DIR_C)!;
     expect(c).toBeTruthy();
-    // active = queued + blocked + running(non-idle) + idle + finalizing = 5
+    // active = in_progress(dc-q, dc-r) + idle(dc-i) + blocked(dc-b) + finalizing(dc-f) = 5
     expect(c.active).toBe(5);
+    // review = in_review(dc-rev) = 1
     expect(c.review).toBe(1);
-    expect(c.failed).toBe(1);
-    // needs-attention = review + failed (the operator pull-signal)
-    expect(c.needsAttention).toBe(2);
+    // failed is always 0 in the canonical model (aborted is terminal, not a failure bucket)
+    expect(c.failed).toBe(0);
+    // needs-attention = review (no failed bucket in new model)
+    expect(c.needsAttention).toBe(1);
     // Terminal merged/aborted land in counts but not the buckets.
     expect(c.counts.merged).toBe(1);
     expect(c.counts.aborted).toBe(1);

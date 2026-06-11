@@ -1,8 +1,8 @@
 // Tests for butchr's PLAN-PREVIEW gate (see db.ts `plan_preview`,
 // tasks.createTask(planPreview), taskmd.renderAgentPrompt's plan-preview protocol,
-// and mcp.ts propose_plan). The gate REUSES the ASK -> AWAITING-INPUT -> ANSWER ->
+// and mcp.ts propose_plan). The gate REUSES the ASK -> NEEDS_INFO -> ANSWER ->
 // RESUME handshake: a plan-preview agent proposes a plan via the MCP `propose_plan`
-// tool, the task parks in `awaiting_input` holding the plan, the operator answers
+// tool, the task parks in `needs_info` holding the plan, the operator answers
 // 'proceed', and the SAME claude session resumes to implement + request_review.
 //
 // In-process: no real claude or herdr is spawned. BUTCHR_HERDR_BIN points at `true`
@@ -11,14 +11,14 @@
 // git repo with one commit for `git worktree add`. The MCP tool calls go through the
 // REAL handleMcp JSON-RPC transport — the "agent" is mocked by us issuing its calls.
 //
-// What this covers (the spec's required plan->awaiting_input->approve->resume path):
+// What this covers (the spec's required plan->needs_info->approve->resume path):
 //   1. createTask(planPreview=true) stamps plan_preview on the DB row + task.md, and
 //      renderAgentPrompt hands the FIRST launch the plan-preview protocol (propose_plan,
 //      not request_review).
 //   2. tools/list gating: a plan-preview task is offered propose_plan (+ request_review
 //      + ask); an ordinary task is NOT offered propose_plan.
-//   3. The agent calling propose_plan parks the task in awaiting_input holding the plan,
-//      non-blocking (markAwaitingInputFromAgent core), and rejects a blank plan.
+//   3. The agent calling propose_plan parks the task in needs_info holding the plan,
+//      non-blocking (markNeedsInfoFromAgent core), and rejects a blank plan.
 //   4. answerTask('proceed') re-queues the task PRESERVING session_id, and
 //      resolveLaunchCommand resumes the SAME session — the implement phase.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -158,17 +158,17 @@ describe("tools/list gating", () => {
   });
 });
 
-describe("plan -> awaiting_input -> approve -> resume (mock the agent)", () => {
-  test("propose_plan parks the task awaiting_input holding the plan; answer resumes the SAME session", async () => {
+describe("plan -> needs_info -> approve -> resume (mock the agent)", () => {
+  test("propose_plan parks the task needs_info holding the plan; answer resumes the SAME session", async () => {
     const SESSION = "pp-session-1111-2222-3333";
     const pp = await tasksMod.createTask(
       DIR_ID, "Refactor the cache layer.", [], [], "task", null, [], 0, true,
     );
-    // Simulate the agent having launched: stamp it running with a session id + pane,
+    // Simulate the agent having launched: stamp it in_progress with a session id + pane,
     // exactly as markRunning would after the first dispatch.
     dbMod.db
       .query(
-        `UPDATE tasks SET status='running', session_id=?, herdr_pane_id=?, started_at=? WHERE id=?`,
+        `UPDATE tasks SET status='in_progress', session_id=?, herdr_pane_id=?, started_at=? WHERE id=?`,
       )
       .run(SESSION, "pane-9", dbMod.nowIso(), pp.id);
 
@@ -179,22 +179,22 @@ describe("plan -> awaiting_input -> approve -> resume (mock the agent)", () => {
       name: "propose_plan",
       arguments: { plan: PLAN },
     });
-    // Non-blocking tool result reports awaiting_input.
+    // Non-blocking tool result reports needs_info.
     const payload = JSON.parse(out.result.content[0].text);
     expect(out.result.isError).toBe(false);
-    expect(payload.status).toBe("awaiting_input");
+    expect(payload.status).toBe("needs_info");
 
-    // The task parked in awaiting_input, holding the plan; the pane was cleared (the
+    // The task parked in needs_info, holding the plan; the pane was cleared (the
     // agent exits) and the session id is preserved for the resume.
     const parked = row(pp.id);
-    expect(parked.status).toBe("awaiting_input");
+    expect(parked.status).toBe("needs_info");
     expect(parked.question).toBe(PLAN);
     expect(parked.herdr_pane_id).toBeNull();
     expect(parked.session_id).toBe(SESSION);
 
     // The operator approves with a 'proceed' decision.
     const answered = await tasksMod.answerTask(pp.id, "proceed");
-    expect(answered.status).toBe("queued");
+    expect(answered.status).toBe("in_progress");
     const requeued = row(pp.id);
     expect(requeued.answer).toBe("proceed");
     expect(requeued.question).toBeNull();
@@ -216,12 +216,12 @@ describe("plan -> awaiting_input -> approve -> resume (mock the agent)", () => {
     expect(answerPrompt).toContain("request_review");
   });
 
-  test("a blank plan is rejected (isError) and the task stays running", async () => {
+  test("a blank plan is rejected (isError) and the task stays in_progress", async () => {
     const pp = await tasksMod.createTask(
       DIR_ID, "Another gated task.", [], [], "task", null, [], 0, true,
     );
     dbMod.db
-      .query(`UPDATE tasks SET status='running', session_id=?, started_at=? WHERE id=?`)
+      .query(`UPDATE tasks SET status='in_progress', session_id=?, started_at=? WHERE id=?`)
       .run("s", dbMod.nowIso(), pp.id);
 
     const out = await rpc(pp.id, "tools/call", {
@@ -230,6 +230,6 @@ describe("plan -> awaiting_input -> approve -> resume (mock the agent)", () => {
     });
     expect(out.result.isError).toBe(true);
     // Not parked — the agent is expected to re-propose a real plan.
-    expect(row(pp.id).status).toBe("running");
+    expect(row(pp.id).status).toBe("in_progress");
   });
 });
