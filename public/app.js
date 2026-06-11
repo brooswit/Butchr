@@ -4,7 +4,6 @@
 const app = document.getElementById("app");
 
 // ---------- tiny helpers ----------
-const h = (html) => html; // marker for template strings
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -156,15 +155,9 @@ function tagChips(t) {
 function isLive(t) {
   return !!t.herdr_pane_id;
 }
-// A task has a live agent pane we can read recent output from whenever its
-// herdr_pane_id is set — running/idle/review (agent blocked in request_review)
-// and finalizing. This is exactly what the backend /output route gates on.
-function hasLivePane(t) {
-  return !!t.herdr_pane_id;
-}
 // Compact monospace readout of a task's herdr pane/tab ids, for surfacing next to
 // the Open-terminal control. Returns "" when no pane is allocated (task not yet
-// dispatched or already torn down) — same gate as isLive/hasLivePane, so the ids
+// dispatched or already torn down) — same gate as isLive, so the ids
 // appear exactly when the terminal button does.
 function herdrIds(t) {
   if (!t.herdr_pane_id) return "";
@@ -255,19 +248,34 @@ function toast(msg, isErr) {
   toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
 }
 
-// Open a GUI terminal attached to a running task's live agent pane.
+// The toast confirming a terminal attach, naming the emulator butchr launched.
+function terminalToast(r) {
+  toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
+}
+
+// The <a class="term-link"> control that opens a task's live agent terminal —
+// rendered only when the task has a live pane. Returns "" otherwise. Caller wires
+// the click via wireTermLink once the markup is in the DOM.
+function termLinkMarkup(t) {
+  return isLive(t)
+    ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a>` : "";
+}
+
+// Wire the .term-link inside `container` (if present) to open the task's terminal.
+function wireTermLink(container, taskId) {
+  const tl = container.querySelector(".term-link");
+  if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(taskId); });
+}
+
+// Open a GUI terminal attached to a running task's live agent pane. Routed through
+// action(), which owns the disable/try/toast/re-enable dance; `btn` is optional
+// (the term-link callers pass none). onDone re-enables on success (action's catch
+// re-enables on failure) — opening a terminal never navigates, so no render().
 async function openTaskTerminal(id, btn) {
-  if (btn) btn.disabled = true;
-  try {
+  await action(btn, async () => {
     const r = await api("POST", "/tasks/" + id + "/terminal");
-    toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
-  } catch (e) {
-    // Fallback: show the command to run manually.
-    const msg = e.message || "could not open terminal";
-    toast(msg, true);
-  } finally {
-    if (btn) btn.disabled = false;
-  }
+    terminalToast(r);
+  }, { onDone: () => { if (btn) btn.disabled = false; } });
 }
 
 // ---------- managed CTO agent (PER-DIRECTORY) ----------
@@ -276,6 +284,16 @@ async function openTaskTerminal(id, btn) {
 // stopped, session, since, restarts) plus controls — Open CTO terminal (reuses the
 // workspace-agent attach), Enable/Start/Stop, Restart, and Restart fresh (a brand-new
 // session) — all scoped to `dirId` via /api/directories/:id/cto/*.
+// The CTO agent's tri-state status, mapped from running/desired to a display label
+// and the matching cto-badge CSS class. Shared by the directory panel and the
+// dashboard mini-badge so the mapping can't drift between them.
+function ctoState(s) {
+  return {
+    state: s.running ? "running" : (s.desired ? "starting…" : "stopped"),
+    cls: s.running ? "ok" : (s.desired ? "warn" : "off"),
+  };
+}
+
 async function ctoPanel(dirId) {
   const base = "/directories/" + dirId + "/cto";
   let s;
@@ -286,8 +304,7 @@ async function ctoPanel(dirId) {
       el("small", { class: "muted" }, "CTO agent status unavailable"));
   }
   const card = el("div", { class: "panel cto-card", style: "margin-top:28px" });
-  const state = s.running ? "running" : (s.desired ? "starting…" : "stopped");
-  const stateCls = s.running ? "ok" : (s.desired ? "warn" : "off");
+  const { state, cls: stateCls } = ctoState(s);
   const bits = [];
   if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
   if (s.since) bits.push(`since ${fmtTime(s.since)}`);
@@ -315,7 +332,7 @@ async function ctoPanel(dirId) {
   if (s.running && s.paneId) {
     controls.appendChild(btn("Open CTO terminal", "", async () => {
       const r = await api("POST", base + "/terminal");
-      toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
+      terminalToast(r);
     }));
   }
   if (s.running || s.desired) {
@@ -379,21 +396,22 @@ function openModal({ title, body, footer } = {}) {
 }
 
 // Owns the disable/try/restore/toast dance every action button repeats: disable
-// `btn`, run `fn` (typically an api() call), and on success toast `success` (a
-// string, or a fn of fn's result) then run `onDone` (defaults to render()). On
-// failure, toast the error and re-enable the button so it can be retried. The
-// few buttons whose success message depends on the response toast inside `fn`
-// themselves and pass no `success`. Any pre-flight confirm() must run before
-// calling action(), so a cancel never disables the button.
+// `btn` (when present), run `fn` (typically an api() call), and on success toast
+// `success` (a string, or a fn of fn's result) then run `onDone` (defaults to
+// render()). On failure, toast the error and re-enable the button so it can be
+// retried. The few buttons whose success message depends on the response toast
+// inside `fn` themselves and pass no `success`. `btn` is optional — a caller with
+// no button to disable (e.g. a term-link) passes none. Any pre-flight confirm()
+// must run before calling action(), so a cancel never disables the button.
 async function action(btn, fn, { success, onDone } = {}) {
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   try {
     const r = await fn();
     if (success != null) toast(typeof success === "function" ? success(r) : success);
     (onDone || render)();
   } catch (e) {
     toast(e.message, true);
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -748,8 +766,7 @@ async function ctoMiniBadge(dirId, slot) {
   if (!slot) return;
   try {
     const s = await api("GET", "/directories/" + dirId + "/cto");
-    const state = s.running ? "running" : (s.desired ? "starting…" : "stopped");
-    const cls = s.running ? "ok" : (s.desired ? "warn" : "off");
+    const { state, cls } = ctoState(s);
     slot.innerHTML = `<span class="cto-badge ${cls}">CTO ${esc(state)}</span>`;
   } catch {
     slot.innerHTML = "";
@@ -772,7 +789,7 @@ async function renderDirectory(id) {
   const wrap = el("div");
   wrap.appendChild(el("div", { class: "crumbs", html: `<a href="#/">Directories</a> / ${esc(dir.label || dir.path)}` }));
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
-  wrap.appendChild(el("div", { class: "path", html: esc(dir.path) }));
+  wrap.appendChild(el("div", { class: "path" }, dir.path));
 
   // create-task launcher — a button that opens the New-task modal (prompt +
   // optional blocked_by). The modal POSTs to the existing create endpoint; the
@@ -900,15 +917,9 @@ function openGateModal(dir) {
   cancel.addEventListener("click", close);
   ta.focus();
 
-  const patch = async (btn, gate_cmd, msg) => {
-    btn.disabled = true;
-    try {
-      await api("PATCH", "/directories/" + dir.id, { gate_cmd });
-      toast(msg);
-      close();
-      render();
-    } catch (e) { toast(e.message, true); btn.disabled = false; }
-  };
+  const patch = (btn, gate_cmd, msg) =>
+    action(btn, () => api("PATCH", "/directories/" + dir.id, { gate_cmd }),
+      { success: msg, onDone: () => { close(); render(); } });
   save.addEventListener("click", () => patch(save, ta.value, "gate command updated"));
   useDefault.addEventListener("click", () => patch(useDefault, null, "reverted to the default gate"));
 }
@@ -1463,8 +1474,7 @@ function tasksTable(tasks) {
     const action = t.status === "in_review" ? "review →"
       : t.status === "spec_review" ? "review spec →"
       : t.status === "needs_info" ? "answer →" : "open →";
-    const termLink = isLive(t)
-      ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a> · ` : "";
+    const termLink = termLinkMarkup(t);
     // Feedback states are awaiting the operator — surface the state-kind chip
     // (e.g. "feedback: diff review") so a row that needs a human reads at a glance,
     // rather than just sitting in the list looking like in-flight work.
@@ -1473,10 +1483,9 @@ function tasksTable(tasks) {
       <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
       <td>${taskChips(t, { kind: feedback })}${tagChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
-      <td>${termLink}<a href="#/task/${esc(t.id)}">${action}</a>${
+      <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a>${
         herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
-    const tl = tr.querySelector(".term-link");
-    if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(t.id); });
+    wireTermLink(tr, t.id);
     tb.appendChild(tr);
   }
   table.appendChild(tb);
@@ -1880,8 +1889,7 @@ function boardLane(lane, items, byId) {
 // blockers will never merge, so they're flagged as stuck.
 function boardCard(t, lane, byId) {
   const card = el("div", { class: "board-card" });
-  const termLink = isLive(t)
-    ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a>` : "";
+  const termLink = termLinkMarkup(t);
   card.innerHTML = `
     <div class="bc-top">
       <a class="bc-id" href="#/task/${esc(t.id)}">${esc(t.id)}</a>
@@ -1915,8 +1923,7 @@ function boardCard(t, lane, byId) {
     }
   }
 
-  const tl = card.querySelector(".term-link");
-  if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(t.id); });
+  wireTermLink(card, t.id);
   return card;
 }
 
@@ -2058,13 +2065,12 @@ function costLabel(t) {
 // deliberately hedged ("~", "rough"), never a promise. Prefers the to-merge range,
 // falling back to to-review; says "insufficient data" when history is too thin.
 // Numbers are formatted via fmtDuration; the bucket/basis annotation is escaped.
+const INSUFFICIENT = `insufficient data <span class="muted">· not enough history yet</span>`;
 function fmtEstimate(est) {
   if (!est) return "—";
-  if (est.insufficient) {
-    return `insufficient data <span class="muted">· not enough history yet</span>`;
-  }
+  if (est.insufficient) return INSUFFICIENT;
   const r = est.toMerge || est.toReview;
-  if (!r) return `insufficient data <span class="muted">· not enough history yet</span>`;
+  if (!r) return INSUFFICIENT;
   const label = est.toMerge ? "to merge" : "to review";
   const bucket = est.basis === "overall" ? "all tasks" : `${est.bucket} ${est.basis}`;
   return `est ~${fmtDuration(r.p50Ms)}–${fmtDuration(r.p90Ms)} `
@@ -2210,6 +2216,38 @@ function dependentRollup(rootId, tasks) {
   return { direct, total: subtree.length, merged };
 }
 
+// Append a heading + monospace block pair to `parent`. el() escapes a text child,
+// so callers pass the RAW string (no esc()/innerHTML) — the recurring "<h2> + <pre
+// class=block>" pair in the task detail (prompt, review notes, summary, output, …).
+function block(heading, text, parent) {
+  parent.appendChild(el("h2", {}, heading));
+  parent.appendChild(el("pre", { class: "block" }, text));
+}
+
+// One ".blocker-row": the id (linked to its task) plus an optional status chip, with
+// a "dead" flag (terminal blocker that will never merge) adding the class + warning.
+// Pass a falsy `status` to omit the chip (the spawned-sub-task list, which is id-only).
+function blockerRow(id, status, { dead = false } = {}) {
+  const row = el("div", { class: "blocker-row" + (dead ? " dead" : "") });
+  row.innerHTML = `<a class="bk-id" href="#/task/${esc(id)}">${esc(id)}</a>`
+    + (status ? chip(status) : "")
+    + (dead ? '<span class="bk-dead">will never merge — edit blocked_by to proceed</span>' : "");
+  return row;
+}
+
+// The shared scaffold behind the task-detail dependency panels (blocked-by, spawned,
+// rollup): a ".panel" (distinguished by `cls`) with a margin-collapsed h2 heading, an
+// optional chain-estimate line, optional `lead` nodes (the rollup's summary/bar), and
+// a ".blockers" list of `rows`.
+function listPanel(heading, rows, { chainLine, cls = "", lead } = {}) {
+  const panel = el("div", { class: "panel" + (cls ? " " + cls : "") });
+  panel.appendChild(el("h2", { style: "margin-top:0" }, heading));
+  if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
+  for (const node of [].concat(lead || [])) panel.appendChild(node);
+  panel.appendChild(el("div", { class: "blockers" }, rows));
+  return panel;
+}
+
 // Render the sub-task progress rollup panel: "N/M merged", a progress bar, and the
 // direct dependents with their live statuses (so a plan's progress reads at a
 // glance). Live-updates for free — the task page re-renders on every SSE event.
@@ -2218,29 +2256,23 @@ function rollupPanel(rollup) {
   if (!rollup) return null;
   const { direct, total, merged } = rollup;
   const pct = total ? Math.round((merged / total) * 100) : 0;
-  const panel = el("div", { class: "panel rollup-panel" });
-  panel.appendChild(el("h2", { style: "margin-top:0" }, "Sub-task progress"));
-  panel.appendChild(el("div", { class: "rollup-summary" }, [
-    el("span", { class: "rollup-frac" }, `${merged}/${total} merged`),
-    el("span", { class: "rollup-pct muted" }, `${pct}%`),
-  ]));
-  panel.appendChild(el("div", { class: "rollup-bar", role: "progressbar",
-    "aria-valuenow": String(merged), "aria-valuemin": "0", "aria-valuemax": String(total) }, [
-    el("div", { class: "rollup-bar-fill", style: `width:${pct}%` }),
-  ]));
+  const lead = [
+    el("div", { class: "rollup-summary" }, [
+      el("span", { class: "rollup-frac" }, `${merged}/${total} merged`),
+      el("span", { class: "rollup-pct muted" }, `${pct}%`),
+    ]),
+    el("div", { class: "rollup-bar", role: "progressbar",
+      "aria-valuenow": String(merged), "aria-valuemin": "0", "aria-valuemax": String(total) }, [
+      el("div", { class: "rollup-bar-fill", style: `width:${pct}%` }),
+    ]),
+  ];
   const nested = total - direct.length;
   if (nested > 0) {
-    panel.appendChild(el("div", { class: "rollup-nested muted" },
+    lead.push(el("div", { class: "rollup-nested muted" },
       `${direct.length} direct · +${nested} nested sub-task${nested === 1 ? "" : "s"}`));
   }
-  const list = el("div", { class: "blockers" });
-  for (const c of direct) {
-    const row = el("div", { class: "blocker-row" });
-    row.innerHTML = `<a class="bk-id" href="#/task/${esc(c.id)}">${esc(c.id)}</a>${chip(effStatus(c))}`;
-    list.appendChild(row);
-  }
-  panel.appendChild(list);
-  return panel;
+  const rows = direct.map((c) => blockerRow(c.id, effStatus(c)));
+  return listPanel("Sub-task progress", rows, { cls: "rollup-panel", lead });
 }
 
 async function renderTask(id) {
@@ -2322,43 +2354,22 @@ async function renderTask(id) {
   // blocker statuses comes back on the task view (blockerStates), computed below.
   if (Array.isArray(t.blocked_by) && t.blocked_by.length) {
     const dead = new Set(t.deadBlockers || []);
-    const panel = el("div", { class: "panel blocked-panel" });
-    const head = t.status === "blocked"
-      ? "Blocked — waiting on:"
-      : "Depends on:";
-    panel.appendChild(el("h2", { style: "margin-top:0" }, head));
-    if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
-    const list = el("div", { class: "blockers" });
-    for (const bid of t.blocked_by) {
-      const st = (t.blockerStates && t.blockerStates[bid]) || "unknown";
-      const isDead = dead.has(bid);
-      const row = el("div", { class: "blocker-row" + (isDead ? " dead" : "") });
-      row.innerHTML = `
-        <a class="bk-id" href="#/task/${esc(bid)}">${esc(bid)}</a>
-        ${chip(st)}
-        ${isDead ? '<span class="bk-dead">will never merge — edit blocked_by to proceed</span>' : ""}`;
-      list.appendChild(row);
-    }
-    panel.appendChild(list);
-    wrap.appendChild(panel);
+    const head = t.status === "blocked" ? "Blocked — waiting on:" : "Depends on:";
+    const rows = t.blocked_by.map((bid) => blockerRow(
+      bid,
+      (t.blockerStates && t.blockerStates[bid]) || "unknown",
+      { dead: dead.has(bid) },
+    ));
+    wrap.appendChild(listPanel(head, rows, { chainLine, cls: "blocked-panel" }));
   }
 
   // spawned sub-tasks — a PLAN task records the sub-tasks it decomposed the request
   // into (see propose_subtasks). Surface them with links so the operator can follow
   // the decomposition. Shown whenever the task spawned any.
   if (Array.isArray(t.spawned_subtasks) && t.spawned_subtasks.length) {
-    const panel = el("div", { class: "panel spawned-panel" });
-    panel.appendChild(el("h2", { style: "margin-top:0" },
-      `Spawned ${t.spawned_subtasks.length} sub-task${t.spawned_subtasks.length === 1 ? "" : "s"}`));
-    if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
-    const list = el("div", { class: "blockers" });
-    for (const sid of t.spawned_subtasks) {
-      const row = el("div", { class: "blocker-row" });
-      row.innerHTML = `<a class="bk-id" href="#/task/${esc(sid)}">${esc(sid)}</a>`;
-      list.appendChild(row);
-    }
-    panel.appendChild(list);
-    wrap.appendChild(panel);
+    const heading = `Spawned ${t.spawned_subtasks.length} sub-task${t.spawned_subtasks.length === 1 ? "" : "s"}`;
+    const rows = t.spawned_subtasks.map((sid) => blockerRow(sid, null));
+    wrap.appendChild(listPanel(heading, rows, { chainLine, cls: "spawned-panel" }));
   }
 
   // sub-task progress rollup — if this task GATES others (its id is in their
@@ -2372,8 +2383,7 @@ async function renderTask(id) {
   if (rollup) wrap.appendChild(rollupPanel(rollup));
 
   // prompt
-  wrap.appendChild(el("h2", {}, "Prompt"));
-  wrap.appendChild(el("pre", { class: "block", html: esc(t.prompt || "—") }));
+  block("Prompt", t.prompt || "—", wrap);
 
   // aborted with revert_reason — the task's merge was fast-forwarded into main but the
   // post-merge verify gate (build + tests) came back RED, so the merge was auto-reverted
@@ -2408,7 +2418,7 @@ async function renderTask(id) {
   // live output — best-effort snapshot of the agent's recent terminal output,
   // polled while the panel is open and the task still has a live pane. This is a
   // convenience view; the git diff below stays the source of truth for review.
-  if (hasLivePane(t)) {
+  if (isLive(t)) {
     if (liveOutputCacheId !== t.id) { liveOutputCache = ""; liveOutputCacheId = t.id; }
     const pre = el("pre", { class: "block live-output-body" },
       liveOutputCache || "loading recent output…");
@@ -2445,22 +2455,15 @@ async function renderTask(id) {
   }
 
   // review notes
-  if (t.review_notes) {
-    wrap.appendChild(el("h2", {}, "Review notes"));
-    wrap.appendChild(el("pre", { class: "block", html: esc(t.review_notes) }));
-  }
+  if (t.review_notes) block("Review notes", t.review_notes, wrap);
 
   // agent summary (from request_review)
-  if (t.summary) {
-    wrap.appendChild(el("h2", {}, "Agent summary"));
-    wrap.appendChild(el("pre", { class: "block", html: esc(t.summary) }));
-  }
+  if (t.summary) block("Agent summary", t.summary, wrap);
 
   // output snapshot — on a merged task this is the agent's post-merge wrap-up
   // captured during the finalizing phase; otherwise the rescue snapshot.
   if (t.output_snapshot) {
-    wrap.appendChild(el("h2", {}, t.status === "merged" ? "Agent wrap-up" : "Agent output (snapshot)"));
-    wrap.appendChild(el("pre", { class: "block", html: esc(t.output_snapshot) }));
+    block(t.status === "merged" ? "Agent wrap-up" : "Agent output (snapshot)", t.output_snapshot, wrap);
   }
 
   // agent transcript — a readable, lazily-fetched view of what the session's agent
@@ -2527,10 +2530,7 @@ async function renderTask(id) {
   // box: show the question, take an answer, and POST it. On answer butchr re-launches
   // the SAME agent session via `--resume` with the answer injected.
   if (t.status === "needs_info") {
-    if (t.question) {
-      wrap.appendChild(el("h2", {}, "Agent's question"));
-      wrap.appendChild(el("pre", { class: "block", html: esc(t.question) }));
-    }
+    if (t.question) block("Agent's question", t.question, wrap);
     const answerPanel = el("div", { class: "panel", style: "margin-top:18px" });
     answerPanel.innerHTML = `
       <h2 style="margin-top:0">Answer</h2>
