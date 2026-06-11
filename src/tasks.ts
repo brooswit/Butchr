@@ -61,9 +61,6 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks" | "tags">
 
 // --- DURATION ESTIMATES (rough, history-derived) ---------------------------
 
-/** Terminal states that don't get a forward duration estimate (work is done). */
-const ESTIMATE_TERMINAL = new Set<TaskStatus>(["merged", "aborted"]);
-
 /**
  * Assemble the estimator's input rows from the tasks table (parsing the raw
  * blocked_by JSON column into a clean id array). The pure estimate model in
@@ -91,7 +88,7 @@ export function estimateInputRows(): EstimateRow[] {
  */
 export function taskEstimate(id: string): Estimate | null {
   const row = getTask(id);
-  if (!row || ESTIMATE_TERMINAL.has(row.status)) return null;
+  if (!row || isTerminal(row.status)) return null;
   const rows = estimateInputRows();
   const stats = computeEstimateStats(rows);
   const self = rows.find((r) => r.id === id);
@@ -124,6 +121,17 @@ export function getTask(id: string): TaskRow | null {
   return (
     db.query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id) ?? null
   );
+}
+
+/**
+ * Re-read a task and report whether it has reached a terminal state, as the
+ * "terminal" | "ok" result the agent-facing request_review / ask handlers return
+ * when their guarded UPDATE matched no row (the task moved under them). One read
+ * (vs the old double getTask) keyed off the canonical isTerminal predicate.
+ */
+function terminalOrOk(id: string): "terminal" | "ok" {
+  const s = getTask(id)?.status;
+  return s && isTerminal(s) ? "terminal" : "ok";
 }
 
 // --- task dependencies / blocking ------------------------------------------
@@ -278,6 +286,25 @@ export function listTasks(directoryId: string): TaskRow[] {
     .all(directoryId);
 }
 
+/**
+ * Best-effort read of a task's on-disk task.md, returning the prompt / context /
+ * review-notes triple, or null when the file is absent or unparseable. The single
+ * guarded (existsSync + try/catch) read shared by taskView and taskSearchText so a
+ * missing/corrupt task.md degrades the same way in both.
+ */
+function readTaskMdSafe(
+  dirPath: string,
+  id: string,
+): { prompt: string; context: string[]; reviewNotes: string } | null {
+  if (!existsSync(taskMdPath(dirPath, id))) return null;
+  try {
+    const doc = readTaskMd(dirPath, id);
+    return { prompt: doc.prompt, context: doc.meta.context, reviewNotes: doc.reviewNotes };
+  } catch {
+    return null; // ignore parse errors
+  }
+}
+
 /** Merge the DB row with the on-disk task.md for the detail view. */
 export function taskView(id: string): TaskView | null {
   const row = getTask(id);
@@ -287,16 +314,11 @@ export function taskView(id: string): TaskView | null {
   let context: string[] = [];
   let review_notes = "";
   if (dir) {
-    const p = taskMdPath(dir.path, id);
-    if (existsSync(p)) {
-      try {
-        const doc = readTaskMd(dir.path, id);
-        prompt = doc.prompt;
-        context = doc.meta.context;
-        review_notes = doc.reviewNotes;
-      } catch {
-        /* ignore parse errors */
-      }
+    const md = readTaskMdSafe(dir.path, id);
+    if (md) {
+      prompt = md.prompt;
+      context = md.context;
+      review_notes = md.reviewNotes;
     }
   }
   const blocked_by = parseBlockedBy(row.blocked_by);
@@ -339,13 +361,9 @@ function taskSearchText(row: TaskRow, dirPath: string | null): string {
   const parts: string[] = [row.id];
   if (row.summary) parts.push(row.summary);
   if (row.review_note) parts.push(row.review_note);
-  if (dirPath && existsSync(taskMdPath(dirPath, row.id))) {
-    try {
-      const doc = readTaskMd(dirPath, row.id);
-      parts.push(doc.prompt, doc.reviewNotes);
-    } catch {
-      /* ignore parse errors — fall back to the DB fields above */
-    }
+  if (dirPath) {
+    const md = readTaskMdSafe(dirPath, row.id);
+    if (md) parts.push(md.prompt, md.reviewNotes);
   }
   return parts.join("\n");
 }
@@ -388,6 +406,38 @@ export function taskListView(directoryId: string, q?: string): TaskListView[] {
 function emitUpdated(id: string): void {
   const v = taskView(id);
   if (v) publish({ type: "task.updated", task: v });
+}
+
+/**
+ * TEARDOWN + DISCARD the agent's worktree, in the ONE correct order: (optionally)
+ * capture the session's token usage FIRST — it reads the transcript while the
+ * session id + worktree are still in hand and MUST precede the worktree discard
+ * (see captureSessionUsage) — then tear down the herdr tab/pane and `git.cleanup`
+ * the worktree + branch. The caller keeps any readRunLogSnapshot read (the run log
+ * lives outside the worktree).
+ *
+ *  - `background: true` runs the teardown fire-and-forget (each step swallows its
+ *    own error so a teardown failure can't strand the call OR skip the cleanup) and
+ *    returns at once — used by proposeSubtasks, which must not block the MCP response.
+ *  - `background: false` (default) AWAITS the teardown, letting a herdr.teardownTask
+ *    failure PROPAGATE to the caller (git.cleanup still swallows its own error) —
+ *    used by finalizeMerge / abortTask, which gate their status write on it.
+ */
+async function teardownAndDiscard(
+  dir: { path: string },
+  row: TaskRow,
+  { captureUsage = false, background = false }: { captureUsage?: boolean; background?: boolean } = {},
+): Promise<void> {
+  if (captureUsage) captureSessionUsage(row.id);
+  if (background) {
+    void (async () => {
+      await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id).catch(() => {});
+      await git.cleanup(dir.path, row.id).catch(() => {});
+    })();
+  } else {
+    await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
+    await git.cleanup(dir.path, row.id).catch(() => {});
+  }
 }
 
 /**
@@ -848,16 +898,10 @@ export async function proposeSubtasks(
     );
   }
   updateTaskMdStatus(dir.path, planId, "merged");
-  // Capture the plan agent's token usage / model before its worktree is discarded
-  // below (the transcript lives outside the worktree, but capture here while the
-  // session id + dir are in hand).
-  captureSessionUsage(planId);
-  // Tear down the agent's tab/pane and discard the (codeless) worktree + branch in
-  // the background — best-effort, never blocking the caller.
-  void (async () => {
-    await herdr.teardownTask(plan.herdr_tab_id, planId, plan.herdr_pane_id).catch(() => {});
-    await git.cleanup(dir.path, planId).catch(() => {});
-  })();
+  // Capture the plan agent's token usage / model (before the worktree is discarded),
+  // then tear down the agent's tab/pane and discard the (codeless) worktree + branch
+  // in the background — best-effort, never blocking the caller.
+  void teardownAndDiscard(dir, plan, { captureUsage: true, background: true });
 
   emitUpdated(planId);
   // A task could have been blocked on this plan task; its completion may unblock it.
@@ -954,21 +998,20 @@ export async function setBlockedBy(
   }
 
   const eligible = allBlockersMerged(blockers);
-  const dir = getDirectory(row.directory_id);
 
   if (eligible) {
     // No outstanding blockers. A blocked task becomes eligible → in_progress (ready);
     // anything else (in_progress/in_review/…) is already past the block, so leave it.
-    if (row.status === "blocked") {
-      const res = db.query(
-        `UPDATE tasks SET status='in_progress', next_dispatch_at=NULL WHERE id=? AND status='blocked'`,
-      ).run(id);
-      if (res.changes > 0) {
-        recordTaskEvent(id, "blocked", "in_progress", "dependencies cleared by operator");
-        if (dir) updateTaskMdStatus(dir.path, id, "in_progress");
-      }
-    }
-    emitUpdated(id);
+    const transitioned =
+      row.status === "blocked" &&
+      setStatus(id, "in_progress", {
+        from: "blocked",
+        note: "dependencies cleared by operator",
+        set: { next_dispatch_at: null },
+      });
+    // setStatus emits on a successful transition; otherwise (already-past-block task,
+    // or a lost race) emit here so the view still refreshes exactly once, as before.
+    if (!transitioned) emitUpdated(id);
     return taskView(id)!;
   }
 
@@ -1054,7 +1097,6 @@ export type ApproveOutcome = {
  */
 async function requestChanges(
   id: string,
-  dirPath: string,
   note: string,
   paneId: string | null,
   tabId: string | null,
@@ -1068,18 +1110,28 @@ async function requestChanges(
   // on `agent_name_taken`), and clear the stored tab id since the re-dispatch spins
   // up a fresh one. Shared by the in_review request-changes path and the
   // finalize-time merge-conflict kick-back.
-  const from = getTask(id)?.status ?? "in_review";
   await herdr.teardownTask(tabId, id, paneId);
   // This is a REWORK re-queue (a request-changes or a conflict kick-back), NOT a
   // dispatch failure — it's a fresh intent to run, so clear the dispatch retry
   // state (attempts / last error / backoff) so prior dispatch failures don't
-  // count against the resume and a stale backoff can't delay it.
-  db.query(
-    `UPDATE tasks SET status='in_progress', review_note=?, herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, summary=NULL, conflict=0, idle=0,
-       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
-  ).run(note, id);
-  recordTaskEvent(id, from, "in_progress", eventNote);
-  updateTaskMdStatus(dirPath, id, "in_progress");
+  // count against the resume and a stale backoff can't delay it. Unconditional
+  // (no `from` guard) — the callers only ever route a non-in_progress task here, so
+  // setStatus records the in_review/finalizing → in_progress event as before.
+  setStatus(id, "in_progress", {
+    note: eventNote,
+    set: {
+      review_note: note,
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+      output_snapshot: null,
+      summary: null,
+      conflict: 0,
+      idle: 0,
+      dispatch_attempts: 0,
+      last_dispatch_error: null,
+      next_dispatch_at: null,
+    },
+  });
 }
 
 /** Actionable change-request note for a merge conflict, naming the files + steps. */
@@ -1409,7 +1461,6 @@ export async function respondToFeedback(
     // in_review REQUEST CHANGES → RESUME the workspace agent with the notes.
     await requestChanges(
       id,
-      dir.path,
       note,
       row.herdr_pane_id,
       row.herdr_tab_id,
@@ -1513,7 +1564,6 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       // (requestChanges tears down any lingering tab in the fallback).
       await requestChanges(
         id,
-        dir.path,
         notes,
         row.herdr_pane_id,
         row.herdr_tab_id,
@@ -1571,9 +1621,10 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // capture whatever the agent logged, tear down the worktree + branch, and stamp merged.
   const snapshot = readRunLogSnapshot(id);
   // Close the agent's dedicated tab (best-effort — usually already gone since the
-  // agent exited after request_review, but removes any empty husk tab).
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
-  await git.cleanup(dir.path, id).catch(() => {});
+  // agent exited after request_review, but removes any empty husk tab) and discard
+  // the worktree + branch (already landed in main). Awaited so the merged write below
+  // only runs after teardown — a teardown failure propagates, exactly as before.
+  await teardownAndDiscard(dir, row, {});
   if (
     !setStatus(id, "merged", {
       from: "finalizing",
@@ -1640,11 +1691,10 @@ export async function abortTask(id: string): Promise<TaskView> {
   // Tell the watcher (if any) to stop before we kill the tab / remove the tree,
   // so it never transitions the task to review behind us.
   signalAbort(id);
-  // Close the agent's whole tab (kills the agent + removes the dedicated tab).
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
-
-  // Throw away the worktree + branch — nothing gets merged.
-  await git.cleanup(dir.path, id).catch(() => {});
+  // Close the agent's whole tab (kills the agent + removes the dedicated tab) and
+  // throw away the worktree + branch — nothing gets merged. Awaited (a teardown
+  // failure propagates, as before).
+  await teardownAndDiscard(dir, row, {});
 
   setStatus(id, "aborted", {
     note: "aborted by operator",
@@ -1878,7 +1928,7 @@ export function markReviewFromAgent(
 ): "ok" | "terminal" | "notfound" {
   const row = getTask(id);
   if (!row) return "notfound";
-  if (row.status === "merged" || row.status === "aborted") return "terminal";
+  if (isTerminal(row.status)) return "terminal";
 
   // Capture the agent's terminal output now: once it exits there is no live pane
   // for the reviewer to inspect, so the snapshot (plus the git diff) is what
@@ -1904,26 +1954,25 @@ export function markReviewFromAgent(
 
   // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a
   // duplicate call). Clear the pane: the agent is exiting and review holds no live
-  // process.
-  const res = db.query(
-    `UPDATE tasks SET status='in_review', completed_at=COALESCE(completed_at, ?), summary=?, idle=0,
-       herdr_pane_id=NULL, output_snapshot=?
-       WHERE id=? AND status IN ('in_progress','in_review')`,
-  ).run(nowIso(), summary ?? null, snapshot || null, id);
-  if (res.changes === 0) {
+  // process. setStatus records the audit event ONLY on the genuine in_progress→
+  // in_review change (a duplicate in_review→in_review is status-unchanged, so no
+  // event) — matching the old `if (row.status === "in_progress")` guard exactly.
+  if (
+    !setStatus(id, "in_review", {
+      from: ["in_progress", "in_review"],
+      note: "agent requested review",
+      set: {
+        completed_at: keep(nowIso()),
+        summary: summary ?? null,
+        idle: 0,
+        herdr_pane_id: null,
+        output_snapshot: snapshot || null,
+      },
+    })
+  ) {
     // Not in a phase we can submit (e.g. needs_info/blocked/aborted under us).
-    return getTask(id)?.status === "merged" || getTask(id)?.status === "aborted"
-      ? "terminal"
-      : "ok";
+    return terminalOrOk(id);
   }
-  // Record only the genuine in_progress→in_review transition (not a duplicate
-  // request_review call, which is in_review→in_review and changes no status).
-  if (row.status === "in_progress") {
-    recordTaskEvent(id, "in_progress", "in_review", "agent requested review");
-  }
-  const dir = getDirectory(row.directory_id);
-  if (dir) updateTaskMdStatus(dir.path, id, "in_review");
-  emitUpdated(id);
   // Capture the session's token usage / model now that the agent has finished this
   // turn (re-read each call so a rework's added turns are reflected too).
   captureSessionUsage(id);
@@ -1956,7 +2005,7 @@ export function markNeedsInfoFromAgent(
 ): "ok" | "terminal" | "notfound" {
   const row = getTask(id);
   if (!row) return "notfound";
-  if (row.status === "merged" || row.status === "aborted") return "terminal";
+  if (isTerminal(row.status)) return "terminal";
 
   // Capture the agent's terminal output now: once it exits there is no live pane,
   // so the snapshot is what the answerer sees of where the agent got stuck.
@@ -1971,25 +2020,25 @@ export function markNeedsInfoFromAgent(
 
   // in_progress/finalizing → needs_info (normal), or needs_info → needs_info (a
   // duplicate ask). Clear the pane: the agent is exiting and this state holds no
-  // live process.
-  const res = db.query(
-    `UPDATE tasks SET status='needs_info', question=?, idle=0,
-       herdr_pane_id=NULL, output_snapshot=?
-       WHERE id=? AND status IN ('in_progress','finalizing','needs_info')`,
-  ).run(question, snapshot || null, id);
-  if (res.changes === 0) {
+  // live process. setStatus records the audit event ONLY on a genuine change (a
+  // duplicate needs_info→needs_info is status-unchanged) — matching the old
+  // `if (row.status !== "needs_info")` guard exactly.
+  if (
+    !setStatus(id, "needs_info", {
+      from: ["in_progress", "finalizing", "needs_info"],
+      note: "agent asked a clarifying question",
+      set: {
+        question,
+        idle: 0,
+        herdr_pane_id: null,
+        output_snapshot: snapshot || null,
+      },
+    })
+  ) {
     // Not in a state we can park (e.g. it was aborted out from under the agent) —
     // report the current status so the tool surfaces it.
-    return getTask(id)?.status === "merged" || getTask(id)?.status === "aborted"
-      ? "terminal"
-      : "ok";
+    return terminalOrOk(id);
   }
-  if (row.status !== "needs_info") {
-    recordTaskEvent(id, row.status, "needs_info", "agent asked a clarifying question");
-  }
-  const dir = getDirectory(row.directory_id);
-  if (dir) updateTaskMdStatus(dir.path, id, "needs_info");
-  emitUpdated(id);
   // Capture the session's token usage / model now that the agent has paused this turn.
   captureSessionUsage(id);
   return "ok";
@@ -2011,14 +2060,22 @@ async function resumeWithAnswer(
 ): Promise<void> {
   appendAnswer(dirPath, id, row.question ?? "", answer, nowIso());
   await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
-  db.query(
-    `UPDATE tasks SET status='in_progress', answer=?, question=NULL,
-       herdr_pane_id=NULL, herdr_tab_id=NULL, output_snapshot=NULL, idle=0,
-       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
-  ).run(answer, id);
-  recordTaskEvent(id, "needs_info", "in_progress", "question answered by operator");
-  updateTaskMdStatus(dirPath, id, "in_progress");
-  emitUpdated(id);
+  // The caller (respondToFeedback) only routes a needs_info task here, so the
+  // unconditional re-arm to in_progress records the needs_info → in_progress event.
+  setStatus(id, "in_progress", {
+    note: "question answered by operator",
+    set: {
+      answer,
+      question: null,
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+      output_snapshot: null,
+      idle: 0,
+      dispatch_attempts: 0,
+      last_dispatch_error: null,
+      next_dispatch_at: null,
+    },
+  });
 }
 
 /**
@@ -2386,7 +2443,6 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
   await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
 
   const attempts = (row.dispatch_attempts ?? 0) + 1;
-  const dir = getDirectory(row.directory_id);
 
   if (attempts >= config.maxDispatchAttempts) {
     if (row.status === "finalizing") {
@@ -2405,22 +2461,20 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
       emitUpdated(id);
       return;
     }
-    db.query(
-      `UPDATE tasks SET status='aborted', dispatch_attempts=?, last_dispatch_error=?,
-         next_dispatch_at=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL,
-         completed_at=COALESCE(completed_at, ?) WHERE id=?`,
-    ).run(attempts, err, nowIso(), id);
-    recordTaskEvent(
-      id,
-      row.status,
-      "aborted",
-      `dispatch gave up after ${attempts} attempt${attempts === 1 ? "" : "s"}`,
-    );
-    if (dir) updateTaskMdStatus(dir.path, id, "aborted");
+    setStatus(id, "aborted", {
+      note: `dispatch gave up after ${attempts} attempt${attempts === 1 ? "" : "s"}`,
+      set: {
+        dispatch_attempts: attempts,
+        last_dispatch_error: err,
+        next_dispatch_at: null,
+        herdr_pane_id: null,
+        herdr_tab_id: null,
+        completed_at: keep(nowIso()),
+      },
+    });
     console.error(
       `[butchr] task ${id} failed to dispatch after ${attempts} attempts: ${err}`,
     );
-    emitUpdated(id);
     return;
   }
 
