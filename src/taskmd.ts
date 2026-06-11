@@ -4,6 +4,7 @@
 //
 // We deliberately hand-roll a tiny YAML reader/writer for the front matter
 // (zero dependencies). The shape is fixed and simple, so this is safe.
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskKind, TaskStatus } from "./db.ts";
@@ -282,13 +283,67 @@ export function appendAnswer(
  * question in context. This is a focused message: the answer plus a reminder to
  * continue and submit, exactly like renderReworkPrompt is for a reject.
  */
-export function renderAnswerPrompt(answer: string): string {
+export function renderAnswerPrompt(answer: string, reground = ""): string {
   const body =
     `You paused this task to ask a clarifying question via the \`ask\` tool. Here ` +
     `is the answer:\n\n${answer.trim()}\n\nUse it to continue the task. When the ` +
     `work is complete, call \`request_review\` (or use \`ask\` again if something ` +
     `else is genuinely ambiguous).`;
-  return [`# Answer to your question`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
+  const focused = [`# Answer to your question`, "", body].join("\n");
+  // If the task was edited while it was paused, the re-grounding block (the CURRENT
+  // prompt + context) leads, so the agent re-grounds before reading the answer.
+  const head = reground.trim() ? reground.trim() + "\n\n---\n\n" : "";
+  return head + focused + "\n\n---\n\n" + REVIEW_PROTOCOL;
+}
+
+/**
+ * Stable fingerprint of the parts of a task.md that a RESUMED agent's `--resume`
+ * session would NOT pick up on its own: the prompt body and the context-file list.
+ * butchr records this whenever it grounds an agent (markRunning) and re-checks it on
+ * every resume — a mismatch means the task's prompt/context was edited while the agent
+ * was paused (needs_info / in_review), so the resume must RE-GROUND it
+ * (renderRegroundBlock) instead of handing it only the focused answer/rework message.
+ * Review notes are deliberately EXCLUDED (they already flow into the rework prompt), as
+ * is status/usage/etc. — none of which change what the agent must build.
+ */
+export function groundingFingerprint(doc: TaskDoc): string {
+  const payload = JSON.stringify({
+    prompt: doc.prompt.trim(),
+    context: doc.meta.context,
+  });
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+/**
+ * Build a RE-GROUNDING block for a resumed agent whose task was EDITED while it was
+ * paused (needs_info / in_review). A resume re-enters the SAME `claude --resume`
+ * session, which still holds the ORIGINAL prompt + context the agent was first given —
+ * so an operator's edit to the prompt/context (e.g. via the broadened `raise` tool) is
+ * invisible to it unless we restate the CURRENT definition. This block carries the
+ * authoritative current prompt + context-file list, framed as superseding what the
+ * session holds. The dispatcher prepends it to the focused answer/rework message ONLY
+ * when groundingFingerprint shows the prompt/context actually changed since the agent
+ * was last grounded; an unchanged task resumes with the focused message exactly as
+ * before.
+ */
+export function renderRegroundBlock(doc: TaskDoc): string {
+  const parts: string[] = [
+    `# Task updated while you were paused\n\n` +
+      `This task's prompt and/or context files were REVISED while it was paused. The ` +
+      `definition below is the CURRENT, authoritative one — it SUPERSEDES the original ` +
+      `prompt and context files you were given earlier in this session. Re-ground ` +
+      `yourself in it before continuing.`,
+    `## Current prompt\n\n${doc.prompt.trim()}`,
+  ];
+  if (doc.meta.context.length) {
+    const list = doc.meta.context.map((rel) => `- \`${rel}\``).join("\n");
+    parts.push(
+      `## Context files\n\n` +
+        `Read these with your tools before continuing (their paths are relative to the ` +
+        `repository root) — they may have changed:\n\n${list}`,
+    );
+  }
+  return parts.join("\n\n");
 }
 
 /** Update only the `status:` line in the front matter, in place. */
@@ -477,14 +532,18 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
  * to address them and submit again. Falls back to a generic instruction if no
  * review notes are recorded (shouldn't happen, but keeps the agent unblocked).
  */
-export function renderReworkPrompt(directoryRoot: string, doc: TaskDoc): string {
+export function renderReworkPrompt(directoryRoot: string, doc: TaskDoc, reground = ""): string {
   const notes = doc.reviewNotes.trim();
   const body = notes
     ? `Your previous submission was reviewed and changes were requested. Address ` +
       `the following review notes, then call \`request_review\` again.\n\n${notes}`
     : `Changes were requested on your previous submission. Review your work, ` +
       `make the necessary fixes, then call \`request_review\` again.`;
-  return [`# Changes requested`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
+  const focused = [`# Changes requested`, "", body].join("\n");
+  // If the task was edited while it was paused, the re-grounding block (the CURRENT
+  // prompt + context) leads, so the agent re-grounds before reading the review notes.
+  const head = reground.trim() ? reground.trim() + "\n\n---\n\n" : "";
+  return head + focused + "\n\n---\n\n" + REVIEW_PROTOCOL;
 }
 
 /**

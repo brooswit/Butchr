@@ -360,6 +360,22 @@ ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
 // taskmd.renderAgentPrompt's plan-preview protocol.
 ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
 
+// RESUME RE-GROUNDING FINGERPRINT. A sha256 over the task's PROMPT + CONTEXT-FILE LIST
+// (taskmd.groundingFingerprint), recorded by markRunning every time butchr GROUNDS an
+// agent — i.e. launches it carrying the full prompt+context: a fresh first launch, or a
+// re-grounded resume. A resume re-enters the SAME `claude --resume` session, which still
+// holds the prompt+context the agent saw when last grounded, so its focused answer/rework
+// message normally restates none of it. But the broadened `raise` tool lets an operator
+// EDIT a paused task's prompt/context (or it can change for any reason) while the agent
+// waits in needs_info / in_review; on resume the dispatcher compares this stored
+// fingerprint against the CURRENT task.md and, on a mismatch, prepends the updated
+// definition (taskmd.renderRegroundBlock) so the resumed agent re-grounds in the current
+// task rather than the stale snapshot in its session. Review notes are deliberately NOT
+// part of the fingerprint — they already flow into the rework prompt. NULL for a task
+// never grounded (or paused before this column existed) — treated as a mismatch, so the
+// next resume re-grounds once, which is safe. Orthogonal to `status`.
+ensureColumn("tasks", "grounding_fp", "TEXT");
+
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
 // design (task playful-rabbit-0405) carried a SECOND axis (`stage` = idea|spec|build)
 // orthogonal to `status`; the CEO retracted it as over-complicated. The idea-vs-rest
@@ -620,6 +636,11 @@ export type TaskRow = {
   // the plan-preview gate (the agent proposes a plan and pauses for operator approval
   // before writing code), else 0. Surfaced on TaskView via the `...row` spread.
   plan_preview: number;
+  // RESUME RE-GROUNDING FINGERPRINT (see the ensureColumn block above): a sha256 of the
+  // prompt + context-file list the agent was last grounded in. Compared on resume to
+  // detect a prompt/context edit made while the task was paused (needs_info / in_review),
+  // which triggers a re-ground (taskmd.renderRegroundBlock). NULL until first grounded.
+  grounding_fp: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

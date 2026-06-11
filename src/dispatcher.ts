@@ -24,7 +24,7 @@ import { buildScriptArgv, modelFlag, stripAnsi } from "./exec.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
-import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderReworkPrompt } from "./taskmd.ts";
+import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
 import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
 
@@ -633,15 +633,31 @@ export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> 
     // hand it the answer; otherwise it's a reject/conflict rework → hand it the
     // review notes.
     const doc = readTaskMd(dir.path, task.id);
+    // Fingerprint the CURRENT prompt+context. markRunning records it as what THIS launch
+    // grounds the agent in; on a resume we also compare it to the stored fingerprint to
+    // detect a prompt/context edit made while the task was paused (see below).
+    const groundingFp = groundingFingerprint(doc);
     let rendered: string;
     if (task.status === "finalizing") {
       // FINALIZE phase: the workspace agent is resumed to do post-approval 'final
       // thoughts' before butchr lands the merge (see renderFinalizePrompt).
       rendered = renderFinalizePrompt();
-    } else if (isResume && task.answer && task.answer.trim()) {
-      rendered = renderAnswerPrompt(task.answer);
     } else if (isResume) {
-      rendered = renderReworkPrompt(dir.path, doc);
+      // A resume re-enters the SAME `--resume` session, which still holds the prompt +
+      // context the agent saw when it was last grounded. If the task's prompt/context was
+      // EDITED while it waited (needs_info / in_review) — e.g. an operator revised it via
+      // the broadened `raise` tool — that session is now STALE. Detect it by comparing the
+      // stored grounding fingerprint and, on a mismatch, prepend the CURRENT definition so
+      // the resumed agent works from the up-to-date task, not the snapshot in its context.
+      // (A NULL stored fingerprint — a task paused before this existed — counts as a
+      // mismatch and re-grounds once, which is safe.) An UNCHANGED task resumes with the
+      // focused answer/rework message exactly as before.
+      const reground =
+        (task.grounding_fp ?? "") !== groundingFp ? renderRegroundBlock(doc) : "";
+      rendered =
+        task.answer && task.answer.trim()
+          ? renderAnswerPrompt(task.answer, reground)
+          : renderReworkPrompt(dir.path, doc, reground);
     } else {
       rendered = renderAgentPrompt(dir.path, doc);
     }
@@ -704,7 +720,7 @@ export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> 
         }),
     );
 
-    markRunning(task.id, paneId, sessionId, tabId);
+    markRunning(task.id, paneId, sessionId, tabId, groundingFp);
     spawnWatcher(dir, task.id, paneId, logFile, doneFile);
   } catch (e) {
     // Dispatch failed — re-queue so the next tick retries. Any herdr tab/agent we

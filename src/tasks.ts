@@ -1724,6 +1724,7 @@ export function markRunning(
   paneId: string,
   sessionId: string,
   tabId?: string,
+  groundingFp?: string,
 ): void {
   const row = getTask(id);
   if (!row) return;
@@ -1735,13 +1736,18 @@ export function markRunning(
   // already launched / moved under us in the same tick. `session_id` is set with
   // COALESCE so it sticks to the FIRST id assigned (a resume keeps its existing id);
   // a successful launch clears the dispatch retry state and consumes any pending ASK
-  // answer (it has been injected into this launch's rendered prompt).
+  // answer (it has been injected into this launch's rendered prompt). `grounding_fp`
+  // records the prompt+context fingerprint this launch grounds the agent in (the
+  // dispatcher computes it from the CURRENT task.md and passes it here) — the resume
+  // path compares it to detect a prompt/context edit made while the task was paused
+  // (see dispatcher.dispatch + taskmd.renderRegroundBlock). COALESCE(?, grounding_fp)
+  // overwrites it when a fingerprint is supplied and leaves it untouched otherwise.
   const res = db.query(
     `UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=?, session_id=COALESCE(session_id, ?),
        started_at=COALESCE(started_at, ?), dispatch_attempts=0, last_dispatch_error=NULL,
-       next_dispatch_at=NULL, answer=NULL
+       next_dispatch_at=NULL, answer=NULL, grounding_fp=COALESCE(?, grounding_fp)
        WHERE id=? AND status IN ('in_progress','finalizing') AND herdr_pane_id IS NULL`,
-  ).run(paneId, tabId ?? null, sessionId, nowIso(), id);
+  ).run(paneId, tabId ?? null, sessionId, nowIso(), groundingFp ?? null, id);
   if (res.changes === 0) return; // aborted / already running / moved under us
   // Record a launch event on the FIRST launch only (its status is unchanged, so this
   // is the one audit-trail marker that the agent started); reworks/relaunches/the

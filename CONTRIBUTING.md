@@ -45,8 +45,23 @@ SQLite tracks runtime state; `task.md` on disk is the source of truth for the
 prompt and metadata. The full set of task states and the transitions between
 them lives in the state machine in `src/tasks.ts` (with the persisted columns in
 `src/db.ts`) — the agent runs **interactively** and drives the review handshake
-itself via the `request_review` MCP tool, and on "request changes" the same live
-agent resumes in-context rather than being restarted.
+itself via the `request_review` MCP tool, and on "request changes" (or a `needs_info`
+answer) the same live agent resumes in-context (`claude --resume <session-id>`)
+rather than being restarted.
+
+**Resume re-grounding.** A resume re-enters the *same* session, so its prompt is a
+**focused** message (the answer, or the review notes) — it relies on the session
+still holding the original prompt + context. But a task can be **edited while it's
+paused** (an operator revising the prompt/context of a task sitting in `needs_info`
+or `in_review`). To keep the resumed agent grounded in the *current* `task.md`,
+butchr fingerprints the prompt + context-file list it grounds an agent in
+(`taskmd.groundingFingerprint` → the `grounding_fp` column, written by
+`markRunning`) and, on every resume, compares it to the live `task.md`. On a
+mismatch the dispatcher prepends a **re-ground block** (`taskmd.renderRegroundBlock`
+— the current prompt + context, marked as superseding the session snapshot) ahead of
+the focused answer/rework message. An *unedited* task resumes with the focused
+message byte-for-byte as before. (Review notes are excluded from the fingerprint —
+they already flow into the rework prompt.)
 
 **Concurrency — fully concurrent.** Every queued task is dispatched immediately
 and runs in parallel; there is no per-directory "one at a time" limit. Each task
