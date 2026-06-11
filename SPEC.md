@@ -641,8 +641,11 @@ On a genuine `in_progress → in_review` transition, `triggerCi` runs the direct
 blocks on it. The command is the directory's **per-directory `gate_cmd`** (or the
 default `BUTCHR_VERIFY_CMD`), resolved via `directories.directoryGateCmd` and run as a
 single `bash -lc` invocation — so each registered repo defines its own build/test
-(butchr's own default is `bun build … && bun test`; another repo sets `npm test`,
-etc.). An empty resolved command means the directory opted out → a trivial pass. It's
+(butchr's own default is `bun build … && bun test ./test`; another repo sets
+`npm test`, etc.). The default's test arg is **scoped to `./test`** because task
+worktrees live at `<dir>/<taskId>` (subdirs of the repo): a bare `bun test` from
+either gate's cwd would glob sibling worktrees' tests and run an unstable,
+cross-task suite — see the verify gate below and `BUTCHR_VERIFY_CMD`. An empty resolved command means the directory opted out → a trivial pass. It's
 spawned through the **shared gate runner** (`src/gate.ts` `runGate`) that the
 post-merge verify gate also uses, so the two gates can't drift on how they
 spawn/bound a run: the run is **bounded by `BUTCHR_VERIFY_TIMEOUT_MS`** (the same
@@ -712,6 +715,12 @@ time against an up-to-date base tip instead of racing. Inside the exclusive sect
 3. If the ff stuck, run the **post-merge verify gate** (`verifyDefaultBranch` → the
    directory's gate command — its `gate_cmd` or the default `BUTCHR_VERIFY_CMD`,
    resolved via `directoryGateCmd` so it matches the CI gate — in the repo **root**).
+   Because this runs from the repo **root**, the default's `bun test ./test` arg is
+   load-bearing: a bare `bun test` here would discover + run the test files inside
+   **every sibling task worktree** (`<dir>/<otherTask>/test/*.test.ts`), so an
+   in-flight worktree's failing/interfering test could RED this gate and auto-revert
+   an unrelated, already-green merge. Scoping to `./test` makes the gate run only the
+   repo's own suite with a stable count regardless of how many sibling worktrees exist.
    On **RED**, `git.resetHard` the default
    branch back to `priorTip` — undoing the merge so a broken commit never sits on
    main. (Because merges are serialized, nothing landed after the ff, so the reset is
@@ -1477,7 +1486,7 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_GIT_BIN` | `git` | git binary. |
 | `BUTCHR_TICK_MS` | `1500` | dispatcher poll interval. |
 | `BUTCHR_CTO_CONTEXT` | _(empty)_ | optional file seeding a new directory's `.butchr/CTO.md` (else built-in default). |
-| `BUTCHR_VERIFY_CMD` | `bun build src/index.ts --target bun --outfile /dev/null && bun test` | **default** build/test gate command for **both** the CI gate (task worktree) and the post-merge verify gate (repo root), run via `bash -lc`. A directory's own `gate_cmd` (set at register time / via `PATCH /api/directories/:id`) overrides it per-directory; **empty disables** the gate. |
+| `BUTCHR_VERIFY_CMD` | `bun build src/index.ts --target bun --outfile /dev/null && bun test ./test` | **default** build/test gate command for **both** the CI gate (task worktree) and the post-merge verify gate (repo root), run via `bash -lc`. A directory's own `gate_cmd` (set at register time / via `PATCH /api/directories/:id`) overrides it per-directory; **empty disables** the gate. The test arg is **scoped to `./test`** on purpose: task worktrees live at `<dir>/<taskId>` (subdirs of the repo), so a bare `bun test` from the repo root would glob sibling worktrees' `test/*.test.ts` and run an unstable, cross-task suite (an in-flight worktree's failing test could auto-revert an unrelated green merge). `bunfig.toml` (`[test] root = "./test"`) pins bare `bun test` the same way. |
 | `BUTCHR_VERIFY_TIMEOUT_MS` | `600000` (10 min) | timeout (treated as RED/FAIL) for **both** gates that share the gate runner: the post-merge verify gate and each in-worktree CI build/test command. |
 | `BUTCHR_MAX_DISPATCH_ATTEMPTS` | `5` | consecutive dispatch failures before giving up to `failed`. |
 | `BUTCHR_DISPATCH_BACKOFF_BASE_MS` | `1000` | base for `min(base·2^(n-1), cap)` retry backoff. |

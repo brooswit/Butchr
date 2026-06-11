@@ -1,0 +1,16 @@
+# Pin `bun test` discovery to the repo's own ./test suite.
+#
+# butchr creates each task's git worktree as a SUBDIRECTORY of the repo
+# (`<dir>/<taskId>` — see src/git.ts worktreePath). A bare `bun test` from the
+# repo root globs the WHOLE tree and would discover + run the test files inside
+# every sibling task worktree (`<dir>/<otherTask>/test/*.test.ts`), so the suite
+# would balloon to an unstable count and an in-flight worktree's failing test
+# could fail an unrelated run (the post-merge verify gate even auto-reverts a
+# green merge on such a failure). `root` scopes discovery to ./test so the count
+# is stable no matter how many sibling worktrees exist.
+#
+# The gate command default (config.verifyCmd) ALSO passes `./test` explicitly;
+# this is the defense-in-depth that protects a bare `bun test` run by hand or by
+# a script. Keep the two in sync.
+[test]
+root = "./test"

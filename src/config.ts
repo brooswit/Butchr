@@ -127,10 +127,21 @@ export const config = {
    * dogfooding setup). For a repo where this command does not apply, override
    * BUTCHR_VERIFY_CMD with the right build/test command. Set it EMPTY to DISABLE
    * the gate entirely (every merge is accepted as before — no verify, no revert).
+   *
+   * The test arg is SCOPED to `./test` on purpose. butchr lays out each task's git
+   * worktree as a SUBDIRECTORY of the repo (`<dir>/<taskId>` — see git.worktreePath),
+   * so a bare `bun test` from the repo root (where the post-merge verify gate runs)
+   * would glob the ENTIRE tree and discover+run the test files inside EVERY sibling
+   * task worktree (`<dir>/<otherTask>/test/*.test.ts`) — an in-flight worktree's
+   * failing/interfering test could then auto-revert an unrelated, already-green merge.
+   * Pinning discovery to `./test` makes BOTH gates (in-worktree CI + main-root verify)
+   * run only the repo's OWN suite with a STABLE test count, regardless of how many
+   * sibling worktrees exist. `bunfig.toml` (`[test] root = "./test"`) pins bare
+   * `bun test` the same way as defense-in-depth.
    */
   verifyCmd: env(
     "BUTCHR_VERIFY_CMD",
-    "bun build src/index.ts --target bun --outfile /dev/null && bun test",
+    "bun build src/index.ts --target bun --outfile /dev/null && bun test ./test",
   ),
   /** Max wall-clock (ms) the verify gate may run before it's killed + treated as RED. */
   verifyTimeoutMs: envInt("BUTCHR_VERIFY_TIMEOUT_MS", 1000 * 60 * 10),
