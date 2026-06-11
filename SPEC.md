@@ -38,6 +38,7 @@ terminal/PTY/agent-session management to herdr.
    - [6.3 MCP tools](#63-mcp-per-task-tools)
    - [6.4 Operator CLI](#64-operator-cli-binbutchr)
    - [6.5 Webapp](#65-webapp-public)
+   - [6.7 CTO notification channel (one-way)](#67-cto-notification-channel-one-way)
 7. [Data model](#7-data-model)
 8. [Configuration](#8-configuration)
 9. [On-disk layout](#9-on-disk-layout)
@@ -1273,6 +1274,93 @@ hostname is also accepted by the Host check.
 > only against the operator's browser being turned into a confused deputy by a
 > third-party web page; it is **not** a defense against a hostile local process or
 > a multi-tenant host. Real authn/authz is a separate, future concern.
+
+### 6.7 CTO notification channel (one-way)
+
+A long-running **CTO agent** (a persistent Claude Code session that operates butchr
+via its API/CLI) otherwise has to **poll** to learn that a task wants its attention.
+`src/channel.ts` is a tiny **one-way push channel** that closes that gap: it speaks
+the Claude Code **Channels** contract (research preview) on top of MCP over **stdio**
+and forwards butchr's existing attention feed into the running CTO session, so it
+reacts immediately. It mirrors exactly the in-app feed a human sees in the dashboard
+(`/health` `needsAttention` + the badge derived from the §2 feedback states).
+
+**One-way only.** The channel can push to the CTO; the CTO cannot push back through
+it. The `initialize` result advertises **only** `capabilities.experimental['claude/channel'] = {}`
+and deliberately omits `tools` (and `resources`/`prompts`) — there is **no reply
+tool, no `tools/call`, no permission relay**. The CTO acts on a notification through
+the normal surfaces (`POST …/approve|reject|answer|requeue`, `butchr` CLI), not
+through this channel.
+
+**What it pushes.** It subscribes to butchr's **existing** SSE stream
+(`GET /api/events`, §6.2) — *not* a new bus — and for every task that **ENTERS** a
+CTO attention state emits one channel notification. The attention states are the spec's
+`spec_review` / `in_review` / `needs_info` / **`failed`**; since butchr folded the
+former `failed` state into the canonical terminal **`aborted`** (see §2.1 / the
+`["failed","aborted"]` migration in `db.ts`), `aborted` *is* "failed" here.
+"Entering" is edge-triggered: the bridge remembers each task's last-seen status and
+emits only when it **changed into** an attention state, so a `task.updated` that
+merely touches a task already in that state does not re-notify, and a reconnect
+(which replays no history) cannot re-fire a transition already seen this run.
+
+**Notification shape.** Each is a JSON-RPC **notification** (no `id`) with
+method **`notifications/claude/channel`** and params `{ content, meta }`:
+
+- `content` — a concise, single-line, human-style string carrying the same info the
+  dashboard surfaces: task id, directory label, the new state, and the relevant
+  text (the generated spec for `spec_review`, the `request_review` summary for
+  `in_review`, the agent's question for `needs_info`, the failure reason for a failed
+  task). Whitespace-collapsed and length-bounded.
+- `meta` — `{ task_id, dir, state }`, **identifier-keyed** (keys are bare
+  `[A-Za-z_][A-Za-z0-9_]*`). `dir` is the stable **directory id** (machine routing);
+  the human directory **label** appears in `content` (resolved from a small cache the
+  bridge seeds once from `GET /api/directories` and keeps fresh off the
+  `directory.*` events on the same stream, falling back to the id when unknown).
+
+**Best-effort + resilient.** A malformed/irrelevant event, a missing task payload, or
+a failed write is dropped silently — it never crashes the bridge or butchr. The SSE
+subscription **auto-reconnects** (fixed backoff) whenever the stream ends or errors
+(server restart, network blip). All diagnostics go to **stderr** — stdout is reserved
+for the JSON-RPC protocol.
+
+**Zero deps.** Like `src/mcp.ts` (which hand-rolls Streamable-HTTP MCP), this
+hand-rolls the **stdio** MCP framing (newline-delimited JSON-RPC) and the SSE parser
+itself; no `@modelcontextprotocol/sdk`, no npm dependency. The only butchr import is
+`config` (for the default SSE URL).
+
+**Feasibility.** butchr's agents run Claude Code ≥ v2.1.80 under Claude Max
+(Anthropic auth — claude.ai/Console, **not** Bedrock/Vertex), which Channels require.
+A custom channel is not on Anthropic's allowlist during the research preview, so the
+CTO agent must be launched with **`--dangerously-load-development-channels`**.
+
+**Launching the CTO agent with the channel.** Register the bridge as an MCP **stdio**
+server and load it as a development channel. In the CTO session's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "butchr-cto-channel": {
+      "command": "bun",
+      "args": ["run", "/path/to/butchr/src/channel.ts", "--role", "cto"]
+    }
+  }
+}
+```
+
+then launch Claude Code so that server is loaded **as a channel** via the
+`server:<name>` reference — `<name>` is the `.mcp.json` key (which also matches the
+bridge's `serverInfo.name`, `butchr-cto-channel`):
+
+```
+claude --dangerously-load-development-channels server:butchr-cto-channel ...
+```
+
+The bridge derives the SSE URL from butchr's `config.host`/`config.port`
+(`http://127.0.0.1:47800/api/events` by default); override with
+**`BUTCHR_CHANNEL_SSE_URL`** if butchr runs elsewhere. Notifications then surface in
+the running CTO session as `<butchr-cto-channel>` events to act on. (The companion
+**workspace-agent** channel for feedback-*answered* events is a separate, later phase
+— it needs a keep-alive lifecycle change — and is intentionally out of scope here.)
 
 ---
 
