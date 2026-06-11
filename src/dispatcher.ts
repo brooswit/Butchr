@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
-import { db, getSetting, setSetting } from "./db.ts";
+import { db, getSetting, recordTaskEvent, setSetting } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
@@ -831,15 +831,127 @@ function sleep(ms: number): Promise<void> {
 // alive but quiet → idle; the moment it writes again → active. Skipped entirely
 // when idle detection is disabled or the log hasn't appeared yet (treating a
 // missing log as "stale" would flag a just-started agent as idle).
-function refreshIdle(taskId: string, logFile: string): void {
-  if (config.idleMs <= 0) return;
+//
+// Returns how long (ms) the agent has been QUIET (now - log mtime) so the caller
+// can drive the stall auto-nudge off the same single stat() — or null when idle
+// detection is disabled or the log hasn't appeared yet (nothing to nudge against).
+function refreshIdle(taskId: string, logFile: string): number | null {
+  if (config.idleMs <= 0) return null;
   let mtimeMs: number;
   try {
     mtimeMs = statSync(logFile).mtimeMs;
   } catch {
-    return; // no log yet — agent is still spinning up
+    return null; // no log yet — agent is still spinning up
   }
-  setIdle(taskId, Date.now() - mtimeMs > config.idleMs);
+  const quietMs = Date.now() - mtimeMs;
+  setIdle(taskId, quietMs > config.idleMs);
+  return quietMs;
+}
+
+/**
+ * STALLED-AGENT AUTO-NUDGE decision: should the watcher send a `continue` nudge to
+ * a live workspace agent right now? Pure (clock/IO-free) so the boundary is
+ * unit-testable without spawning an agent. A stall is an agent that is ALIVE but
+ * has produced NO output for long enough that it's almost certainly wedged on a
+ * transient API error or parked at an empty prompt — the gap neither the idle flag
+ * (which only marks it) nor the runaway watchdog (which only catches alive+looping)
+ * recovers on its own.
+ *
+ *  - `quietMs`    — how long the agent's CLI has been silent (now - log mtime).
+ *  - `sinceLastNudgeMs` — ms since we last nudged THIS stall, or null if we never
+ *    have (the first nudge of a fresh stall).
+ *  - `nudgesSent` — consecutive nudges already sent for this uninterrupted stall.
+ *  - `idleMs` / `idleNudgeMs` / `maxNudges` — the config knobs.
+ *
+ * Nudge only when ALL hold: auto-nudging is enabled (`idleNudgeMs > 0` and
+ * `maxNudges > 0`), we're under the consecutive-nudge cap, the agent has been quiet
+ * past the idle threshold PLUS the grace period (`idleMs + idleNudgeMs`), and at
+ * least a full grace period has elapsed since the previous nudge (so repeated
+ * nudges are spaced, never fired every poll tick). The caller RESETS `nudgesSent`
+ * the instant output resumes, so the cap counts only truly-unanswered nudges.
+ */
+export function shouldNudgeStall(opts: {
+  quietMs: number;
+  sinceLastNudgeMs: number | null;
+  nudgesSent: number;
+  idleMs: number;
+  idleNudgeMs: number;
+  maxNudges: number;
+}): boolean {
+  if (opts.idleNudgeMs <= 0 || opts.maxNudges <= 0) return false; // disabled
+  if (opts.nudgesSent >= opts.maxNudges) return false; // cap reached — leave for a human
+  if (opts.quietMs <= opts.idleMs + opts.idleNudgeMs) return false; // not stalled long enough
+  // Space successive nudges by at least the grace period (first nudge: no prior).
+  if (opts.sinceLastNudgeMs !== null && opts.sinceLastNudgeMs <= opts.idleNudgeMs) {
+    return false;
+  }
+  return true;
+}
+
+/** The per-task auto-nudge state the watcher threads across its poll ticks. */
+export type NudgeState = { nudgesSent: number; lastNudgeAt: number };
+
+/**
+ * STALLED-AGENT AUTO-NUDGE — one poll-tick step for a single watched task. A
+ * WORKSPACE build agent can sit idle-but-alive on a transient API error (e.g. a 529
+ * Overloaded) or parked at an empty prompt — a quiet stall that NEITHER the idle
+ * flag (it only marks it) NOR the runaway watchdog (it only catches alive+looping)
+ * recovers, so the task halts until a human opens the pane and types "continue".
+ * This auto-types that `continue` for them.
+ *
+ * SCOPE — this fires ONLY for a live `in_progress` workspace build agent:
+ *  - The managed CTO agent is event-driven and idle-BY-DESIGN (idle = waiting for a
+ *    channel push); it also never runs under a task watcher, so it can't reach here.
+ *  - The short-lived `finalizing` (final-thoughts) phase is not a stall risk and is
+ *    skipped — only `in_progress` is an interactive build prompt where `continue`
+ *    means resume the work.
+ * Any non-`in_progress` phase (or no log yet, `quietMs === null`) is a NO-OP that
+ * leaves the state untouched.
+ *
+ * `quietMs` is how long the agent's CLI has been silent (now - log mtime). When it
+ * drops back to/under `idleMs` the stall cleared (output resumed), so the
+ * consecutive-nudge streak RESETS — the cap counts only truly-unanswered nudges.
+ * Otherwise, when shouldNudgeStall says it's time, we best-effort send `continue` +
+ * Enter to the agent's pane (a dead/missing pane is a harmless no-op), record the
+ * nudge on the task's event timeline, and advance the state. Bounded by
+ * `idleNudgeMaxNudges` consecutive nudges before we give up and leave the task
+ * flagged `idle` for a human (shouldNudgeStall enforces the cap). `now` is injected
+ * so the step is testable without mocking the clock.
+ */
+export async function maybeNudgeStalledAgent(
+  taskId: string,
+  phase: string | undefined,
+  quietMs: number | null,
+  state: NudgeState,
+  now: number,
+): Promise<NudgeState> {
+  // Not a live build agent, or the log hasn't appeared yet → nothing to nudge.
+  if (quietMs === null || phase !== "in_progress") return state;
+  // Output resumed (or never stalled) → clear any in-flight nudge streak.
+  if (quietMs <= config.idleMs) return { nudgesSent: 0, lastNudgeAt: 0 };
+  if (
+    !shouldNudgeStall({
+      quietMs,
+      sinceLastNudgeMs: state.lastNudgeAt === 0 ? null : now - state.lastNudgeAt,
+      nudgesSent: state.nudgesSent,
+      idleMs: config.idleMs,
+      idleNudgeMs: config.idleNudgeMs,
+      maxNudges: config.idleNudgeMaxNudges,
+    })
+  ) {
+    return state;
+  }
+  const nudgesSent = state.nudgesSent + 1;
+  // Type the steering line and submit it, exactly as a human would.
+  await harness.send(taskId, { text: "continue", enter: true });
+  const note =
+    `[butchr] stalled workspace agent auto-nudged (quiet ~${Math.round(quietMs / 1000)}s): ` +
+    `sent 'continue' (nudge ${nudgesSent}/${config.idleNudgeMaxNudges}).`;
+  // Logged as an in_progress→in_progress timeline entry (a within-state event, like
+  // the agent-launched marker) so the nudge is auditable without a status change.
+  recordTaskEvent(taskId, "in_progress", "in_progress", note);
+  console.log(`[butchr] task ${taskId} ${note}`);
+  return { nudgesSent, lastNudgeAt: now };
 }
 
 /**
@@ -908,6 +1020,12 @@ function spawnWatcher(
     // against a false "vanished" during the brief agent-registration lag at
     // startup.
     let seenAlive = false;
+    // STALLED-AGENT AUTO-NUDGE state. `nudgesSent` counts the consecutive nudges
+    // sent to the CURRENT uninterrupted stall (reset to 0 the instant output
+    // resumes); `lastNudgeAt` is when the most recent nudge went out (0 = none yet),
+    // so successive nudges stay spaced by the grace period. See shouldNudgeStall.
+    let nudgesSent = 0;
+    let lastNudgeAt = 0;
     while (true) {
       if (abortSignals.has(taskId)) break;
       // Release our slot the moment the task leaves its live agent phase. Once it
@@ -950,8 +1068,16 @@ function spawnWatcher(
         break;
       }
       // While the agent is alive and working, surface whether its CLI has gone
-      // quiet (no recent log output) for the UI's idle indicator.
-      refreshIdle(taskId, logFile);
+      // quiet (no recent log output) for the UI's idle indicator. The returned
+      // quiet-duration also drives the stall auto-nudge step below.
+      const quietMs = refreshIdle(taskId, logFile);
+      ({ nudgesSent, lastNudgeAt } = await maybeNudgeStalledAgent(
+        taskId,
+        cur,
+        quietMs,
+        { nudgesSent, lastNudgeAt },
+        Date.now(),
+      ));
       await sleep(1000);
     }
 

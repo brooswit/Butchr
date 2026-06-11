@@ -377,6 +377,31 @@ export const config = {
   idleMs: envInt("BUTCHR_IDLE_MS", 1000 * 60),
 
   /**
+   * STALLED-AGENT AUTO-NUDGE. A WORKSPACE build agent can STALL — sit idle but
+   * alive — on a transient API error (e.g. a 529 Overloaded) or parked at an empty
+   * prompt. The idle detector (`idleMs`) only FLAGS that as `idle`; the runaway
+   * watchdog (`maxRunMs`) only catches an agent that is alive-and-LOOPING. Neither
+   * RECOVERS a quiet stall, so the task halts until a human opens the pane and
+   * types "continue". This is the grace period (ms) AFTER a task is flagged idle
+   * (i.e. beyond `idleMs` of no output) before the watcher auto-nudges the agent by
+   * sending `continue` + Enter to its pane. Picked as a small multiple of `idleMs`
+   * so a brief quiet spell never triggers a nudge. `0` DISABLES auto-nudging
+   * (a stall is just left flagged for a human, the old behavior). Only ever applied
+   * to a live in_progress workspace agent — NEVER the managed CTO agent (which is
+   * event-driven and idle-by-design) or any non-workspace agent.
+   */
+  idleNudgeMs: envInt("BUTCHR_IDLE_NUDGE_MS", 1000 * 60 * 2),
+
+  /**
+   * Max CONSECUTIVE auto-nudges butchr sends a single stalled workspace agent
+   * before giving up and leaving it flagged `idle` for a human (so it can never
+   * nudge-loop forever against a truly wedged agent). The counter resets the moment
+   * the agent produces output again (the stall cleared). `<=0` is treated as no
+   * nudging. See `idleNudgeMs` and dispatcher.shouldNudgeStall.
+   */
+  idleNudgeMaxNudges: envInt("BUTCHR_IDLE_NUDGE_MAX", 3),
+
+  /**
    * Optional override for opening a GUI terminal attached to a running task.
    * Template run via `bash -lc`; `{{CMD}}` is replaced with the shell-quoted
    * `herdr agent attach <id>` command. If unset, butchr auto-detects an

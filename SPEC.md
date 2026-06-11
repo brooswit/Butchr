@@ -271,7 +271,8 @@ meaningful within its owning status and is cleared as the task moves on:
   a **live agent**. This is the restart-safe ready-vs-running signal (§2.1).
 - **`idle`** (on a live `in_progress` agent) — agent alive but its CLI produced no
   output for `BUTCHR_IDLE_MS`. Owned by the dispatcher watcher; set/cleared via
-  `setIdle`, which only writes (and emits) on a genuine flip.
+  `setIdle`, which only writes (and emits) on a genuine flip. A *prolonged* idle is a
+  **stall** the watcher auto-recovers — see the stalled-agent auto-nudge below.
 - **`conflict`** (on `in_review`) — a non-conflict merge failure surfaced to the human
   (set by `finalizeMerge` on an unusual merge error).
 - **`ci_status` / `ci_summary`** (on `in_review`) — the advisory CI gate result
@@ -566,7 +567,31 @@ captured output); a dead `finalizing` agent → `finalizeMerge` (the operator al
 approved, so land the merge).
 
 `refreshIdle` toggles the `idle` flag from the run log's mtime (the agent runs under
-`script -f`, so the log mtime tracks live output).
+`script -f`, so the log mtime tracks live output) and returns how long the CLI has
+been quiet, which drives the auto-nudge below.
+
+#### Stalled-agent auto-nudge
+
+A **stall** is the gap between the two recovery mechanisms above: an `in_progress`
+**workspace** agent that is *alive but quiet* — wedged on a transient API error (e.g.
+a **529 Overloaded**) or parked at an empty prompt. The idle detector only **flags**
+it (`idle`); the runaway watchdog only catches an agent that's alive-and-**looping**
+(it fires on elapsed wall-clock, not on silence). Neither *recovers* a quiet stall,
+so the task halts until a human opens the pane and types `continue`.
+
+On each poll tick the watcher runs `maybeNudgeStalledAgent`: once the agent has been
+quiet past `BUTCHR_IDLE_MS` **plus** the grace period `BUTCHR_IDLE_NUDGE_MS` (a small
+multiple of the idle window; `0` disables auto-nudging), it best-effort `send`s
+`continue` + Enter to the agent's pane — exactly what a human would type — and records
+the nudge on the task's event timeline. The trip itself is the pure, unit-testable
+`shouldNudgeStall`. Successive nudges are spaced by at least the grace period and are
+**bounded** by `BUTCHR_IDLE_NUDGE_MAX` *consecutive* nudges; at the cap the watcher
+gives up and leaves the task flagged `idle` for a human (so it can never nudge-loop
+against a truly wedged agent). The consecutive count **resets** the instant output
+resumes. Scope is strict: only a live `in_progress` workspace build agent is nudged —
+the short-lived `finalizing` pass is skipped, and the **managed CTO agent** (which is
+event-driven and idle *by design*) and any other non-workspace agent never run under a
+task watcher, so they are never nudged.
 
 ### Retry, backoff, and give-up
 
@@ -1624,6 +1649,8 @@ All settings live in `src/config.ts`, each overridable by an env var. Defaults:
 | `BUTCHR_MAX_RUN_MS` | `2700000` (45 min) | runaway/stuck guard: max time in `running` without submitting before force-rescue to `review` (0 disables; trips before `AGENT_TIMEOUT_MS` by default). |
 | `BUTCHR_AGENT_START_GRACE_MS` | `60000` | grace for a freshly-dispatched agent to register with herdr before it's rescued. |
 | `BUTCHR_IDLE_MS` | `60000` | no-output window before a `running` task is flagged `idle` (0 disables). |
+| `BUTCHR_IDLE_NUDGE_MS` | `120000` (2 min) | stalled-agent auto-nudge: grace period *beyond* `IDLE_MS` of silence before the watcher auto-sends `continue` to a live `in_progress` workspace agent (0 disables; never the CTO/non-workspace agents). |
+| `BUTCHR_IDLE_NUDGE_MAX` | `3` | max **consecutive** auto-nudges before giving up and leaving the stall flagged for a human (resets when output resumes). |
 | `BUTCHR_CI_RETRIES` | `1` | flaky-CI retries on a failing review-gate build/test (0 disables). |
 | `BUTCHR_AUTO_MERGE` | `false` | auto-merge CI-green low-risk tasks (opt-in). |
 | `BUTCHR_AUTO_MERGE_ALLOWLIST` | `public/,test/,docs/,*.md` | comma-separated low-risk path allowlist. |
