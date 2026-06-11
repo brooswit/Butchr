@@ -279,11 +279,6 @@ async function openTaskTerminal(id, btn) {
 }
 
 // ---------- managed CTO agent (PER-DIRECTORY) ----------
-// Each directory runs its OWN CTO agent (in that repo's root — its principal/dev
-// agent). This panel renders that directory's CTO agent: a status line (running/
-// stopped, session, since, restarts) plus controls — Open CTO terminal (reuses the
-// workspace-agent attach), Enable/Start/Stop, Restart, and Restart fresh (a brand-new
-// session) — all scoped to `dirId` via /api/directories/:id/cto/*.
 // The CTO agent's tri-state status, mapped from running/desired to a display label
 // and the matching cto-badge CSS class. Shared by the directory panel and the
 // dashboard mini-badge so the mapping can't drift between them.
@@ -294,6 +289,11 @@ function ctoState(s) {
   };
 }
 
+// Each directory runs its OWN CTO agent (in that repo's root — its principal/dev
+// agent). This panel renders that directory's CTO agent: a status line (running/
+// stopped, session, since, restarts) plus controls — Open CTO terminal (reuses the
+// workspace-agent attach), Enable/Start/Stop, Restart, and Restart fresh (a brand-new
+// session) — all scoped to `dirId` via /api/directories/:id/cto/*.
 async function ctoPanel(dirId) {
   const base = "/directories/" + dirId + "/cto";
   let s;
