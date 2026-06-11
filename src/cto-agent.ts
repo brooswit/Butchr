@@ -35,7 +35,7 @@
 //
 // Context hygiene (a CTO session is INDEFINITE): prefer sending `/compact` to the
 // LIVE agent via the harness `send` capability when the session grows, with a
-// forced-fresh restart as the last resort. See SPEC §6.8.
+// forced-fresh restart as the last resort.
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
@@ -471,7 +471,7 @@ export function stopCtoAgent(directoryId: string): Promise<CtoStatus> {
 /**
  * RESTART a directory's CTO agent. By default it RESUMES the same session (a clean
  * bounce); `fresh` forces a brand-new session — the ONLY way to cold-start (e.g.
- * last-resort context hygiene when the session has grown unmanageable). See SPEC §6.8.
+ * last-resort context hygiene when the session has grown unmanageable).
  */
 export async function restartCtoAgent(
   directoryId: string,

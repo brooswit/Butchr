@@ -1,6 +1,6 @@
 // BRIEF → EXPAND. The webapp's low-effort new-task flow: the operator types a
 // one-line IDEA, and this turns it into a PROPER, concrete, scoped task prompt —
-// grounded in the target repo (its SPEC.md / CONTRIBUTING.md / code) — which the
+// grounded in the target repo (its CONTRIBUTING.md / code) — which the
 // webapp drops into the prompt textarea for the operator to review/edit before
 // Create. The operator gives ideas, not full specs; this closes that gap.
 //
@@ -28,7 +28,7 @@ const expandDir = join(config.dataDir, "expand");
 export type BriefExpansionInput = {
   /** The operator's one-line idea. */
   brief: string;
-  /** The target repo root, so the expander can Read/Grep its SPEC.md / code. */
+  /** The target repo root, so the expander can Read/Grep its CONTRIBUTING.md / code. */
   cwd: string;
 };
 
@@ -62,7 +62,7 @@ export function buildExpandPrompt(brief: string): string {
     "prompt for a coding agent that will work in THIS repository.",
     "",
     "First, GROUND yourself in the repo: use the Read / Grep / Glob tools to read its",
-    "SPEC.md, CONTRIBUTING.md, README, and the relevant source files so the task prompt",
+    "CONTRIBUTING.md and the relevant source files so the task prompt",
     "names real files, modules, and conventions that actually exist here. Do NOT invent",
     "files or APIs.",
     "",

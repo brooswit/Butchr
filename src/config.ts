@@ -297,8 +297,8 @@ export const config = {
    * conformance reviewer's headless, read-only, non-recursing claude recipe:
    *  - `-p` runs headless and prints the expanded prompt to stdout, then exits.
    *  - `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` makes it
-   *    read-only (no Write/Edit/Bash) so it can inspect the repo (SPEC.md / code) but
-   *    never mutate it, and auto-resolves tool requests without a human prompt.
+   *    read-only (no Write/Edit/Bash) so it can inspect the repo (CONTRIBUTING.md / code)
+   *    but never mutate it, and auto-resolves tool requests without a human prompt.
    *  - NO `--mcp-config` / `--dangerously-skip-permissions`: no recursion into butchr.
    * The single `{{PROMPT_FILE}}` placeholder is replaced with a temp file holding the
    * rendered expand prompt (avoiding shell-escaping). Run via `bash -lc`, cwd = the
@@ -323,7 +323,7 @@ export const config = {
    *
    * This REVIVES the retired CTO-fork mechanism. It reuses the conformance/expander's
    * headless, read-only, non-recursing claude recipe so the spec writer can inspect the
-   * repo (SPEC.md / code) but never mutate it and can't recurse into butchr's own tools:
+   * repo (CONTRIBUTING.md / code) but never mutate it and can't recurse into butchr's own tools:
    *  - `-p` runs headless and prints the spec to stdout, then exits.
    *  - `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` → read-only.
    *  - NO `--mcp-config` / `--dangerously-skip-permissions`: no recursion.
@@ -438,7 +438,7 @@ export const config = {
   // workspace agents but with NO worktree/branch/review/merge. Each receives ONLY
   // that directory's PUSH attention notifications via the one-way CTO channel
   // (src/channel.ts, scoped to the directory_id), and each directory's dashboard card
-  // exposes an 'Open CTO terminal' button for it. See src/cto-agent.ts + SPEC §6.8.
+  // exposes an 'Open CTO terminal' button for it. See src/cto-agent.ts.
 
   /**
    * GLOBAL DEFAULT for the per-directory CTO-agent enable. DEFAULT OFF so nothing
@@ -519,7 +519,7 @@ export const config = {
    *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (see `ctoAgentModel`).
    *  - `{{SESSION_FLAG}}` → `--session-id <uuid>` on a FRESH start, or
    *    `--resume <id>` on every supervised relaunch / boot-adopt so the CTO keeps
-   *    full context and never cold-starts (see SPEC §6.8 session continuity).
+   *    full context and never cold-starts (session continuity; see src/cto-agent.ts).
    *  - `{{MCP_CONFIG}}`   → the generated MCP config registering the channel server.
    *  - `{{PROMPT_FILE}}`  → the editable CTO brief file (`ctoBriefPath`).
    * `--dangerously-skip-permissions` lets it call the butchr API/CLI without prompts.

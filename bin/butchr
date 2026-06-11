@@ -564,7 +564,7 @@ async function cmdRestore(positionals, flags) {
   if (!flags.force && (await serverRunning())) {
     fail(
       `a butchr server appears to be running at ${BASE} — stop it first ` +
-        `(see OPERATIONS.md "Restart safely"), then re-run, or pass --force.`,
+        `(see CONTRIBUTING.md "Restart safely"), then re-run, or pass --force.`,
     );
   }
   const backup = await import("../src/backup.ts");

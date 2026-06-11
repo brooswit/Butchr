@@ -4,7 +4,8 @@
 # Idempotent: re-running regenerates the units from deploy/*.{service,timer},
 # overwrites the installed copies, and reloads systemd. It deliberately does NOT
 # enable or start anything — enabling a service is a privileged operator action,
-# so this script just prints the exact commands for you to run. See OPERATIONS.md.
+# so this script just prints the exact commands for you to run. See CONTRIBUTING.md
+# ("Operations runbook").
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

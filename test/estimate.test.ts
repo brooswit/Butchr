@@ -73,11 +73,11 @@ describe("classifyPathType", () => {
   test("single-category file sets", () => {
     expect(classifyPathType(["src/a.ts", "test/b.test.ts", "bin/x"])).toBe("core");
     expect(classifyPathType(["public/app.js", "public/style.css"])).toBe("webapp");
-    expect(classifyPathType(["SPEC.md", "README.md", "docs/guide.txt"])).toBe("docs");
+    expect(classifyPathType(["CONTRIBUTING.md", "CHANGELOG.md", "docs/guide.txt"])).toBe("docs");
   });
   test("cross-category set → mixed; empty → core", () => {
     expect(classifyPathType(["src/a.ts", "public/app.js"])).toBe("mixed");
-    expect(classifyPathType(["SPEC.md", "src/a.ts"])).toBe("mixed");
+    expect(classifyPathType(["CONTRIBUTING.md", "src/a.ts"])).toBe("mixed");
     expect(classifyPathType([])).toBe("core");
   });
 });

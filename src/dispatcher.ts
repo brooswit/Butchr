@@ -455,7 +455,7 @@ async function tick(): Promise<void> {
 export async function generateSpecForIdea(dir: DirectoryRow, task: TaskRow): Promise<void> {
   try {
     // Ensure the worktree exists (idempotent) so the read-only spec writer can ground
-    // itself against the repo's SPEC.md / code.
+    // itself against the repo's CONTRIBUTING.md / code.
     const worktree = await git.createWorktree(dir.path, task.id);
     const doc = readTaskMd(dir.path, task.id);
     const brief = doc.prompt;

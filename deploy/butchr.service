@@ -6,10 +6,10 @@
 #
 # Equivalent to running `bun run src/index.ts` from the repo, but kept alive by
 # systemd: Restart=always relaunches it on any crash/power-loss exit, and the
-# user manager starts it on boot once enabled (see OPERATIONS.md).
+# user manager starts it on boot once enabled (see CONTRIBUTING.md).
 [Unit]
 Description=butchr — agent task harness (Bun server + dispatcher)
-Documentation=file://@REPO_DIR@/OPERATIONS.md
+Documentation=file://@REPO_DIR@/CONTRIBUTING.md
 # herdr owns the PTY/agent sessions butchr dispatches into. butchr starts fine
 # without it and resumes once it is reachable, so this is a soft Wants (pull
 # herdr in when butchr starts) + After (order it first when both are enabled) —

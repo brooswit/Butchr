@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS settings (
 // 'singleton'; the migration below drops that shape — pre-1.0, destroying the old
 // singleton row is fine.)
 //   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
-//     supervised relaunch + boot-adopt so the CTO never cold-starts (SPEC 6.8).
+//     supervised relaunch + boot-adopt so the CTO never cold-starts (see src/cto-agent.ts).
 //   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the
 //     pane backs the Open-CTO-terminal attach; positional pane ids may renumber).
 //   - desired: 1 when the operator/boot wants it UP (supervisor relaunches on death),
@@ -321,7 +321,7 @@ ensureColumn("tasks", "answer", "TEXT");
 // Both are NULL for tasks that never reached review / predate this feature; such
 // tasks only feed the overall-pool estimate, never a size/type bucket. Captured by
 // tasks.captureDiffFootprint (best-effort, re-captured on each review transition so
-// a rework's final footprint wins). Orthogonal to `status`. See SPEC.md §10.
+// a rework's final footprint wins). Orthogonal to `status`. See src/estimate.ts.
 ensureColumn("tasks", "diff_lines", "INTEGER");
 ensureColumn("tasks", "path_type", "TEXT");
 

@@ -27,7 +27,7 @@
 // overall pool); durations are wall-clock and include any queue/idle/rework time;
 // and the whole thing is a rough forecast, not an SLA.
 
-// --- tuning constants (documented in SPEC.md §10) ---------------------------
+// --- tuning constants (the size/type heuristics live here, in this module) ---
 
 // Size-bucket thresholds on the final changed-line count (added + deleted):
 // `<= small` → small, `<= medium` → medium, else large.

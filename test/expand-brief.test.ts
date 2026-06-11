@@ -47,7 +47,7 @@ describe("expandBrief", () => {
     const seen: import("../src/expand.ts").BriefExpansionInput[] = [];
     expandMod.setBriefExpander(async (input) => {
       seen.push(input);
-      return `Implement: ${input.brief}\n- read SPEC.md\n- add a test`;
+      return `Implement: ${input.brief}\n- read CONTRIBUTING.md\n- add a test`;
     });
 
     const out = await expandMod.expandBrief("add a dark-mode toggle", CWD);
@@ -102,7 +102,7 @@ describe("pure helpers", () => {
   test("buildExpandPrompt embeds the brief + the output markers + repo-grounding", () => {
     const p = expandMod.buildExpandPrompt("add a widget");
     expect(p).toContain("add a widget");
-    expect(p).toContain("SPEC.md");
+    expect(p).toContain("CONTRIBUTING.md");
     expect(p).toContain("<<<TASK_PROMPT>>>");
     expect(p).toContain("<<<END_TASK_PROMPT>>>");
   });

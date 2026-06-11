@@ -7,7 +7,7 @@
 # scripts/install-service.sh before install. Do not enable this file in place.
 [Unit]
 Description=herdr — terminal workspace/session manager (headless server)
-Documentation=file://@REPO_DIR@/OPERATIONS.md
+Documentation=file://@REPO_DIR@/CONTRIBUTING.md
 After=network.target
 StartLimitIntervalSec=60
 StartLimitBurst=10
