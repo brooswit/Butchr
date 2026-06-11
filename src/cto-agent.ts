@@ -89,8 +89,8 @@ function directoryPath(directoryId: string): string | null {
 /** A registered directory's herdr workspace id (the CTO tab lives in it), or null. */
 function directoryWorkspace(directoryId: string): string | null {
   const row = db
-    .query<{ herdr_workspace: string | null; label: string | null; path: string }, [string]>(
-      `SELECT herdr_workspace, label, path FROM directories WHERE id=?`,
+    .query<{ herdr_workspace: string | null }, [string]>(
+      `SELECT herdr_workspace FROM directories WHERE id=?`,
     )
     .get(directoryId);
   return row?.herdr_workspace ?? null;
