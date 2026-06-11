@@ -93,6 +93,10 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     async paneTerminalId() { return "rootterm"; },
     async paneList(): Promise<PaneInfo[]> { return []; },
     async resolveAgentPane() { state.pane = resolvedPane; return resolvedPane; },
+    async reconcilePane(_name, stored) {
+      const paneId = state.alive ? resolvedPane : undefined;
+      return { paneId, drifted: !!paneId && !!stored && paneId !== stored };
+    },
     isAgentNameTaken() { return false; },
     async agentRead() { return ""; },
     async send() {},

@@ -324,6 +324,33 @@ export async function resolveAgentPane(
 }
 
 /**
+ * Resolve a task's CURRENT live pane BY AGENT NAME — herdr's source of truth — and
+ * report whether the `stored` pane id butchr cached at launch has DRIFTED.
+ *
+ * This is the use-time resolver every pane-TOUCHING path should go through instead
+ * of trusting the cached id. herdr pane ids are POSITIONAL: when a sibling tab/pane
+ * closes herdr RENUMBERS the survivors, so the id recorded at launch silently goes
+ * stale and can now point at a DIFFERENT task's (often already-dead) shell. The
+ * agent NAME (= the task id) is the stable handle, so we re-resolve through
+ * `resolveAgentPane` (which keys on the renumber-stable terminal id) and compare.
+ *
+ *  - `.paneId` is the live pane id to TARGET right now, or `undefined` when the
+ *    agent has no live pane (gone / never registered).
+ *  - `.drifted` is true only when there IS a live pane, a `stored` id was given, and
+ *    the two differ — the caller's cue to repair its stored copy. When the agent has
+ *    no live pane we report `drifted: false` (there is nothing trustworthy to repair
+ *    toward — don't clobber the stored id on a transient herdr read).
+ */
+export async function reconcilePane(
+  name: string,
+  stored?: string | null,
+): Promise<{ paneId: string | undefined; drifted: boolean }> {
+  const paneId = await resolveAgentPane(name);
+  const drifted = !!paneId && !!stored && paneId !== stored;
+  return { paneId, drifted };
+}
+
+/**
  * Does this error (thrown by `agentStart` / the herdr wrapper) indicate the
  * agent name is already in use? herdr surfaces this as an `agent_name_taken`
  * error code; we match loosely so a reworded message still reconciles.
@@ -520,6 +547,7 @@ export const herdrRunner: AgentRunner = {
   paneTerminalId,
   paneList,
   resolveAgentPane,
+  reconcilePane,
   isAgentNameTaken,
   agentRead,
   send,

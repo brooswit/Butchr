@@ -6,7 +6,7 @@ import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
 import { computeDiskUsage } from "./disk.ts";
 import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
-import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
+import { currentPaneRepairing, dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
   dashboard,
@@ -752,6 +752,12 @@ route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   if (!t.herdr_pane_id) {
     throw new HttpError(409, `task has no live agent pane (status=${t.status})`);
   }
+  // herdr may have RENUMBERED the pane since launch (a sibling tab closed), so the
+  // stored id can now point at a dead sibling shell. Re-resolve the CURRENT pane by
+  // name and self-heal the stored id. (`agent attach` already targets by name, so the
+  // attach itself is correct regardless — this keeps the recorded id truthful and is
+  // the use-time reconciliation the spec mandates for every pane-touching path.)
+  await currentPaneRepairing(p.id!);
   return attachAgentTerminal(p.id!);
 });
 

@@ -23,7 +23,7 @@ import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import type { StartedAgent } from "./harness.ts";
 import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, setIdle } from "./tasks.ts";
+import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
@@ -257,9 +257,11 @@ export async function reconcileRunningTasks(
 
     if (await harness.agentExists(row.id)) {
       // Live agent — re-adopt. Record its current pane + tab (both may have moved
-      // while butchr was down) and re-attach a watcher so completion/idle resume.
+      // while butchr was down — herdr renumbers positional ids when sibling tabs
+      // close). Resolve the pane BY NAME via the renumber-stable resolver, not the
+      // stored id, so we re-attach against the agent's CURRENT pane.
       const paneId =
-        (await harness.agentPaneId(row.id)) ?? row.herdr_pane_id ?? row.id;
+        (await harness.resolveAgentPane(row.id)) ?? row.herdr_pane_id ?? row.id;
       const tabId = (await harness.agentTabId(row.id)) ?? row.herdr_tab_id ?? undefined;
       if (paneId !== row.herdr_pane_id || tabId !== row.herdr_tab_id) {
         adoptPane(row.id, paneId, tabId);
@@ -918,6 +920,35 @@ export type NudgeState = { nudgesSent: number; lastNudgeAt: number };
  * flagged `idle` for a human (shouldNudgeStall enforces the cap). `now` is injected
  * so the step is testable without mocking the clock.
  */
+/**
+ * Resolve a live task's CURRENT herdr pane BY AGENT NAME and SELF-HEAL the stored
+ * `herdr_pane_id` when herdr has renumbered it out from under us (a sibling tab/pane
+ * closed). This is the single use-time reconciliation every pane-touching path runs
+ * so they all act on the LIVE pane — never the launch-time id that can now point at a
+ * dead sibling shell (the bug that mis-aimed the auto-nudge and terminal-attach).
+ *
+ * Returns the current pane id, or — if herdr can't resolve a live pane this instant
+ * (a transient read, or the agent just exited) — falls back to the stored id so a
+ * momentary hiccup never erases a still-valid pane. Best-effort: a thrown herdr
+ * error degrades to the stored id rather than propagating into the watcher loop.
+ */
+export async function currentPaneRepairing(taskId: string): Promise<string | undefined> {
+  const stored = getTask(taskId)?.herdr_pane_id ?? null;
+  let resolved: { paneId: string | undefined; drifted: boolean } | undefined;
+  try {
+    resolved = await harness.reconcilePane(taskId, stored);
+  } catch {
+    return stored ?? undefined; // herdr hiccup — keep what we had
+  }
+  const paneId = resolved?.paneId;
+  if (paneId && resolved?.drifted && repairPaneId(taskId, paneId)) {
+    console.log(
+      `[butchr] task ${taskId} herdr pane drifted (${stored} → ${paneId}, renumbered); repaired stored id`,
+    );
+  }
+  return paneId ?? stored ?? undefined;
+}
+
 export async function maybeNudgeStalledAgent(
   taskId: string,
   phase: string | undefined,
@@ -929,6 +960,13 @@ export async function maybeNudgeStalledAgent(
   if (quietMs === null || phase !== "in_progress") return state;
   // Output resumed (or never stalled) → clear any in-flight nudge streak.
   if (quietMs <= config.idleMs) return { nudgesSent: 0, lastNudgeAt: 0 };
+  // The agent is idle/quiet — exactly the window where its stored pane id may be
+  // stale (a sibling tab closed → herdr renumbered) AND where we're about to act on
+  // the pane (the nudge below; a human may also attach right now). Re-resolve the
+  // CURRENT pane by name and self-heal the stored id so the nudge — and any attach —
+  // target the live pane, not a renumbered-away shell. `send` itself routes by name,
+  // so this also keeps the recorded id truthful for the UI/teardown.
+  await currentPaneRepairing(taskId);
   if (
     !shouldNudgeStall({
       quietMs,

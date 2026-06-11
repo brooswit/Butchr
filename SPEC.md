@@ -114,6 +114,29 @@ a long-lived session whose context has grown — cleaner than a fresh restart) a
 thin butchr-level helper may sit on top, but the capability itself is the seam
 method; core butchr behavior is unchanged by adding it.
 
+**Current-pane-by-name resolution (surviving herdr renumbering).** herdr pane ids
+are **positional**: when a sibling tab/pane closes, herdr **renumbers** the
+survivors, so the `herdr_pane_id` butchr cached at launch silently goes stale and
+can point at a **different task's** (often already-dead) shell. The agent **name**
+(= the task id) is the only stable, butchr-owned handle, so **every pane-touching
+path resolves the task's *current* pane by name at use-time** rather than trusting
+the cached id:
+
+- `AgentRunner.reconcilePane(name, stored?)` resolves the live pane by name (via the
+  renumber-stable `resolveAgentPane`, which keys on the opaque `terminal_id`) and
+  reports whether `stored` has **drifted**. `dispatcher.currentPaneRepairing(taskId)`
+  wraps it: when the live pane differs from the stored id it **repairs** the row
+  (`tasks.repairPaneId`) so the DB reconverges, and otherwise leaves it untouched. A
+  herdr hiccup or a just-exited agent degrades to the stored id — it never erases a
+  still-valid pane.
+- The pane-touching sites all run this reconciliation: the **auto-nudge** (below)
+  before each nudge, the **startup re-adopt** (resolves the pane by name, not the
+  stored id), and the **terminal-attach** route (`POST /api/tasks/:id/terminal`). The
+  **teardown** path (`teardownTask`) and the startup **reaper** never trust a stored
+  positional id at all — they close/deregister strictly **by agent name**, so a
+  renumber can never make them target the wrong task's tab/pane. `send` likewise
+  routes text **by name** and resolves the pane for Enter/keys at call-time.
+
 ```
                           ┌──────────────────────────── butchr (one Bun process) ────────────────────────────┐
                           │                                                                                    │
@@ -268,7 +291,11 @@ meaningful within its owning status and is cleared as the task moves on:
 
 - **`herdr_pane_id`** (on `in_progress`/`finalizing`) — **not just bookkeeping**: a
   NULL pane means the task is **ready** (the dispatcher launches it); a set pane means
-  a **live agent**. This is the restart-safe ready-vs-running signal (§2.1).
+  a **live agent**. This is the restart-safe ready-vs-running signal (§2.1). The id is
+  **positional** and herdr *renumbers* it when a sibling tab/pane closes, so it is
+  **self-healed at use-time** by re-resolving the agent's current pane **by name** —
+  pane-touching paths never trust the cached id (see *Current-pane-by-name resolution*
+  above).
 - **`idle`** (on a live `in_progress` agent) — agent alive but its CLI produced no
   output for `BUTCHR_IDLE_MS`. Owned by the dispatcher watcher; set/cleared via
   `setIdle`, which only writes (and emits) on a genuine flip. A *prolonged* idle is a
@@ -581,9 +608,13 @@ so the task halts until a human opens the pane and types `continue`.
 
 On each poll tick the watcher runs `maybeNudgeStalledAgent`: once the agent has been
 quiet past `BUTCHR_IDLE_MS` **plus** the grace period `BUTCHR_IDLE_NUDGE_MS` (a small
-multiple of the idle window; `0` disables auto-nudging), it best-effort `send`s
-`continue` + Enter to the agent's pane — exactly what a human would type — and records
-the nudge on the task's event timeline. The trip itself is the pure, unit-testable
+multiple of the idle window; `0` disables auto-nudging), it first **re-resolves the
+agent's current pane by name and self-heals a drifted `herdr_pane_id`**
+(`currentPaneRepairing` — herdr may have renumbered the pane while the agent sat
+idle, so the cached id can point at a dead sibling shell), then best-effort `send`s
+`continue` + Enter — addressed **by agent name**, so herdr routes it to the *live*
+pane, never the renumbered-away one — and records the nudge on the task's event
+timeline. The trip itself is the pure, unit-testable
 `shouldNudgeStall`. Successive nudges are spaced by at least the grace period and are
 **bounded** by `BUTCHR_IDLE_NUDGE_MAX` *consecutive* nudges; at the cap the watcher
 gives up and leaves the task flagged `idle` for a human (so it can never nudge-loop

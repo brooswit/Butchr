@@ -1713,6 +1713,30 @@ export function adoptPane(id: string, paneId: string, tabId?: string): void {
 }
 
 /**
+ * Repair a live task's STORED herdr_pane_id after herdr RENUMBERED it (a sibling
+ * tab/pane closed shifted the positional ids). `livePaneId` is the CURRENT pane
+ * resolved by agent name; we re-point the row to it so every reader of the stored
+ * id (the UI's has-a-pane gate, teardown's husk defense, the live-output panel)
+ * stops pointing at a now-dead sibling shell.
+ *
+ * Guarded so it only ever heals a genuine drift: the task must still hold a
+ * live-agent phase (in_progress/finalizing), already have a non-null pane id, and
+ * that id must actually differ — so a no-drift tick is a silent no-op and we never
+ * resurrect a pane on a task whose agent has exited (its id is NULL by then).
+ * Returns true when it repaired (and emits an update so dashboards refresh).
+ */
+export function repairPaneId(id: string, livePaneId: string): boolean {
+  if (!livePaneId) return false;
+  const res = db.query(
+    `UPDATE tasks SET herdr_pane_id=? WHERE id=? AND status IN ('in_progress','finalizing')
+       AND herdr_pane_id IS NOT NULL AND herdr_pane_id<>?`,
+  ).run(livePaneId, id, livePaneId);
+  if (res.changes === 0) return false;
+  emitUpdated(id);
+  return true;
+}
+
+/**
  * Capture the task's cumulative token usage (and the model it actually ran under)
  * from the Claude Code session transcript and persist it onto the row. Called at
  * the points where the agent has finished a turn — entering review (live or

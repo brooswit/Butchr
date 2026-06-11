@@ -159,6 +159,10 @@ function makeFake(opts: { resolvedPane: string | undefined }): {
       calls.resolveAgentPane.push([name, closedTerminalId]);
       return opts.resolvedPane;
     },
+    async reconcilePane(_name, stored) {
+      const paneId = opts.resolvedPane;
+      return { paneId, drifted: !!paneId && !!stored && paneId !== stored };
+    },
     isAgentNameTaken() {
       return false;
     },
