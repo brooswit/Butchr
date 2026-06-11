@@ -894,33 +894,6 @@ export function shouldNudgeStall(opts: {
 export type NudgeState = { nudgesSent: number; lastNudgeAt: number };
 
 /**
- * STALLED-AGENT AUTO-NUDGE — one poll-tick step for a single watched task. A
- * WORKSPACE build agent can sit idle-but-alive on a transient API error (e.g. a 529
- * Overloaded) or parked at an empty prompt — a quiet stall that NEITHER the idle
- * flag (it only marks it) NOR the runaway watchdog (it only catches alive+looping)
- * recovers, so the task halts until a human opens the pane and types "continue".
- * This auto-types that `continue` for them.
- *
- * SCOPE — this fires ONLY for a live `in_progress` workspace build agent:
- *  - The managed CTO agent is event-driven and idle-BY-DESIGN (idle = waiting for a
- *    channel push); it also never runs under a task watcher, so it can't reach here.
- *  - The short-lived `finalizing` (final-thoughts) phase is not a stall risk and is
- *    skipped — only `in_progress` is an interactive build prompt where `continue`
- *    means resume the work.
- * Any non-`in_progress` phase (or no log yet, `quietMs === null`) is a NO-OP that
- * leaves the state untouched.
- *
- * `quietMs` is how long the agent's CLI has been silent (now - log mtime). When it
- * drops back to/under `idleMs` the stall cleared (output resumed), so the
- * consecutive-nudge streak RESETS — the cap counts only truly-unanswered nudges.
- * Otherwise, when shouldNudgeStall says it's time, we best-effort send `continue` +
- * Enter to the agent's pane (a dead/missing pane is a harmless no-op), record the
- * nudge on the task's event timeline, and advance the state. Bounded by
- * `idleNudgeMaxNudges` consecutive nudges before we give up and leave the task
- * flagged `idle` for a human (shouldNudgeStall enforces the cap). `now` is injected
- * so the step is testable without mocking the clock.
- */
-/**
  * Resolve a live task's CURRENT herdr pane BY AGENT NAME and SELF-HEAL the stored
  * `herdr_pane_id` when herdr has renumbered it out from under us (a sibling tab/pane
  * closed). This is the single use-time reconciliation every pane-touching path runs
@@ -949,6 +922,33 @@ export async function currentPaneRepairing(taskId: string): Promise<string | und
   return paneId ?? stored ?? undefined;
 }
 
+/**
+ * STALLED-AGENT AUTO-NUDGE — one poll-tick step for a single watched task. A
+ * WORKSPACE build agent can sit idle-but-alive on a transient API error (e.g. a 529
+ * Overloaded) or parked at an empty prompt — a quiet stall that NEITHER the idle
+ * flag (it only marks it) NOR the runaway watchdog (it only catches alive+looping)
+ * recovers, so the task halts until a human opens the pane and types "continue".
+ * This auto-types that `continue` for them.
+ *
+ * SCOPE — this fires ONLY for a live `in_progress` workspace build agent:
+ *  - The managed CTO agent is event-driven and idle-BY-DESIGN (idle = waiting for a
+ *    channel push); it also never runs under a task watcher, so it can't reach here.
+ *  - The short-lived `finalizing` (final-thoughts) phase is not a stall risk and is
+ *    skipped — only `in_progress` is an interactive build prompt where `continue`
+ *    means resume the work.
+ * Any non-`in_progress` phase (or no log yet, `quietMs === null`) is a NO-OP that
+ * leaves the state untouched.
+ *
+ * `quietMs` is how long the agent's CLI has been silent (now - log mtime). When it
+ * drops back to/under `idleMs` the stall cleared (output resumed), so the
+ * consecutive-nudge streak RESETS — the cap counts only truly-unanswered nudges.
+ * Otherwise, when shouldNudgeStall says it's time, we best-effort send `continue` +
+ * Enter to the agent's pane (a dead/missing pane is a harmless no-op), record the
+ * nudge on the task's event timeline, and advance the state. Bounded by
+ * `idleNudgeMaxNudges` consecutive nudges before we give up and leave the task
+ * flagged `idle` for a human (shouldNudgeStall enforces the cap). `now` is injected
+ * so the step is testable without mocking the clock.
+ */
 export async function maybeNudgeStalledAgent(
   taskId: string,
   phase: string | undefined,
