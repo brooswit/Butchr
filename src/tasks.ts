@@ -896,8 +896,14 @@ export async function proposeSubtasks(
       "merged",
       `plan decomposed into ${created.length} sub-task${created.length === 1 ? "" : "s"}`,
     );
+    // Mirror task.md ONLY when the guarded UPDATE actually transitioned the row.
+    // If the plan was aborted out from under the agent at the same instant it called
+    // propose_subtasks, the UPDATE matches 0 rows (the DB row stays 'aborted'); writing
+    // task.md='merged' here would desync the disk artifact from the DB — exactly the
+    // class setStatus exists to prevent. So it stays inside this guard, next to the
+    // (already-gated) recordTaskEvent.
+    updateTaskMdStatus(dir.path, planId, "merged");
   }
-  updateTaskMdStatus(dir.path, planId, "merged");
   // Capture the plan agent's token usage / model (before the worktree is discarded),
   // then tear down the agent's tab/pane and discard the (codeless) worktree + branch
   // in the background — best-effort, never blocking the caller.

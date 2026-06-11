@@ -217,6 +217,32 @@ describe("proposeSubtasks", () => {
     expect(err?.status).toBe(409);
   });
 
+  test("happy path mirrors task.md → 'merged' when the guarded UPDATE changes a row", async () => {
+    const plan = await tasksMod.createTask(DIR_ID, "mirror plan", [], [], "plan");
+    await tasksMod.proposeSubtasks(plan.id, [{ prompt: "only one" }]);
+    // DB and disk both reflect the merge.
+    expect(row(plan.id).status).toBe("merged");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, plan.id).meta.status).toBe("merged");
+  });
+
+  test("lost race: plan aborted under the agent → task.md is NOT corrupted to 'merged'", async () => {
+    const plan = await tasksMod.createTask(DIR_ID, "raced plan", [], [], "plan");
+    // Simulate the lost race: the plan task is aborted (terminal, no longer in
+    // ('in_progress','needs_info')) at the same instant the agent calls propose_subtasks.
+    await tasksMod.abortTask(plan.id);
+    expect(row(plan.id).status).toBe("aborted");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, plan.id).meta.status).toBe("aborted");
+
+    // Now the propose_subtasks path runs against the already-aborted plan. The guarded
+    // merge UPDATE matches 0 rows, so the plan must stay aborted in BOTH the DB and on disk.
+    await tasksMod.proposeSubtasks(plan.id, [{ prompt: "sub" }]);
+
+    // DB row was not transitioned (the WHERE status IN (...) guard matched nothing)...
+    expect(row(plan.id).status).toBe("aborted");
+    // ...and task.md on disk still reads 'aborted', NOT 'merged' (the bug this fixes).
+    expect(taskmdMod.readTaskMd(REPO_ROOT, plan.id).meta.status).toBe("aborted");
+  });
+
   test("is idempotent — a second call returns the same spawned ids without re-creating", async () => {
     const plan = await tasksMod.createTask(DIR_ID, "idempotent plan", [], [], "plan");
     const first = await tasksMod.proposeSubtasks(plan.id, [{ prompt: "only one" }]);
