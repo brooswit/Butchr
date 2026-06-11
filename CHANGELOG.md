@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Final pass complete — no changes needed. Reviewed the full diff: no stray debugging/TODOs, operational console logs match the dispatcher's style, test-only exports are used only by the test, comments/docs (SPEC §6.8 + config table + data model) are tidy. Build + full test suite still green (371/0). Ready to merge. (task pearly-loon-b048)
 - Final pass complete — no changes needed. Reviewed the committed diff (auto-saved in d8c2583): comments/docs are tidy, no stray debugging in the repo (the /tmp recorder scratch files are outside the worktree and uncommitted), and the implementation is minimal and self-contained across SPEC.md, src/harness.ts, src/herdr.ts, test/harness.test.ts, and test/send.test.ts. Build and full test suite remain green. Ready to merge. (task zappy-seal-ee69)
 - Final pass complete — no changes needed. Reviewed the captured diff: comments/docs are accurate, no stray debugging, change is minimal (143 insertions across public/app.js, public/style.css, SPEC.md). Ready to merge. (task dulcet-crag-1a20)
 - Final pass complete — nothing to change. Self-reviewed the full diff: comments/docs are tidy, no stray debugging, fix intact (src/config.ts verifyCmd → `bun test ./test`, new bunfig.toml `[test] root`, SPEC.md docs, new regression test). Build + full ./test suite green. Ready to finalize and merge. (task chipper-quail-2384)
