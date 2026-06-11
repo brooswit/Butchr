@@ -1778,6 +1778,19 @@ export async function captureDiffFootprint(id: string): Promise<void> {
 }
 
 /**
+ * COMMIT-ON-REVIEW: persist a WORKSPACE-agent task's uncommitted worktree diff onto
+ * its task branch as a WIP commit, so the work survives the worktree being deleted
+ * (a repo move, the reaper, a crash cleanup) and the branch — not the transient
+ * worktree — is the durable source of truth for review-state work. Called when a task
+ * transitions OUT of `in_progress` into `in_review` / `needs_info`. Best-effort +
+ * idempotent (see git.commitWorktree): a failure here must never break the transition.
+ */
+function autoCommitOnReview(id: string, directoryId: string): void {
+  const dir = getDirectory(directoryId);
+  if (dir) git.commitWorktree(dir.path, id, `butchr: wip ${id} (auto-saved)`);
+}
+
+/**
  * DEAD-AGENT FALLBACK: move an `in_progress` task to `in_review` because its agent
  * ended WITHOUT calling request_review (the watcher / startup reconcile rescue path;
  * the live path is markReviewFromAgent). Guarded on the build phase being live
@@ -1785,6 +1798,12 @@ export async function captureDiffFootprint(id: string): Promise<void> {
  * resurrected. The caller is already tearing down the tab — we clear the ids.
  */
 export function markInReview(id: string, snapshot: string): void {
+  // COMMIT-ON-REVIEW (FIRST): the agent ended with uncommitted work in its worktree;
+  // commit it onto the branch BEFORE the transition so this rescue path can't leave
+  // the diff as worktree-only state a later deletion would lose. Only when genuinely
+  // in_progress (the state this rescues from) — best-effort, never blocks the move.
+  const pre = getTask(id);
+  if (pre?.status === "in_progress") autoCommitOnReview(id, pre.directory_id);
   if (
     !setStatus(id, "in_review", {
       from: "in_progress",
@@ -1854,6 +1873,11 @@ export function markReviewFromAgent(
     return "ok";
   }
 
+  // COMMIT-ON-REVIEW (FIRST): the agent is told it need not commit — butchr captures
+  // its worktree. On the genuine in_progress→in_review transition, commit that diff
+  // onto the branch NOW so it can't be lost as worktree-only state before merge.
+  if (row.status === "in_progress") autoCommitOnReview(id, row.directory_id);
+
   // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a
   // duplicate call). Clear the pane: the agent is exiting and review holds no live
   // process.
@@ -1913,6 +1937,13 @@ export function markNeedsInfoFromAgent(
   // Capture the agent's terminal output now: once it exits there is no live pane,
   // so the snapshot is what the answerer sees of where the agent got stuck.
   const snapshot = readRunLogSnapshot(id);
+
+  // COMMIT-ON-REVIEW (FIRST): when a BUILD agent (in_progress) asks, it may have
+  // uncommitted work in its worktree; commit it onto the branch BEFORE parking in
+  // needs_info so the diff survives a worktree deletion and the resume-on-answer
+  // continues on top of it. Only on the in_progress transition (finalizing work is
+  // already committed); best-effort, never blocks the park.
+  if (row.status === "in_progress") autoCommitOnReview(id, row.directory_id);
 
   // in_progress/finalizing → needs_info (normal), or needs_info → needs_info (a
   // duplicate ask). Clear the pane: the agent is exiting and this state holds no

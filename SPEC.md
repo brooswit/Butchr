@@ -583,6 +583,38 @@ with no live process held open. This is what makes review durable across an agen
 butchr restart (an MCP server can't wake an idle Claude Code client, so butchr never
 parks a call).
 
+### Commit-on-review (the branch is the durable source of truth)
+
+Agents are told they **need not commit** — butchr captures the worktree. That left a
+durability gap: a task could enter a review state (`in_review` / `needs_info`) with the
+agent's diff living **only as uncommitted worktree state**. If the worktree were then
+deleted — a repo move's DELETE cascade, the reaper, a crash cleanup — the work was
+**permanently lost**; and `git.rebaseOntoDefault`'s *"no commits → reset onto tip"* branch
+could wipe such a branch on re-dispatch.
+
+So whenever a **workspace-agent** task transitions **out of `in_progress`** into a
+non-merged review state — `in_review` (live `markReviewFromAgent`, the dead-agent rescue
+`markInReview`, and the watchdog/reconcile paths that route through it) or `needs_info`
+(`markNeedsInfoFromAgent`) — butchr **auto-commits the worktree FIRST**, via
+`git.commitWorktree` (`git add -A` then commit `butchr: wip <taskId> (auto-saved)`,
+reusing `git.merge`'s mechanism). The agent's diff now lives **on the task branch** — the
+**durable source of truth** for review-state work — independent of the transient worktree.
+
+Properties:
+
+- **Unconditional.** The WIP commit happens **even if unresolved conflict markers are
+  present** — preserving the work matters more than purity. The base is still protected:
+  `git.merge`'s `findConflictMarkers` scan **refuses to merge** a branch whose (now
+  committed) content carries markers.
+- **Best-effort + idempotent.** A commit failure — including *"nothing to commit"* — is a
+  no-op that **never breaks the state transition**.
+- **Resume keeps it.** Request-changes (`rejectTask`) and answer (`answerTask`) resume the
+  workspace agent **without resetting the branch**, so the WIP commit stays and the agent
+  continues **on top of it**; its further changes still merge cleanly (`git.merge` collapses
+  / replays the WIP commit through its rebase).
+- **Fixes the reset fragility.** A review-state branch now **always has a commit**, so
+  `rebaseOntoDefault` rebases it (rather than hitting the *no-commits → hard-reset* path).
+
 ### Non-blocking ask (the needs-info handshake)
 
 `ask` (MCP) follows the **same non-blocking shape** as `request_review`, applied to

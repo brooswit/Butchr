@@ -272,6 +272,54 @@ export async function diffStat(dir: string, taskId: string): Promise<DiffStat> {
   return { files: [...files], changedLines: counts.lines };
 }
 
+/**
+ * COMMIT-ON-REVIEW durability. Stage and commit ALL worktree changes onto the task
+ * branch <taskId> so the agent's diff lives on the BRANCH — the durable source of
+ * truth — and can't be lost if the worktree is later deleted (a repo move's DELETE
+ * cascade, the reaper, a crash cleanup) or reset on re-dispatch.
+ *
+ * Called when a WORKSPACE-agent task transitions OUT of `in_progress` into a
+ * non-merged review state (`in_review` / `needs_info`) where it would otherwise be
+ * left as uncommitted worktree state only (see tasks.markInReview /
+ * markReviewFromAgent / markNeedsInfoFromAgent). Reuses the same `git add -A` +
+ * commit mechanism merge() uses at merge time; the WIP commit it leaves is later
+ * collapsed/replayed by merge()'s rebase, and a resume (request-changes / answer)
+ * continues on TOP of it (the agent's further changes still merge cleanly).
+ *
+ * UNCONDITIONAL: commits even when unresolved conflict markers are present —
+ * preserving the work matters more, and merge()'s findConflictMarkers guard still
+ * REFUSES to land poisoned content into the base. This also removes the old
+ * "no commits → reset onto tip" fragility in rebaseOntoDefault: a review-state
+ * branch now always has at least this commit.
+ *
+ * BEST-EFFORT + IDEMPOTENT: never throws and returns false (a no-op) when there is
+ * no worktree, nothing to commit, or git fails — so a commit failure can NEVER break
+ * the state transition. Synchronous (via Bun.spawnSync) so the sync transition
+ * functions can commit FIRST, before the worktree is exposed to deletion.
+ *
+ * Returns true iff a WIP commit was actually created.
+ */
+export function commitWorktree(
+  dir: string,
+  taskId: string,
+  message: string,
+): boolean {
+  const wt = worktreePath(dir, taskId);
+  if (!existsSync(wt)) return false;
+  try {
+    const add = Bun.spawnSync([git, "-C", wt, "add", "-A"]);
+    if (!add.success) return false;
+    // `git commit` exits non-zero on "nothing to commit" — that's a benign no-op
+    // (idempotent: a second call, or a tree with no changes, simply does nothing).
+    const commit = Bun.spawnSync([
+      git, "-C", wt, "commit", "-m", message,
+    ]);
+    return commit.success;
+  } catch {
+    return false; // best-effort: a git/spawn failure must never break the caller
+  }
+}
+
 export type MergeResult = {
   ok: boolean;
   conflict: boolean;
