@@ -84,7 +84,8 @@ butchr needs from the runtime: **provision** a workspace, **launch** the agent
 session-id / resume / mcp-config / model — **and** the *headless read-only* modes:
 the CTO-fork spec generator, the conformance reviewer, the brief expander, via
 `runHeadless`), **confirm live**, **resolve** the agent's pane handle, **read**
-output, and **tear down**. `src/herdr.ts` is the concrete herdr implementation
+output, **send** control input to a live agent's stdin (see below), and **tear
+down**. `src/herdr.ts` is the concrete herdr implementation
 (`herdrRunner`); the **dispatcher and reaper talk to the `harness` proxy, never to
 herdr directly**, and `setRunner()` lets tests (or a future deployment) drop in a
 different backend — the dispatcher path is covered by a **fake backend** in
@@ -92,6 +93,25 @@ different backend — the dispatcher path is covered by a **fake backend** in
 `PaneInfo`) and the headless `HeadlessSpec`/`HeadlessResult` are defined in
 `harness.ts`; `herdr.ts` re-exports the handle types for its other importers
 (`server.ts`/`directories.ts`/`tasks.ts`), which still call it directly.
+
+**Driving a live agent's stdin (`send`).** butchr harnesses the *interactive*
+Claude Code CLI, so the agent's stdin is a live control channel — but the harness
+otherwise only **launches** + **reads**. `AgentRunner.send(name, input)` closes the
+loop: it pushes control input to a LIVE agent's stdin, wrapping herdr's
+`agent send` / `pane send-text` / `pane send-keys` primitives. `input` is either
+literal **text** (`{ text, enter? }`) — a slash-command like `/compact` / `/clear`,
+or a steering message, with an optional trailing **Enter** to submit it — or named
+control **keys** (`{ keys: [...] }`, e.g. `C-c` to interrupt, `Enter`, `Escape`).
+Text is written **by name** (`agent send`, the stable handle that survives herdr's
+positional pane-id renumbering); Enter and keys go through `pane send-keys` on the
+agent's resolved pane. It is **best-effort**: a send to a missing/dead agent or
+pane is a no-op that **never throws**. Only meaningful for a LIVE agent —
+**workspace agents exit at review**, so the prime consumer is the always-live
+**managed CTO agent**, which can use it for **context hygiene** (send `/compact` to
+a long-lived session whose context has grown — cleaner than a fresh restart) and to
+**interrupt** a stuck/runaway agent with `Ctrl+C` instead of killing its pane. A
+thin butchr-level helper may sit on top, but the capability itself is the seam
+method; core butchr behavior is unchanged by adding it.
 
 ```
                           ┌──────────────────────────── butchr (one Bun process) ────────────────────────────┐

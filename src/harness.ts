@@ -39,6 +39,19 @@ export type PaneInfo = {
 };
 
 /**
+ * One control input to push to a LIVE interactive agent's stdin via `send`.
+ * Either:
+ *   - literal `text` (a slash-command like `/compact`/`/clear`, or a steering
+ *     message), with an optional trailing `enter` to SUBMIT the line; or
+ *   - one or more named control `keys` (e.g. `C-c` to interrupt, `Enter`,
+ *     `Escape`) passed straight through to the runtime's key vocabulary.
+ * The two forms are mutually exclusive — discriminated on the `keys` field.
+ */
+export type SendInput =
+  | { text: string; enter?: boolean }
+  | { keys: string[] };
+
+/**
  * One HEADLESS, read-only agent invocation (the CTO-fork spec generator, the
  * conformance reviewer, the brief expander). The caller has already substituted
  * its command template and written any temp prompt file; the backend only has to
@@ -127,6 +140,13 @@ export interface AgentRunner {
   isAgentNameTaken(e: unknown): boolean;
   /** Best-effort recent output of the agent named `name` (for the live panel). "" on failure. */
   agentRead(name: string, lines?: number): Promise<string>;
+  /**
+   * Best-effort: push a control input to the LIVE agent's stdin — literal text
+   * (with an optional trailing Enter to submit) or named control keys (C-c,
+   * Enter, Escape). Only meaningful for a live interactive agent; a send to a
+   * missing/dead pane is a no-op that NEVER throws.
+   */
+  send(name: string, input: SendInput): Promise<void>;
   /** Close a pane / terminate the agent terminal. */
   paneClose(target: string): Promise<void>;
   /** Tear down a task's session (close its dedicated tab). Best-effort. */

@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentRunner, HeadlessSpec } from "../src/harness.ts";
+import type { AgentRunner, HeadlessSpec, SendInput } from "../src/harness.ts";
 
 let DATA_DIR: string;
 let REPO_ROOT: string;
@@ -98,6 +98,7 @@ type Calls = {
   paneClose: string[];
   resolveAgentPane: Array<[string, string | undefined]>;
   agentDeregister: string[];
+  send: Array<[string, SendInput]>;
   headless: HeadlessSpec[];
 };
 
@@ -112,6 +113,7 @@ function makeFake(opts: { resolvedPane: string | undefined }): {
     paneClose: [],
     resolveAgentPane: [],
     agentDeregister: [],
+    send: [],
     headless: [],
   };
   const runner: AgentRunner = {
@@ -162,6 +164,9 @@ function makeFake(opts: { resolvedPane: string | undefined }): {
     },
     async agentRead() {
       return "";
+    },
+    async send(name, input) {
+      calls.send.push([name, input]);
     },
     async paneClose(target) {
       calls.paneClose.push(target);
@@ -246,6 +251,20 @@ describe("dispatcher against a fake AgentRunner backend", () => {
     expect(row.herdr_pane_id).toBeNull(); // NO phantom pane recorded
     expect(row.dispatch_attempts).toBe(1); // a bounded retry was counted
     expect(row.next_dispatch_at).not.toBeNull(); // backoff scheduled
+  });
+});
+
+describe("send flows through the harness proxy", () => {
+  test("the active backend's send receives text vs keys inputs verbatim", async () => {
+    const { runner, calls } = makeFake({ resolvedPane: "x" });
+    harnessMod.setRunner(runner);
+
+    await harnessMod.harness.send("task-1", { text: "/compact", enter: true });
+    await harnessMod.harness.send("task-1", { keys: ["C-c"] });
+
+    expect(calls.send.length).toBe(2);
+    expect(calls.send[0]).toEqual(["task-1", { text: "/compact", enter: true }]);
+    expect(calls.send[1]).toEqual(["task-1", { keys: ["C-c"] }]);
   });
 });
 

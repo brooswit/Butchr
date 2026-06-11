@@ -13,18 +13,20 @@ import type {
   HeadlessResult,
   HeadlessSpec,
   PaneInfo,
+  SendInput,
   StartedAgent,
   Tab,
   Workspace,
 } from "./harness.ts";
-export type { PaneInfo, StartedAgent, Tab, Workspace };
-
-const bin = config.herdrBin;
+export type { PaneInfo, SendInput, StartedAgent, Tab, Workspace };
 
 type Envelope = { id?: string; result?: any; error?: any };
 
+// We read `config.herdrBin` at each call site (rather than caching it once at
+// module load) so a test can repoint the bin — `config.herdrBin` never changes at
+// runtime in production, so this is byte-for-byte the same value either way.
 async function herdr(args: string[]): Promise<any> {
-  const res = await run([bin, ...args]);
+  const res = await run([config.herdrBin, ...args]);
   if (!res.ok) {
     throw new Error(
       `herdr ${args.join(" ")} failed (${res.code}): ${res.stderr || res.stdout}`,
@@ -54,7 +56,7 @@ async function herdr(args: string[]): Promise<any> {
  * unwrapped `env.result ?? env` for the caller to field-probe.
  */
 async function herdrSoft(args: string[]): Promise<any | null> {
-  const res = await run([bin, ...args]);
+  const res = await run([config.herdrBin, ...args]);
   if (!res.ok) return null;
   const text = res.stdout.trim();
   if (!text) return null;
@@ -69,7 +71,7 @@ async function herdrSoft(args: string[]): Promise<any | null> {
 
 /** Is the herdr server reachable? */
 export async function isUp(): Promise<boolean> {
-  const res = await run([bin, "status", "server"]);
+  const res = await run([config.herdrBin, "status", "server"]);
   return res.ok && /status:\s*running/.test(res.stdout);
 }
 
@@ -90,7 +92,7 @@ export async function workspaceCreate(
 /** Does a workspace still exist? (herdr may have been restarted/closed.) */
 export async function workspaceExists(workspaceId: string): Promise<boolean> {
   if (!workspaceId) return false;
-  const res = await run([bin, "workspace", "get", workspaceId]);
+  const res = await run([config.herdrBin, "workspace", "get", workspaceId]);
   if (!res.ok) return false;
   return !res.stdout.includes('"error"');
 }
@@ -132,7 +134,7 @@ export async function tabCreate(
 /** Close a herdr tab (kills every pane/agent inside it and removes the tab). */
 export async function tabClose(tabId: string | null | undefined): Promise<void> {
   if (!tabId) return;
-  await run([bin, "tab", "close", tabId]).catch(() => {});
+  await run([config.herdrBin, "tab", "close", tabId]).catch(() => {});
 }
 
 /**
@@ -206,7 +208,7 @@ export async function agentStart(
  */
 export async function agentExists(name: string): Promise<boolean> {
   if (!name) return false;
-  const res = await run([bin, "agent", "get", name]);
+  const res = await run([config.herdrBin, "agent", "get", name]);
   return res.ok && !res.stdout.includes('"error"');
 }
 
@@ -358,10 +360,45 @@ export async function agentRead(name: string, lines = 200): Promise<string> {
   return raw.replace(ANSI_RE, "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trimEnd();
 }
 
+/**
+ * Push a control input to a LIVE agent's stdin — the send half of the control
+ * channel (butchr otherwise only LAUNCHES + READS). Two forms:
+ *
+ *   - `{ text, enter? }` — write LITERAL text (a slash-command like `/compact` /
+ *     `/clear`, or a steering message). Written BY NAME via `agent send`, which
+ *     keys off the stable agent name (the codebase's preferred handle — it
+ *     survives herdr's positional pane-id renumbering). A trailing `enter`
+ *     SUBMITS the line; Enter is a key, and `send-keys` is pane-scoped, so we
+ *     resolve the agent's live pane for it.
+ *   - `{ keys }` — named control keys (`C-c` to interrupt a runaway/stuck agent,
+ *     `Enter`, `Escape`, …) forwarded verbatim to `pane send-keys`, which is
+ *     pane-scoped only, so we resolve the agent's live pane first.
+ *
+ * Best-effort throughout: a missing/dead agent or pane makes every step a
+ * swallowed no-op (`herdrSoft` returns null; an unresolved pane is skipped) so a
+ * send to a gone agent NEVER throws. Only meaningful for a LIVE interactive
+ * agent — the prime consumer is the always-live managed CTO agent.
+ */
+export async function send(name: string, input: SendInput): Promise<void> {
+  if (!name) return;
+  if ("keys" in input) {
+    if (!input.keys.length) return;
+    const pane = await agentPaneId(name);
+    if (!pane) return; // missing/dead pane → no-op
+    await herdrSoft(["pane", "send-keys", pane, ...input.keys]);
+    return;
+  }
+  if (input.text) await herdrSoft(["agent", "send", name, input.text]);
+  if (input.enter) {
+    const pane = await agentPaneId(name);
+    if (pane) await herdrSoft(["pane", "send-keys", pane, "Enter"]);
+  }
+}
+
 /** Close a pane / terminate the agent terminal. */
 export async function paneClose(target: string): Promise<void> {
   if (!target) return;
-  await run([bin, "pane", "close", target]);
+  await run([config.herdrBin, "pane", "close", target]);
 }
 
 /**
@@ -413,9 +450,9 @@ export async function agentDeregister(name: string): Promise<void> {
   if (!name) return;
   const tab = await agentTabId(name);
   const pane = await agentPaneId(name);
-  await run([bin, "agent", "rename", name, "--clear"]).catch(() => {});
-  if (pane) await run([bin, "pane", "close", pane]).catch(() => {});
-  if (tab) await run([bin, "tab", "close", tab]).catch(() => {});
+  await run([config.herdrBin, "agent", "rename", name, "--clear"]).catch(() => {});
+  if (pane) await run([config.herdrBin, "pane", "close", pane]).catch(() => {});
+  if (tab) await run([config.herdrBin, "tab", "close", tab]).catch(() => {});
 }
 
 /**
@@ -485,6 +522,7 @@ export const herdrRunner: AgentRunner = {
   resolveAgentPane,
   isAgentNameTaken,
   agentRead,
+  send,
   paneClose,
   teardownTask,
   agentDeregister,
