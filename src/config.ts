@@ -54,10 +54,38 @@ function envMap(name: string): Map<string, string> {
 // per-directory `.butchr/` folders that live inside each registered repo.
 const dataDir = env("BUTCHR_DATA_DIR", join(home, ".local", "share", "butchr"));
 
+// The HTTP bind host, hoisted so `loopbackHost` can be derived from it once below.
+const host = env("BUTCHR_HOST", "127.0.0.1");
+
+// The read-only, non-recursing claude recipe shared by the three headless agents
+// (conformance reviewer, brief expander, CTO-fork spec generator). `-p` runs
+// headless + prints the verdict then exits; `--permission-mode dontAsk` +
+// `--allowedTools "Read Grep Glob"` makes it read-only (no Write/Edit/Bash) and
+// auto-resolves tool requests; NO `--mcp-config`/`--dangerously-skip-permissions`
+// so it can't recurse into butchr's own tools. `session` is interpolated right
+// after `-p` (a trailing space included by the caller): "" for the two non-forking
+// reviewers, "{{CTO_SESSION}} " for the spec generator (substituted downstream into
+// `--resume <id> --fork-session` or nothing). `{{PROMPT_FILE}}` → the rendered prompt.
+function readonlyClaude(session: string): string {
+  return (
+    `claude -p ${session}--permission-mode dontAsk ` +
+    '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"'
+  );
+}
+
 export const config = {
   /** HTTP host/port for the REST API + webapp. */
-  host: env("BUTCHR_HOST", "127.0.0.1"),
+  host,
   port: envInt("BUTCHR_PORT", 47800),
+
+  /**
+   * The loopback-dialable form of `host`: when butchr binds 0.0.0.0 (all
+   * interfaces) a local child process still reaches it via 127.0.0.1, so any URL
+   * an agent's child dials should use this rather than the raw bind host. Computed
+   * once here so the dispatcher (per-task MCP endpoint) and the CTO agent (channel
+   * SSE URL) share one derivation.
+   */
+  loopbackHost: host === "0.0.0.0" ? "127.0.0.1" : host,
 
   /**
    * EXTRA browser origins allowed to make state-changing (`POST`/`PUT`/`DELETE`/
@@ -276,11 +304,7 @@ export const config = {
    * this is ADVISORY (it never hard-blocks approval) and best-effort (a failure or an
    * unparseable verdict leaves conformance NULL). Set it EMPTY to DISABLE the gate.
    */
-  conformanceCmd: env(
-    "BUTCHR_CONFORMANCE_CMD",
-    "claude -p --permission-mode dontAsk " +
-      '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"',
-  ),
+  conformanceCmd: env("BUTCHR_CONFORMANCE_CMD", readonlyClaude("")),
   /** Max wall-clock (ms) the conformance reviewer may run before it's killed (→ NULL verdict). */
   conformanceTimeoutMs: envInt("BUTCHR_CONFORMANCE_TIMEOUT_MS", 120000),
   /**
@@ -305,11 +329,7 @@ export const config = {
    * target repo. Set it EMPTY to DISABLE expansion (the endpoint then 502s and the
    * operator writes the prompt by hand). See src/expand.ts.
    */
-  expandBriefCmd: env(
-    "BUTCHR_EXPAND_BRIEF_CMD",
-    "claude -p --permission-mode dontAsk " +
-      '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"',
-  ),
+  expandBriefCmd: env("BUTCHR_EXPAND_BRIEF_CMD", readonlyClaude("")),
   /** Max wall-clock (ms) the brief expander may run before it's killed (→ failure). */
   expandBriefTimeoutMs: envInt("BUTCHR_EXPAND_BRIEF_TIMEOUT_MS", 120000),
 
@@ -336,11 +356,7 @@ export const config = {
    * Set it EMPTY to DISABLE spec generation (an idea task then fails to advance and the
    * operator is shown the error). See src/cto.ts.
    */
-  specGenCmd: env(
-    "BUTCHR_SPEC_GEN_CMD",
-    "claude -p {{CTO_SESSION}} --permission-mode dontAsk " +
-      '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"',
-  ),
+  specGenCmd: env("BUTCHR_SPEC_GEN_CMD", readonlyClaude("{{CTO_SESSION}} ")),
   /** Max wall-clock (ms) the CTO-fork spec generator may run before it's killed (→ failure). */
   specGenTimeoutMs: envInt("BUTCHR_SPEC_GEN_TIMEOUT_MS", 1000 * 60 * 5),
   /**

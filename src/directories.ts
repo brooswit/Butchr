@@ -15,6 +15,7 @@ import { db, nowIso } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
+import { harness } from "./harness.ts";
 import * as herdr from "./herdr.ts";
 import { generateDirectoryId } from "./ids.ts";
 import { ctoMdPath } from "./taskmd.ts";
@@ -106,6 +107,34 @@ export function getDirectoryByPath(path: string): DirectoryRow | null {
     db.query<DirectoryRow, [string]>(`SELECT * FROM directories WHERE path=?`).get(path) ??
     null
   );
+}
+
+/**
+ * Ensure the directory's herdr workspace exists, recreating it (and persisting the
+ * new ids on the directory row) when herdr was restarted or the workspace was closed
+ * out from under us. The single existence-check + create + row UPDATE both the
+ * dispatcher (task agents) and the managed CTO agent funnel through — one workspace
+ * per directory backs both. Goes through the swappable `harness` runner so a
+ * test-injected fake backend is honored.
+ *
+ * Returns the workspace id and whether a fresh one was `created` (vs the existing one
+ * being reused) so the caller can do its own create-only bookkeeping (the dispatcher
+ * logs + mutates its in-memory DirectoryRow; the CTO agent does neither).
+ */
+export async function ensureDirectoryWorkspace(
+  directoryId: string,
+  cwd: string,
+  label: string,
+): Promise<{ workspaceId: string | undefined; created: boolean }> {
+  const existing = getDirectory(directoryId)?.herdr_workspace ?? null;
+  if (existing && (await harness.workspaceExists(existing))) {
+    return { workspaceId: existing, created: false };
+  }
+  const ws = await harness.workspaceCreate(cwd, label);
+  db.query(
+    `UPDATE directories SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
+  ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, directoryId);
+  return { workspaceId: ws.workspaceId, created: true };
 }
 
 export function listDirectories(): DirectoryView[] {

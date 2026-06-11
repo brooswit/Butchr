@@ -48,9 +48,11 @@ import {
   nowIso,
   saveCtoAgentRow,
 } from "./db.ts";
+import { ensureDirectoryWorkspace } from "./directories.ts";
 import { publish } from "./events.ts";
-import type { StartedAgent } from "./harness.ts";
+import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
+import { startAgentInFreshTab } from "./herdr.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
 
 // butchr's own state dir for the CTO agents' generated artifacts (never the repo).
@@ -70,30 +72,12 @@ export function ctoAgentName(directoryId: string): string {
   return `${config.ctoAgentName}-${directoryId}`;
 }
 
-// Single-quote a string for `bash -lc` (identical to the dispatcher's `shq`).
-function shq(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
-
-// loopback host for URLs the agent's child processes dial (0.0.0.0 isn't dialable).
-const sseHost = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
-
 /** A registered directory's repo-root path (the CTO agent's cwd), or null if gone. */
 function directoryPath(directoryId: string): string | null {
   const row = db
     .query<{ path: string }, [string]>(`SELECT path FROM directories WHERE id=?`)
     .get(directoryId);
   return row?.path ?? null;
-}
-
-/** A registered directory's herdr workspace id (the CTO tab lives in it), or null. */
-function directoryWorkspace(directoryId: string): string | null {
-  const row = db
-    .query<{ herdr_workspace: string | null }, [string]>(
-      `SELECT herdr_workspace FROM directories WHERE id=?`,
-    )
-    .get(directoryId);
-  return row?.herdr_workspace ?? null;
 }
 
 /**
@@ -232,7 +216,7 @@ export function writeChannelMcpConfig(directoryId: string): string {
         command: "bash",
         args: ["-lc", config.ctoChannelCmd],
         env: {
-          BUTCHR_CHANNEL_SSE_URL: `http://${sseHost}:${config.port}/api/events`,
+          BUTCHR_CHANNEL_SSE_URL: `http://${config.loopbackHost}:${config.port}/api/events`,
           BUTCHR_CHANNEL_DIR: directoryId,
         },
       },
@@ -265,17 +249,14 @@ export function resolveCtoSession(
 
 /** Build the fully-substituted, `script`-wrapped launch argv. Exported for testing. */
 export function buildCtoArgv(sessionFlag: string, directoryId: string): string[] {
-  const model = config.ctoAgentModel.trim();
-  const modelFlag = model ? `--model ${model}` : "";
   const agentCmd = config.ctoAgentCmd
-    .replaceAll("{{MODEL_FLAG}}", modelFlag)
+    .replaceAll("{{MODEL_FLAG}}", modelFlag(config.ctoAgentModel))
     .replaceAll("{{SESSION_FLAG}}", sessionFlag)
     .replaceAll("{{MCP_CONFIG}}", mcpConfigFile(directoryId))
     .replaceAll("{{PROMPT_FILE}}", resolveBriefFile());
   // Run under `script` (PTY → the interactive UI renders + input works in the herdr
   // pane) while logging to a file — exactly how the dispatcher launches task agents.
-  const wrapped = `SHELL=/bin/bash script -qfe --log-out ${shq(logFile(directoryId))} -c ${shq(agentCmd)}`;
-  return ["bash", "-lc", wrapped];
+  return buildScriptArgv({ agentCmd, logFile: logFile(directoryId) });
 }
 
 /**
@@ -285,34 +266,12 @@ export function buildCtoArgv(sessionFlag: string, directoryId: string): string[]
  * repo root and persists it on the directory row. Returns the workspace id.
  */
 async function ensureCtoWorkspace(directoryId: string, cwd: string): Promise<string | undefined> {
-  const existing = directoryWorkspace(directoryId);
-  if (existing && (await harness.workspaceExists(existing))) return existing;
-  const label = `butchr-cto-${directoryId}`;
-  const ws = await harness.workspaceCreate(cwd, label);
-  db.query(`UPDATE directories SET herdr_workspace=?, herdr_pane=? WHERE id=?`).run(
-    ws.workspaceId ?? null,
-    ws.rootPaneId ?? null,
+  const { workspaceId } = await ensureDirectoryWorkspace(
     directoryId,
+    cwd,
+    `butchr-cto-${directoryId}`,
   );
-  return ws.workspaceId;
-}
-
-// Start the agent, self-healing an `agent_name_taken` collision — the dispatcher's
-// startAgentReconciling pattern, scoped to this directory's CTO name.
-async function startAgentReconciling(
-  name: string,
-  cwd: string,
-  argv: string[],
-  workspaceId?: string,
-  tabId?: string,
-): Promise<StartedAgent> {
-  try {
-    return await harness.agentStart(name, cwd, argv, workspaceId, tabId);
-  } catch (e) {
-    if (!harness.isAgentNameTaken(e)) throw e;
-    await harness.agentDeregister(name);
-    return await harness.agentStart(name, cwd, argv, workspaceId, tabId);
-  }
+  return workspaceId;
 }
 
 /**
@@ -337,30 +296,18 @@ async function performLaunch(directoryId: string, fresh: boolean): Promise<void>
   const workspaceId = await ensureCtoWorkspace(directoryId, cwd);
   rmSync(logFile(directoryId), { force: true });
 
-  const tab = await harness.tabCreate(workspaceId ?? undefined, cwd, `butchr-cto-${directoryId}`);
-  let paneId: string;
-  let tabId: string | undefined;
-  try {
-    await startAgentReconciling(name, cwd, argv, workspaceId ?? undefined, tab.tabId);
-    // The tab's empty root pane is a husk; close it so the tab holds only the agent.
-    // Capture its stable terminal id first so resolveAgentPane can wait out the
-    // positional-id renumber (the phantom-pane guard — see dispatcher.ts).
-    let closedTerminalId: string | undefined;
-    if (tab.tabId && tab.rootPaneId) {
-      closedTerminalId = await harness.paneTerminalId(tab.rootPaneId);
-      await harness.paneClose(tab.rootPaneId).catch(() => {});
-    }
-    const realPane = await harness.resolveAgentPane(name, closedTerminalId);
-    if (!realPane) {
-      throw new Error("CTO agent did not register a live pane after start");
-    }
-    paneId = realPane;
-    tabId = tab.tabId;
-  } catch (e) {
-    await harness.agentDeregister(name).catch(() => {});
-    if (tab.tabId) await harness.tabClose(tab.tabId).catch(() => {});
-    throw e;
-  }
+  // Create a dedicated tab, start the agent in it (self-healing a name collision),
+  // close the husk root pane, and re-resolve the agent's real pane surviving herdr's
+  // positional renumber — the same sequence the dispatcher runs (it wraps this in its
+  // per-workspace pane lock; the single-instance CTO launch needs no such lock).
+  const { paneId, tabId } = await startAgentInFreshTab(harness, {
+    name,
+    cwd,
+    argv,
+    workspaceId: workspaceId ?? undefined,
+    label: `butchr-cto-${directoryId}`,
+    paneError: "CTO agent did not register a live pane after start",
+  });
 
   saveCtoAgentRow(directoryId, {
     session_id: sessionId,

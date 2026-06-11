@@ -3,7 +3,7 @@
 // which speaks to the running herdr server over its unix socket and replies with
 // a JSON envelope: {"id": "...", "result": { ... }}.
 import { config } from "./config.ts";
-import { run } from "./exec.ts";
+import { run, stripAnsi } from "./exec.ts";
 // The runtime-handle types + the backend interface live in harness.ts (which owns
 // the abstraction's contract). We import them TYPE-ONLY (erased at runtime, so no
 // import cycle: harness.ts imports `herdrRunner` from here as a value) and re-export
@@ -362,12 +362,6 @@ export function isAgentNameTaken(e: unknown): boolean {
   );
 }
 
-// Control sequences that survive even herdr's `--format text` read (stray CSI
-// escapes, charset selects, lone control chars). Strip them so the live-output
-// panel renders as readable plain text rather than terminal noise.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
-
 /**
  * Best-effort recent output of the agent terminal named `name`, for the webapp's
  * live-output panel. Reads herdr's `recent-unwrapped` buffer (text format, so
@@ -384,7 +378,7 @@ export async function agentRead(name: string, lines = 200): Promise<string> {
   if (!r) return "";
   const raw: string = r.read?.text ?? r.text ?? "";
   if (!raw) return "";
-  return raw.replace(ANSI_RE, "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trimEnd();
+  return stripAnsi(raw).replaceAll("\r\n", "\n").replaceAll("\r", "\n").trimEnd();
 }
 
 /**
@@ -480,6 +474,100 @@ export async function agentDeregister(name: string): Promise<void> {
   await run([config.herdrBin, "agent", "rename", name, "--clear"]).catch(() => {});
   if (pane) await run([config.herdrBin, "pane", "close", pane]).catch(() => {});
   if (tab) await run([config.herdrBin, "tab", "close", tab]).catch(() => {});
+}
+
+/**
+ * Start an agent, self-healing an `agent_name_taken` collision: if a lingering
+ * same-named agent (an orphan from an abandoned/aborted run) is still registered,
+ * deregister it and retry once. Without this a single stale agent would block the
+ * (re)launch forever. A second failure propagates to the caller.
+ *
+ * Operates through the supplied `runner` (the `harness` proxy) — NOT this module's
+ * own exports — so a test-injected fake backend is honored. herdr.ts can't import
+ * the `harness` value (it would cycle with harness.ts), hence the parameter.
+ */
+export async function startAgentReconciling(
+  runner: AgentRunner,
+  name: string,
+  cwd: string,
+  argv: string[],
+  workspaceId?: string,
+  tabId?: string,
+): Promise<StartedAgent> {
+  try {
+    return await runner.agentStart(name, cwd, argv, workspaceId, tabId);
+  } catch (e) {
+    if (!runner.isAgentNameTaken(e)) throw e;
+    // Reclaim the stale agent. Closing its pane is NOT enough — herdr keeps the
+    // NAME registered (and respawns the agent), so the retry would fail again.
+    // agentDeregister clears the name via `agent rename --clear` and then closes
+    // the orphaned pane + its (old) tab, truly freeing the name for reuse. We
+    // retry into the fresh tab created for this (re)launch.
+    await runner.agentDeregister(name);
+    console.log(`[butchr] reclaimed stale agent name ${name}; retrying agentStart`);
+    return await runner.agentStart(name, cwd, argv, workspaceId, tabId);
+  }
+}
+
+/**
+ * Launch an agent into a FRESH dedicated tab and return its real, settled pane.
+ *
+ * The full create→start→close-husk→resolve sequence the dispatcher and the managed
+ * CTO agent both run: create a dedicated tab (labeled `label`), start the agent in
+ * it (self-healing a name collision), close the empty root husk pane the tab spawns,
+ * then re-resolve the agent's CURRENT pane by its STABLE terminal id (surviving
+ * herdr's positional renumber). Throws `paneError` if the agent never registered a
+ * live pane. On ANY failure it cleans up INSIDE the call (deregister the name + close
+ * the just-created tab) so a half-registered husk can't linger, then rethrows.
+ *
+ * The dispatcher wraps this in its per-workspace pane lock (positional ids renumber
+ * workspace-globally on any close); the CTO agent calls it directly. Operates through
+ * `runner` (the `harness` proxy) so a test fake is honored — see startAgentReconciling.
+ */
+export async function startAgentInFreshTab(
+  runner: AgentRunner,
+  opts: {
+    name: string;
+    cwd: string;
+    argv: string[];
+    workspaceId?: string;
+    label: string;
+    paneError: string;
+  },
+): Promise<{ paneId: string; tabId?: string }> {
+  const { name, cwd, argv, workspaceId, label, paneError } = opts;
+  const tab = await runner.tabCreate(workspaceId, cwd, label);
+  try {
+    await startAgentReconciling(runner, name, cwd, argv, workspaceId, tab.tabId);
+
+    // `tab create` spawns an empty root shell pane; `agent start --tab` then adds
+    // the agent as a SECOND pane. Close that empty pane so the tab holds only the
+    // agent. Capture the husk's STABLE terminal id FIRST: closing it renumbers the
+    // positional pane ids, and `pane close` returns BEFORE that renumber propagates,
+    // so resolveAgentPane waits for this terminal to vanish before trusting a
+    // re-resolved pane id.
+    let closedTerminalId: string | undefined;
+    if (tab.tabId && tab.rootPaneId) {
+      closedTerminalId = await runner.paneTerminalId(tab.rootPaneId);
+      await runner.paneClose(tab.rootPaneId).catch(() => {});
+    }
+
+    // Re-resolve the agent's CURRENT pane by its STABLE terminal id, waiting out
+    // herdr's positional-id renumber. Returns undefined if the agent never
+    // registered a live pane (a failed/clobbered start) — treat the whole launch as
+    // FAILED rather than recording a stale/phantom pane id (the phantom-task bug).
+    const realPane = await runner.resolveAgentPane(name, closedTerminalId);
+    if (!realPane) throw new Error(paneError);
+    return { paneId: realPane, tabId: tab.tabId };
+  } catch (e) {
+    // Clean up while the just-created tab id is still fresh (a concurrent launch
+    // could renumber it): deregister the name (frees it + closes its pane/tab if it
+    // partly registered) and close the dedicated tab in case the agent never
+    // registered (an empty husk tab).
+    await runner.agentDeregister(name).catch(() => {});
+    if (tab.tabId) await runner.tabClose(tab.tabId).catch(() => {});
+    throw e;
+  }
 }
 
 /**

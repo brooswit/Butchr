@@ -19,9 +19,11 @@ import { join } from "node:path";
 import { config } from "./config.ts";
 import { db, getSetting, recordTaskEvent, setSetting } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
+import { ensureDirectoryWorkspace } from "./directories.ts";
+import { buildScriptArgv, modelFlag, stripAnsi } from "./exec.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
-import type { StartedAgent } from "./harness.ts";
+import { startAgentInFreshTab } from "./herdr.ts";
 import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderReworkPrompt } from "./taskmd.ts";
 import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
@@ -33,23 +35,11 @@ mkdirSync(promptsDir, { recursive: true });
 mkdirSync(runsDir, { recursive: true });
 mkdirSync(mcpDir, { recursive: true });
 
-// The host the agent (running locally) should dial to reach butchr's MCP server.
-// If butchr binds 0.0.0.0 (all interfaces), the agent still connects via loopback.
-const mcpHost = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
-
-// Shell-escape a string for safe interpolation inside a single-quoted context.
-function shq(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
-
 // The agent runs under `script`, so its log is a raw terminal typescript: ANSI
 // escapes, carriage returns, and `script`'s own "Script started/done" banners.
 // Clean it up before showing it to a human as a fallback snapshot.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]/g;
 function sanitizeTypescript(raw: string): string {
-  return raw
-    .replace(ANSI_RE, "")
+  return stripAnsi(raw)
     .replaceAll("\r\n", "\n")
     .replaceAll("\r", "\n")
     .split("\n")
@@ -73,6 +63,18 @@ const abortSignals = new Set<string>();
 export function signalAbort(taskId: string): boolean {
   if (!watching.has(taskId)) return false;
   abortSignals.add(taskId);
+  return true;
+}
+
+// Consume a pending abort signal for a watched task: if one is set, clear it,
+// release the watcher slot, log, and report true so the caller bails WITHOUT moving
+// the task to review (abortTask owns its terminal state + pane/worktree cleanup).
+// false when there is nothing to consume (the watcher proceeds normally).
+function consumeAbort(taskId: string): boolean {
+  if (!abortSignals.has(taskId)) return false;
+  abortSignals.delete(taskId);
+  watching.delete(taskId);
+  console.log(`[butchr] task ${taskId} watcher aborted`);
   return true;
 }
 
@@ -179,6 +181,20 @@ type QueuedRow = TaskRow & {
   dir_id: string;
 };
 
+// Project the directory columns the dispatch query joins in (aliased `dir_id`) back
+// into a DirectoryRow — the shape the dispatch/heal/watch paths take. Used wherever a
+// QueuedRow needs its directory peeled out.
+function dirOf(row: QueuedRow): DirectoryRow {
+  return {
+    id: row.dir_id,
+    path: row.path,
+    label: row.label,
+    herdr_workspace: row.herdr_workspace,
+    herdr_pane: row.herdr_pane,
+    created_at: row.created_at,
+  };
+}
+
 // Liveness markers for the /health endpoint: when the loop last ran and how many
 // times. Stamped at the START of every tick (before any early-out) so the health
 // check reflects that the loop itself is alive even while herdr is down.
@@ -244,14 +260,7 @@ export async function reconcileRunningTasks(
   for (const row of rows) {
     if (watching.has(row.id)) continue; // already adopted (defensive)
 
-    const dir: DirectoryRow = {
-      id: row.dir_id,
-      path: row.path,
-      label: row.label,
-      herdr_workspace: row.herdr_workspace,
-      herdr_pane: row.herdr_pane,
-      created_at: row.created_at,
-    };
+    const dir = dirOf(row);
     const logFile = runLogPath(row.id);
     const doneFile = join(runsDir, `${row.id}.done`);
 
@@ -399,14 +408,7 @@ async function tick(): Promise<void> {
     // idea across overlapping ticks (mirrors `dispatching` for build tasks).
     for (const row of selectIdeaForDispatch(nowStr)) {
       if (ideating.has(row.id)) continue;
-      const dir: DirectoryRow = {
-        id: row.dir_id,
-        path: row.path,
-        label: row.label,
-        herdr_workspace: row.herdr_workspace,
-        herdr_pane: row.herdr_pane,
-        created_at: row.created_at,
-      };
+      const dir = dirOf(row);
       ideating.add(row.id);
       // Fire-and-forget, concurrently.
       generateSpecForIdea(dir, row).finally(() => ideating.delete(row.id));
@@ -424,14 +426,7 @@ async function tick(): Promise<void> {
     for (const row of rows) {
       if (dispatching.has(row.id) || watching.has(row.id)) continue;
 
-      const dir: DirectoryRow = {
-        id: row.dir_id,
-        path: row.path,
-        label: row.label,
-        herdr_workspace: row.herdr_workspace,
-        herdr_pane: row.herdr_pane,
-        created_at: row.created_at,
-      };
+      const dir = dirOf(row);
 
       dispatching.add(row.id);
       // Fire-and-forget, concurrently; the watcher is spawned inside dispatch().
@@ -492,17 +487,15 @@ function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
 }
 
 async function healWorkspace(dir: DirectoryRow): Promise<string | undefined> {
-  if (dir.herdr_workspace && (await harness.workspaceExists(dir.herdr_workspace))) {
-    return dir.herdr_workspace;
-  }
   const label = dir.label ?? dir.path.split("/").pop() ?? dir.path;
-  const ws = await harness.workspaceCreate(dir.path, label);
-  db.query(
-    `UPDATE directories SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
-  ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, dir.id);
-  dir.herdr_workspace = ws.workspaceId ?? null;
-  console.log(`[butchr] recreated herdr workspace for ${label} (${ws.workspaceId})`);
-  return ws.workspaceId;
+  const { workspaceId, created } = await ensureDirectoryWorkspace(dir.id, dir.path, label);
+  // On a recreate, mirror the new id onto the in-memory DirectoryRow and log it
+  // (the reuse path leaves both untouched, as before).
+  if (created) {
+    dir.herdr_workspace = workspaceId ?? null;
+    console.log(`[butchr] recreated herdr workspace for ${label} (${workspaceId})`);
+  }
+  return workspaceId;
 }
 
 /** The launch decision for a task: how to invoke its agent this dispatch. */
@@ -564,14 +557,11 @@ export function resolveLaunchCommand(
   // unset one yields an empty flag so claude keeps its current default. The value
   // was validated at creation (tasks.validateModel) and ends up single-quote
   // escaped when the whole agentCmd is wrapped for `script -c`, so it's injection-safe.
-  const model = task.model?.trim();
-  const modelFlag = model ? `--model ${model}` : "";
-
   const agentCmd = (isResume ? config.resumeCmd : config.agentCmd)
     .replaceAll("{{PROMPT_FILE}}", promptFile)
     .replaceAll("{{MCP_CONFIG}}", mcpConfigFile)
     .replaceAll("{{SESSION_ID}}", sessionId)
-    .replaceAll("{{MODEL_FLAG}}", modelFlag);
+    .replaceAll("{{MODEL_FLAG}}", modelFlag(task.model));
 
   return { isResume, sessionId, agentCmd, lostContext };
 }
@@ -675,7 +665,7 @@ export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> 
         mcpServers: {
           butchr: {
             type: "http",
-            url: `http://${mcpHost}:${config.port}/mcp/${task.id}`,
+            url: `http://${config.loopbackHost}:${config.port}/mcp/${task.id}`,
           },
         },
       }),
@@ -700,69 +690,29 @@ export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> 
     const doneFile = join(runsDir, `${task.id}.done`);
     rmSync(logFile, { force: true });
     rmSync(doneFile, { force: true });
-    const wrapped =
-      `SHELL=/bin/bash script -qfe --log-out ${shq(logFile)} -c ${shq(agentCmd)}; ` +
-      `echo "$?" > ${shq(doneFile)}`;
-    const argv = ["bash", "-lc", wrapped];
+    const argv = buildScriptArgv({ agentCmd, logFile, doneFile });
 
     // One TAB PER TASK: create a dedicated herdr tab (labeled with the task id)
     // and start the agent in it, so tasks land as separate tabs instead of a wall
-    // of split panes in one shared tab. tabCreate is best-effort — on failure it
-    // returns {} and agentStart falls back to the legacy workspace-scoped split.
+    // of split panes in one shared tab.
     //
-    // This whole tab-create → agent-start → close-leftover-pane sequence runs
-    // under the per-workspace herdr pane lock: pane ids are positional and
-    // renumber workspace-globally on any close, so a concurrent dispatch's close
-    // could otherwise land on THIS task's just-started agent pane (the phantom-task
-    // bug). Serializing per workspace keeps each task's pane ids stable across the
-    // sequence; tasks in other workspaces still run concurrently.
+    // This whole tab-create → agent-start → close-leftover-pane sequence (in
+    // startAgentInFreshTab) runs under the per-workspace herdr pane lock: pane ids
+    // are positional and renumber workspace-globally on any close, so a concurrent
+    // dispatch's close could otherwise land on THIS task's just-started agent pane
+    // (the phantom-task bug). Serializing per workspace keeps each task's pane ids
+    // stable across the sequence; tasks in other workspaces still run concurrently.
     const { paneId, tabId } = await withHerdrPaneLock(
       workspaceId ?? "default",
-      async () => {
-        const tab = await harness.tabCreate(workspaceId ?? undefined, worktree, task.id);
-        try {
-          await startAgentReconciling(
-            task.id,
-            worktree,
-            argv,
-            workspaceId ?? undefined,
-            tab.tabId,
-          );
-
-          // `tab create` spawns an empty root shell pane; `agent start --tab` then
-          // adds the agent as a SECOND pane. Close that empty pane so the tab holds
-          // only the agent. Capture the husk's STABLE terminal id FIRST: closing it
-          // renumbers the positional pane ids, and `pane close` returns BEFORE that
-          // renumber propagates, so resolveAgentPane waits for this terminal to
-          // vanish before trusting a re-resolved pane id.
-          let closedTerminalId: string | undefined;
-          if (tab.tabId && tab.rootPaneId) {
-            closedTerminalId = await harness.paneTerminalId(tab.rootPaneId);
-            await harness.paneClose(tab.rootPaneId).catch(() => {});
-          }
-
-          // Re-resolve the agent's CURRENT pane by its STABLE terminal id, waiting
-          // out herdr's positional-id renumber. Returns undefined if the agent
-          // never registered a live pane (a failed/clobbered start) — treat the
-          // whole dispatch as FAILED rather than recording a stale/phantom pane id
-          // (the phantom-task bug).
-          const realPane = await harness.resolveAgentPane(task.id, closedTerminalId);
-          if (!realPane) {
-            throw new Error(
-              `agent ${task.id} did not register a live pane after start`,
-            );
-          }
-          return { paneId: realPane, tabId: tab.tabId };
-        } catch (e) {
-          // Clean up INSIDE the lock so the just-created tab id can't be renumbered
-          // by a concurrent dispatch before we close it: deregister the name (frees
-          // it + closes its pane/tab if it partly registered) and close the
-          // dedicated tab in case the agent never registered (an empty husk tab).
-          await harness.agentDeregister(task.id).catch(() => {});
-          if (tab.tabId) await harness.tabClose(tab.tabId).catch(() => {});
-          throw e;
-        }
-      },
+      () =>
+        startAgentInFreshTab(harness, {
+          name: task.id,
+          cwd: worktree,
+          argv,
+          workspaceId: workspaceId ?? undefined,
+          label: task.id,
+          paneError: `agent ${task.id} did not register a live pane after start`,
+        }),
     );
 
     markRunning(task.id, paneId, sessionId, tabId);
@@ -793,33 +743,6 @@ export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> 
     );
     await harness.agentDeregister(task.id).catch(() => {});
     await markDispatchFailure(task.id, msg);
-  }
-}
-
-// Start the agent, self-healing an `agent_name_taken` collision: if a lingering
-// same-named agent (an orphan from an abandoned/aborted run) is still registered,
-// deregister it and retry once. Without this a single stale agent would block the
-// task from ever dispatching. A second failure propagates to dispatch()'s catch
-// (→ backToQueued, retried next tick).
-async function startAgentReconciling(
-  name: string,
-  worktree: string,
-  argv: string[],
-  workspaceId?: string,
-  tabId?: string,
-): Promise<StartedAgent> {
-  try {
-    return await harness.agentStart(name, worktree, argv, workspaceId, tabId);
-  } catch (e) {
-    if (!harness.isAgentNameTaken(e)) throw e;
-    // Reclaim the stale agent. Closing its pane is NOT enough — herdr keeps the
-    // NAME registered (and respawns the agent), so the retry would fail again.
-    // agentDeregister clears the name via `agent rename --clear` and then closes
-    // the orphaned pane + its (old) tab, truly freeing the name for reuse. We
-    // retry into the fresh tab created for this dispatch.
-    await harness.agentDeregister(name);
-    console.log(`[butchr] reclaimed stale agent name ${name}; retrying agentStart`);
-    return await harness.agentStart(name, worktree, argv, workspaceId, tabId);
   }
 }
 
@@ -1121,12 +1044,7 @@ function spawnWatcher(
 
     // Aborted out from under us: drop the task without capturing output or
     // moving it to review. abortTask owns the pane close + worktree cleanup.
-    if (abortSignals.has(taskId)) {
-      abortSignals.delete(taskId);
-      watching.delete(taskId);
-      console.log(`[butchr] task ${taskId} watcher aborted`);
-      return;
-    }
+    if (consumeAbort(taskId)) return;
 
     // If the agent already submitted (in_review / needs_info) or the task moved on
     // (merged/aborted), there is nothing to rescue. Only a task still sitting in a
@@ -1163,12 +1081,7 @@ function spawnWatcher(
       }
       if (isExecFailure(code, snapshot.length > 0)) {
         // Last-moment abort wins (mirrors the markReview path below).
-        if (abortSignals.has(taskId)) {
-          abortSignals.delete(taskId);
-          watching.delete(taskId);
-          console.log(`[butchr] task ${taskId} watcher aborted`);
-          return;
-        }
+        if (consumeAbort(taskId)) return;
         // markDispatchFailure tears down the herdr tab/pane and increments the
         // attempt count → backoff (re-queue) or give up to `failed` at the cap.
         await markDispatchFailure(
@@ -1222,12 +1135,7 @@ function spawnWatcher(
 
     // Last-moment abort (signalled while we captured output): bail without
     // moving to review so abortTask's terminal state stands.
-    if (abortSignals.has(taskId)) {
-      abortSignals.delete(taskId);
-      watching.delete(taskId);
-      console.log(`[butchr] task ${taskId} watcher aborted`);
-      return;
-    }
+    if (consumeAbort(taskId)) return;
 
     // Rescue PHASE-AWARE: a build (in_progress) agent that ended without submitting →
     // in_review for a human to inspect; a finalize agent that ended → land the merge
