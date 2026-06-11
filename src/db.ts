@@ -531,31 +531,10 @@ export const ALL_STATUSES: TaskStatus[] = [
   "aborted",
 ];
 
-/** The state's kind (idle | agent | feedback). */
-export function stateKind(status: TaskStatus): StateKind {
-  return STATE_META[status]?.kind ?? "idle";
-}
-/** Which agent runs an agent-kind state (undefined for idle/feedback states). */
-export function agentTypeOf(status: TaskStatus): AgentType | undefined {
-  return STATE_META[status]?.agentType;
-}
-/** Is this an AGENT state (an agent is/should be running)? */
-export function isAgentState(status: TaskStatus): boolean {
-  return stateKind(status) === "agent";
-}
-/** Is this a FEEDBACK state (awaiting an operator response to an artifact)? */
-export function isFeedbackState(status: TaskStatus): boolean {
-  return stateKind(status) === "feedback";
-}
 /** The two terminal states. */
 export function isTerminal(status: TaskStatus): boolean {
   return status === "merged" || status === "aborted";
 }
-
-/** The feedback states, in happy-path order (spec_review, in_review, needs_info). */
-export const FEEDBACK_STATES: TaskStatus[] = ALL_STATUSES.filter(isFeedbackState);
-/** The agent states (idea, in_progress, finalizing). */
-export const AGENT_STATES: TaskStatus[] = ALL_STATUSES.filter(isAgentState);
 
 export type TaskRow = {
   id: string;

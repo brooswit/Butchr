@@ -106,21 +106,10 @@ describe("1. state metadata (kind + agentType per state)", () => {
     expect(Object.keys(M).sort()).toEqual([...dbMod.ALL_STATUSES].sort());
   });
 
-  test("the helpers read the metadata consistently", () => {
-    expect(dbMod.stateKind("idea")).toBe("agent");
-    expect(dbMod.agentTypeOf("idea")).toBe("ceo-agent");
-    expect(dbMod.agentTypeOf("in_progress")).toBe("workspace-agent");
-    expect(dbMod.agentTypeOf("finalizing")).toBe("workspace-agent");
-    expect(dbMod.agentTypeOf("spec_review")).toBeUndefined();
-    expect(dbMod.agentTypeOf("blocked")).toBeUndefined();
-
-    expect(dbMod.FEEDBACK_STATES).toEqual(["spec_review", "needs_info", "in_review"]);
-    expect(dbMod.AGENT_STATES).toEqual(["idea", "in_progress", "finalizing"]);
+  test("isTerminal identifies exactly the two terminal states", () => {
     expect(dbMod.isTerminal("merged")).toBe(true);
     expect(dbMod.isTerminal("aborted")).toBe(true);
     expect(dbMod.isTerminal("in_progress")).toBe(false);
-    expect(dbMod.isFeedbackState("in_review")).toBe(true);
-    expect(dbMod.isAgentState("finalizing")).toBe(true);
   });
 
   test("feedbackInfo surfaces each feedback state's artifact + accepted responses", () => {
