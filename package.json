@@ -1,6 +1,6 @@
 {
   "name": "butchr",
-  "version": "0.9.41",
+  "version": "0.9.42",
   "description": "Agent task harness on top of herdr — directories are workspaces, tasks are git worktrees.",
   "type": "module",
   "module": "src/index.ts",
