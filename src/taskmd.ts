@@ -5,7 +5,7 @@
 // We deliberately hand-roll a tiny YAML reader/writer for the front matter
 // (zero dependencies). The shape is fixed and simple, so this is safe.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { TaskKind, TaskStatus } from "./db.ts";
 
 export type TaskMeta = {
@@ -489,9 +489,4 @@ export function renderFinalizePrompt(): string {
     `When you're done (or if there's nothing to wrap up), call \`request_review\` ` +
     `again to signal butchr to finalize and merge your branch.`;
   return [`# Approved — final thoughts before merge`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
-}
-
-/** Ensure a parent directory exists for a given file path. */
-export function ensureParent(filePath: string): void {
-  mkdirSync(dirname(filePath), { recursive: true });
 }
