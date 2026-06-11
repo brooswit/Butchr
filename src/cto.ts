@@ -23,6 +23,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
 import { buildExpandPrompt, parseExpansion } from "./expand.ts";
+import { harness } from "./harness.ts";
 
 const specDir = join(config.dataDir, "spec");
 
@@ -93,32 +94,18 @@ async function defaultSpecWriter(input: SpecGenInput): Promise<string | null> {
     .replaceAll("{{CTO_SESSION}}", ctoSessionFlag(config.ctoSessionId))
     .replaceAll("{{PROMPT_FILE}}", promptFile);
 
-  let timedOut = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  // Run via the harness's headless backend (read-only, stdin ignored, SIGKILL on
+  // timeout) so this agent-execution path goes through the same swappable seam as
+  // the interactive agent. A timed-out / non-zero / errored run yields NULL.
   try {
-    const proc = Bun.spawn(["bash", "-lc", cmd], {
+    const r = await harness.runHeadless({
+      cmd,
       cwd: input.cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      // The spec writer reads context but must never block on stdin.
-      stdin: "ignore",
+      timeoutMs: config.specGenTimeoutMs,
     });
-    timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGKILL");
-    }, config.specGenTimeoutMs);
-
-    const [stdout, , code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (timedOut || code !== 0) return null;
-    return parseExpansion(stdout);
-  } catch {
-    return null;
+    if (!r.ok) return null;
+    return parseExpansion(r.stdout);
   } finally {
-    if (timer) clearTimeout(timer);
     rmSync(promptFile, { force: true });
   }
 }

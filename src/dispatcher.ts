@@ -20,7 +20,8 @@ import { config } from "./config.ts";
 import { db, getSetting, setSetting } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import * as git from "./git.ts";
-import * as herdr from "./herdr.ts";
+import { harness } from "./harness.ts";
+import type { StartedAgent } from "./harness.ts";
 import { readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderReworkPrompt } from "./taskmd.ts";
 import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
@@ -254,12 +255,12 @@ export async function reconcileRunningTasks(
     const logFile = runLogPath(row.id);
     const doneFile = join(runsDir, `${row.id}.done`);
 
-    if (await herdr.agentExists(row.id)) {
+    if (await harness.agentExists(row.id)) {
       // Live agent — re-adopt. Record its current pane + tab (both may have moved
       // while butchr was down) and re-attach a watcher so completion/idle resume.
       const paneId =
-        (await herdr.agentPaneId(row.id)) ?? row.herdr_pane_id ?? row.id;
-      const tabId = (await herdr.agentTabId(row.id)) ?? row.herdr_tab_id ?? undefined;
+        (await harness.agentPaneId(row.id)) ?? row.herdr_pane_id ?? row.id;
+      const tabId = (await harness.agentTabId(row.id)) ?? row.herdr_tab_id ?? undefined;
       if (paneId !== row.herdr_pane_id || tabId !== row.herdr_tab_id) {
         adoptPane(row.id, paneId, tabId);
       }
@@ -270,7 +271,7 @@ export async function reconcileRunningTasks(
       // Agent gone — it ended while butchr was offline. Rescue PHASE-AWARE: a build
       // (in_progress) agent → in_review for a human; a finalize agent → land the merge
       // directly (the operator already approved). Close its (now husk) tab defensively.
-      await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
+      await harness.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
       const snapshot = readRunLogSnapshot(row.id);
       if (row.status === "finalizing") {
         await finalizeMerge(row.id).catch(() => {});
@@ -353,7 +354,7 @@ async function tick(): Promise<void> {
   tickCount++;
   try {
     // If herdr is down, do nothing this tick (no error spam — it may come back).
-    if (!(await herdr.isUp())) return;
+    if (!(await harness.isUp())) return;
 
     // AUTO-UNBLOCK pass: promote any `blocked` task whose blockers have all merged
     // to `queued` BEFORE the queued selection below, so a freshly-unblocked task
@@ -489,11 +490,11 @@ function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
 }
 
 async function healWorkspace(dir: DirectoryRow): Promise<string | undefined> {
-  if (dir.herdr_workspace && (await herdr.workspaceExists(dir.herdr_workspace))) {
+  if (dir.herdr_workspace && (await harness.workspaceExists(dir.herdr_workspace))) {
     return dir.herdr_workspace;
   }
   const label = dir.label ?? dir.path.split("/").pop() ?? dir.path;
-  const ws = await herdr.workspaceCreate(dir.path, label);
+  const ws = await harness.workspaceCreate(dir.path, label);
   db.query(
     `UPDATE directories SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
   ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, dir.id);
@@ -573,7 +574,7 @@ export function resolveLaunchCommand(
   return { isResume, sessionId, agentCmd, lostContext };
 }
 
-async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
+export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
   // Hoisted out of the try so the catch (below) can report whether a RESUME
   // (rework re-launch) failed, not just a fresh dispatch — see fix #2.
   let isResume = false;
@@ -716,7 +717,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
     const { paneId, tabId } = await withHerdrPaneLock(
       workspaceId ?? "default",
       async () => {
-        const tab = await herdr.tabCreate(workspaceId ?? undefined, worktree, task.id);
+        const tab = await harness.tabCreate(workspaceId ?? undefined, worktree, task.id);
         try {
           await startAgentReconciling(
             task.id,
@@ -734,8 +735,8 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
           // vanish before trusting a re-resolved pane id.
           let closedTerminalId: string | undefined;
           if (tab.tabId && tab.rootPaneId) {
-            closedTerminalId = await herdr.paneTerminalId(tab.rootPaneId);
-            await herdr.paneClose(tab.rootPaneId).catch(() => {});
+            closedTerminalId = await harness.paneTerminalId(tab.rootPaneId);
+            await harness.paneClose(tab.rootPaneId).catch(() => {});
           }
 
           // Re-resolve the agent's CURRENT pane by its STABLE terminal id, waiting
@@ -743,7 +744,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
           // never registered a live pane (a failed/clobbered start) — treat the
           // whole dispatch as FAILED rather than recording a stale/phantom pane id
           // (the phantom-task bug).
-          const realPane = await herdr.resolveAgentPane(task.id, closedTerminalId);
+          const realPane = await harness.resolveAgentPane(task.id, closedTerminalId);
           if (!realPane) {
             throw new Error(
               `agent ${task.id} did not register a live pane after start`,
@@ -755,8 +756,8 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
           // by a concurrent dispatch before we close it: deregister the name (frees
           // it + closes its pane/tab if it partly registered) and close the
           // dedicated tab in case the agent never registered (an empty husk tab).
-          await herdr.agentDeregister(task.id).catch(() => {});
-          if (tab.tabId) await herdr.tabClose(tab.tabId).catch(() => {});
+          await harness.agentDeregister(task.id).catch(() => {});
+          if (tab.tabId) await harness.tabClose(tab.tabId).catch(() => {});
           throw e;
         }
       },
@@ -788,7 +789,7 @@ async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
         `:`,
       msg,
     );
-    await herdr.agentDeregister(task.id).catch(() => {});
+    await harness.agentDeregister(task.id).catch(() => {});
     await markDispatchFailure(task.id, msg);
   }
 }
@@ -804,19 +805,19 @@ async function startAgentReconciling(
   argv: string[],
   workspaceId?: string,
   tabId?: string,
-): Promise<herdr.StartedAgent> {
+): Promise<StartedAgent> {
   try {
-    return await herdr.agentStart(name, worktree, argv, workspaceId, tabId);
+    return await harness.agentStart(name, worktree, argv, workspaceId, tabId);
   } catch (e) {
-    if (!herdr.isAgentNameTaken(e)) throw e;
+    if (!harness.isAgentNameTaken(e)) throw e;
     // Reclaim the stale agent. Closing its pane is NOT enough — herdr keeps the
     // NAME registered (and respawns the agent), so the retry would fail again.
     // agentDeregister clears the name via `agent rename --clear` and then closes
     // the orphaned pane + its (old) tab, truly freeing the name for reuse. We
     // retry into the fresh tab created for this dispatch.
-    await herdr.agentDeregister(name);
+    await harness.agentDeregister(name);
     console.log(`[butchr] reclaimed stale agent name ${name}; retrying agentStart`);
-    return await herdr.agentStart(name, worktree, argv, workspaceId, tabId);
+    return await harness.agentStart(name, worktree, argv, workspaceId, tabId);
   }
 }
 
@@ -936,7 +937,7 @@ function spawnWatcher(
           break;
         }
       }
-      const alive = await herdr.agentExists(taskId);
+      const alive = await harness.agentExists(taskId);
       if (alive) seenAlive = true;
       else if (seenAlive) {
         vanished = true;
@@ -1053,7 +1054,7 @@ function spawnWatcher(
     // The process is gone; close the whole tab defensively in case a husk pane
     // remains, so the dead task's tab doesn't linger. (markReview clears the
     // stored tab id, so close it now while we still have it.)
-    await herdr.teardownTask(getTask(taskId)?.herdr_tab_id, taskId, paneId);
+    await harness.teardownTask(getTask(taskId)?.herdr_tab_id, taskId, paneId);
 
     // Last-moment abort (signalled while we captured output): bail without
     // moving to review so abortTask's terminal state stands.

@@ -74,6 +74,24 @@ filesystem.
 *state*; herdr owns *PTYs/panes/tabs*. The herdr **agent name is the task id**, so
 all lookups (`agentExists`, `agentRead`, `agentDeregister`, …) key off the task id.
 
+**The agent-execution harness (`src/harness.ts`).** The session/runtime that
+actually *runs* the Claude Code agent sits behind a swappable interface —
+**`AgentRunner`** (a.k.a. the ExecBackend) — so butchr is decoupled from herdr
+specifically ("herdr or whatever"). The interface names every operation the rest of
+butchr needs from the runtime: **provision** a workspace, **launch** the agent
+(both the *interactive* workspace agent via a PTY/`script` wrapper — with
+session-id / resume / mcp-config / model — **and** the *headless read-only* modes:
+the CTO-fork spec generator, the conformance reviewer, the brief expander, via
+`runHeadless`), **confirm live**, **resolve** the agent's pane handle, **read**
+output, and **tear down**. `src/herdr.ts` is the concrete herdr implementation
+(`herdrRunner`); the **dispatcher and reaper talk to the `harness` proxy, never to
+herdr directly**, and `setRunner()` lets tests (or a future deployment) drop in a
+different backend — the dispatcher path is covered by a **fake backend** in
+`test/harness.test.ts`. The runtime-handle types (`Workspace`/`Tab`/`StartedAgent`/
+`PaneInfo`) and the headless `HeadlessSpec`/`HeadlessResult` are defined in
+`harness.ts`; `herdr.ts` re-exports the handle types for its other importers
+(`server.ts`/`directories.ts`/`tasks.ts`), which still call it directly.
+
 ```
                           ┌──────────────────────────── butchr (one Bun process) ────────────────────────────┐
                           │                                                                                    │
@@ -85,7 +103,7 @@ all lookups (`agentExists`, `agentRead`, `agentDeregister`, …) key off the tas
                           │                                                                                    │
   Claude Code agent ─MCP──┘   dispatcher.ts (tick loop + watcher) ─► taskmd.ts (prompt render)                 │
         ▲                      │  ├─ git.ts   (worktree / rebase / merge / revert / cleanup)                    │
-        │ herdr CLI            │  ├─ herdr.ts (workspace / tab / pane / agent)                                  │
+        │ herdr CLI            │  ├─ harness.ts (AgentRunner seam) ─► herdr.ts (workspace / tab / pane / agent) │
         │ (agent start, …)     │  ├─ verify.ts (post-merge gate)  usage.ts (token accounting)                  │
         ▼                      │  └─ taskmd.ts (prompt render: agent / rework / answer)                         │
    herdr server ◄─PTY/panes────┘   reaper.ts (boot cleanup)  log.ts (rotating file log)                        │

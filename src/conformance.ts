@@ -24,6 +24,7 @@ import { db } from "./db.ts";
 import { getDirectory } from "./directories.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
+import { harness } from "./harness.ts";
 // getTask / taskView are imported from tasks.ts; the reverse edge (tasks.ts importing
 // triggerConformance) makes this a cycle, but every cross-reference here is used only
 // INSIDE functions (call time), never at module-evaluation top level, so the cycle
@@ -165,33 +166,18 @@ async function defaultConformanceRunner(input: ConformanceInput): Promise<Confor
   writeFileSync(promptFile, buildReviewPrompt(input), "utf8");
   const cmd = tmpl.replaceAll("{{PROMPT_FILE}}", promptFile);
 
-  let proc: ReturnType<typeof Bun.spawn> | null = null;
-  let timedOut = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  // Run via the harness's headless backend (read-only, stdin ignored, SIGKILL on
+  // timeout) so this agent-execution path goes through the same swappable seam as
+  // the interactive agent. A timed-out / non-zero / unparseable run yields NULL.
   try {
-    proc = Bun.spawn(["bash", "-lc", cmd], {
+    const r = await harness.runHeadless({
+      cmd,
       cwd: input.cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
+      timeoutMs: config.conformanceTimeoutMs,
     });
-    const child = proc;
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, config.conformanceTimeoutMs);
-
-    const [stdout, , code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    if (timedOut || code !== 0) return null;
-    return parseConformanceVerdict(stdout);
-  } catch {
-    return null;
+    if (!r.ok) return null;
+    return parseConformanceVerdict(r.stdout);
   } finally {
-    if (timer) clearTimeout(timer);
     rmSync(promptFile, { force: true });
   }
 }

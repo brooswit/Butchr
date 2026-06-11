@@ -4,6 +4,20 @@
 // a JSON envelope: {"id": "...", "result": { ... }}.
 import { config } from "./config.ts";
 import { run } from "./exec.ts";
+// The runtime-handle types + the backend interface live in harness.ts (which owns
+// the abstraction's contract). We import them TYPE-ONLY (erased at runtime, so no
+// import cycle: harness.ts imports `herdrRunner` from here as a value) and re-export
+// the handle types so herdr.ts's existing importers keep working unchanged.
+import type {
+  AgentRunner,
+  HeadlessResult,
+  HeadlessSpec,
+  PaneInfo,
+  StartedAgent,
+  Tab,
+  Workspace,
+} from "./harness.ts";
+export type { PaneInfo, StartedAgent, Tab, Workspace };
 
 const bin = config.herdrBin;
 
@@ -59,8 +73,6 @@ export async function isUp(): Promise<boolean> {
   return res.ok && /status:\s*running/.test(res.stdout);
 }
 
-export type Workspace = { workspaceId: string; rootPaneId: string };
-
 /** Provision a workspace for a directory. Returns the workspace + root pane id. */
 export async function workspaceCreate(
   cwd: string,
@@ -88,8 +100,6 @@ export async function workspaceClose(workspaceId: string): Promise<void> {
   if (!workspaceId) return;
   await herdr(["workspace", "close", workspaceId]).catch(() => {});
 }
-
-export type Tab = { tabId?: string; rootPaneId?: string };
 
 /**
  * Create a dedicated herdr TAB for a task (one tab per task — the operator's
@@ -136,8 +146,6 @@ export async function agentTabId(name: string): Promise<string | undefined> {
   if (!r) return undefined;
   return r.agent?.tab_id ?? r.pane?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id ?? undefined;
 }
-
-export type StartedAgent = { paneId: string; terminalId?: string };
 
 /**
  * Start an agent process rooted at `cwd` (the task worktree). `argv` is the
@@ -244,13 +252,6 @@ export async function paneTerminalId(paneId: string): Promise<string | undefined
   if (!r) return undefined;
   return r.pane?.terminal_id ?? r.terminal_id ?? undefined;
 }
-
-export type PaneInfo = {
-  paneId: string;
-  terminalId?: string;
-  tabId?: string;
-  workspaceId?: string;
-};
 
 /** List the live panes (optionally scoped to a workspace). [] on any failure. */
 export async function paneList(workspaceId?: string): Promise<PaneInfo[]> {
@@ -416,3 +417,76 @@ export async function agentDeregister(name: string): Promise<void> {
   if (pane) await run([bin, "pane", "close", pane]).catch(() => {});
   if (tab) await run([bin, "tab", "close", tab]).catch(() => {});
 }
+
+/**
+ * Run one HEADLESS, read-only agent invocation (the CTO-fork spec generator, the
+ * conformance reviewer, the brief expander). Unlike the interactive agent these do
+ * NOT go through a herdr PTY — they are plain child processes — but they live on
+ * the backend so ALL Claude execution sits behind the one swappable seam.
+ *
+ * The caller has already substituted the command template and written any temp
+ * prompt file; we just spawn `bash -lc <cmd>` in `cwd` with stdin ignored (a
+ * read-only agent must never block on input), bounded by `timeoutMs` (SIGKILL on
+ * expiry), and return its stdout for the caller to parse. Never throws — a
+ * spawn/timeout/non-zero run surfaces as `ok: false`. This is the byte-for-byte
+ * behavior the three headless callers previously inlined via `Bun.spawn`.
+ */
+export async function runHeadless(spec: HeadlessSpec): Promise<HeadlessResult> {
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const proc = Bun.spawn(["bash", "-lc", spec.cmd], {
+      cwd: spec.cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    if (spec.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        proc.kill("SIGKILL");
+      }, spec.timeoutMs);
+    }
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { ok: !timedOut && code === 0, code, stdout, stderr, timedOut };
+  } catch {
+    return { ok: false, code: null, stdout: "", stderr: "", timedOut };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * The herdr-backed implementation of the AgentRunner interface (src/harness.ts).
+ * This is the DEFAULT backend butchr runs with: each method delegates to the
+ * herdr CLI wrapper above. Assembled as an object literal of the existing
+ * standalone exports so herdr.ts's other importers (server/directories/tasks) keep
+ * calling them directly, while the dispatcher/reaper/headless callers go through
+ * the `harness` proxy that points here.
+ */
+export const herdrRunner: AgentRunner = {
+  isUp,
+  workspaceCreate,
+  workspaceExists,
+  workspaceClose,
+  tabCreate,
+  tabClose,
+  agentTabId,
+  agentStart,
+  agentExists,
+  agentPaneId,
+  agentTerminalId,
+  paneTerminalId,
+  paneList,
+  resolveAgentPane,
+  isAgentNameTaken,
+  agentRead,
+  paneClose,
+  teardownTask,
+  agentDeregister,
+  runHeadless,
+};

@@ -20,6 +20,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
 import { HttpError } from "./directories.ts";
+import { harness } from "./harness.ts";
 
 const expandDir = join(config.dataDir, "expand");
 
@@ -120,31 +121,18 @@ async function defaultBriefExpander(input: BriefExpansionInput): Promise<string 
   writeFileSync(promptFile, buildExpandPrompt(input.brief), "utf8");
   const cmd = tmpl.replaceAll("{{PROMPT_FILE}}", promptFile);
 
-  let timedOut = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  // Run via the harness's headless backend (read-only, stdin ignored, SIGKILL on
+  // timeout) so this agent-execution path goes through the same swappable seam as
+  // the interactive agent. A timed-out / non-zero / unparseable run yields NULL.
   try {
-    const proc = Bun.spawn(["bash", "-lc", cmd], {
+    const r = await harness.runHeadless({
+      cmd,
       cwd: input.cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
+      timeoutMs: config.expandBriefTimeoutMs,
     });
-    timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGKILL");
-    }, config.expandBriefTimeoutMs);
-
-    const [stdout, , code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (timedOut || code !== 0) return null;
-    return parseExpansion(stdout);
-  } catch {
-    return null;
+    if (!r.ok) return null;
+    return parseExpansion(r.stdout);
   } finally {
-    if (timer) clearTimeout(timer);
     rmSync(promptFile, { force: true });
   }
 }

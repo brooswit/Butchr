@@ -10,7 +10,7 @@ import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { DirectoryRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
-import * as herdr from "./herdr.ts";
+import { harness } from "./harness.ts";
 
 const git = config.gitBin;
 
@@ -107,10 +107,10 @@ export async function reapOrphans(
       )
       .all();
     for (const t of terminal) {
-      if (!(await herdr.agentExists(t.id))) continue;
+      if (!(await harness.agentExists(t.id))) continue;
       // Clears the name via `agent rename --clear` and closes the orphaned
       // pane + its tab (best-effort inside agentDeregister).
-      await herdr.agentDeregister(t.id).catch(() => {});
+      await harness.agentDeregister(t.id).catch(() => {});
       husks++;
       console.log(`[butchr] reaped herdr husk for terminal task ${t.id} (${t.status})`);
     }
