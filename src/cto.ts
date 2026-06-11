@@ -19,13 +19,9 @@
 // We spawn directly via Bun.spawn (rather than exec.ts' run()) so we can KILL the child on
 // timeout. The runner is overridable in tests (setSpecWriter) so the idea→ready path is
 // exercised without spawning a real claude.
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { config } from "./config.ts";
 import { buildExpandPrompt, parseExpansion } from "./expand.ts";
-import { harness } from "./harness.ts";
-
-const specDir = join(config.dataDir, "spec");
+import { runHeadlessWithPrompt } from "./headless.ts";
 
 /** Everything the spec writer needs; passed to the (mockable) runner. */
 export type SpecGenInput = {
@@ -74,11 +70,6 @@ export function ctoSessionFlag(sessionId: string): string {
  * config.specGenTimeoutMs — a timed-out / non-zero / unparseable run yields NULL. Never throws.
  */
 async function defaultSpecWriter(input: SpecGenInput): Promise<string | null> {
-  const tmpl = config.specGenCmd.trim();
-  if (!tmpl) return null; // spec generation disabled
-
-  mkdirSync(specDir, { recursive: true });
-  const promptFile = join(specDir, `${input.taskId}.md`);
   // On a REVISE round, append the operator's change requests so the regenerated spec
   // addresses them (the base brief grounds the spec; the notes steer the revision).
   let prompt = buildExpandPrompt(input.brief);
@@ -89,25 +80,18 @@ async function defaultSpecWriter(input: SpecGenInput): Promise<string | null> {
       `address the following, keeping everything else that was correct:\n\n` +
       input.notes.trim();
   }
-  writeFileSync(promptFile, prompt, "utf8");
-  const cmd = tmpl
-    .replaceAll("{{CTO_SESSION}}", ctoSessionFlag(config.ctoSessionId))
-    .replaceAll("{{PROMPT_FILE}}", promptFile);
 
-  // Run via the harness's headless backend (read-only, stdin ignored, SIGKILL on
-  // timeout) so this agent-execution path goes through the same swappable seam as
-  // the interactive agent. A timed-out / non-zero / errored run yields NULL.
-  try {
-    const r = await harness.runHeadless({
-      cmd,
-      cwd: input.cwd,
-      timeoutMs: config.specGenTimeoutMs,
-    });
-    if (!r.ok) return null;
-    return parseExpansion(r.stdout);
-  } finally {
-    rmSync(promptFile, { force: true });
-  }
+  const stdout = await runHeadlessWithPrompt({
+    cmdTemplate: config.specGenCmd,
+    subdir: "spec",
+    fileBase: `${input.taskId}.md`,
+    promptText: prompt,
+    cwd: input.cwd,
+    timeoutMs: config.specGenTimeoutMs,
+    extraVars: { "{{CTO_SESSION}}": ctoSessionFlag(config.ctoSessionId) },
+  });
+  if (stdout === null) return null;
+  return parseExpansion(stdout);
 }
 
 /**

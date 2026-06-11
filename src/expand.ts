@@ -16,13 +16,9 @@
 // the route + parsing wiring is exercised without spawning a real claude. Unlike the
 // gate this is NOT best-effort: a failure surfaces an error to the operator (who keeps
 // their brief and can retry or write the prompt by hand).
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { config } from "./config.ts";
 import { HttpError } from "./directories.ts";
-import { harness } from "./harness.ts";
-
-const expandDir = join(config.dataDir, "expand");
+import { runHeadlessWithPrompt } from "./headless.ts";
 
 /** Everything the expander needs; passed to the (mockable) runner. */
 export type BriefExpansionInput = {
@@ -113,28 +109,16 @@ export function parseExpansion(stdout: string): string | null {
  * a timed-out / non-zero / unparseable run yields NULL. Never throws.
  */
 async function defaultBriefExpander(input: BriefExpansionInput): Promise<string | null> {
-  const tmpl = config.expandBriefCmd.trim();
-  if (!tmpl) return null; // expansion disabled
-
-  mkdirSync(expandDir, { recursive: true });
-  const promptFile = join(expandDir, `${Date.now()}-${process.pid}.md`);
-  writeFileSync(promptFile, buildExpandPrompt(input.brief), "utf8");
-  const cmd = tmpl.replaceAll("{{PROMPT_FILE}}", promptFile);
-
-  // Run via the harness's headless backend (read-only, stdin ignored, SIGKILL on
-  // timeout) so this agent-execution path goes through the same swappable seam as
-  // the interactive agent. A timed-out / non-zero / unparseable run yields NULL.
-  try {
-    const r = await harness.runHeadless({
-      cmd,
-      cwd: input.cwd,
-      timeoutMs: config.expandBriefTimeoutMs,
-    });
-    if (!r.ok) return null;
-    return parseExpansion(r.stdout);
-  } finally {
-    rmSync(promptFile, { force: true });
-  }
+  const stdout = await runHeadlessWithPrompt({
+    cmdTemplate: config.expandBriefCmd,
+    subdir: "expand",
+    fileBase: `${Date.now()}-${process.pid}.md`,
+    promptText: buildExpandPrompt(input.brief),
+    cwd: input.cwd,
+    timeoutMs: config.expandBriefTimeoutMs,
+  });
+  if (stdout === null) return null;
+  return parseExpansion(stdout);
 }
 
 /**

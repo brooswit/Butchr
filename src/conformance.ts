@@ -17,22 +17,19 @@
 // `bash -lc` in the task's worktree with only Read/Grep/Glob — see config.ts). The
 // runner is overridable in tests (setConformanceRunner) so the persistence + trigger
 // wiring is exercised without spawning a real claude.
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { getDirectory } from "./directories.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
-import { harness } from "./harness.ts";
+import { runHeadlessWithPrompt } from "./headless.ts";
 // getTask / taskView are imported from tasks.ts; the reverse edge (tasks.ts importing
 // triggerConformance) makes this a cycle, but every cross-reference here is used only
 // INSIDE functions (call time), never at module-evaluation top level, so the cycle
 // resolves cleanly under Bun's ESM loader — same pattern the rest of the tree relies on.
 import { getTask, taskView } from "./tasks.ts";
 import { readTaskMd } from "./taskmd.ts";
-
-const confDir = join(config.dataDir, "conformance");
 
 /** The reviewer's verdict on whether a diff satisfies its prompt. */
 export type ConformanceVerdict = "yes" | "partial" | "no";
@@ -160,28 +157,16 @@ export function parseConformanceVerdict(stdout: string): ConformanceResult | nul
  * timed-out / non-zero / unparseable run yields NULL (best-effort). Never throws.
  */
 async function defaultConformanceRunner(input: ConformanceInput): Promise<ConformanceResult | null> {
-  const tmpl = config.conformanceCmd.trim();
-  if (!tmpl) return null; // gate disabled
-
-  mkdirSync(confDir, { recursive: true });
-  const promptFile = join(confDir, `${input.taskId}.md`);
-  writeFileSync(promptFile, buildReviewPrompt(input), "utf8");
-  const cmd = tmpl.replaceAll("{{PROMPT_FILE}}", promptFile);
-
-  // Run via the harness's headless backend (read-only, stdin ignored, SIGKILL on
-  // timeout) so this agent-execution path goes through the same swappable seam as
-  // the interactive agent. A timed-out / non-zero / unparseable run yields NULL.
-  try {
-    const r = await harness.runHeadless({
-      cmd,
-      cwd: input.cwd,
-      timeoutMs: config.conformanceTimeoutMs,
-    });
-    if (!r.ok) return null;
-    return parseConformanceVerdict(r.stdout);
-  } finally {
-    rmSync(promptFile, { force: true });
-  }
+  const stdout = await runHeadlessWithPrompt({
+    cmdTemplate: config.conformanceCmd,
+    subdir: "conformance",
+    fileBase: `${input.taskId}.md`,
+    promptText: buildReviewPrompt(input),
+    cwd: input.cwd,
+    timeoutMs: config.conformanceTimeoutMs,
+  });
+  if (stdout === null) return null;
+  return parseConformanceVerdict(stdout);
 }
 
 /** Run the active runner once, converting any throw into NULL (best-effort). */
