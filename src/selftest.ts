@@ -144,12 +144,12 @@ export async function resolveSandbox(
     "/api/directories",
   );
   let target: { id: string; label: string; path: string } | undefined;
+  const known =
+    dirs.map((d) => `  ${d.id}  ${d.label}  ${d.path}`).join("\n") ||
+    "  (no directories registered)";
   if (dir) {
     target = dirs.find((d) => d.id === dir) ?? dirs.find((d) => d.path === dir);
     if (!target) {
-      const known =
-        dirs.map((d) => `  ${d.id}  ${d.label}  ${d.path}`).join("\n") ||
-        "  (no directories registered)";
       throw new Error(`no registered directory matches "${dir}". Known directories:\n${known}`);
     }
   } else {
@@ -157,9 +157,6 @@ export async function resolveSandbox(
       dirs.find((d) => (d.label ?? "").toLowerCase() === "sandbox") ??
       dirs.find((d) => basename(d.path ?? "") === "sandbox");
     if (!target) {
-      const known =
-        dirs.map((d) => `  ${d.id}  ${d.label}  ${d.path}`).join("\n") ||
-        "  (no directories registered)";
       throw new Error(
         `no 'sandbox' directory is registered — pass --dir <id|path> to choose one.\n` +
           `Known directories:\n${known}`,
