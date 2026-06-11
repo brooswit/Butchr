@@ -109,23 +109,63 @@ export function getDirectoryByPath(path: string): DirectoryRow | null {
   );
 }
 
+export type WorkspaceHeal = { workspaceId: string | undefined; created: boolean };
+
+// In-flight workspace create/heal keyed by directory id. BOTH callers that heal a
+// directory's workspace — the dispatcher (task agents) and the managed CTO agent —
+// funnel through this ONE map, so a CTO (re)launch and a task dispatch both racing the
+// SAME directory's closed/restarted herdr workspace can no longer each see
+// workspaceExists=false and double-create (the second persist UPDATE would clobber the
+// first, orphaning a workspace). The FIRST caller runs the heal; concurrent callers
+// await its result. The entry is cleared once the heal settles, so a LATER heal (a
+// subsequent close/restart) starts fresh.
+const workspaceInFlight = new Map<string, Promise<WorkspaceHeal>>();
+
 /**
  * Ensure the directory's herdr workspace exists, recreating it (and persisting the
  * new ids on the directory row) when herdr was restarted or the workspace was closed
  * out from under us. The single existence-check + create + row UPDATE both the
  * dispatcher (task agents) and the managed CTO agent funnel through — one workspace
- * per directory backs both. Goes through the swappable `harness` runner so a
- * test-injected fake backend is honored.
+ * per directory backs both — and the in-flight dedupe lives HERE (not in any one
+ * caller) so EVERY path collapses to exactly one create per directory under
+ * concurrency. Goes through the swappable `harness` runner so a test-injected fake
+ * backend is honored.
  *
  * Returns the workspace id and whether a fresh one was `created` (vs the existing one
  * being reused) so the caller can do its own create-only bookkeeping (the dispatcher
- * logs + mutates its in-memory DirectoryRow; the CTO agent does neither).
+ * logs + mutates its in-memory DirectoryRow; the CTO agent does neither). The single
+ * underlying create is owned by — and reported `created: true` to — the FIRST caller;
+ * concurrent callers that merely await that in-flight heal get the same workspace id
+ * with `created: false`, so the create-only bookkeeping runs exactly once no matter how
+ * many race.
  */
 export async function ensureDirectoryWorkspace(
   directoryId: string,
   cwd: string,
   label: string,
-): Promise<{ workspaceId: string | undefined; created: boolean }> {
+): Promise<WorkspaceHeal> {
+  const existing = workspaceInFlight.get(directoryId);
+  if (existing) {
+    // An awaiter: share the in-flight heal's workspace id, but never re-claim the
+    // create — the initiator owns it (and its create-only bookkeeping).
+    const { workspaceId } = await existing;
+    return { workspaceId, created: false };
+  }
+  const p = healDirectoryWorkspace(directoryId, cwd, label).finally(() =>
+    workspaceInFlight.delete(directoryId),
+  );
+  workspaceInFlight.set(directoryId, p);
+  return p;
+}
+
+// The actual existence-check + create + row UPDATE, run once per in-flight heal (see
+// ensureDirectoryWorkspace's dedupe). Reuses the recorded workspace when it still
+// exists; otherwise creates a fresh one and persists its ids on the directory row.
+async function healDirectoryWorkspace(
+  directoryId: string,
+  cwd: string,
+  label: string,
+): Promise<WorkspaceHeal> {
   const existing = getDirectory(directoryId)?.herdr_workspace ?? null;
   if (existing && (await harness.workspaceExists(existing))) {
     return { workspaceId: existing, created: false };

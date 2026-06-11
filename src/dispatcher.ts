@@ -98,10 +98,6 @@ export function readRunLogSnapshot(taskId: string): string {
   }
 }
 
-// In-flight workspace create/heal keyed by directory id, so concurrent tasks in
-// the same directory share one workspace instead of racing to recreate it.
-const workspaceInFlight = new Map<string, Promise<string | undefined>>();
-
 // Per-workspace lock serializing the herdr "create a task's tab + start its agent
 // + close the leftover root pane" critical section. herdr pane ids are POSITIONAL
 // and renumber workspace-globally whenever ANY pane closes, so two concurrent
@@ -473,24 +469,17 @@ export async function generateSpecForIdea(dir: DirectoryRow, task: TaskRow): Pro
   }
 }
 
-// Ensure the directory's herdr workspace still exists; recreate it (and update
-// the DB) if herdr was restarted or the workspace was closed out from under us.
-// Concurrent tasks in the same directory can call this at once, so dedupe by
-// directory id: the first caller does the create/heal and the rest await its
-// promise, which is cleared once it settles.
-function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
-  const existing = workspaceInFlight.get(dir.id);
-  if (existing) return existing;
-  const p = healWorkspace(dir).finally(() => workspaceInFlight.delete(dir.id));
-  workspaceInFlight.set(dir.id, p);
-  return p;
-}
-
-async function healWorkspace(dir: DirectoryRow): Promise<string | undefined> {
+// Heal the directory's herdr workspace (recreate it after an herdr restart / manual
+// close) and surface the id for this dispatch. The create/heal DEDUPE now lives inside
+// ensureDirectoryWorkspace itself (a module-level in-flight map keyed by directory id),
+// so concurrent task dispatches AND the managed CTO agent funnel through ONE create per
+// directory — this wrapper just adds the dispatcher's create-only bookkeeping: on a
+// recreate, mirror the new id onto the in-memory DirectoryRow and log it. The reuse
+// path — and any concurrent awaiter that didn't own the create (created=false) — leave
+// both untouched, as before.
+async function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
   const label = dir.label ?? dir.path.split("/").pop() ?? dir.path;
   const { workspaceId, created } = await ensureDirectoryWorkspace(dir.id, dir.path, label);
-  // On a recreate, mirror the new id onto the in-memory DirectoryRow and log it
-  // (the reuse path leaves both untouched, as before).
   if (created) {
     dir.herdr_workspace = workspaceId ?? null;
     console.log(`[butchr] recreated herdr workspace for ${label} (${workspaceId})`);
