@@ -6,6 +6,7 @@ import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
 import { computeDiskUsage } from "./disk.ts";
 import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
+import type { DirectoryRow, TaskRow } from "./db.ts";
 import { currentPaneRepairing, dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
@@ -74,6 +75,55 @@ async function readJson(req: Request): Promise<any> {
   } catch {
     throw new HttpError(400, "invalid JSON body");
   }
+}
+
+/**
+ * Parse a positive-integer query param with a default and optional clamp. A
+ * missing/non-finite/non-positive value yields `def`; otherwise it is floored and
+ * clamped into `[min, max]` (each applied only when given). Centralizes the
+ * `Number.isFinite(raw) && raw > 0 ? Math.min(MAX, Math.floor(raw)) : DEFAULT`
+ * idiom the read routes repeated for `days` / `offset` / `limit`.
+ */
+function intParam(
+  url: URL,
+  name: string,
+  opts: { def: number; min?: number; max?: number },
+): number {
+  const raw = Number(url.searchParams.get(name));
+  if (!(Number.isFinite(raw) && raw > 0)) return opts.def;
+  let v = Math.floor(raw);
+  if (opts.max !== undefined) v = Math.min(opts.max, v);
+  if (opts.min !== undefined) v = Math.max(opts.min, v);
+  return v;
+}
+
+/** Look up a directory by id or throw 404 — the single guard for the directory-scoped routes. */
+function requireDirectory(id: string): DirectoryRow {
+  const dir = getDirectory(id);
+  if (!dir) throw new HttpError(404, "directory not found");
+  return dir;
+}
+
+/** Look up a task by id or throw 404 — the single guard for the task-scoped routes. */
+function requireTask(id: string): TaskRow {
+  const t = getTask(id);
+  if (!t) throw new HttpError(404, "task not found");
+  return t;
+}
+
+/**
+ * Resolve a task's session context for the read-only transcript/activity routes:
+ * throws 404 (via requireTask) if the task is gone, else returns the worktree path +
+ * session id, or null when there's no resolvable session yet (its directory is gone
+ * or it has no session_id) — the caller then yields an empty transcript/activity
+ * rather than a 404. The transcript itself lives under ~/.claude/projects (outside
+ * the worktree), so the path is only a lookup hint that survives worktree cleanup.
+ */
+function taskSessionContext(taskId: string): { wt: string; sessionId: string } | null {
+  const t = requireTask(taskId);
+  const dir = getDirectory(t.directory_id);
+  if (!dir || !t.session_id) return null;
+  return { wt: worktreePath(dir.path, taskId), sessionId: t.session_id };
 }
 
 // ---- CSRF / DNS-rebinding guard -------------------------------------------
@@ -462,8 +512,7 @@ route("POST", "/api/resume", async () => setPauseResponse(false));
 // auto-merge rates. `?days=N` (1–90, default 14) sets the throughput window.
 route("GET", "/api/metrics", async (req) => {
   const url = new URL(req.url);
-  const raw = Number(url.searchParams.get("days"));
-  const days = Number.isFinite(raw) && raw > 0 ? Math.min(90, Math.floor(raw)) : 14;
+  const days = intParam(url, "days", { def: 14, max: 90 });
   return json(computeMetrics(metricRows(), Date.now(), days));
 });
 
@@ -540,7 +589,7 @@ route("DELETE", "/api/directories/:id", async (_req, p) => {
 // huge prompt bodies never ship to the client (the list projection omits them). A
 // blank/absent q returns the full list unchanged. See tasks.taskListView.
 route("GET", "/api/directories/:id/tasks", async (req, p) => {
-  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  requireDirectory(p.id!);
   const q = new URL(req.url).searchParams.get("q") ?? undefined;
   return json(taskListView(p.id!, q));
 });
@@ -594,9 +643,8 @@ route("POST", "/api/directories/:id/tasks", async (req, p) => {
 
 // Tasks
 route("GET", "/api/tasks/:id", async (_req, p) => {
-  const v = taskView(p.id!);
-  if (!v) throw new HttpError(404, "task not found");
-  return json(v);
+  requireTask(p.id!);
+  return json(taskView(p.id!));
 });
 
 route("GET", "/api/tasks/:id/diff", async (_req, p) => {
@@ -610,14 +658,14 @@ route("GET", "/api/tasks/:id/diff", async (_req, p) => {
 // critical-path total across its dependency chain (a plan's sub-tasks, or this
 // task's blockers), or null when there's nothing to chain. 404 if the task is gone.
 route("GET", "/api/tasks/:id/estimate", async (_req, p) => {
-  if (!getTask(p.id!)) throw new HttpError(404, "task not found");
+  requireTask(p.id!);
   return json({ single: taskEstimate(p.id!), chain: taskChainEstimate(p.id!) });
 });
 
 // Per-task AUDIT TIMELINE: the ordered log of this task's status transitions
 // (oldest → newest), powering the task-detail timeline. 404 if the task is gone.
 route("GET", "/api/tasks/:id/events", async (_req, p) => {
-  if (!getTask(p.id!)) throw new HttpError(404, "task not found");
+  requireTask(p.id!);
   return json(listTaskEvents(p.id!));
 });
 
@@ -625,8 +673,7 @@ route("GET", "/api/tasks/:id/events", async (_req, p) => {
 // page's "Live output" panel. Only meaningful while the task has a live pane;
 // returns "" once the pane is gone. Never the source of truth for review.
 route("GET", "/api/tasks/:id/output", async (_req, p) => {
-  const t = getTask(p.id!);
-  if (!t) throw new HttpError(404, "task not found");
+  const t = requireTask(p.id!);
   const output = t.herdr_pane_id ? await herdr.agentRead(p.id!) : "";
   return json({ output });
 });
@@ -639,24 +686,15 @@ route("GET", "/api/tasks/:id/output", async (_req, p) => {
 // `?offset=&limit=` (limit clamped to 1..500, default 200) since a long session
 // produces hundreds of turns; `total` and `hasMore` let the UI page or "load more".
 route("GET", "/api/tasks/:id/transcript", async (req, p) => {
-  const t = getTask(p.id!);
-  if (!t) throw new HttpError(404, "task not found");
-  const dir = getDirectory(t.directory_id);
   // The transcript lives under ~/.claude/projects (outside the worktree), so it
   // survives worktree cleanup; findTranscript falls back to a by-session-id scan
   // when the munged worktree path no longer exists (e.g. after merge).
-  const all =
-    dir && t.session_id
-      ? readSessionTranscript(worktreePath(dir.path, p.id!), t.session_id)
-      : [];
+  const ctx = taskSessionContext(p.id!);
+  const all = ctx ? readSessionTranscript(ctx.wt, ctx.sessionId) : [];
   const total = all.length;
   const url = new URL(req.url);
-  const rawOffset = Number(url.searchParams.get("offset"));
-  const rawLimit = Number(url.searchParams.get("limit"));
-  const offset =
-    Number.isFinite(rawOffset) && rawOffset > 0 ? Math.min(Math.floor(rawOffset), total) : 0;
-  const limit =
-    Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(500, Math.floor(rawLimit)) : 200;
+  const offset = intParam(url, "offset", { def: 0, max: total });
+  const limit = intParam(url, "limit", { def: 200, max: 500 });
   const turns = all.slice(offset, offset + limit);
   return json({ turns, total, offset, limit, hasMore: offset + turns.length < total });
 });
@@ -669,13 +707,12 @@ route("GET", "/api/tasks/:id/transcript", async (req, p) => {
 // no qualifying step yet; `elapsedMs` is null until the task has started running.
 // No actions, no side effects. 404 only if the task itself is gone.
 route("GET", "/api/tasks/:id/activity", async (_req, p) => {
-  const t = getTask(p.id!);
-  if (!t) throw new HttpError(404, "task not found");
-  const dir = getDirectory(t.directory_id);
-  const activity =
-    dir && t.session_id
-      ? readSessionActivity(worktreePath(dir.path, p.id!), t.session_id)
-      : { lastAction: null, lastAt: null };
+  const ctx = taskSessionContext(p.id!);
+  const activity = ctx
+    ? readSessionActivity(ctx.wt, ctx.sessionId)
+    : { lastAction: null, lastAt: null };
+  // Re-read the row (still present — taskSessionContext 404s if it isn't) for started_at.
+  const t = getTask(p.id!)!;
   const startMs = t.started_at ? Date.parse(t.started_at) : NaN;
   const elapsedMs = Number.isFinite(startMs) ? Math.max(0, Date.now() - startMs) : null;
   return json({ ...activity, elapsedMs });
@@ -759,8 +796,7 @@ async function attachAgentTerminal(agentName: string): Promise<Response> {
 // have a live pane to attach to — the agent exits after the non-blocking
 // request_review, so `review` (and queued/merged/aborted) have no pane.
 route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
-  const t = getTask(p.id!);
-  if (!t) throw new HttpError(404, "task not found");
+  const t = requireTask(p.id!);
   // Gate on an actual live pane rather than a specific status — only a running
   // agent has a pane (herdr_pane_id set); everything else has nothing to attach to.
   if (!t.herdr_pane_id) {
@@ -785,27 +821,27 @@ route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
 // CtoStatus (the lifecycle calls also publish a `cto.updated` SSE event so every
 // dashboard reflects it live). 404 if the directory is gone.
 route("GET", "/api/directories/:id/cto", async (_req, p) => {
-  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  requireDirectory(p.id!);
   return json(await ctoAgentStatus(p.id!));
 });
 route("POST", "/api/directories/:id/cto/start", async (_req, p) => {
-  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  requireDirectory(p.id!);
   return json(await startCtoAgent(p.id!));
 });
 route("POST", "/api/directories/:id/cto/stop", async (_req, p) => {
-  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  requireDirectory(p.id!);
   return json(await stopCtoAgent(p.id!));
 });
 // `?fresh=1` cold-starts a BRAND-NEW session (the only way to do so — last-resort
 // context hygiene); otherwise it bounces, RESUMING the same session.
 route("POST", "/api/directories/:id/cto/restart", async (req, p) => {
-  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  requireDirectory(p.id!);
   const fresh = new URL(req.url).searchParams.get("fresh") === "1";
   return json(await restartCtoAgent(p.id!, { fresh }));
 });
 // Open a GUI terminal attached to this directory's CTO agent's live pane.
 route("POST", "/api/directories/:id/cto/terminal", async (_req, p) => {
-  if (!getDirectory(p.id!)) throw new HttpError(404, "directory not found");
+  requireDirectory(p.id!);
   const s = await ctoAgentStatus(p.id!);
   if (!s.running || !s.paneId) {
     throw new HttpError(409, "CTO agent has no live pane (not running)");
