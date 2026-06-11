@@ -1200,7 +1200,14 @@ hash-routed and SSE-driven. Views/features:
   rows, finished list, and board cards; a non-zero **priority** shows as a `prio N`
   chip across those same views. Graph nodes that gate dependents carry an
   inline **sub-tree merge-progress bar** (merged fraction of their transitive
-  dependents). Running task cards/rows show a read-only **live activity pulse** — a
+  dependents). The graph always shows the **active/in-flight** tasks (the "tip");
+  a **"Finished generations" range slider** (value persisted in `localStorage`,
+  current value shown alongside) controls how much of the **finished dependency
+  history** behind them renders — computed client-side as the generation depth back
+  from the tip along `blocked_by` (gen 1 = finished tasks that directly block an
+  active task, gen 2 = their finished blockers, …), defaulting to a small depth so
+  deep merge trains stay readable. `0` shows the active frontier only; the maximum
+  reveals the full available history. Running task cards/rows show a read-only **live activity pulse** — a
   pulsing dot, the agent's latest action (last tool call + target, clipped to one
   line), and elapsed-since-started — polled from `/api/tasks/:id/activity` on a small
   timer (the cheap transcript-tail read); the latest action is cached so the wholesale

@@ -1073,6 +1073,21 @@ function setDirView(v) {
   try { localStorage.setItem(DIRVIEW_KEY, v); } catch (e) { /* ignore */ }
 }
 
+// How many previous FINISHED generations the dependency graph reveals behind the
+// active frontier (see renderGraph / finishedGenerations). Mirrored to localStorage
+// so the operator's chosen depth survives SSE re-renders and reloads. Defaults to a
+// small value so the graph stays readable; 0 hides all finished nodes (active only).
+const GRAPH_GENS_KEY = "butchr-graph-gens";
+function graphGenDepth() {
+  try {
+    const v = parseInt(localStorage.getItem(GRAPH_GENS_KEY), 10);
+    return Number.isFinite(v) && v >= 0 ? v : 1;
+  } catch (e) { return 1; }
+}
+function setGraphGenDepth(n) {
+  try { localStorage.setItem(GRAPH_GENS_KEY, String(n)); } catch (e) { /* ignore */ }
+}
+
 function historyOpen() {
   try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch (e) { return false; }
 }
@@ -1427,6 +1442,42 @@ function gatedSubtree(rootId, dependentsOf) {
   return seen;
 }
 
+// Generation depth, back from the active frontier, of each FINISHED (non-active)
+// task in the active tasks' dependency ancestry. The active/in-flight tasks are the
+// "tip" (generation 0); a finished task that directly blocks an active task is
+// generation 1; its finished blockers are generation 2; and so on. Computed purely
+// client-side by a breadth-first walk BACKWARD along blocked_by, counting only the
+// finished hops, so the shortest distance to the tip wins. Finished tasks with no
+// dependency path to an active task aren't "previous generations" of anything
+// in flight and get no entry (they're omitted from the graph). Returns a Map of
+// finished-task-id → generation (>= 1); active tasks are intentionally absent.
+function finishedGenerations(tasks) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const isActive = (t) => t && ACTIVE_STATUSES.includes(t.status);
+  const gen = new Map();
+  // Frontier starts at the active tip (generation 0); these are not recorded in
+  // `gen` (they always render) but seed the walk into their blockers.
+  let frontier = tasks.filter(isActive).map((t) => t.id);
+  const visited = new Set(frontier);
+  let g = 0;
+  while (frontier.length) {
+    const next = [];
+    for (const id of frontier) {
+      for (const b of (byId.get(id).blocked_by || [])) {
+        if (visited.has(b)) continue;
+        const bt = byId.get(b);
+        if (!bt || isActive(bt)) continue; // active blockers seed from their own gen-0 slot
+        visited.add(b);
+        gen.set(b, g + 1);
+        next.push(b);
+      }
+    }
+    frontier = next;
+    g++;
+  }
+  return gen;
+}
+
 // Assign each node a column (level) = longest blocker-chain depth, so blockers sit
 // strictly left of the tasks they block (a layered topological layout). Roots
 // (no in-graph blockers) land at level 0. The backend forbids dependency cycles,
@@ -1457,6 +1508,10 @@ function graphLevels(nodeIds, edges) {
 // arrows pointing left→right across topological levels. Inline SVG, no library.
 // Clicking a node opens its task detail. Re-rendered wholesale on each SSE event
 // by the directory view, so it live-updates for free.
+//
+// The active/in-flight tasks (the "tip") always render; how much of the FINISHED
+// dependency history behind them shows is controlled by a generations slider (see
+// finishedGenerations + buildGraphGenSlider) so deep merge trains stay readable.
 function renderGraph(tasks) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
@@ -1464,17 +1519,42 @@ function renderGraph(tasks) {
   // sub-tree progress counts dependents that have already merged off the graph.
   const dependentsOf = reverseDeps(tasks);
 
-  // Node set: every non-terminal task, plus any of their blockers that exist in
-  // this directory (so each edge has a node to land on — a merged blocker shows up
-  // as a green node, making the dependency's provenance visible).
-  const nodeIds = new Set(active.map((t) => t.id));
-  for (const t of active) {
-    for (const b of (t.blocked_by || [])) if (byId.has(b)) nodeIds.add(b);
-  }
-
-  if (nodeIds.size === 0) {
+  if (active.length === 0) {
     return el("div", { class: "empty" }, "No active tasks to graph.");
   }
+
+  // Finished-task generations back from the active tip, and the deepest one present.
+  const gen = finishedGenerations(tasks);
+  let maxGen = 0;
+  for (const g of gen.values()) if (g > maxGen) maxGen = g;
+
+  // The graph repaints into `holder` whenever the slider moves, reading the (clamped)
+  // depth fresh each time so the persisted value drives both the control and the draw.
+  const holder = el("div", { class: "task-graph-holder" });
+  const draw = () => {
+    holder.innerHTML = "";
+    holder.appendChild(drawGraphSvg(byId, active, dependentsOf, gen, Math.min(graphGenDepth(), maxGen)));
+  };
+  draw();
+
+  const parts = [];
+  // Only worth a slider when there's finished history to reveal; otherwise the graph
+  // is just the active frontier and the control would do nothing.
+  if (maxGen >= 1) parts.push(buildGraphGenSlider(maxGen, draw));
+  parts.push(holder);
+  return el("div", {}, parts);
+}
+
+// Build the SVG graph for the active tip plus every finished node within `depth`
+// generations of it (finishedGenerations). Pulled out of renderGraph so the slider
+// can repaint just this subtree without rebuilding the control around it.
+function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
+  // Node set: the active tip (always shown), plus finished tasks whose generation
+  // back from the tip is within the chosen depth. A merged blocker that passes shows
+  // up as a green node, making the dependency's provenance visible; one beyond the
+  // depth is dropped along with its now-dangling edges.
+  const nodeIds = new Set(active.map((t) => t.id));
+  for (const [id, g] of gen) if (g <= depth && byId.has(id)) nodeIds.add(id);
 
   const edges = [];
   for (const id of nodeIds) {
@@ -1582,6 +1662,41 @@ function renderGraph(tasks) {
 
   const scroll = el("div", { class: "task-graph-scroll" }, [root]);
   return el("div", {}, [legend, scroll]);
+}
+
+// Human-readable readout shown next to the generations slider. The endpoints get
+// descriptive labels (0 = active only, max = the full available history) so the
+// operator knows what the extremes mean.
+function graphGenValueText(n, maxGen) {
+  if (n <= 0) return "0 (active only)";
+  if (n >= maxGen) return maxGen + " (all)";
+  return String(n);
+}
+
+// The "Finished generations" range slider for the dependency graph. Lets the
+// operator choose how many previous finished generations (0 … maxGen) render behind
+// the active tip; the chosen value persists in localStorage (graphGenDepth) and the
+// current value is shown alongside. `onChange` repaints the graph in place.
+function buildGraphGenSlider(maxGen, onChange) {
+  // Reflect the persisted depth, clamped to what's currently available.
+  const value = Math.min(graphGenDepth(), maxGen);
+  const input = el("input", {
+    type: "range", id: "graph-gens", class: "graph-gens-slider",
+    min: "0", max: String(maxGen), step: "1", value: String(value),
+    "aria-label": "Previous finished generations to show",
+  });
+  const out = el("span", { class: "graph-gens-value" }, graphGenValueText(value, maxGen));
+  input.addEventListener("input", () => {
+    const n = Math.max(0, Math.min(maxGen, parseInt(input.value, 10) || 0));
+    setGraphGenDepth(n);
+    out.textContent = graphGenValueText(n, maxGen);
+    onChange();
+  });
+  return el("div", { class: "graph-gens" }, [
+    el("label", { class: "graph-gens-label", for: "graph-gens" }, "Finished generations"),
+    input,
+    out,
+  ]);
 }
 
 // ---------- pipeline / merge-train board ----------

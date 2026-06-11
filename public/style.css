@@ -556,6 +556,17 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .vt-btn.active { background: var(--accent); color: #fff; }
 
 /* dependency graph — inline SVG DAG of non-terminal tasks + their blockers */
+/* generations slider — how many previous finished generations the graph reveals */
+.graph-gens {
+  display: flex; align-items: center; gap: 10px; margin: 4px 0 10px;
+  flex-wrap: wrap;
+}
+.graph-gens-label { font-size: 13px; font-weight: 600; color: var(--muted); }
+.graph-gens-slider { width: 200px; max-width: 60vw; accent-color: var(--accent); cursor: pointer; }
+.graph-gens-value {
+  font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text);
+  min-width: 5.5em;
+}
 .tg-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
 .task-graph-scroll {
   overflow: auto; border: 1px solid var(--border); border-radius: 8px;
