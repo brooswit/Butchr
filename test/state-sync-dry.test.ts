@@ -137,6 +137,59 @@ describe("T1 — task.md mirror stays in lockstep on the migrated transitions", 
   });
 });
 
+describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column set", () => {
+  // markInReview (dead-agent rescue) clears BOTH herdr_pane_id AND herdr_tab_id (the
+  // caller is tearing the tab down); the two agent-tool paths clear ONLY herdr_pane_id.
+  // This locks that per-caller difference so the extraction can't silently drop the tab
+  // clear again.
+  async function runningWithPaneAndTab(prompt: string): Promise<string> {
+    const v = await tasksMod.createTask(DIR_ID, prompt);
+    tasksMod.markRunning(v.id, `pane-${v.id}`, `sess-${v.id}`, `tab-${v.id}`);
+    const r = row(v.id);
+    expect(r.status).toBe("in_progress");
+    expect(r.herdr_pane_id).toBe(`pane-${v.id}`);
+    expect(r.herdr_tab_id).toBe(`tab-${v.id}`);
+    return v.id;
+  }
+
+  test("markInReview clears herdr_pane_id AND herdr_tab_id", async () => {
+    const id = await runningWithPaneAndTab("rescue clears both ids");
+    tasksMod.markInReview(id, "run-log snapshot");
+    const r = row(id);
+    expect(r.status).toBe("in_review");
+    expect(r.herdr_pane_id).toBeNull();
+    expect(r.herdr_tab_id).toBeNull(); // the regression the reviewer caught
+  });
+
+  test("markReviewFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
+    const id = await runningWithPaneAndTab("request_review leaves tab id");
+    expect(tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
+    const r = row(id);
+    expect(r.status).toBe("in_review");
+    expect(r.herdr_pane_id).toBeNull();
+    expect(r.herdr_tab_id).toBe(`tab-${id}`); // NOT cleared (matches pre-refactor)
+  });
+
+  test("markNeedsInfoFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
+    const id = await runningWithPaneAndTab("raise leaves tab id");
+    expect(tasksMod.markNeedsInfoFromAgent(id, "which approach?")).toBe("ok");
+    const r = row(id);
+    expect(r.status).toBe("needs_info");
+    expect(r.herdr_pane_id).toBeNull();
+    expect(r.herdr_tab_id).toBe(`tab-${id}`); // NOT cleared (matches pre-refactor)
+  });
+
+  test("the agent-tool paths return notfound/terminal without transitioning", async () => {
+    expect(tasksMod.markReviewFromAgent("no-such-task")).toBe("notfound");
+    expect(tasksMod.markNeedsInfoFromAgent("no-such-task", "q")).toBe("notfound");
+    const merged = await tasksMod.createTask(DIR_ID, "terminal task");
+    dbMod.db.query(`UPDATE tasks SET status='merged' WHERE id=?`).run(merged.id);
+    expect(tasksMod.markReviewFromAgent(merged.id)).toBe("terminal");
+    expect(tasksMod.markNeedsInfoFromAgent(merged.id, "q")).toBe("terminal");
+    expect(row(merged.id).status).toBe("merged"); // untouched
+  });
+});
+
 describe("G3/G4 — shared gate helpers (src/gate.ts)", () => {
   test("makeGateLiveness tracks mark/clear/isLive independently per instance", () => {
     const a = gateMod.makeGateLiveness();

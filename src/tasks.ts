@@ -1896,13 +1896,17 @@ function parkExitingAgent(
 export function markInReview(id: string, snapshot: string): void {
   // Rescue from in_progress ONLY (narrower than the request_review path's array `from`),
   // using the caller-supplied snapshot. completed_at is stamped plain (not keep) and
-  // output_snapshot written raw, preserving this path's exact columns. Return ignored.
+  // output_snapshot written raw, preserving this path's exact columns. Unlike the two
+  // agent-tool paths (which clear only herdr_pane_id), this rescue ALSO clears
+  // herdr_tab_id — the caller is tearing the tab down — so it's carried in extraSet to
+  // reproduce this path's original column set exactly. Return ignored.
   parkExitingAgent(
     id,
     "in_review",
     {
       completed_at: nowIso(),
       output_snapshot: snapshot,
+      herdr_tab_id: null,
       // Reaching review IS progress — clear the auto-resume streak.
       resume_attempts: 0,
     },
