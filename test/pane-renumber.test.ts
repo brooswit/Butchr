@@ -33,6 +33,7 @@ let dbMod: typeof import("../src/db.ts");
 let dispatchMod: typeof import("../src/dispatcher.ts");
 let herdrMod: typeof import("../src/herdr.ts");
 let harnessApi: typeof import("../src/harness.ts");
+let liveMod: typeof import("../src/liveness.ts");
 let cfg: typeof import("../src/config.ts").config;
 let originalRunner: AgentRunner;
 let originalBin: string;
@@ -96,6 +97,11 @@ beforeAll(async () => {
   dispatchMod = await import("../src/dispatcher.ts");
   herdrMod = await import("../src/herdr.ts");
   harnessApi = await import("../src/harness.ts");
+  liveMod = await import("../src/liveness.ts");
+  // The auto-nudge now verifies claude is ACTUALLY alive before sending (see the
+  // liveness guard in maybeNudgeStalledAgent). Report the stalled task's session as a
+  // live /proc process so this file exercises the NUDGE path (not the auto-resume one).
+  liveMod.setCmdlineLister(() => [["claude", "--session-id", "sess-stalled-stale"]]);
 
   // A recording herdr stub that models a renumber: the agent's stable terminal id is
   // "T-live", and `pane list` reports it at the CURRENT pane while a dead sibling sits
@@ -135,6 +141,7 @@ if (argv[0] === "agent" && argv[1] === "get") {
 afterAll(() => {
   cfg.herdrBin = originalBin;
   harnessApi.setRunner(originalRunner);
+  liveMod.setCmdlineLister(null); // restore the real /proc probe for other files
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
@@ -183,6 +190,9 @@ describe("dispatcher.maybeNudgeStalledAgent on a task with a STALE pane id", () 
   test("repairs the drifted pane id AND sends 'continue' by agent name", async () => {
     sends = [];
     seedTask("stalled-stale", "in_progress", STALE_PANE);
+    // Give it the session id the injected /proc lister reports alive, so the liveness
+    // guard passes and we exercise the NUDGE (not the auto-resume) path.
+    dbMod.db.query(`UPDATE tasks SET session_id=? WHERE id=?`).run("sess-stalled-stale", "stalled-stale");
     const now = 5_000_000;
     const next = await dispatchMod.maybeNudgeStalledAgent(
       "stalled-stale",

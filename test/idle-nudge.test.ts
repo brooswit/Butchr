@@ -27,6 +27,7 @@ const DIR_ID = "idle-nudge-dir";
 let dbMod: typeof import("../src/db.ts");
 let dispatchMod: typeof import("../src/dispatcher.ts");
 let harnessMod: typeof import("../src/harness.ts");
+let liveMod: typeof import("../src/liveness.ts");
 let cfg: typeof import("../src/config.ts").config;
 let originalRunner: AgentRunner;
 
@@ -49,13 +50,16 @@ function makeFakeRunner(): AgentRunner {
   });
 }
 
+// Seed a task with a session id; the injected /proc lister (see beforeAll) reports
+// `sess-<id>` as a LIVE claude so the nudge's liveness guard passes and these tests
+// exercise the nudge path (the auto-resume path is covered in auto-resume.test.ts).
 function seedTask(id: string, status: string): void {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, session_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, DIR_ID, status, "pane-" + id, dbMod.nowIso());
+    .run(id, DIR_ID, status, "pane-" + id, "sess-" + id, dbMod.nowIso());
 }
 
 function nudgeEvents(id: string): string[] {
@@ -80,9 +84,18 @@ beforeAll(async () => {
   cfg = (await import("../src/config.ts")).config;
   dispatchMod = await import("../src/dispatcher.ts");
   harnessMod = await import("../src/harness.ts");
+  liveMod = await import("../src/liveness.ts");
 
   originalRunner = harnessMod.getRunner();
   harnessMod.setRunner(makeFakeRunner());
+  // Report every seeded task's `sess-<id>` as a LIVE claude process, so the nudge's
+  // liveness guard (don't nudge a dead shell) passes and these tests drive the nudge.
+  liveMod.setCmdlineLister(() => {
+    const ids = dbMod.db
+      .query<{ session_id: string | null }, []>(`SELECT session_id FROM tasks WHERE session_id IS NOT NULL`)
+      .all();
+    return ids.map((r) => ["claude", "--session-id", r.session_id as string]);
+  });
 
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
@@ -91,6 +104,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   harnessMod.setRunner(originalRunner); // don't leak the fake into other files
+  liveMod.setCmdlineLister(null); // restore the real /proc probe for other files
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 

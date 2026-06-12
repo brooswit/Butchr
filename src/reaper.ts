@@ -5,12 +5,15 @@
 // removed by hand. This runs ONCE on boot (see index.ts) and is deliberately
 // conservative — it NEVER touches the main worktree or a worktree whose task is
 // still queued/running/review/finalizing.
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
 import { harness } from "./harness.ts";
+import { claudeAlive } from "./liveness.ts";
+import { requeueForResume } from "./tasks.ts";
 
 const git = config.gitBin;
 
@@ -122,4 +125,50 @@ export async function reapOrphans(
 
   lastReap = { worktrees, husks, at: new Date().toISOString() };
   return { worktrees, husks };
+}
+
+/**
+ * AUTO-RESUME BACKSTOP for host/herdr restarts. A boot-time sweep (runs after
+ * reconcileRunningTasks — see index.ts) that catches any task butchr THINKS is
+ * `in_progress` with a live pane but whose `claude` process is NOT actually alive: a
+ * power loss / herdr restart killed claude and left herdr's pane as a bare login shell
+ * (so `agentExists` lies). The ground truth is the OS process — claudeAlive checks
+ * /proc for a live claude carrying the session id (see src/liveness.ts).
+ *
+ * For each such task that did NOT exit on its own (no `.done` exit-code file = it was
+ * KILLED, not a clean finish), it routes through tasks.requeueForResume — the same
+ * bounded auto-resume the dispatcher uses — which tears down the husk pane and resets
+ * the task so the dispatch tick relaunches the SAME session via `claude --resume`.
+ *
+ * This is a SAFETY NET: reconcileRunningTasks already handles every running-with-pane
+ * task at boot (re-adopting the live ones, auto-resuming the dead ones), so a clean
+ * boot leaves nothing here. It exists so a dead agent is NEVER left zombied if the
+ * primary reconcile missed it. Skipped when herdr is down (we can't probe the agent
+ * name; reconcile already left those as-is). Returns how many it auto-resumed.
+ */
+export async function reapDeadRunningAgents(herdrUp: boolean): Promise<number> {
+  if (!herdrUp) return 0;
+  const runsDir = join(config.dataDir, "runs");
+  const rows = db
+    .query<TaskRow, []>(
+      `SELECT * FROM tasks WHERE status='in_progress' AND herdr_pane_id IS NOT NULL`,
+    )
+    .all();
+  let resumed = 0;
+  for (const t of rows) {
+    // Genuinely alive? (process is ground truth — pane/agent-name survive a restart.)
+    if (claudeAlive(t.session_id)) continue;
+    // Exited on its own (`.done` present) → leave it for the normal review rescue, not
+    // an auto-resume (resume is only for an agent KILLED mid-work).
+    if (existsSync(join(runsDir, `${t.id}.done`))) continue;
+    const r = await requeueForResume(
+      t.id,
+      "agent process not alive (reaper backstop; host/herdr restart suspected)",
+    );
+    if (r === "resumed" || r === "fresh") resumed++;
+  }
+  if (resumed > 0) {
+    console.log(`[butchr] reaper backstop auto-resumed ${resumed} dead running agent(s)`);
+  }
+  return resumed;
 }

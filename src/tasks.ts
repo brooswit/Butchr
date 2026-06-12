@@ -18,7 +18,7 @@ import { runGate } from "./gate.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
-import { readSessionUsage } from "./usage.ts";
+import { findTranscript, readSessionUsage } from "./usage.ts";
 import { verifyDefaultBranch } from "./verify.ts";
 import {
   appendAnswer,
@@ -1136,6 +1136,8 @@ async function requestChanges(
       dispatch_attempts: 0,
       last_dispatch_error: null,
       next_dispatch_at: null,
+      // A human-driven rework is a fresh start — clear the auto-resume streak too.
+      resume_attempts: 0,
     },
   });
 }
@@ -1900,6 +1902,8 @@ export function markInReview(id: string, snapshot: string): void {
         herdr_pane_id: null,
         herdr_tab_id: null,
         idle: 0,
+        // Reaching review IS progress — clear the auto-resume streak.
+        resume_attempts: 0,
       },
     })
   ) {
@@ -1979,6 +1983,8 @@ export function markReviewFromAgent(
         idle: 0,
         herdr_pane_id: null,
         output_snapshot: snapshot || null,
+        // Reaching review IS progress — clear the auto-resume streak.
+        resume_attempts: 0,
       },
     })
   ) {
@@ -2526,9 +2532,115 @@ export async function requeueTask(id: string): Promise<TaskView> {
       next_dispatch_at: null,
       herdr_pane_id: null,
       herdr_tab_id: null,
+      // Operator re-queue is a fresh start — clear the auto-resume streak too.
+      resume_attempts: 0,
     },
   });
   return taskView(id)!;
+}
+
+/**
+ * HOST/HERDR-RESTART AUTO-RESUME. A power loss / herdr restart kills a task's
+ * `claude` process while herdr restores its pane as a bare login shell and keeps the
+ * agent NAME registered (so `agentExists` lies — see src/liveness.ts). When the
+ * caller has confirmed the process is NOT actually alive AND it wasn't a clean exit
+ * (the `.done` exit-code file is the caller's separate discriminator), this resets the
+ * task so the dispatcher re-launches it EXACTLY where it left off:
+ *
+ *  - Tears down the dead husk tab/pane so the re-dispatch starts a fresh tab and
+ *    nothing collides on `agent_name_taken`.
+ *  - Clears `herdr_pane_id` → the task is READY again; the normal dispatch tick relaunches
+ *    it. Because `started_at` is set and (usually) `session_id` is kept, the dispatcher's
+ *    resolveLaunchCommand picks `claude --resume <session_id>` — full prior context.
+ *  - If the session TRANSCRIPT is gone (nothing to resume into), clears `session_id` so
+ *    the relaunch is a FRESH run from the full prompt (resolveLaunchCommand's lostContext
+ *    path) rather than `--resume ""` — never a silent zombie.
+ *  - BOUNDED by config.maxResumeAttempts: past the cap (or when auto-resume is disabled,
+ *    `<=0`) it rescues the task to `in_review` for a human instead, so a session that
+ *    dies the instant it relaunches can't re-dispatch-loop forever.
+ *
+ * Only acts on an `in_progress` (build) task — a `finalizing` agent that died is landed
+ * by recoverFinalizingTasks / the finalize rescue, not resumed. Returns what it did.
+ * Never throws (best-effort teardown).
+ */
+export async function requeueForResume(
+  id: string,
+  reason: string,
+): Promise<"resumed" | "fresh" | "rescued" | "noop"> {
+  const row = getTask(id);
+  if (!row || row.status !== "in_progress") return "noop";
+
+  // Tear down the dead husk tab/pane (a fallen-to-shell pane, or a gone agent) so the
+  // re-dispatch spins up a fresh tab and the agent name is free. Best-effort.
+  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+
+  const attempts = (row.resume_attempts ?? 0) + 1;
+
+  // BOUNDED / disabled: stop the resume loop and hand the task to a human in review.
+  if (config.maxResumeAttempts <= 0 || attempts > config.maxResumeAttempts) {
+    const prior = row.resume_attempts ?? 0;
+    const note =
+      `[butchr] moved to review automatically: ${reason}. ` +
+      (config.maxResumeAttempts <= 0
+        ? `Auto-resume is disabled (BUTCHR_MAX_RESUME_ATTEMPTS<=0).`
+        : `butchr already auto-resumed it ${prior} time(s) without the agent reaching ` +
+          `review (cap ${config.maxResumeAttempts}); stopping the resume loop so a ` +
+          `human can inspect it.`) +
+      `\n\n` +
+      readRunLogSnapshot(id);
+    // markInReview resets resume_attempts to 0 (a human now owns it).
+    markInReview(id, note);
+    console.warn(
+      `[butchr] task ${id} not auto-resumed (${reason}); rescued → in_review ` +
+        `(resume cap ${config.maxResumeAttempts})`,
+    );
+    return "rescued";
+  }
+
+  // Resume vs. fresh: does the session transcript still exist to --resume into?
+  const dir = getWorkspace(row.workspace_id);
+  const worktree = dir ? git.worktreePath(dir.path, id) : "";
+  const hasTranscript = !!row.session_id && !!findTranscript(worktree, row.session_id);
+  const fresh = !hasTranscript;
+
+  if (
+    !setStatus(id, "in_progress", {
+      from: "in_progress",
+      set: {
+        herdr_pane_id: null,
+        herdr_tab_id: null,
+        output_snapshot: null,
+        idle: 0,
+        conflict: 0,
+        resume_attempts: attempts,
+        // NOT a dispatch failure — clear any backoff so the relaunch is prompt.
+        dispatch_attempts: 0,
+        last_dispatch_error: null,
+        next_dispatch_at: null,
+        // No transcript to resume into → drop the session so the relaunch is a FRESH run
+        // from the full prompt (resolveLaunchCommand handles the lostContext fallback).
+        ...(fresh ? { session_id: null } : {}),
+      },
+    })
+  ) {
+    return "noop"; // moved out of in_progress under us (e.g. aborted) — don't claim a resume
+  }
+  // Within-state audit marker (status is unchanged in_progress, so setStatus records no
+  // event — mirror the auto-nudge's explicit timeline entry).
+  recordTaskEvent(
+    id,
+    "in_progress",
+    "in_progress",
+    fresh
+      ? `auto re-dispatch (${reason}); session transcript missing — FRESH run, prior in-session context lost ` +
+          `(attempt ${attempts}/${config.maxResumeAttempts})`
+      : `auto-resume via --resume (${reason}); attempt ${attempts}/${config.maxResumeAttempts}`,
+  );
+  console.log(
+    `[butchr] task ${id} ${fresh ? "auto re-dispatched FRESH" : "auto-resumed (--resume)"} ` +
+      `(${reason}); attempt ${attempts}/${config.maxResumeAttempts}`,
+  );
+  return fresh ? "fresh" : "resumed";
 }
 
 /**

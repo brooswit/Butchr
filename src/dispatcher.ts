@@ -24,8 +24,9 @@ import { buildScriptArgv, modelFlag, stripAnsi } from "./exec.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
+import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, setIdle } from "./tasks.ts";
+import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
@@ -228,7 +229,7 @@ export function dispatcherHealth(): { lastTickAt: number; tickCount: number; tic
  */
 export async function reconcileRunningTasks(
   herdrUp: boolean,
-): Promise<{ adopted: number; rescued: number; skipped: number }> {
+): Promise<{ adopted: number; rescued: number; resumed: number; skipped: number }> {
   // A LIVE agent task is one in an agent phase (in_progress build, or finalizing
   // wrap-up) that recorded a pane — i.e. it was RUNNING when butchr stopped. Ready
   // (pane-NULL) agent tasks are never-launched/rework and are handled by the normal
@@ -240,7 +241,7 @@ export async function reconcileRunningTasks(
          WHERE t.status IN ('in_progress','finalizing') AND t.herdr_pane_id IS NOT NULL`,
     )
     .all();
-  if (rows.length === 0) return { adopted: 0, rescued: 0, skipped: 0 };
+  if (rows.length === 0) return { adopted: 0, rescued: 0, resumed: 0, skipped: 0 };
 
   if (!herdrUp) {
     console.warn(
@@ -248,11 +249,12 @@ export async function reconcileRunningTasks(
         `as-is (cannot distinguish live agents from dead ones); will reconcile ` +
         `on a later restart with herdr up`,
     );
-    return { adopted: 0, rescued: 0, skipped: rows.length };
+    return { adopted: 0, rescued: 0, resumed: 0, skipped: rows.length };
   }
 
   let adopted = 0;
   let rescued = 0;
+  let resumed = 0;
   for (const row of rows) {
     if (watching.has(row.id)) continue; // already adopted (defensive)
 
@@ -260,7 +262,15 @@ export async function reconcileRunningTasks(
     const logFile = runLogPath(row.id);
     const doneFile = join(runsDir, `${row.id}.done`);
 
-    if (await harness.agentExists(row.id)) {
+    // LIVENESS — herdr's pane/agent NAME survives a herdr/host restart even though the
+    // restart KILLED claude (the pane falls back to a bare login shell), so
+    // `agentExists` alone is NOT "the agent is running". The ground truth is the
+    // process: claudeAlive checks /proc for a live claude carrying this session id.
+    // Re-adopt only when BOTH agree the agent is genuinely live.
+    const nameAlive = await harness.agentExists(row.id);
+    const procAlive = claudeAlive(row.session_id);
+
+    if (nameAlive && procAlive) {
       // Live agent — re-adopt. Record its current pane + tab (both may have moved
       // while butchr was down — herdr renumbers positional ids when sibling tabs
       // close). Resolve the pane BY NAME via the renumber-stable resolver, not the
@@ -274,10 +284,24 @@ export async function reconcileRunningTasks(
       spawnWatcher(dir, row.id, paneId, logFile, doneFile);
       adopted++;
       console.log(`[butchr] re-adopted running task ${row.id} (pane ${paneId}, tab ${tabId})`);
+    } else if (row.status === "in_progress" && !existsSync(doneFile)) {
+      // The build agent's claude is NOT actually alive AND it did not exit on its own
+      // (no `.done` exit-code file) — i.e. it was KILLED mid-work by a power loss /
+      // herdr restart. AUTO-RESUME it: requeueForResume tears down the dead husk pane
+      // and resets the task to READY so the dispatch tick relaunches the SAME session
+      // via `claude --resume` (or a fresh run if the transcript is gone). Bounded so a
+      // session that keeps dying can't loop. This is the no-operator-action recovery.
+      const r = await requeueForResume(
+        row.id,
+        "agent process was not alive at startup (host/herdr restart suspected)",
+      );
+      if (r === "rescued") rescued++;
+      else if (r === "resumed" || r === "fresh") resumed++;
     } else {
-      // Agent gone — it ended while butchr was offline. Rescue PHASE-AWARE: a build
-      // (in_progress) agent → in_review for a human; a finalize agent → land the merge
-      // directly (the operator already approved). Close its (now husk) tab defensively.
+      // Agent gone and it EXITED on its own (`.done` present), or a `finalizing` agent
+      // died. Rescue PHASE-AWARE: a build agent → in_review for a human; a finalize
+      // agent → land the merge directly (the operator already approved). Close its
+      // (now husk) tab defensively.
       await harness.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
       const snapshot = readRunLogSnapshot(row.id);
       if (row.status === "finalizing") {
@@ -291,11 +315,11 @@ export async function reconcileRunningTasks(
             `was offline. Output captured as-is.\n\n${snapshot}`,
         );
         rescued++;
-        console.log(`[butchr] rescued task ${row.id} → in_review (agent gone while offline)`);
+        console.log(`[butchr] rescued task ${row.id} → in_review (agent ended while offline)`);
       }
     }
   }
-  return { adopted, rescued, skipped: 0 };
+  return { adopted, rescued, resumed, skipped: 0 };
 }
 
 /**
@@ -888,8 +912,23 @@ export async function maybeNudgeStalledAgent(
   if (quietMs === null || phase !== "in_progress") return state;
   // Output resumed (or never stalled) → clear any in-flight nudge streak.
   if (quietMs <= config.idleMs) return { nudgesSent: 0, lastNudgeAt: 0 };
-  // The agent is idle/quiet — exactly the window where its stored pane id may be
-  // stale (a sibling tab closed → herdr renumbered) AND where we're about to act on
+  // LIVENESS GUARD (the "continuecontinuecontinue into a dead shell" fix): the agent
+  // is quiet — but is its `claude` STILL ALIVE? A herdr/host restart kills claude and
+  // leaves the pane as a bare login shell while herdr keeps the agent name registered,
+  // so `agentExists` would still say "alive" and we'd type `continue` into a dead
+  // shell forever. The process is the ground truth: if claude is NOT in /proc for this
+  // session, do NOT nudge — trigger AUTO-RESUME instead (tear down the husk pane and
+  // re-dispatch the same session via `--resume`). requeueForResume clears the pane, so
+  // the watcher's loop-top sees pane=NULL next tick and hands off to the fresh dispatch.
+  if (!claudeAlive(getTask(taskId)?.session_id ?? null)) {
+    await requeueForResume(
+      taskId,
+      "agent process is no longer alive while quiet (herdr/host restart suspected); nudge suppressed",
+    );
+    return state;
+  }
+  // The agent is idle/quiet but ALIVE — exactly the window where its stored pane id may
+  // be stale (a sibling tab closed → herdr renumbered) AND where we're about to act on
   // the pane (the nudge below; a human may also attach right now). Re-resolve the
   // CURRENT pane by name and self-heal the stored id so the nudge — and any attach —
   // target the live pane, not a renumbered-away shell. `send` itself routes by name,
@@ -974,6 +1013,10 @@ function spawnWatcher(
     let timedOut = false;
     let vanished = false;
     let neverStarted = false;
+    // AUTO-RESUME HAND-OFF: set when the task's pane is cleared out from under us
+    // (its claude died and was auto-resumed, or an operator re-queued) — a fresh
+    // dispatch+watcher now owns it, so we release our slot WITHOUT rescuing to review.
+    let handedOff = false;
     // RUNAWAY/STUCK guard: set when the task has been `running` past
     // config.maxRunMs without the agent submitting (it's alive but looping/stuck).
     // `runawayMs` records the elapsed time at the trip for the rescue note.
@@ -1000,8 +1043,17 @@ function spawnWatcher(
       // pane: `in_progress` (build) and `finalizing` (final thoughts). Any other state
       // means the task was reclaimed elsewhere, so we stop looping; otherwise we'd hold
       // the `watching` slot forever and tick() would skip the task.
-      const cur = getTask(taskId)?.status;
+      const curTask = getTask(taskId);
+      const cur = curTask?.status;
       if (cur !== "in_progress" && cur !== "finalizing") break;
+      // AUTO-RESUME HAND-OFF: the pane was cleared (NULL) out from under us — the
+      // nudge guard auto-resumed a dead-claude agent (requeueForResume), a reaper
+      // backstop did, or an operator re-queued. A fresh dispatch+watcher will own it;
+      // stop here so we don't rescue a task that's already being relaunched.
+      if (curTask!.herdr_pane_id == null) {
+        handedOff = true;
+        break;
+      }
       if (existsSync(doneFile)) break; // process exited
       if (Date.now() > deadline) {
         timedOut = true;
@@ -1050,6 +1102,13 @@ function spawnWatcher(
     // Aborted out from under us: drop the task without capturing output or
     // moving it to review. abortTask owns the pane close + worktree cleanup.
     if (consumeAbort(taskId)) return;
+
+    // Auto-resumed / re-queued out from under us (pane cleared): a fresh dispatch owns
+    // this task now — release our slot WITHOUT rescuing it to review.
+    if (handedOff) {
+      watching.delete(taskId);
+      return;
+    }
 
     // If the agent already submitted (in_review / needs_info) or the task moved on
     // (merged/aborted), there is nothing to rescue. Only a task still sitting in a

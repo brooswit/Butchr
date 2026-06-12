@@ -320,15 +320,54 @@ trip 503.
 
 On boot (`src/index.ts`) butchr repairs state left by a prior run, **after**
 re-adopting running agents (`reconcileRunningTasks`) so live/just-merged work is
-never mistaken for garbage. Watch the log for: re-adopted running agents; rescued
-tasks whose agent died while butchr was offline; finalized tasks left mid-wrap-up
-(`recoverFinalizingTasks`); and `reapOrphans` (`src/reaper.ts`), a conservative
-once-on-boot sweep that removes **leaked git worktrees + branches** and **herdr
-husks** for tasks in a terminal state (`merged` / `aborted` / `rejected`) or with
-no DB row — it never touches the main worktree or a worktree whose task is still
+never mistaken for garbage. Watch the log for: re-adopted running agents;
+**auto-resumed** agents killed by a host/herdr restart (see "Restart resilience"
+below); rescued tasks whose agent ended while butchr was offline; finalized tasks
+left mid-wrap-up (`recoverFinalizingTasks`); and `reapOrphans` (`src/reaper.ts`), a
+conservative once-on-boot sweep that removes **leaked git worktrees + branches** and
+**herdr husks** for tasks in a terminal state (`merged` / `aborted` / `rejected`) or
+with no DB row — it never touches the main worktree or a worktree whose task is still
 queued/running/review/finalizing, and skips herdr deregistration entirely when
 herdr is down (worktree reaping still runs). This is the automated fix for the old
 "an aborted task's worktree/branch survived a restart" bug.
+
+### Restart resilience (auto-resume on host/herdr restart)
+
+The production answer to "the laptop lost power mid-work and every agent had to be
+re-queued by hand." When the host loses power / is re-logged-in, **herdr restarts and
+every agent's `claude` process is killed**, but herdr restores the pane as a **bare
+login shell** and keeps the agent NAME registered — so `agentExists(taskId)` still
+says "alive" even though claude is dead. The old behavior re-adopted such a task and
+the idle-nudge then typed `continue` into the dead shell forever
+("continuecontinuecontinue"). butchr now **auto-resumes** instead, with no operator
+action:
+
+- **Liveness is the OS process, not the pane.** `src/liveness.ts` `claudeAlive(sessionId)`
+  scans `/proc` for a live process carrying the session id as a **distinct argv token**
+  (claude runs with `--session-id <uuid>` / `--resume <uuid>`, so the uuid is its own
+  argv element). A killed claude is gone from `/proc` → dead; a genuinely-alive (even
+  quiet/idle) claude still has its process → alive, so a *working* agent is **never**
+  false-resumed. This is the ground-truth signal that survives a herdr restore (which
+  keeps the pane/agent-name) and the run-log mtime (which can't tell idle from dead).
+- **Auto-resume = relaunch the same session.** When butchr finds a task it thinks is
+  `in_progress` but whose claude isn't alive **and** it didn't exit on its own (the
+  per-run `<id>.done` exit-code file is the discriminator: present ⇒ a clean exit ⇒
+  rescue to review; absent ⇒ *killed* ⇒ resume), `tasks.requeueForResume` tears down the
+  dead husk pane and resets the task to READY. The normal dispatch tick then relaunches
+  it via `claude --resume <session_id>` (full prior context). If the session transcript
+  is gone, it falls back to a **fresh** dispatch from the full prompt (never a silent
+  zombie).
+- **Bounded** by `BUTCHR_MAX_RESUME_ATTEMPTS` (default 5): the `resume_attempts` column
+  counts consecutive auto-resumes that didn't reach review; past the cap the task is
+  rescued to `in_review` for a human instead, so a session that dies the instant it
+  relaunches can't re-dispatch-loop. The counter resets on progress (reaching review)
+  or any operator re-queue.
+- **Three triggers, same path:** (1) startup `reconcileRunningTasks` — the full-reboot
+  recovery; (2) the per-task watcher's **idle-nudge guard** (`maybeNudgeStalledAgent`
+  checks `claudeAlive` before nudging — a dead agent is auto-resumed, never nudged); and
+  (3) a boot-time backstop sweep `reaper.reapDeadRunningAgents`. Net behavior: power dies
+  mid-work → on next boot, agents resume from their sessions with no lost work and no
+  operator action.
 
 ### herdr model
 

@@ -236,6 +236,18 @@ ensureColumn("tasks", "dispatch_attempts", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("tasks", "last_dispatch_error", "TEXT");
 ensureColumn("tasks", "next_dispatch_at", "TEXT");
 
+// `resume_attempts` counts CONSECUTIVE host/herdr-restart AUTO-RESUMES of this task
+// that did NOT make progress. When butchr finds a task it thinks is in_progress but
+// whose claude process isn't actually alive (a power loss / herdr restart left a bare
+// login-shell pane — see src/liveness.ts), it re-dispatches the same session via
+// `claude --resume`. This counter bounds that (config.maxResumeAttempts) so a session
+// that dies the instant it relaunches can't re-dispatch-loop forever; past the cap the
+// task is rescued to review for a human. Distinct from `dispatch_attempts` (which
+// counts dispatch() *launch* failures): a resume that launches fine but whose agent is
+// then killed again is not a dispatch failure. Reset to 0 on real progress (reaching
+// review) and on any operator re-queue. See tasks.requeueForResume.
+ensureColumn("tasks", "resume_attempts", "INTEGER NOT NULL DEFAULT 0");
+
 // `blocked_by` is a JSON-array TEXT column holding the ids of the tasks this task
 // is BLOCKED ON (its dependency set). A task with any not-yet-merged blocker sits
 // in status='blocked' (a pre-dispatch waiting state — no agent runs) until every
@@ -624,6 +636,9 @@ export type TaskRow = {
   dispatch_attempts: number;
   last_dispatch_error: string | null;
   next_dispatch_at: string | null;
+  // Consecutive host/herdr-restart auto-resumes of this task that didn't make
+  // progress (bounded by config.maxResumeAttempts). See tasks.requeueForResume.
+  resume_attempts: number;
   // Build/test failure output when this task's merge was auto-reverted off the
   // default branch by the post-merge verify gate (null otherwise). See approveTask.
   revert_reason: string | null;

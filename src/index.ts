@@ -4,7 +4,7 @@ import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts
 import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import { initFileLogging } from "./log.ts";
-import { reapOrphans } from "./reaper.ts";
+import { reapDeadRunningAgents, reapOrphans } from "./reaper.ts";
 import { startServer } from "./server.ts";
 import { recoverFinalizingTasks } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
@@ -23,15 +23,20 @@ async function main(): Promise<void> {
     );
   }
 
-  // Re-adopt the agents launched before this restart instead of orphaning them:
-  // live agents get their watcher re-attached; dead ones are rescued to review.
-  // (Replaces the old blind re-queue, which collided on `agent_name_taken`.)
-  const { adopted, rescued } = await reconcileRunningTasks(herdrUp);
+  // Re-adopt the agents launched before this restart instead of orphaning them.
+  // LIVENESS-AWARE (see src/liveness.ts): an agent whose `claude` process is genuinely
+  // alive gets its watcher re-attached; one KILLED by a power loss / herdr restart
+  // (its pane fell back to a bare login shell) is AUTO-RESUMED via `claude --resume`
+  // with no operator action; one that ended on its own is rescued to review.
+  const { adopted, rescued, resumed } = await reconcileRunningTasks(herdrUp);
   if (adopted > 0) {
     console.log(`[butchr] re-adopted ${adopted} running agent(s) from a prior run`);
   }
+  if (resumed > 0) {
+    console.log(`[butchr] auto-resumed ${resumed} agent(s) killed by a host/herdr restart`);
+  }
   if (rescued > 0) {
-    console.log(`[butchr] rescued ${rescued} task(s) whose agent died while butchr was offline`);
+    console.log(`[butchr] rescued ${rescued} task(s) whose agent ended while butchr was offline`);
   }
 
   // Complete any task left mid-finalize (the branch already merged to main).
@@ -50,6 +55,12 @@ async function main(): Promise<void> {
       `[butchr] reaped ${reapedWt} orphaned worktree(s), ${reapedHusks} herdr husk(s) on startup`,
     );
   }
+
+  // AUTO-RESUME BACKSTOP: a safety-net sweep for any in_progress-with-pane task whose
+  // claude isn't actually alive that reconcile somehow didn't handle (a clean boot
+  // leaves nothing here — reconcile already auto-resumed the dead ones). See
+  // reaper.reapDeadRunningAgents.
+  await reapDeadRunningAgents(herdrUp);
 
   // Managed CTO agents — ONE PER REGISTERED WORKSPACE (each default OFF unless that
   // workspace opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).

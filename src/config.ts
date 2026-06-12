@@ -205,6 +205,22 @@ export const config = {
   dispatchBackoffCapMs: envInt("BUTCHR_DISPATCH_BACKOFF_CAP_MS", 30000),
 
   /**
+   * AUTO-RESUME bound (host/herdr-restart resilience). When butchr finds a task it
+   * thinks is `in_progress` but whose `claude` process is NOT actually alive (a
+   * power loss / herdr restart killed it, leaving herdr's pane as a bare login shell
+   * — see src/liveness.ts), it auto-re-dispatches the SAME session via
+   * `claude --resume` so the agent picks up exactly where it left off. This caps how
+   * many CONSECUTIVE such auto-resumes butchr performs WITHOUT the agent making
+   * progress (reaching review): past the cap the task is rescued to `in_review` for a
+   * human instead of resumed again, so a session that dies the instant it relaunches
+   * (e.g. a corrupt transcript) can never re-dispatch-loop forever. The counter
+   * (`resume_attempts`) resets to 0 the moment the task reaches review or an operator
+   * re-queues it. `<=0` disables auto-resume (a dead agent is rescued to review as
+   * before).
+   */
+  maxResumeAttempts: envInt("BUTCHR_MAX_RESUME_ATTEMPTS", 5),
+
+  /**
    * Command template run inside a task's worktree to execute the agent for its
    * FIRST attempt. Placeholders, all replaced by the dispatcher:
    *  - `{{PROMPT_FILE}}` → absolute path to the rendered prompt file.
