@@ -782,17 +782,50 @@ It is stored per workspace as a single JSON column (`workspaces.step_responders`
 (the `GET` returns the **fully-resolved** map — every step present with its effective
 value) or the webapp's **Step responders** panel.
 
-**`spec-generation` is wired.** When an `idea` task is created it does **not** fork a
-spec generator — it parks in `idea` (a feedback/waiting state) and butchr pushes a
-`spec requested` event on the one-way CTO channel carrying the brief + task id. The
-responder writes the spec and submits it via **`POST /api/tasks/:id/spec { spec }`**
-(`tasks.submitSpec` → the unified feedback path), which rewrites the prompt brief → spec
-and advances the task to `spec_review`. The two responders use the **same endpoint** and
-differ only in *surface*: for `cto` the persistent CTO agent reacts to the channel push
-(it checks `responderFor(workspace, 'spec-generation')` and acts only when it is `cto`);
-for `user` the webapp renders a "write the spec" form on the idea task. The endpoint stays
-open to both, so a human can always submit even on a `cto` workspace. The other steps are
-configuration-only for now — routing that consumes them lands in follow-up work.
+**The responder routing is `cto`-vs-`user` *emphasis*, never a backend gate.** butchr is
+**responder-agnostic**: every feedback step is surfaced on the CTO channel **and** stays
+actionable by a human in the webapp — the action endpoints (`/spec`, `/approve`,
+`/reject`, `/answer`) are open to both regardless of the configured responder. The
+`step_responders` config drives only two things: (a) the **CTO agent's self-check** — it
+auto-acts on a step **only** when that step's responder is `cto`, and observes (leaves it
+for the human) when it is `user`; and (b) the **webapp's awaiting-who emphasis** — a
+`user` step shows a prominent "awaiting you" badge/banner, a `cto` step a muted "awaiting
+CTO — you can also act". A human can therefore always act, even on a `cto` step.
+
+**State → step map (the single mapping both the CTO self-check and the webapp route on),
+in `tasks.feedbackStep(status, planPreview)`:**
+
+| task state | responder step |
+|------------|----------------|
+| `idea` | `spec-generation` |
+| `spec_review` | `spec-approval` |
+| `in_review` | `diff-review` |
+| `needs_info` **with `plan_preview`** | `plan-approval` (a proposed plan from `propose_plan`) |
+| `needs_info` (otherwise) | `answer-question` (a question raised via `raise`) |
+
+`tasks.pendingResponder(row)` composes that map with `responderFor` and is surfaced on
+the task view as the computed **`pending_responder`** field (`cto` | `user` | `null` when
+not in a feedback state), so the webapp and CTO read who-acts directly off the task
+without cross-referencing the workspace config.
+
+> **Known simplification — `needs_info` plan-vs-question.** A `needs_info` task holds
+> *either* a proposed plan (`propose_plan`, plan-preview gate) *or* a raised question
+> (`raise`) in the same `question` column; nothing on the row records which, so the only
+> signal is `plan_preview`. A plan-preview task that **raises a question during
+> implementation** therefore maps to `plan-approval` rather than `answer-question`. This
+> affects only which step's config + UI emphasis applies (the backend treats every
+> `needs_info` identically — answerable by a human, pushed to the channel). A future task
+> can add a precise marker (e.g. a `plan_proposed`/`plan_approved` flag) to disambiguate.
+
+**`spec-generation` (the `idea` state) in detail.** When an `idea` task is created it does
+**not** fork a spec generator — it parks in `idea` and butchr pushes a `spec requested`
+event on the one-way CTO channel carrying the brief + task id. The responder writes the
+spec and submits it via **`POST /api/tasks/:id/spec { spec }`** (`tasks.submitSpec` → the
+unified feedback path), which rewrites the prompt brief → spec and advances the task to
+`spec_review`. For `cto` the persistent CTO agent reacts to the channel push (it checks
+`responderFor(workspace, 'spec-generation')` and acts only when it is `cto`); for `user`
+the webapp renders a "write the spec" form on the idea task. `idle-handling` is the one
+step not yet surfaced as a feedback state — it lands with the idle-handling work.
 
 ---
 

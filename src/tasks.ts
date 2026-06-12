@@ -15,10 +15,12 @@ import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
 import {
   HttpError,
   getWorkspace,
+  responderFor,
   workspaceChangelogPath,
   workspaceGateCmd,
   workspaceVersionFile,
 } from "./workspaces.ts";
+import type { Responder, ResponderStep } from "./workspaces.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
 import { runGate } from "./gate.ts";
@@ -61,6 +63,12 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
   // forward estimate is only meaningful for work still ahead. The webapp renders it
   // as a loose forecast (e.g. "est ~12–30m, n=8"), never a promise.
   estimate: Estimate | null;
+  // FW-3: the resolved RESPONDER (`cto` | `user`) for the task's CURRENT pending
+  // feedback step — who is expected to act right now — or null when the task is not
+  // in a feedback state. Computed from the state→step map (feedbackStep) + the
+  // workspace's per-step responder config (responderFor). Lets the webapp + CTO show
+  // "awaiting you" vs "awaiting CTO" without cross-referencing the workspace config.
+  pending_responder: Responder | null;
 };
 
 // --- DURATION ESTIMATES (rough, history-derived) ---------------------------
@@ -299,6 +307,56 @@ function readTaskMdSafe(
   }
 }
 
+/**
+ * FW-3 STATE→STEP MAP. The per-workspace feedback STEP a task in a given state is
+ * awaiting a response on (one of workspaces.RESPONDER_STEPS), or null when the status
+ * is not a feedback state. This is the single mapping the CTO self-check and the webapp
+ * route on (combined with responderFor):
+ *
+ *   idea         → spec-generation   (a brief awaiting a spec)
+ *   spec_review  → spec-approval     (a generated spec awaiting approval)
+ *   in_review    → diff-review       (a finished diff awaiting review)
+ *   needs_info   → plan-approval | answer-question  (see the discriminator below)
+ *
+ * NEEDS_INFO DISCRIMINATOR — a known simplification. A `needs_info` task holds EITHER a
+ * proposed plan (from the plan-preview gate's `propose_plan`) OR a raised question (from
+ * `raise`) in the SAME `question` column; nothing on the row records which. The only
+ * available signal is `plan_preview`, so a plan-preview task parked in needs_info is
+ * treated as awaiting PLAN approval, and any other needs_info as awaiting a question
+ * answer. LIMITATION: a plan-preview task that RAISES a question DURING implementation
+ * also has plan_preview=1, so it maps to `plan-approval` rather than `answer-question`.
+ * This only affects which responder-step's config + UI emphasis applies (the backend is
+ * responder-agnostic — every needs_info is answerable by a human and pushed to the
+ * channel regardless), and is accepted for now; a future task can add a precise marker
+ * (e.g. a `plan_proposed`/`plan_approved` flag) to disambiguate. See CONTRIBUTING §7.
+ */
+export function feedbackStep(status: TaskStatus, planPreview: boolean): ResponderStep | null {
+  switch (status) {
+    case "idea":
+      return "spec-generation";
+    case "spec_review":
+      return "spec-approval";
+    case "in_review":
+      return "diff-review";
+    case "needs_info":
+      return planPreview ? "plan-approval" : "answer-question";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The resolved RESPONDER (`cto` | `user`) for a task's CURRENT pending feedback step,
+ * or null when the task is not in a feedback state. Combines the state→step map
+ * (feedbackStep) with the workspace's per-step responder config (workspaces.responderFor,
+ * FW-1). Pure read of the row + the workspace config; surfaced as `pending_responder` on
+ * TaskView / TaskListView so the webapp + CTO never have to cross-reference.
+ */
+export function pendingResponder(row: TaskRow): Responder | null {
+  const step = feedbackStep(row.status, !!row.plan_preview);
+  return step ? responderFor(row.workspace_id, step) : null;
+}
+
 /** Merge the DB row with the on-disk task.md for the detail view. */
 export function taskView(id: string): TaskView | null {
   const row = getTask(id);
@@ -326,6 +384,7 @@ export function taskView(id: string): TaskView | null {
     blockerStates: blockerStatesOf(blocked_by),
     deadBlockers: deadBlockerIds(blocked_by),
     estimate: taskEstimate(id),
+    pending_responder: pendingResponder(row),
   };
 }
 
@@ -390,6 +449,7 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
       tags: parseTags(row.tags),
       blockerStates: blockerStatesOf(blocked_by),
       deadBlockers: deadBlockerIds(blocked_by),
+      pending_responder: pendingResponder(row),
     });
   }
   return out;

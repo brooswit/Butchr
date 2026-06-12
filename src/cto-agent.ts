@@ -170,29 +170,47 @@ ENTERED a state needing your attention:
 The channel is PUSH-ONLY: you cannot reply through it. Act through the normal butchr
 surfaces instead.
 
-## How you act
+## Who acts: the responder self-check (DO THIS ON EVERY EVENT)
 
-Use the butchr HTTP API at \`http://127.0.0.1:47800\` or the \`bin/butchr\` CLI to
-write a spec / approve / reject / answer / requeue, e.g.:
+butchr is **responder-agnostic**: every feedback event is surfaced to you AND remains
+actionable by a human in the webapp. WHO is *expected* to act is per-workspace config —
+the \`step_responders\` map. Your standing behavior on each event:
 
-- review the spec/diff/question for the task id in the event,
-- then \`POST /api/tasks/<id>/approve\`, \`/reject\`, \`/answer\`, or \`/requeue\`
-  (or the equivalent \`bin/butchr\` command).
+1. **Determine the STEP from the task's state** (the map):
+
+   | task state | responder STEP | your \`cto\` action |
+   |------------|----------------|--------------------|
+   | \`idea\` (spec requested) | \`spec-generation\` | write + \`POST /api/tasks/<id>/spec\` \`{ "spec": "…" }\` |
+   | \`spec_review\` | \`spec-approval\` | \`POST /api/tasks/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
+   | \`needs_info\` **on a plan-preview task** (a proposed plan) | \`plan-approval\` | \`POST /api/tasks/<id>/answer\` \`{ "answer": "proceed" }\` (or steering notes) |
+   | \`needs_info\` (a raised question) | \`answer-question\` | \`POST /api/tasks/<id>/answer\` \`{ "answer": "…" }\` |
+   | \`in_review\` (a diff) | \`diff-review\` | \`POST /api/tasks/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
+   | \`aborted\` | — (a failure to triage) | investigate; \`/requeue\` if appropriate |
+
+   (A \`needs_info\` task that opted into the plan-preview gate is holding a PROPOSED PLAN
+   awaiting your go/steer; any other \`needs_info\` is a clarifying QUESTION. butchr also
+   exposes this on the task as \`pending_responder\` — the resolved \`cto\`/\`user\` for the
+   current step — so you don't have to cross-reference.)
+
+2. **Check the responder for that step.** \`GET /api/workspaces/<workspace_id>\` returns
+   the fully-resolved \`step_responders\` map; read \`step_responders[<step>]\` (or just read
+   the task's \`pending_responder\`).
+
+3. **AUTO-ACT only when it is \`"cto"\`.** Do the action above via the butchr HTTP API at
+   \`http://127.0.0.1:47800\` (or the equivalent \`bin/butchr\` command). When it is
+   \`"user"\`, **do NOT act** — a human will handle it in the webapp; just observe (the
+   event is informational for you). The endpoints stay open to both, so a human can
+   always act even on a \`cto\` step — but YOU only auto-act on \`cto\`.
 
 ## Writing specs (the \`spec requested\` event)
 
-A \`spec requested\` event means an \`idea\` task is waiting for someone to turn its
-brief into a concrete, repo-grounded SPEC. WHO writes it is per-workspace config — the
-\`spec-generation\` responder:
-
-1. **Check the responder FIRST.** \`GET /api/workspaces/<workspace_id>\` returns a
-   \`step_responders\` map. Look at \`step_responders["spec-generation"]\`.
-2. If it is \`"cto"\` → it's YOURS: read the repo (this is your repo root) to ground the
-   spec, write a detailed, scoped SPEC for the brief, and submit it with
-   \`POST /api/tasks/<id>/spec\` body \`{ "spec": "<the spec>" }\`. butchr rewrites the
-   task's prompt to your spec and advances it to \`spec_review\`.
-3. If it is \`"user"\` → a HUMAN will write the spec in the webapp. **Do NOT write or
-   submit it** — just observe; the event is informational for you.
+A \`spec requested\` event is the \`spec-generation\` case above: an \`idea\` task waiting
+for someone to turn its brief into a concrete, repo-grounded SPEC. Only when
+\`step_responders["spec-generation"]\` is \`"cto"\`: read the repo (this is your repo root)
+to ground the spec, write a detailed, scoped SPEC for the brief, and submit it with
+\`POST /api/tasks/<id>/spec\` body \`{ "spec": "<the spec>" }\` — butchr rewrites the task's
+prompt to your spec and advances it to \`spec_review\`. If it is \`"user"\`, a HUMAN writes
+it in the webapp; do NOT submit — just observe.
 
 (If a spec is later sent back for changes, the task returns to \`idea\` and you get a
 fresh \`spec requested\` event with the change note recorded on the task — revise and

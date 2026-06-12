@@ -104,6 +104,34 @@ const AWAITED_LABEL = {
 function stateKind(status) {
   return STATE_KIND[status] || "idle";
 }
+// FW-3: who is EXPECTED to act on a feedback task's CURRENT step, read from the
+// server-computed `pending_responder` (cto|user — see tasks.pendingResponder). butchr is
+// responder-agnostic, so the action controls are always available; this is emphasis only.
+// `user` is surfaced prominently ("awaiting you") since it needs a human; `cto` is muted
+// ("awaiting CTO — you can also act") since the CTO agent handles it automatically but a
+// human may still act. Returns "" when the task isn't in a feedback state (responder null).
+function responderChip(t) {
+  const r = t && t.pending_responder;
+  if (r === "user") {
+    return ' <span class="chip awaiting-you" title="this step is assigned to YOU — act in the controls below">awaiting you</span>';
+  }
+  if (r === "cto") {
+    return ' <span class="chip awaiting-cto" title="this step is assigned to the CTO agent (handled automatically) — you can also act">awaiting CTO</span>';
+  }
+  return "";
+}
+// FW-3: human-facing label for the feedback STEP a task is currently on — a JS mirror of
+// tasks.feedbackStep (incl. the needs_info plan-vs-question split on plan_preview). Used
+// only for the awaiting-who banner copy on the task detail. null for a non-feedback state.
+function feedbackStepLabel(t) {
+  switch (t.status) {
+    case "idea": return "spec generation";
+    case "spec_review": return "spec approval";
+    case "in_review": return "diff review";
+    case "needs_info": return t.plan_preview ? "plan approval" : "answering the question";
+    default: return null;
+  }
+}
 function awaitedLabel(status) {
   return AWAITED_LABEL[status] || null;
 }
@@ -121,7 +149,7 @@ function effStatus(t) {
 // `plan` shows the plan-preview badge (if the task opted into that gate); `kind` shows
 // a small state-kind chip (agent/feedback/idle) plus for feedback states the awaited
 // artifact label — surfacing the canonical 3-kind model in the UI.
-function taskChips(t, { plan = false, kind = false } = {}) {
+function taskChips(t, { plan = false, kind = false, responder = false } = {}) {
   const st = effStatus(t);
   const kindStr = stateKind(st);
   const awaited = awaitedLabel(st);
@@ -137,6 +165,7 @@ function taskChips(t, { plan = false, kind = false } = {}) {
   return (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
     + chip(st)
     + kindChip
+    + (responder ? responderChip(t) : "")
     + (t.conflict ? ' <span class="chip aborted">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
     // (priority 0 is the silent FIFO default, shown on no card).
@@ -1591,7 +1620,7 @@ function tasksTable(tasks) {
     const feedback = stateKind(effStatus(t)) === "feedback";
     tr.innerHTML = `
       <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
-      <td>${taskChips(t, { kind: feedback })}${tagChips(t)}</td>
+      <td>${taskChips(t, { kind: feedback, responder: true })}${tagChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
       <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a>${
         herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
@@ -2002,7 +2031,7 @@ function boardCard(t, lane, byId) {
   card.innerHTML = `
     <div class="bc-top">
       <a class="bc-id" href="#/task/${esc(t.id)}">${esc(t.id)}</a>
-      <span class="bc-chips">${taskChips(t, { plan: true })}</span>
+      <span class="bc-chips">${taskChips(t, { plan: true, responder: true })}</span>
     </div>
     <div class="bc-meta">
       <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
@@ -2573,6 +2602,24 @@ async function renderTask(id) {
   // on first open (transcripts get large) and paged via a "Load more" button.
   if (t.session_id) wrap.appendChild(renderTranscriptPanel(t.id));
 
+  // FW-3 AWAITING-WHO BANNER. For a task sitting in a feedback state, surface WHO is
+  // expected to act on the current step — the server-computed `pending_responder` (the
+  // resolved cto/user from the workspace's step-responder config). `user` is emphasized
+  // ("awaiting you"); `cto` is muted ("the CTO agent handles this — you can also act").
+  // butchr is responder-agnostic: the action controls below render regardless, so a human
+  // can always act. Null pending_responder (non-feedback state) shows no banner.
+  if (t.pending_responder) {
+    const stepLbl = feedbackStepLabel(t);
+    const stepStr = stepLbl ? ` (${esc(stepLbl)})` : "";
+    const html = t.pending_responder === "user"
+      ? `<strong>Awaiting you</strong> — this step${stepStr} is assigned to <strong>you</strong>. Act in the controls below.`
+      : `<strong>Awaiting the CTO agent</strong> — this step${stepStr} is handled automatically by this workspace's CTO agent. You can also act in the controls below.`;
+    wrap.appendChild(el("div", {
+      class: "responder-banner " + (t.pending_responder === "user" ? "awaiting-you" : "awaiting-cto"),
+      html,
+    }));
+  }
+
   // diff + review controls (when in_review)
   if (t.status === "in_review") {
     // CI GATE badge — shown BEFORE the diff. Reflects the build/test job butchr
@@ -2614,7 +2661,10 @@ async function renderTask(id) {
   // is ALWAYS available so a human can submit, but for a `cto` workspace the CTO agent
   // normally handles it from the channel push.
   if (t.status === "idea") {
-    const specResponder = (dir && dir.step_responders && dir.step_responders["spec-generation"]) || "cto";
+    // The spec-generation responder for this idea, read straight from the task's
+    // server-computed pending_responder (resolved cto/user) — no cross-reference to the
+    // workspace config needed. Falls back to "cto" defensively.
+    const specResponder = t.pending_responder || "cto";
     if (t.review_note) block("Spec changes requested", t.review_note, wrap);
     const specPanel = el("div", { class: "panel", style: "margin-top:18px" });
     specPanel.innerHTML = `

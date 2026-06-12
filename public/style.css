@@ -334,6 +334,45 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* A non-zero dispatch priority — shown only when set (priority 0 is the silent FIFO
    default). Reuse the in_progress hue so it reads as an "acts sooner" signal. */
 .chip.priority { background: var(--in_progress); }
+/* FW-3 AWAITING-WHO emphasis (the resolved pending_responder for a feedback task's
+   current step). `awaiting-you` (user) is a FILLED, attention-grabbing pill — this step
+   needs a human; `awaiting-cto` is a muted outlined pill — the CTO agent handles it
+   automatically (a human may still act). */
+.chip.awaiting-you {
+  background: var(--needs_info);
+  color: #fff;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+.chip.awaiting-cto {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+/* The task-detail awaiting-who banner: a prominent strip above the feedback controls.
+   `awaiting-you` is tinted + accented (act now); `awaiting-cto` reads as a quiet note. */
+.responder-banner {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.responder-banner.awaiting-you {
+  border-color: var(--needs_info);
+  border-left: 3px solid var(--needs_info);
+  background: var(--panel-2);
+  color: var(--text);
+}
+.responder-banner.awaiting-cto {
+  background: var(--panel-2);
+  color: var(--muted);
+}
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
