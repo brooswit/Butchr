@@ -22,6 +22,7 @@ import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { getWorkspace } from "./workspaces.ts";
 import { publish } from "./events.ts";
+import { makeGateLiveness, settleGate } from "./gate.ts";
 import * as git from "./git.ts";
 import { runHeadlessWithPrompt } from "./headless.ts";
 // getTask / taskView are imported from tasks.ts; the reverse edge (tasks.ts importing
@@ -63,18 +64,19 @@ export type ConformanceRunner = (input: ConformanceInput) => Promise<Conformance
 
 let conformanceRunner: ConformanceRunner = defaultConformanceRunner;
 
-// Task ids whose conformance reviewer is IN FLIGHT in THIS butchr process right now.
-// The reviewer runs in-process (triggerConformance awaits the runner), so a butchr
-// restart kills it AND empties this set — which is exactly what makes a DB
-// conformance_status='checking' with no entry here PROVABLY stale (its reviewer died
+// Liveness for the conformance gate: which task ids have a reviewer IN FLIGHT in THIS
+// butchr process right now. The reviewer runs in-process (triggerConformance awaits the
+// runner), so a butchr restart kills it AND empties this set — which is exactly what makes
+// a DB conformance_status='checking' with no entry here PROVABLY stale (its reviewer died
 // with the process). recoverStuckGates keys off this to re-trigger only genuinely-dead
-// gates, never one still legitimately running. Added synchronously before the 'checking'
-// write; cleared in a finally. See tasks.recoverStuckGates.
-const conformanceInFlight = new Set<string>();
+// gates, never one still legitimately running. Marked synchronously before the 'checking'
+// write; cleared in a finally. Same makeGateLiveness primitive the CI gate uses. See
+// tasks.recoverStuckGates.
+const conformanceLiveness = makeGateLiveness();
 
 /** Is this task's conformance reviewer running in THIS process right now? */
 export function conformanceGateInFlight(id: string): boolean {
-  return conformanceInFlight.has(id);
+  return conformanceLiveness.isLive(id);
 }
 
 /** Replace the conformance runner (tests inject a fake to avoid spawning claude). */
@@ -222,7 +224,7 @@ export async function triggerConformance(id: string): Promise<void> {
   // Mark the reviewer IN FLIGHT in this process (synchronously, before the 'checking'
   // write) so a concurrent recovery sweep sees it's genuinely running here and won't
   // re-trigger it; cleared in the finally below when this process is done with it.
-  conformanceInFlight.add(id);
+  conformanceLiveness.mark(id);
   try {
     // Flip to 'checking' SYNCHRONOUSLY — before any await — so a still-in-flight review
     // is visible (spinner) the instant the fire-and-forget call's sync prefix runs, and
@@ -263,14 +265,11 @@ export async function triggerConformance(id: string): Promise<void> {
     // 0 — see tasks.recoverStuckGates / config.maxGateRecoveryAttempts.
     const status = result ? statusFor(result.conforms) : null;
     const summary = result ? (result.reason || (status === "pass" ? "conforms" : "")) : null;
-    const res = db
-      .query(
-        `UPDATE tasks SET conformance_status=?, conformance_summary=?, gate_recovery_attempts=0 WHERE id=? AND status='in_review'`,
-      )
-      .run(status, summary, id);
-    if (res.changes === 0) return;
+    // Settle via the shared gate write (same primitive as the CI gate): persist the badge
+    // + reset gate_recovery_attempts, guarded on the task still being in_review.
+    if (!settleGate(id, { conformance_status: status, conformance_summary: summary })) return;
     emitUpdated(id);
   } finally {
-    conformanceInFlight.delete(id);
+    conformanceLiveness.clear(id);
   }
 }

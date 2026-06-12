@@ -4,7 +4,7 @@ import { checkChangelogUpdated } from "./changelog.ts";
 import { config } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
-import type { TaskRow, TaskStatus } from "./db.ts";
+import type { TaskRow, TaskStatus, WorkspaceRow } from "./db.ts";
 import {
   classifyPathType,
   computeEstimateStats,
@@ -25,7 +25,7 @@ import { currentPaneRepairing, readRunLogSnapshot, signalAbort } from "./dispatc
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
 import { publish } from "./events.ts";
-import { runGate } from "./gate.ts";
+import { makeGateLiveness, runGate, settleGate } from "./gate.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
@@ -524,6 +524,27 @@ function isKeep(v: unknown): v is { __keep: true; value: string | number | null 
 }
 
 /**
+ * Wrap a value passed in setStatus's `set` so the column compiles to
+ * `col=COALESCE(?, col)` (OVERWRITE the column ONLY when the supplied value is non-NULL,
+ * else leave it untouched) — the MIRROR-IMAGE of keep()'s `col=COALESCE(col, ?)`
+ * stick-to-first. Used for "overwrite-if-supplied" columns: grounding_fp (re-stamped on
+ * each launch that passes a fingerprint, kept across a launch that doesn't) and
+ * output_snapshot (replaced when a fresh snapshot was captured, kept otherwise).
+ */
+function setIfPresent(
+  value: string | number | null,
+): { __setIfPresent: true; value: string | number | null } {
+  return { __setIfPresent: true, value };
+}
+function isSetIfPresent(
+  v: unknown,
+): v is { __setIfPresent: true; value: string | number | null } {
+  return (
+    typeof v === "object" && v !== null && (v as { __setIfPresent?: unknown }).__setIfPresent === true
+  );
+}
+
+/**
  * The ONE guarded task-status transition. Builds a `WHERE id=? [AND status IN
  * (…from)]` UPDATE that writes `status` (plus any `opts.set` columns) and, ONLY when
  * it actually changed a row, performs the other three steps that must stay in
@@ -542,7 +563,8 @@ function isKeep(v: unknown): v is { __keep: true; value: string | number | null 
  *    actually changed (`row.status !== to`), so a same-status write (e.g. a duplicate
  *    re-queue) logs no spurious transition — matching the old per-call-site guards.
  *  - `set` — extra columns written alongside status as `col=?`; wrap a value in
- *    `keep(...)` for `col=COALESCE(col, ?)` stamp-once semantics.
+ *    `keep(...)` for `col=COALESCE(col, ?)` stamp-once semantics, or `setIfPresent(...)`
+ *    for `col=COALESCE(?, col)` overwrite-if-supplied semantics.
  */
 function setStatus(
   id: string,
@@ -561,6 +583,9 @@ function setStatus(
   for (const [col, val] of Object.entries(opts.set ?? {})) {
     if (isKeep(val)) {
       assigns.push(`${col}=COALESCE(${col}, ?)`);
+      params.push(val.value);
+    } else if (isSetIfPresent(val)) {
+      assigns.push(`${col}=COALESCE(?, ${col})`);
       params.push(val.value);
     } else {
       assigns.push(`${col}=?`);
@@ -1059,6 +1084,26 @@ function buildConflictNotes(
   ].join("\n");
 }
 
+/**
+ * Build the actionable merge-conflict note (resolving the default branch name), append it
+ * to task.md's Review Notes as a Rejection entry, and return it for the caller to persist
+ * onto review_note. Shared by the two places a rebase conflict surfaces: the pre-dispatch
+ * rebase (prepareBranchForDispatch — persists review_note directly) and the merge-time
+ * rebase (finalizeMerge — hands the note to requestChanges, which persists review_note as
+ * part of the kick-back, so finalizeMerge no longer writes it a second time).
+ */
+async function recordMergeConflictNote(
+  dir: WorkspaceRow,
+  id: string,
+  conflictFiles: string[],
+  message: string,
+): Promise<string> {
+  const base = await git.defaultBranch(dir.path);
+  const note = buildConflictNotes(id, base, conflictFiles, message);
+  appendRejection(dir.path, id, note, nowIso());
+  return note;
+}
+
 /** Outcome of the pre-dispatch auto-rebase (see prepareBranchForDispatch). */
 export type BranchPrep = {
   // The branch is safely based on the current default tip (clean rebase/reset, an
@@ -1114,11 +1159,9 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   const res = await runExclusiveMerge(() => git.rebaseOntoDefault(dir.path, id));
 
   if (res.conflict) {
-    const base = await git.defaultBranch(dir.path);
-    const note = buildConflictNotes(id, base, res.conflictFiles, res.message);
     // Surface it (NOT a silent dispatch): record the note in task.md (the resumed
     // agent reads it via renderReworkPrompt) and in review_note for the UI.
-    appendRejection(dir.path, id, note, nowIso());
+    const note = await recordMergeConflictNote(dir, id, res.conflictFiles, res.message);
     db.query(`UPDATE tasks SET review_note=? WHERE id=?`).run(note, id);
     emitUpdated(id);
     return { ok: false, rebased: false, conflict: true };
@@ -1439,11 +1482,10 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       // author of the code) as a changes_requested verdict with resolution
       // steps, exactly like a reject. Returns 200, task bounces to `inactive` so
       // the dispatcher resumes the SAME session in-context to resolve it.
-      const base = await git.defaultBranch(dir.path);
-      const notes = buildConflictNotes(id, base, result.conflictFiles, result.message);
-      appendRejection(dir.path, id, notes, nowIso());
+      const notes = await recordMergeConflictNote(dir, id, result.conflictFiles, result.message);
       // Same channel as reject: into the live agent if blocked, else re-queue
-      // (requestChanges tears down any lingering tab in the fallback).
+      // (requestChanges tears down any lingering tab in the fallback). requestChanges
+      // persists review_note + emits via setStatus, so we DON'T write/emit it again here.
       await requestChanges(
         id,
         notes,
@@ -1451,7 +1493,6 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         row.herdr_tab_id,
         "merge conflict — sent back to agent",
       );
-      emitUpdated(id);
       return { task: taskView(id)!, conflictSentBack: true };
     }
     // Non-conflict merge failure — genuinely unusual/unsafe; surface to the human.
@@ -1477,25 +1518,31 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       `[butchr] task ${id} merge AUTO-REVERTED: post-merge verify failed on the ` +
         `default branch; main restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
     );
-    const res = db.query(
-      `UPDATE tasks SET status='failed', conflict=0, idle=0, idle_context=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL,
-         output_snapshot=COALESCE(?, output_snapshot), revert_reason=?, last_dispatch_error=?,
-         completed_at=COALESCE(completed_at, ?)
-         WHERE id=? AND status=?`,
-    ).run(snapshot || null, reason, reason, nowIso(), id, inflight);
-    if (res.changes === 0) {
+    // Pure DRY collapse of the UPDATE→event→task.md mirror→emit tail into setStatus
+    // (this transition already mirrored task.md, so it's not a desync fix). output_snapshot
+    // is overwrite-if-supplied (COALESCE(?, col) → setIfPresent), distinct from
+    // completed_at's stamp-once (COALESCE(col, ?) → keep). The idle=0 clear auto-wipes
+    // idle_context inside setStatus, matching the explicit clear.
+    if (
+      !setStatus(id, "failed", {
+        from: inflight,
+        note: "merge auto-reverted off main (post-merge verify failed)",
+        set: {
+          conflict: 0,
+          idle: 0,
+          herdr_pane_id: null,
+          herdr_tab_id: null,
+          output_snapshot: setIfPresent(snapshot || null),
+          revert_reason: reason,
+          last_dispatch_error: reason,
+          completed_at: keep(nowIso()),
+        },
+      })
+    ) {
       // Raced (e.g. aborted) between the gate and here — leave whatever won.
       emitUpdated(id);
       return { task: taskView(id)! };
     }
-    recordTaskEvent(
-      id,
-      inflight,
-      "failed",
-      "merge auto-reverted off main (post-merge verify failed)",
-    );
-    updateTaskMdStatus(dir.path, id, "failed");
-    emitUpdated(id);
     return { task: taskView(id)!, revertedOnRed: true };
   }
 
@@ -1622,19 +1669,30 @@ export function markRunning(
   // path compares it to detect a prompt/context edit made while the task was paused
   // (see dispatcher.dispatch + taskmd.renderRegroundBlock). COALESCE(?, grounding_fp)
   // overwrites it when a fingerprint is supplied and leaves it untouched otherwise.
-  const res = db.query(
-    `UPDATE tasks SET status='in_progress', herdr_pane_id=?, herdr_tab_id=?,
-       session_id=COALESCE(session_id, ?), started_at=COALESCE(started_at, ?),
-       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL, answer=NULL,
-       grounding_fp=COALESCE(?, grounding_fp)
-       WHERE id=? AND status='inactive'`,
-  ).run(paneId, tabId ?? null, sessionId, nowIso(), groundingFp ?? null, id);
-  if (res.changes === 0) return; // aborted / already running / moved under us
-  // Record the inactive→in_progress launch transition (the agent (re)started). The
-  // first launch (no started_at yet) is a fresh build; later launches are resumes
-  // (rework / answer / conflict-bounce) — both are genuine state transitions.
-  recordTaskEvent(id, "inactive", "in_progress", row.started_at ? "agent resumed" : "agent launched");
-  emitUpdated(id);
+  //
+  // Routed through setStatus so this launch transition keeps the task.md mirror in
+  // lockstep — the raw write it replaced skipped the mirror (a desync this fixes). The
+  // event note distinguishes the first launch (no started_at — a fresh build) from a
+  // resume (rework / answer / conflict-bounce); both are genuine transitions.
+  if (
+    !setStatus(id, "in_progress", {
+      from: "inactive",
+      note: row.started_at ? "agent resumed" : "agent launched",
+      set: {
+        herdr_pane_id: paneId,
+        herdr_tab_id: tabId ?? null,
+        session_id: keep(sessionId),
+        started_at: keep(nowIso()),
+        dispatch_attempts: 0,
+        last_dispatch_error: null,
+        next_dispatch_at: null,
+        answer: null,
+        grounding_fp: setIfPresent(groundingFp ?? null),
+      },
+    })
+  ) {
+    return; // aborted / already running / moved under us
+  }
 }
 
 /**
@@ -1755,6 +1813,80 @@ function autoCommitOnReview(id: string, workspaceId: string): void {
 }
 
 /**
+ * Shared preamble for the three "the agent is EXITING — park its task" transitions
+ * (markInReview's dead-agent rescue, markReviewFromAgent's request_review, and
+ * markNeedsInfoFromAgent's raise). They all: bail on a missing/terminal task; capture
+ * the run-log snapshot (the diagnostic the reviewer/answerer reads once the live pane is
+ * gone); COMMIT-ON-REVIEW the worktree iff still genuinely `in_progress` (so the diff
+ * survives the worktree being torn down); flip the status via setStatus from
+ * `['in_progress', to]` (the genuine transition OR a status-unchanged duplicate call),
+ * clearing the pane + idle; then capture session usage. When `opts.gates` is set AND the
+ * task was genuinely `in_progress` (not a duplicate already-parked call), it ALSO fires
+ * the footprint + CI + conformance trio — fire-and-forget, review never blocks on them.
+ *
+ * Per-caller differences are carried in `extraSet` (e.g. completed_at stamp-once vs
+ * plain, the `summary`/`question` column, resume_attempts reset) and `opts`
+ * (note, gates, a caller-supplied snapshot, a narrower `from`). Returns the same
+ * "ok"/"terminal"/"notfound" the agent-tool callers surface; markInReview ignores it.
+ */
+function parkExitingAgent(
+  id: string,
+  to: TaskStatus,
+  extraSet: Record<string, unknown>,
+  opts: {
+    note: string;
+    gates?: boolean;
+    snapshot?: string;
+    from?: TaskStatus | TaskStatus[];
+  },
+): "ok" | "terminal" | "notfound" {
+  const row = getTask(id);
+  if (!row) return "notfound";
+  if (isTerminal(row.status)) return "terminal";
+
+  // Capture the agent's terminal output (unless the caller already has one): once the
+  // agent exits there is no live pane, so this snapshot + the git diff is what review /
+  // the answerer is conducted against.
+  const snapshot = opts.snapshot ?? readRunLogSnapshot(id);
+
+  // COMMIT-ON-REVIEW (FIRST): the agent is told it need not commit — butchr captures its
+  // worktree. On the genuine in_progress transition, commit that diff onto the branch NOW
+  // so it can't be lost as worktree-only state before merge. Best-effort, never blocks.
+  if (row.status === "in_progress") autoCommitOnReview(id, row.workspace_id);
+
+  // Flip status. setStatus records the audit event ONLY on a genuine change (a duplicate
+  // already-parked call is status-unchanged, so no event) — matching the old per-call
+  // guards. Clears the pane (the agent is exiting; the state holds no live process).
+  if (
+    !setStatus(id, to, {
+      from: opts.from ?? ["in_progress", to],
+      note: opts.note,
+      set: {
+        idle: 0,
+        herdr_pane_id: null,
+        output_snapshot: snapshot || null,
+        ...extraSet,
+      },
+    })
+  ) {
+    // Not in a phase we can park (e.g. needs_info/blocked/aborted under us) — surface
+    // the current status to the agent-tool caller.
+    return terminalOrOk(id);
+  }
+  // Capture the session's token usage / model now that the agent has finished this turn
+  // (re-read each call so a rework's added turns are reflected too).
+  captureSessionUsage(id);
+  // The gates + footprint run only on a genuine in_progress transition (not a duplicate
+  // park). Fire-and-forget — review never blocks on them.
+  if (opts.gates && row.status === "in_progress") {
+    void captureDiffFootprint(id);
+    void triggerCi(id);
+    void triggerConformance(id);
+  }
+  return "ok";
+}
+
+/**
  * DEAD-AGENT FALLBACK: move an `in_progress` task to `in_review` because its agent
  * ended WITHOUT calling request_review (the watcher / startup reconcile rescue path;
  * the live path is markReviewFromAgent). Guarded on the build phase being live
@@ -1762,41 +1894,20 @@ function autoCommitOnReview(id: string, workspaceId: string): void {
  * resurrected. The caller is already tearing down the tab — we clear the ids.
  */
 export function markInReview(id: string, snapshot: string): void {
-  // COMMIT-ON-REVIEW (FIRST): the agent ended with uncommitted work in its worktree;
-  // commit it onto the branch BEFORE the transition so this rescue path can't leave
-  // the diff as worktree-only state a later deletion would lose. Only when genuinely
-  // in_progress (the state this rescues from) — best-effort, never blocks the move.
-  const pre = getTask(id);
-  if (pre?.status === "in_progress") autoCommitOnReview(id, pre.workspace_id);
-  if (
-    !setStatus(id, "in_review", {
-      from: "in_progress",
-      note: "agent finished — submitted for review",
-      set: {
-        completed_at: nowIso(),
-        output_snapshot: snapshot,
-        herdr_pane_id: null,
-        herdr_tab_id: null,
-        idle: 0,
-        // Reaching review IS progress — clear the auto-resume streak.
-        resume_attempts: 0,
-      },
-    })
-  ) {
-    return; // aborted (or otherwise moved) under us
-  }
-  // Capture the session's token usage / model now that the agent has finished.
-  captureSessionUsage(id);
-  // Capture the change footprint (size + path type) for duration estimates while the
-  // worktree still exists. Fire-and-forget — advisory, never blocks the transition.
-  void captureDiffFootprint(id);
-  // CI GATE: this is a genuine running→review transition (guarded above), so kick
-  // off the build/test job for the task's worktree. Fire-and-forget — review must
-  // not block on CI.
-  void triggerCi(id);
-  // SPEC-CONFORMANCE GATE: judge whether the diff satisfies the prompt. Orthogonal to
-  // CI (which only proves it builds/tests). Fire-and-forget — review never blocks on it.
-  void triggerConformance(id);
+  // Rescue from in_progress ONLY (narrower than the request_review path's array `from`),
+  // using the caller-supplied snapshot. completed_at is stamped plain (not keep) and
+  // output_snapshot written raw, preserving this path's exact columns. Return ignored.
+  parkExitingAgent(
+    id,
+    "in_review",
+    {
+      completed_at: nowIso(),
+      output_snapshot: snapshot,
+      // Reaching review IS progress — clear the auto-resume streak.
+      resume_attempts: 0,
+    },
+    { note: "agent finished — submitted for review", gates: true, snapshot, from: "in_progress" },
+  );
 }
 
 /**
@@ -1817,54 +1928,20 @@ export function markReviewFromAgent(
   id: string,
   summary?: string,
 ): "ok" | "terminal" | "notfound" {
-  const row = getTask(id);
-  if (!row) return "notfound";
-  if (isTerminal(row.status)) return "terminal";
-
-  // Capture the agent's terminal output now: once it exits there is no live pane
-  // for the reviewer to inspect, so the snapshot (plus the git diff) is what
-  // review is conducted against.
-  const snapshot = readRunLogSnapshot(id);
-
-  // COMMIT-ON-REVIEW (FIRST): the agent is told it need not commit — butchr captures
-  // its worktree. On the genuine in_progress→in_review transition, commit that diff
-  // onto the branch NOW so it can't be lost as worktree-only state before merge.
-  if (row.status === "in_progress") autoCommitOnReview(id, row.workspace_id);
-
-  // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a
-  // duplicate call). Clear the pane: the agent is exiting and review holds no live
-  // process. setStatus records the audit event ONLY on the genuine in_progress→
-  // in_review change (a duplicate in_review→in_review is status-unchanged, so no
-  // event) — matching the old `if (row.status === "in_progress")` guard exactly.
-  if (
-    !setStatus(id, "in_review", {
-      from: ["in_progress", "in_review"],
-      note: "agent requested review",
-      set: {
-        completed_at: keep(nowIso()),
-        summary: summary ?? null,
-        idle: 0,
-        herdr_pane_id: null,
-        output_snapshot: snapshot || null,
-        // Reaching review IS progress — clear the auto-resume streak.
-        resume_attempts: 0,
-      },
-    })
-  ) {
-    // Not in a phase we can submit (e.g. needs_info/blocked/aborted under us).
-    return terminalOrOk(id);
-  }
-  // Capture the session's token usage / model now that the agent has finished this
-  // turn (re-read each call so a rework's added turns are reflected too).
-  captureSessionUsage(id);
-  // The gates + footprint run only on a genuine in_progress→in_review transition (not
-  // a duplicate request_review). Fire-and-forget — review never blocks on them.
-  if (row.status === "in_progress") {
-    void captureDiffFootprint(id);
-    void triggerCi(id);
-    void triggerConformance(id);
-  }
-  return "ok";
+  // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a duplicate
+  // call — status-unchanged, so no event + no gates, matching the old guard). completed_at
+  // is stamped once (keep). Runs the gates on the genuine transition.
+  return parkExitingAgent(
+    id,
+    "in_review",
+    {
+      completed_at: keep(nowIso()),
+      summary: summary ?? null,
+      // Reaching review IS progress — clear the auto-resume streak.
+      resume_attempts: 0,
+    },
+    { note: "agent requested review", gates: true },
+  );
 }
 
 /**
@@ -1884,45 +1961,15 @@ export function markNeedsInfoFromAgent(
   id: string,
   question: string,
 ): "ok" | "terminal" | "notfound" {
-  const row = getTask(id);
-  if (!row) return "notfound";
-  if (isTerminal(row.status)) return "terminal";
-
-  // Capture the agent's terminal output now: once it exits there is no live pane,
-  // so the snapshot is what the answerer sees of where the agent got stuck.
-  const snapshot = readRunLogSnapshot(id);
-
-  // COMMIT-ON-REVIEW (FIRST): when a BUILD agent (in_progress) asks, it may have
-  // uncommitted work in its worktree; commit it onto the branch BEFORE parking in
-  // needs_info so the diff survives a worktree deletion and the resume-on-answer
-  // continues on top of it. Only on the in_progress transition; best-effort, never
-  // blocks the park.
-  if (row.status === "in_progress") autoCommitOnReview(id, row.workspace_id);
-
-  // in_progress → needs_info (normal), or needs_info → needs_info (a duplicate ask).
-  // Clear the pane: the agent is exiting and this state holds no live process.
-  // setStatus records the audit event ONLY on a genuine change (a duplicate
-  // needs_info→needs_info is status-unchanged) — matching the old
-  // `if (row.status !== "needs_info")` guard exactly.
-  if (
-    !setStatus(id, "needs_info", {
-      from: ["in_progress", "needs_info"],
-      note: "agent asked a clarifying question",
-      set: {
-        question,
-        idle: 0,
-        herdr_pane_id: null,
-        output_snapshot: snapshot || null,
-      },
-    })
-  ) {
-    // Not in a state we can park (e.g. it was aborted out from under the agent) —
-    // report the current status so the tool surfaces it.
-    return terminalOrOk(id);
-  }
-  // Capture the session's token usage / model now that the agent has paused this turn.
-  captureSessionUsage(id);
-  return "ok";
+  // in_progress → needs_info (normal), or needs_info → needs_info (a duplicate ask —
+  // status-unchanged, so no event, matching the old `if (row.status !== "needs_info")`
+  // guard). No gates: needs_info is a pause, not a review submission.
+  return parkExitingAgent(
+    id,
+    "needs_info",
+    { question },
+    { note: "agent asked a clarifying question" },
+  );
 }
 
 /**
@@ -1996,17 +2043,18 @@ export type CiRunner = (dirPath: string, taskId: string, gateCmd: string) => Pro
 // the persistence + trigger wiring without spawning a real `bun` build/test.
 let ciRunner: CiRunner = defaultCiRunner;
 
-// Task ids whose CI gate is RUNNING in THIS butchr process right now. The gate runs
-// in-process (triggerCi awaits runGate), so a butchr restart kills it AND empties this
-// set — which is exactly what makes a DB ci_status='running' with no entry here PROVABLY
-// stale (its build/test subprocess died with the process). recoverStuckGates keys off
-// this to re-trigger only genuinely-dead gates, never one still legitimately running.
-// Added synchronously before the 'running' write; cleared in a finally.
-const ciInFlight = new Set<string>();
+// Liveness for the CI gate: which task ids have a CI gate RUNNING in THIS butchr process
+// right now. The gate runs in-process (triggerCi awaits runGate), so a butchr restart
+// kills it AND empties this set — which is exactly what makes a DB ci_status='running'
+// with no entry here PROVABLY stale (its build/test subprocess died with the process).
+// recoverStuckGates keys off this to re-trigger only genuinely-dead gates, never one still
+// legitimately running. Marked synchronously before the 'running' write; cleared in a
+// finally. The Set + its three operations are the shared makeGateLiveness primitive.
+const ciLiveness = makeGateLiveness();
 
 /** Is this task's CI gate running in THIS process right now? */
 export function ciGateInFlight(id: string): boolean {
-  return ciInFlight.has(id);
+  return ciLiveness.isLive(id);
 }
 
 /** Replace the CI runner (tests inject a fake to avoid spawning bun). */
@@ -2084,7 +2132,7 @@ export async function triggerCi(id: string): Promise<void> {
   // Mark the gate IN FLIGHT in this process (synchronously, before the 'running' write)
   // so a concurrent recovery sweep sees it's genuinely running here and won't re-trigger
   // it; cleared in the finally below once this process is done with it.
-  ciInFlight.add(id);
+  ciLiveness.mark(id);
   try {
     db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
     emitUpdated(id);
@@ -2132,13 +2180,10 @@ export async function triggerCi(id: string): Promise<void> {
 
     // First line is the badge label; the rest (if any) is the output tail.
     const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
-    // Only write back while the task is still in review — if it merged/aborted while
-    // CI ran, don't resurrect stale CI state onto it. A real settle also resets
-    // gate_recovery_attempts (the restart-recovery streak) to 0 — see recoverStuckGates.
-    const res = db
-      .query(`UPDATE tasks SET ci_status=?, ci_summary=?, gate_recovery_attempts=0 WHERE id=? AND status='in_review'`)
-      .run(result.status, summary, id);
-    if (res.changes === 0) return;
+    // Settle via the shared gate write: persist ci_status/ci_summary + reset
+    // gate_recovery_attempts, guarded on the task still being in_review — if it
+    // merged/aborted while CI ran, don't resurrect stale CI state onto it.
+    if (!settleGate(id, { ci_status: result.status, ci_summary: summary })) return;
     emitUpdated(id);
 
     // AUTO-MERGE HOOK: CI just settled to 'pass' on a still-in-review task. If
@@ -2147,7 +2192,7 @@ export async function triggerCi(id: string): Promise<void> {
     // blocks on the merge; the dispatcher tick re-checks as a backstop.
     if (result.status === "pass") void maybeAutoMerge(id);
   } finally {
-    ciInFlight.delete(id);
+    ciLiveness.clear(id);
   }
 }
 
@@ -2384,14 +2429,22 @@ export async function backToQueued(id: string): Promise<void> {
   // a dispatch failure. A genuine dispatch failure goes through markDispatchFailure.
   const row = getTask(id);
   await herdr.teardownTask(row?.herdr_tab_id, id, row?.herdr_pane_id);
-  db.query(
-    `UPDATE tasks SET status='inactive', herdr_pane_id=NULL, herdr_tab_id=NULL, idle=0, idle_context=NULL,
-       dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
-  ).run(id);
-  if (row && row.status !== "inactive") {
-    recordTaskEvent(id, row.status, "inactive", "re-queued");
-  }
-  emitUpdated(id);
+  // Routed through setStatus so the re-queue keeps the task.md mirror in lockstep — the
+  // raw write it replaced skipped it. No `from` guard (unconditional, as before); the
+  // → inactive event fires only on a genuine change (setStatus skips it when already
+  // inactive), matching the old `if (row.status !== "inactive")` guard. setStatus also
+  // wipes idle_context when it clears `idle`, matching the explicit clear here.
+  setStatus(id, "inactive", {
+    note: "re-queued",
+    set: {
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+      idle: 0,
+      dispatch_attempts: 0,
+      last_dispatch_error: null,
+      next_dispatch_at: null,
+    },
+  });
 }
 
 /**
@@ -2452,17 +2505,26 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
 
   // Under the cap: re-arm as READY `inactive` (pane cleared) with a backoff. Setting
   // the status explicitly (not just clearing the pane) guarantees a failure after
-  // markRunning can't leave an orphaned `in_progress`+null-pane row.
+  // markRunning can't leave an orphaned `in_progress`+null-pane row. Routed through
+  // setStatus so this re-arm keeps the task.md mirror in lockstep — the raw write it
+  // replaced skipped BOTH the mirror AND the audit event; via setStatus the genuine
+  // transition (e.g. in_progress→inactive after a post-launch failure) now records the
+  // retry in the event log too (intentional — visible retry history).
   const nextAt = new Date(Date.now() + dispatchBackoffMs(attempts)).toISOString();
-  db.query(
-    `UPDATE tasks SET status='inactive', dispatch_attempts=?, last_dispatch_error=?,
-       next_dispatch_at=?, herdr_pane_id=NULL, herdr_tab_id=NULL WHERE id=?`,
-  ).run(attempts, err, nextAt, id);
+  setStatus(id, "inactive", {
+    note: `dispatch attempt ${attempts}/${config.maxDispatchAttempts} failed; retrying`,
+    set: {
+      dispatch_attempts: attempts,
+      last_dispatch_error: err,
+      next_dispatch_at: nextAt,
+      herdr_pane_id: null,
+      herdr_tab_id: null,
+    },
+  });
   console.warn(
     `[butchr] dispatch attempt ${attempts}/${config.maxDispatchAttempts} failed ` +
       `for ${id}; retrying after ${nextAt}: ${err}`,
   );
-  emitUpdated(id);
 }
 
 /**
@@ -2692,17 +2754,18 @@ export async function recoverStuckGates(): Promise<GateRecoveryResult> {
         : `butchr re-triggered it ${row.gate_recovery_attempts ?? 0} time(s) without it ` +
           `settling (cap ${config.maxGateRecoveryAttempts})`;
       if (ciStale) {
-        const r = db
-          .query(
-            `UPDATE tasks SET ci_status='fail', ci_summary=?, gate_recovery_attempts=0
-               WHERE id=? AND status='in_review' AND ci_status='running'`,
-          )
-          .run(
-            `gate did not complete after a butchr restart — ${reason}; ` +
+        // Shared settle write with the "still stuck on the same value" guard.
+        const changed = settleGate(
+          id,
+          {
+            ci_status: "fail",
+            ci_summary:
+              `gate did not complete after a butchr restart — ${reason}; ` +
               `settled 'fail' so the task isn't stuck. Re-queue or re-run the gate to retry.`,
-            id,
-          );
-        if (r.changes > 0) {
+          },
+          { require: { ci_status: "running" } },
+        );
+        if (changed) {
           settled++;
           emitUpdated(id);
           console.warn(
@@ -2711,13 +2774,12 @@ export async function recoverStuckGates(): Promise<GateRecoveryResult> {
         }
       }
       if (confStale) {
-        const r = db
-          .query(
-            `UPDATE tasks SET conformance_status=NULL, conformance_summary=NULL, gate_recovery_attempts=0
-               WHERE id=? AND status='in_review' AND conformance_status='checking'`,
-          )
-          .run(id);
-        if (r.changes > 0) {
+        const changed = settleGate(
+          id,
+          { conformance_status: null, conformance_summary: null },
+          { require: { conformance_status: "checking" } },
+        );
+        if (changed) {
           settled++;
           emitUpdated(id);
           console.warn(

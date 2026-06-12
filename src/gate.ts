@@ -9,6 +9,7 @@
 // genuinely-different layers — CI's build-vs-test badge parsing + flaky retry,
 // verify's skip-on-empty + revert decision — sit on top in tasks.ts / verify.ts.
 import { config } from "./config.ts";
+import { db } from "./db.ts";
 import { run } from "./exec.ts";
 
 /** Outcome of one gate command: green-ness, combined output, timeout flag. */
@@ -37,4 +38,69 @@ export async function runGate(
   const res = await run(cmd, { cwd: opts.cwd, timeoutMs });
   const output = [res.stdout, res.stderr].filter(Boolean).join("\n").trim();
   return { ok: res.ok, output, timedOut: res.timedOut === true };
+}
+
+// === IN-PROCESS GATE LIVENESS ==============================================
+// Both review-time gates (the CI gate in tasks.ts, the spec-conformance gate in
+// conformance.ts) run IN THIS butchr process and persist a mid-flight DB status
+// ('running' / 'checking'). Each tracks which task ids it is actively running so the
+// restart-recovery sweep (tasks.recoverStuckGates) can tell a genuinely-live gate from
+// a stale DB status whose subprocess died with a previous butchr process: a mid-flight
+// DB status with NO live entry here is PROVABLY stale (the in-process set is emptied by a
+// restart). The set is marked synchronously BEFORE the mid-flight write and cleared in a
+// finally. Both gates implemented this Set identically, so it lives here once.
+
+/** A per-gate liveness tracker: the set of task ids whose gate is running in THIS process. */
+export type GateLiveness = {
+  /** Record that this task's gate is now running here (before the mid-flight DB write). */
+  mark(id: string): void;
+  /** Record that this task's gate is done here (in a finally). */
+  clear(id: string): void;
+  /** Is this task's gate running in THIS process right now? */
+  isLive(id: string): boolean;
+};
+
+/** Build a fresh, independent gate-liveness tracker (one per gate). */
+export function makeGateLiveness(): GateLiveness {
+  const inFlight = new Set<string>();
+  return {
+    mark: (id) => void inFlight.add(id),
+    clear: (id) => void inFlight.delete(id),
+    isLive: (id) => inFlight.has(id),
+  };
+}
+
+// === SHARED GATE SETTLE WRITE ==============================================
+// Both gates settle their result with the SAME guarded write: persist the gate's
+// columns, reset the restart-recovery streak (gate_recovery_attempts=0), and only while
+// the task is STILL `in_review` — so a gate that finished after the task merged/aborted
+// can't resurrect stale gate state onto it. recoverStuckGates' force-settle uses the same
+// write with an extra "still stuck on the same value" equality guard. Centralized here so
+// the in_review guard + recovery-streak reset can't drift between the gates.
+
+/**
+ * Settle a gate result onto a task. Writes `columns` (e.g. `{ci_status, ci_summary}`)
+ * plus `gate_recovery_attempts=0`, guarded on the task still being `in_review` — and, if
+ * `opts.require` is given, on each named column still holding the given value (the
+ * force-settle "still stuck on the same value" guard). Returns whether a row changed
+ * (false = the task moved/settled under us — the caller bails, exactly like the old
+ * `if (res.changes === 0) return`). The caller emits on a true return (gate.ts stays
+ * db-only to avoid an events/tasks import cycle).
+ */
+export function settleGate(
+  id: string,
+  columns: Record<string, string | null>,
+  opts: { require?: Record<string, string> } = {},
+): boolean {
+  const assigns = Object.keys(columns).map((c) => `${c}=?`);
+  assigns.push("gate_recovery_attempts=0");
+  const params: (string | null)[] = [...Object.values(columns)];
+  let where = "id=? AND status='in_review'";
+  params.push(id);
+  for (const [col, val] of Object.entries(opts.require ?? {})) {
+    where += ` AND ${col}=?`;
+    params.push(val);
+  }
+  const res = db.query(`UPDATE tasks SET ${assigns.join(", ")} WHERE ${where}`).run(...params);
+  return res.changes > 0;
 }
