@@ -188,4 +188,26 @@ describe("commit-on-review durability", () => {
     // The base branch was left untouched (no conflict.txt on the default branch).
     expect(existsSync(join(REPO_ROOT, "conflict.txt"))).toBe(false);
   });
+
+  test("4b. UNCOMMITTED (dirty) conflict markers are caught by the same merge guard", async () => {
+    // The collapsed single guard must catch markers in DIRTY worktree state too —
+    // not just already-committed ones (test 4). merge() stages the dirty changes,
+    // scans ONCE, and refuses before committing them onto the branch.
+    const id = await liveBuild("dirty poisoned diff");
+    const wt = join(REPO_ROOT, id);
+    const poisoned =
+      "line\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\nmore\n";
+    writeFileSync(join(wt, "dirty-conflict.txt"), poisoned);
+    // Left UNCOMMITTED — no WIP commit, branch carries no commits yet.
+    expect(commitsAhead(id)).toBe(0);
+
+    const mr = await gitMod.merge(REPO_ROOT, id);
+    expect(mr.ok).toBe(false);
+    expect(mr.conflict).toBe(true);
+    expect(mr.conflictFiles).toContain("dirty-conflict.txt");
+    // Refused BEFORE the finalize commit — the poisoned work was never committed.
+    expect(commitsAhead(id)).toBe(0);
+    // Base untouched.
+    expect(existsSync(join(REPO_ROOT, "dirty-conflict.txt"))).toBe(false);
+  });
 });

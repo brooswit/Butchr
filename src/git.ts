@@ -34,6 +34,37 @@ export async function defaultBranch(dir: string): Promise<string> {
   return "main";
 }
 
+// ---- STALE-BASE PROBES -------------------------------------------------------
+// Two cheap reads that answer "where is the task branch relative to the default
+// tip?" — shared by every place that has to reason about a possibly-stale base
+// (worktreeIsReusable, hasChanges, isBehindDefault, rebaseOntoDefault). Both are
+// best-effort plain `run`s that fail closed (false / 0) rather than throwing, so a
+// git error never breaks a recoverable stale state.
+
+/**
+ * Whether `base`'s tip is ALREADY contained in the task branch — i.e. base is an
+ * ancestor of (or equal to) <taskId>, so the branch is current rather than behind.
+ * `merge-base --is-ancestor` exits 0 iff so; any git error → false (treat as behind).
+ */
+async function branchContainsBase(dir: string, base: string, taskId: string): Promise<boolean> {
+  const anc = await run([
+    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
+  ]);
+  return anc.ok;
+}
+
+/**
+ * Count of commits unique to the task branch vs `base` (the `base..taskId` range) —
+ * i.e. the branch's own work the rebase would replay. 0 on any git error (fail closed:
+ * "no work to preserve").
+ */
+async function branchOwnCommitCount(dir: string, base: string, taskId: string): Promise<number> {
+  const count = await run([
+    git, "-C", dir, "rev-list", "--count", `${base}..${taskId}`,
+  ]);
+  return count.ok ? parseInt(count.stdout.trim(), 10) || 0 : 0;
+}
+
 /**
  * Absolute path to a task's git worktree: <dir>/<taskId>. The single source of
  * truth for where a task's checkout lives — used by createWorktree/diff/merge here
@@ -109,14 +140,8 @@ async function worktreeIsReusable(
   // → current. Behind the tip → reusable only if the branch has its own commits
   // (real work the rebase replays onto the tip; discarding it is the bug to avoid).
   const base = await defaultBranch(dir);
-  const contained = await run([
-    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
-  ]);
-  if (contained.ok) return true;
-  const count = await run([
-    git, "-C", dir, "rev-list", "--count", `${base}..${taskId}`,
-  ]);
-  return count.ok && parseInt(count.stdout.trim(), 10) > 0;
+  if (await branchContainsBase(dir, base, taskId)) return true;
+  return (await branchOwnCommitCount(dir, base, taskId)) > 0;
 }
 
 /**
@@ -183,10 +208,7 @@ async function addLocalExclude(dir: string, pattern: string): Promise<void> {
 /** Whether the task branch has any changes vs the default branch. */
 export async function hasChanges(dir: string, taskId: string): Promise<boolean> {
   const base = await defaultBranch(dir);
-  const res = await run([
-    git, "-C", dir, "rev-list", "--count", `${base}..${taskId}`,
-  ]);
-  if (res.ok && parseInt(res.stdout.trim(), 10) > 0) return true;
+  if ((await branchOwnCommitCount(dir, base, taskId)) > 0) return true;
   // Also count uncommitted changes in the worktree (agent may not have committed).
   const wt = worktreePath(dir, taskId);
   if (existsSync(wt)) {
@@ -359,6 +381,19 @@ async function findConflictMarkers(wt: string): Promise<string[]> {
   return res.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
+/** The refuse-to-merge MergeResult for a worktree poisoned with unresolved
+ * conflict markers — see merge()'s pre-rebase guard. */
+function poisonedResult(taskId: string, poisoned: string[]): MergeResult {
+  return {
+    ok: false,
+    conflict: true,
+    message:
+      `refusing to merge ${taskId}: unresolved git conflict markers in ` +
+      poisoned.join(", "),
+    conflictFiles: poisoned,
+  };
+}
+
 /** Parse `CONFLICT (...): Merge conflict in <path>` lines from git output. */
 function parseConflictFiles(output: string): string[] {
   const files: string[] = [];
@@ -502,40 +537,20 @@ export async function merge(
   // Auto-commit any dangling worktree changes so they're part of the rebase.
   if (existsSync(wt)) {
     const st = await run([git, "-C", wt, "status", "--porcelain"]);
-    if (st.ok && st.stdout.trim().length > 0) {
-      // Stage everything first so the marker scan also sees newly-added files.
-      await run([git, "-C", wt, "add", "-A"]);
-      // GUARD: never commit/merge content that still has unresolved conflict
-      // markers — that's exactly how a poisoned diff reached the base before.
-      // Hold the task for human review instead (worktree left staged, base
-      // untouched).
-      const poisoned = await findConflictMarkers(wt);
-      if (poisoned.length > 0) {
-        return {
-          ok: false,
-          conflict: true,
-          message:
-            `refusing to merge ${taskId}: unresolved git conflict markers in ` +
-            poisoned.join(", "),
-          conflictFiles: poisoned,
-        };
-      }
+    const dirty = st.ok && st.stdout.trim().length > 0;
+    // Stage everything first so the marker scan also sees newly-added files.
+    if (dirty) await run([git, "-C", wt, "add", "-A"]);
+    // GUARD: never commit/merge content that still has unresolved conflict markers —
+    // that's exactly how a poisoned diff reached the base before. Scan ONCE; this
+    // catches both dirty (staged) and already-COMMITTED markers. Hold the task for
+    // human review instead (worktree left staged, base untouched).
+    const poisoned = await findConflictMarkers(wt);
+    if (poisoned.length > 0) return poisonedResult(taskId, poisoned);
+    // Clean — commit the (now staged) dangling changes onto the task branch.
+    if (dirty) {
       await run([
         git, "-C", wt, "commit", "-m", `butchr: finalize task ${taskId}`,
       ]);
-    } else {
-      // No dangling changes, but the agent may have COMMITTED markers earlier.
-      const poisoned = await findConflictMarkers(wt);
-      if (poisoned.length > 0) {
-        return {
-          ok: false,
-          conflict: true,
-          message:
-            `refusing to merge ${taskId}: unresolved git conflict markers in ` +
-            poisoned.join(", "),
-          conflictFiles: poisoned,
-        };
-      }
     }
   }
 
@@ -602,12 +617,9 @@ export async function merge(
  */
 export async function isBehindDefault(dir: string, taskId: string): Promise<boolean> {
   const base = await defaultBranch(dir);
-  // `merge-base --is-ancestor <base> <taskId>` exits 0 iff base is an ancestor of
-  // (or equal to) the task branch — meaning the branch already contains the tip.
-  const anc = await run([
-    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
-  ]);
-  return !anc.ok;
+  // The branch already contains the tip → not behind. branchContainsBase wraps the
+  // `merge-base --is-ancestor` probe.
+  return !(await branchContainsBase(dir, base, taskId));
 }
 
 export type RebaseResult = {
@@ -669,10 +681,7 @@ export async function rebaseOntoDefault(
   if (!existsSync(wt)) return noop();
 
   // Already contains the current default tip → nothing to do.
-  const anc = await run([
-    git, "-C", dir, "merge-base", "--is-ancestor", base, taskId,
-  ]);
-  if (anc.ok) return noop();
+  if (await branchContainsBase(dir, base, taskId)) return noop();
 
   // CAUTION: never clobber uncommitted worktree changes. If the agent left dirty
   // state, skip the pre-dispatch rebase entirely and let the merge-time rebase
@@ -688,10 +697,7 @@ export async function rebaseOntoDefault(
   // Count commits unique to the task branch. Zero → it never advanced past its
   // (now stale) creation base, so there is no real work: hard-reset it onto the
   // current tip for a clean fresh start atop the merged blockers.
-  const count = await run([
-    git, "-C", dir, "rev-list", "--count", `${base}..${taskId}`,
-  ]);
-  const hasCommits = count.ok && parseInt(count.stdout.trim(), 10) > 0;
+  const hasCommits = (await branchOwnCommitCount(dir, base, taskId)) > 0;
 
   if (!hasCommits) {
     const reset = await run([git, "-C", wt, "reset", "--hard", base]);
