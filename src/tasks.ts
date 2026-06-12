@@ -21,7 +21,9 @@ import {
   workspaceVersionFile,
 } from "./workspaces.ts";
 import type { Responder, ResponderStep } from "./workspaces.ts";
-import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
+import { currentPaneRepairing, readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
+import { harness } from "./harness.ts";
+import { claudeAlive } from "./liveness.ts";
 import { publish } from "./events.ts";
 import { runGate } from "./gate.ts";
 import * as git from "./git.ts";
@@ -353,8 +355,22 @@ export function feedbackStep(status: TaskStatus, planPreview: boolean): Responde
  * TaskView / TaskListView so the webapp + CTO never have to cross-reference.
  */
 export function pendingResponder(row: TaskRow): Responder | null {
-  const step = feedbackStep(row.status, !!row.plan_preview);
+  const step = pendingResponderStep(row);
   return step ? responderFor(row.workspace_id, step) : null;
+}
+
+/**
+ * The responder STEP a task is currently awaiting a response on — the feedback-state map
+ * (feedbackStep), PLUS the orthogonal IDLE condition: a LIVE build agent that has gone
+ * `idle` (in_progress + idle flag) is awaiting `idle-handling`, surfaced as a feedback
+ * surface even though `in_progress` is not itself a feedback STATE (idle stays a flag, not
+ * a 13th state — see FW-4). null when the task is neither in a feedback state nor idle.
+ * The single place the idle-as-feedback mapping lives so pendingResponder + the CTO
+ * self-check + the webapp all agree.
+ */
+export function pendingResponderStep(row: TaskRow): ResponderStep | null {
+  if (row.status === "in_progress" && row.idle) return "idle-handling";
+  return feedbackStep(row.status, !!row.plan_preview);
 }
 
 /** Merge the DB row with the on-disk task.md for the detail view. */
@@ -550,6 +566,13 @@ function setStatus(
       assigns.push(`${col}=?`);
       params.push(val as string | number | null);
     }
+  }
+  // The idle CONTEXT is bound to the idle FLAG: any transition that clears `idle`
+  // (every setStatus that sets it does so to 0 — only setIdle ever sets 1) also wipes
+  // the captured `idle_context`, so a stale idle snapshot can never linger on a task
+  // that has left the idle condition. Skipped if a caller set idle_context explicitly.
+  if (opts.set && "idle" in opts.set && !("idle_context" in opts.set)) {
+    assigns.push("idle_context=NULL");
   }
   let where = "id=?";
   params.push(id);
@@ -1455,7 +1478,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         `default branch; main restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
     );
     const res = db.query(
-      `UPDATE tasks SET status='failed', conflict=0, idle=0, herdr_pane_id=NULL, herdr_tab_id=NULL,
+      `UPDATE tasks SET status='failed', conflict=0, idle=0, idle_context=NULL, herdr_pane_id=NULL, herdr_tab_id=NULL,
          output_snapshot=COALESCE(?, output_snapshot), revert_reason=?, last_dispatch_error=?,
          completed_at=COALESCE(completed_at, ?)
          WHERE id=? AND status=?`,
@@ -2269,19 +2292,86 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
 }
 
 /**
- * Flag/unflag a running build task as `idle` (agent alive but no recent CLI output).
- * Owned by the dispatcher watcher. Guarded on a LIVE build agent (status='in_progress'
- * with a pane) so a lagging watcher can't stamp the flag onto a task that has already
- * moved on, and on a value change so we only emit when it actually flips (no
- * per-second event spam).
+ * Flag/unflag a running build task as `idle` (agent alive but no recent CLI output),
+ * capturing/clearing the `idle_context` snapshot in lockstep. Owned by the dispatcher
+ * watcher. Guarded on a LIVE build agent (status='in_progress' with a pane) so a lagging
+ * watcher can't stamp the flag onto a task that has already moved on, and on a value
+ * CHANGE so we only emit when it actually flips (no per-second event spam).
+ *
+ * On the 0→1 flip we record `idle_context` — the run-log tail the responder uses to act
+ * gracefully — from the optional `captureContext` thunk. The thunk is invoked ONLY on a
+ * genuine flip (we peek the current value first), so the watcher's per-second poll never
+ * re-reads the log while a stall persists. Clearing idle (→0) wipes the context to NULL.
  */
-export function setIdle(id: string, idle: boolean): void {
+export function setIdle(id: string, idle: boolean, captureContext?: () => string): void {
   const want = idle ? 1 : 0;
+  // Peek first: only a genuine flip of a LIVE build agent does anything — and only then
+  // do we run the (log-reading) capture thunk.
+  const cur = db
+    .query<{ idle: number; status: string; herdr_pane_id: string | null }, [string]>(
+      `SELECT idle, status, herdr_pane_id FROM tasks WHERE id=?`,
+    )
+    .get(id);
+  if (!cur || cur.status !== "in_progress" || cur.herdr_pane_id == null || cur.idle === want) {
+    return;
+  }
+  // Going idle → snapshot the run-log tail as context (empty → NULL); clearing → NULL.
+  const context = want === 1 ? captureContext?.() || null : null;
   const res = db.query(
-    `UPDATE tasks SET idle=? WHERE id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle<>?`,
-  ).run(want, id, want);
+    `UPDATE tasks SET idle=?, idle_context=? WHERE id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle<>?`,
+  ).run(want, context, id, want);
   if (res.changes === 0) return;
   emitUpdated(id);
+}
+
+/**
+ * NUDGE a live build agent — the graceful idle-handling ACTION, the responder's
+ * deliberate replacement for the old blind auto-"continue". Sends `text` (or a bare
+ * "continue") to the agent's pane exactly as a human would, so the idle-handling
+ * responder (the CTO agent or a webapp user) can STEER the agent with guidance instead of
+ * a context-free poke. Shared by the webapp idle panel, the CTO self-check, and POST
+ * /api/tasks/:id/nudge.
+ *
+ * GUARDS:
+ *  - 404 if the task is gone; 409 if it has no live build agent (not in_progress, or no
+ *    pane) — there is nothing to nudge.
+ *  - LIVENESS (the incident fix): if the agent's claude is NOT actually alive (a dead
+ *    login shell after a herdr/host restart, with the agent name still registered), do
+ *    NOT poke it — route to requeueForResume (tear down the husk + re-dispatch the same
+ *    session via `--resume`) and return that task view. A dead pane is always RECOVERED,
+ *    never poked — the same guard the dispatcher's handleIdleAgent applies.
+ * On the live path: self-heal the stored pane id (currentPaneRepairing) so the send lands
+ * on the agent's CURRENT pane (herdr may have renumbered it), send text+Enter, and record
+ * an audit event.
+ */
+export async function nudgeTask(id: string, text?: string): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (row.status !== "in_progress" || !row.herdr_pane_id) {
+    throw new HttpError(409, `task has no live agent to nudge (status=${row.status})`);
+  }
+  const line = (text ?? "").trim() || "continue";
+  // LIVENESS GUARD: never poke a dead shell — auto-resume instead.
+  if (!claudeAlive(row.session_id)) {
+    await requeueForResume(
+      id,
+      "nudge requested but the agent process is not alive (dead shell, herdr/host restart suspected); auto-resuming instead of poking",
+    );
+    return taskView(id)!;
+  }
+  // Alive — self-heal the pane id so the send targets the agent's current pane, then send
+  // the steering line + Enter exactly as a human would (via the swappable harness seam).
+  await currentPaneRepairing(id);
+  await harness.send(id, { text: line, enter: true });
+  const note =
+    line === "continue"
+      ? `[butchr] idle agent nudged: sent 'continue'`
+      : `[butchr] idle agent nudged with guidance: ${line}`;
+  // Within-state audit marker (in_progress→in_progress), like the old auto-nudge entry.
+  recordTaskEvent(id, "in_progress", "in_progress", note);
+  console.log(`[butchr] task ${id} ${note}`);
+  emitUpdated(id);
+  return taskView(id)!;
 }
 
 export async function backToQueued(id: string): Promise<void> {
@@ -2295,7 +2385,7 @@ export async function backToQueued(id: string): Promise<void> {
   const row = getTask(id);
   await herdr.teardownTask(row?.herdr_tab_id, id, row?.herdr_pane_id);
   db.query(
-    `UPDATE tasks SET status='inactive', herdr_pane_id=NULL, herdr_tab_id=NULL,
+    `UPDATE tasks SET status='inactive', herdr_pane_id=NULL, herdr_tab_id=NULL, idle=0, idle_context=NULL,
        dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_at=NULL WHERE id=?`,
   ).run(id);
   if (row && row.status !== "inactive") {
@@ -2398,6 +2488,9 @@ export async function requeueTask(id: string): Promise<TaskView> {
       next_dispatch_at: null,
       herdr_pane_id: null,
       herdr_tab_id: null,
+      // Re-queuing an IDLE agent is a valid idle-handling action — clear the idle flag
+      // (and, via setStatus, the captured idle_context) so nothing stale lingers.
+      idle: 0,
       // Operator re-queue is a fresh start — clear the auto-resume streak too.
       resume_attempts: 0,
     },

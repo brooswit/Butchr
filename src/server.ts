@@ -43,6 +43,7 @@ import {
   approveTask,
   createTask,
   getTask,
+  nudgeTask,
   rejectTask,
   requeueTask,
   setBlockedBy,
@@ -793,6 +794,18 @@ route("POST", "/api/tasks/:id/spec", async (req, p) => {
 
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
+});
+
+// IDLE-HANDLING ACTION: nudge a live build agent that has gone `idle` (the graceful
+// replacement for the old blind auto-"continue"). A bare nudge sends `continue`; an
+// optional `text` sends operator/CTO GUIDANCE instead — surfaced to whoever the
+// workspace's `idle-handling` responder is (the CTO agent via the channel idle event, or
+// a human via the webapp idle panel). Guarded on liveness: a dead-shell pane is NOT poked
+// — it routes to auto-resume (requeueForResume) inside nudgeTask. 404 if gone; 409 if the
+// task has no live agent to nudge. Requeue/abort reuse the existing /requeue + /abort.
+route("POST", "/api/tasks/:id/nudge", async (req, p) => {
+  const body = await readJson(req);
+  return json(await nudgeTask(p.id!, body.text));
 });
 
 // Replace a task's dependency set (its blocked_by). Allowed on any NON-terminal

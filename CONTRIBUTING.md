@@ -85,7 +85,7 @@ something mechanical):
 | `blocked` | idle | waiting on `blocked_by` dependencies; auto-unblocks to `inactive` |
 | `needs_info` | feedback | an agent asked a question; on answer it resumes (→ `inactive`) |
 | `inactive` | agent (workspace) | **READY** — queued for the dispatcher, no live agent yet |
-| `in_progress` | agent (workspace) | a **LIVE** workspace agent is building the code |
+| `in_progress` | agent (workspace) | a **LIVE** workspace agent is building the code (the orthogonal `idle` flag marks one that has gone quiet → surfaced as the `idle-handling` feedback condition; see §7) |
 | `in_review` | feedback | a diff awaiting approval → mechanical merge, or request-changes → `inactive` |
 | `rolling_back` | idle | a rollback task's revert is being mechanically merged |
 | `rolled_back` | idle (terminal) | a rollback task's revert landed on the default branch |
@@ -398,7 +398,8 @@ login shell** and keeps the agent NAME registered — so `agentExists(taskId)` s
 says "alive" even though claude is dead. The old behavior re-adopted such a task and
 the idle-nudge then typed `continue` into the dead shell forever
 ("continuecontinuecontinue"). butchr now **auto-resumes** instead, with no operator
-action:
+action (and idle is no longer auto-nudged at all — it is surfaced to the
+`idle-handling` responder; see §7):
 
 - **Liveness is the OS process, not the pane.** `src/liveness.ts` `claudeAlive(sessionId)`
   scans `/proc` for a live process carrying the session id as a **distinct argv token**
@@ -420,10 +421,12 @@ action:
   rescued to `in_review` for a human instead, so a session that dies the instant it
   relaunches can't re-dispatch-loop. The counter resets on progress (reaching review)
   or any operator re-queue.
-- **Three triggers, same path:** (1) startup `reconcileRunningTasks` — the full-reboot
-  recovery; (2) the per-task watcher's **idle-nudge guard** (`maybeNudgeStalledAgent`
-  checks `claudeAlive` before nudging — a dead agent is auto-resumed, never nudged); and
-  (3) a boot-time backstop sweep `reaper.reapDeadRunningAgents`. Net behavior: power dies
+- **Four triggers, same path:** (1) startup `reconcileRunningTasks` — the full-reboot
+  recovery; (2) the per-task watcher's **idle guard** (`dispatcher.handleIdleAgent`
+  checks `claudeAlive` when a task goes idle — a dead agent is auto-resumed, never
+  surfaced as nudgeable); (3) the **`idle-handling` nudge** (`tasks.nudgeTask` re-checks
+  `claudeAlive` and routes a dead pane to auto-resume rather than poking it); and (4) a
+  boot-time backstop sweep `reaper.reapDeadRunningAgents`. Net behavior: power dies
   mid-work → on next boot, agents resume from their sessions with no lost work and no
   operator action.
 
@@ -774,7 +777,7 @@ decision that applies to **all** of that workspace's tasks) and **defaults every
 | `plan-approval` | Approving a plan-preview plan before code is written (the plan-preview gate). |
 | `diff-review` | Reviewing the finished diff before it merges (the `in_review` state). |
 | `answer-question` | Answering a question an agent raised (the `needs_info` state). |
-| `idle-handling` | Handling an agent that stalled / went idle (surfaced as a feedback step in later work). |
+| `idle-handling` | Handling a live build agent that went **idle** (the `idle` flag on an `in_progress` task). **Wired:** see below. |
 
 It is stored per workspace as a single JSON column (`workspaces.step_responders`, `NULL`
 = all `cto`), read through `workspaces.responderFor(workspaceId, step)` /
@@ -793,7 +796,8 @@ for the human) when it is `user`; and (b) the **webapp's awaiting-who emphasis**
 CTO — you can also act". A human can therefore always act, even on a `cto` step.
 
 **State → step map (the single mapping both the CTO self-check and the webapp route on),
-in `tasks.feedbackStep(status, planPreview)`:**
+in `tasks.feedbackStep(status, planPreview)` — extended by `tasks.pendingResponderStep(row)`
+to cover the orthogonal idle condition:**
 
 | task state | responder step |
 |------------|----------------|
@@ -802,6 +806,7 @@ in `tasks.feedbackStep(status, planPreview)`:**
 | `in_review` | `diff-review` |
 | `needs_info` **with `plan_preview`** | `plan-approval` (a proposed plan from `propose_plan`) |
 | `needs_info` (otherwise) | `answer-question` (a question raised via `raise`) |
+| `in_progress` **+ `idle` flag** | `idle-handling` (a live agent gone quiet — see below) |
 
 `tasks.pendingResponder(row)` composes that map with `responderFor` and is surfaced on
 the task view as the computed **`pending_responder`** field (`cto` | `user` | `null` when
@@ -824,8 +829,34 @@ spec and submits it via **`POST /api/tasks/:id/spec { spec }`** (`tasks.submitSp
 unified feedback path), which rewrites the prompt brief → spec and advances the task to
 `spec_review`. For `cto` the persistent CTO agent reacts to the channel push (it checks
 `responderFor(workspace, 'spec-generation')` and acts only when it is `cto`); for `user`
-the webapp renders a "write the spec" form on the idea task. `idle-handling` is the one
-step not yet surfaced as a feedback state — it lands with the idle-handling work.
+the webapp renders a "write the spec" form on the idea task.
+
+**`idle-handling` (a live agent gone idle) in detail.** Idle is a **flag** on an
+`in_progress` build agent (claude alive but its CLI quiet past `BUTCHR_IDLE_MS`), **not** a
+13th state — so it stays orthogonal to `status` while still being surfaced as a feedback
+condition. When the dispatcher watcher flags a task idle (`tasks.setIdle`) it captures the
+ANSI-stripped run-log tail into **`idle_context`** (`dispatcher.readRunLogTail`,
+`BUTCHR_IDLE_CONTEXT_LINES` lines) so the responder can see what the agent was doing. The
+one-way CTO channel then pushes an **`agent idle`** event (`meta.state="idle"`) carrying a
+context snippet (`AttentionBridge` tracks the idle flag separately from status, emitting
+only on the 0→1 flip). butchr **no longer auto-types `continue`** — the responder acts
+deliberately:
+
+- **`cto`** → the persistent CTO agent reads `idle_context` and, only when
+  `responderFor(workspace, 'idle-handling')` is `cto`, calls **`POST /api/tasks/:id/nudge
+  { text? }`** (`tasks.nudgeTask`) to steer it with guidance (or a bare `continue`), or
+  `/requeue` / `/abort` if it's wedged or off-track.
+- **`user`** → the webapp's **Idle agent** panel shows `idle_context` + the same action
+  buttons (nudge-with-guidance, re-queue; abort in the header).
+
+**Liveness guard (the power-loss incident fix).** A herdr/host restart kills claude but
+leaves the pane as a bare login shell with the agent name still registered, so
+`agentExists` lies "alive". butchr therefore **never pokes a pane it can't prove is alive**:
+both `dispatcher.handleIdleAgent` (the watcher's idle step) and `tasks.nudgeTask` re-check
+`liveness.claudeAlive` (the `/proc` session-token probe) and route a dead pane to
+`tasks.requeueForResume` (auto-resume) instead of sending keystrokes. `idle_context` is
+cleared in lockstep with the `idle` flag (centralized in `setStatus`, plus the raw-UPDATE
+clear paths), so a stale snapshot never lingers after the agent resumes or moves on.
 
 ---
 

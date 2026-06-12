@@ -165,6 +165,9 @@ ENTERED a state needing your attention:
 - **spec_review** — a submitted spec is awaiting approval.
 - **in_review** — a diff is awaiting review.
 - **needs_info** — an agent asked a question awaiting an answer.
+- **agent idle** — a LIVE build agent went idle/quiet (alive but no recent output): it
+  may be mid-task paused, finished-but-unsubmitted, or wedged. The event carries an
+  \`idle_context\` snapshot of its recent output. See "Handling an idle agent" below.
 - **aborted** — a task failed.
 
 The channel is PUSH-ONLY: you cannot reply through it. Act through the normal butchr
@@ -185,6 +188,7 @@ the \`step_responders\` map. Your standing behavior on each event:
    | \`needs_info\` **on a plan-preview task** (a proposed plan) | \`plan-approval\` | \`POST /api/tasks/<id>/answer\` \`{ "answer": "proceed" }\` (or steering notes) |
    | \`needs_info\` (a raised question) | \`answer-question\` | \`POST /api/tasks/<id>/answer\` \`{ "answer": "…" }\` |
    | \`in_review\` (a diff) | \`diff-review\` | \`POST /api/tasks/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
+   | \`in_progress\` **+ idle** (\`agent idle\`) | \`idle-handling\` | read \`idle_context\`, then \`POST /api/tasks/<id>/nudge\` \`{ "text": "…" }\` (guidance; omit \`text\` for a bare \`continue\`), or \`/requeue\`, or \`/abort\` |
    | \`aborted\` | — (a failure to triage) | investigate; \`/requeue\` if appropriate |
 
    (A \`needs_info\` task that opted into the plan-preview gate is holding a PROPOSED PLAN
@@ -215,6 +219,29 @@ it in the webapp; do NOT submit — just observe.
 (If a spec is later sent back for changes, the task returns to \`idea\` and you get a
 fresh \`spec requested\` event with the change note recorded on the task — revise and
 re-submit via the same \`/spec\` endpoint, again only when the responder is \`cto\`.)
+
+## Handling an idle agent (the \`agent idle\` event)
+
+An \`agent idle\` event means a LIVE build agent (\`in_progress\`) went quiet — alive but
+no recent output. butchr NO LONGER blindly types "continue" at it; instead it surfaces
+the idle agent with CONTEXT and routes it to the \`idle-handling\` responder. Only when
+\`step_responders["idle-handling"]\` is \`"cto"\`: **read the \`idle_context\`** on the task
+(\`GET /api/tasks/<id>\` — the captured tail of the agent's recent output) to judge WHY it
+stopped, then act:
+
+- **Merely slow / paused mid-task** (e.g. a transient \`529 Overloaded\`, or parked at an
+  empty prompt): \`POST /api/tasks/<id>/nudge\` with \`{ "text": "<guidance>" }\` to steer it,
+  or with no body for a bare \`continue\`. This is the old "continue" — now just ONE
+  deliberate option, used when the context shows it just needs a push.
+- **Finished but didn't submit / went off-track / wedged**: don't poke it — \`POST
+  /api/tasks/<id>/requeue\` to re-launch its session fresh, or \`POST /api/tasks/<id>/abort\`
+  if the work should be dropped.
+
+LIVENESS is handled FOR you: butchr never surfaces a DEAD shell as nudgeable — a dead
+agent is auto-resumed — and \`/nudge\` itself re-checks liveness and routes a dead pane to
+auto-resume rather than poking it. So a nudge you send only ever reaches a genuinely live
+agent. If \`step_responders["idle-handling"]\` is \`"user"\`, a human handles it in the
+webapp; just observe.
 
 ## Hard rules
 

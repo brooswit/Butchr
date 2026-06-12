@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
-import { db, getSetting, recordTaskEvent, setSetting } from "./db.ts";
+import { db, getSetting, setSetting } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
 import { buildScriptArgv, modelFlag, stripAnsi } from "./exec.ts";
@@ -95,6 +95,21 @@ export function readRunLogSnapshot(taskId: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * The last `lines` of a task's run log, ANSI-stripped — the IDLE CONTEXT snapshot.
+ * Captured when an agent flips `idle` so the idle-handling responder can see what it
+ * was doing and where it stopped (a mid-task pause, a finished-but-unsubmitted turn, a
+ * wedged prompt) and act gracefully instead of poking blind. Returns "" if the log is
+ * missing/unreadable or `lines <= 0` (capture disabled). Re-reads the whole file (this
+ * only runs on the rare idle-flip, never the hot path) then keeps the tail.
+ */
+export function readRunLogTail(taskId: string, lines: number): string {
+  if (lines <= 0) return "";
+  const snapshot = readRunLogSnapshot(taskId);
+  if (!snapshot) return "";
+  return snapshot.split("\n").slice(-lines).join("\n");
 }
 
 // Per-workspace lock serializing the herdr "create a task's tab + start its agent
@@ -717,59 +732,22 @@ function refreshIdle(taskId: string, logFile: string): number | null {
     return null; // no log yet — agent is still spinning up
   }
   const quietMs = Date.now() - mtimeMs;
-  setIdle(taskId, quietMs > config.idleMs);
+  // On the 0→1 flip, capture the run-log tail as idle_context so the idle-handling
+  // responder sees what the agent was doing. The capture thunk is invoked by setIdle
+  // ONLY when the flag actually flips to idle (never on the per-second no-op poll), so
+  // we don't re-read the log every tick while the stall persists.
+  setIdle(taskId, quietMs > config.idleMs, () =>
+    readRunLogTail(taskId, config.idleContextLines),
+  );
   return quietMs;
 }
-
-/**
- * STALLED-AGENT AUTO-NUDGE decision: should the watcher send a `continue` nudge to
- * a live workspace agent right now? Pure (clock/IO-free) so the boundary is
- * unit-testable without spawning an agent. A stall is an agent that is ALIVE but
- * has produced NO output for long enough that it's almost certainly wedged on a
- * transient API error or parked at an empty prompt — the gap neither the idle flag
- * (which only marks it) nor the runaway watchdog (which only catches alive+looping)
- * recovers on its own.
- *
- *  - `quietMs`    — how long the agent's CLI has been silent (now - log mtime).
- *  - `sinceLastNudgeMs` — ms since we last nudged THIS stall, or null if we never
- *    have (the first nudge of a fresh stall).
- *  - `nudgesSent` — consecutive nudges already sent for this uninterrupted stall.
- *  - `idleMs` / `idleNudgeMs` / `maxNudges` — the config knobs.
- *
- * Nudge only when ALL hold: auto-nudging is enabled (`idleNudgeMs > 0` and
- * `maxNudges > 0`), we're under the consecutive-nudge cap, the agent has been quiet
- * past the idle threshold PLUS the grace period (`idleMs + idleNudgeMs`), and at
- * least a full grace period has elapsed since the previous nudge (so repeated
- * nudges are spaced, never fired every poll tick). The caller RESETS `nudgesSent`
- * the instant output resumes, so the cap counts only truly-unanswered nudges.
- */
-export function shouldNudgeStall(opts: {
-  quietMs: number;
-  sinceLastNudgeMs: number | null;
-  nudgesSent: number;
-  idleMs: number;
-  idleNudgeMs: number;
-  maxNudges: number;
-}): boolean {
-  if (opts.idleNudgeMs <= 0 || opts.maxNudges <= 0) return false; // disabled
-  if (opts.nudgesSent >= opts.maxNudges) return false; // cap reached — leave for a human
-  if (opts.quietMs <= opts.idleMs + opts.idleNudgeMs) return false; // not stalled long enough
-  // Space successive nudges by at least the grace period (first nudge: no prior).
-  if (opts.sinceLastNudgeMs !== null && opts.sinceLastNudgeMs <= opts.idleNudgeMs) {
-    return false;
-  }
-  return true;
-}
-
-/** The per-task auto-nudge state the watcher threads across its poll ticks. */
-export type NudgeState = { nudgesSent: number; lastNudgeAt: number };
 
 /**
  * Resolve a live task's CURRENT herdr pane BY AGENT NAME and SELF-HEAL the stored
  * `herdr_pane_id` when herdr has renumbered it out from under us (a sibling tab/pane
  * closed). This is the single use-time reconciliation every pane-touching path runs
  * so they all act on the LIVE pane — never the launch-time id that can now point at a
- * dead sibling shell (the bug that mis-aimed the auto-nudge and terminal-attach).
+ * dead sibling shell (the bug that mis-aimed the idle nudge and terminal-attach).
  *
  * Returns the current pane id, or — if herdr can't resolve a live pane this instant
  * (a transient read, or the agent just exited) — falls back to the stored id so a
@@ -794,87 +772,56 @@ export async function currentPaneRepairing(taskId: string): Promise<string | und
 }
 
 /**
- * STALLED-AGENT AUTO-NUDGE — one poll-tick step for a single watched task. A
- * WORKSPACE build agent can sit idle-but-alive on a transient API error (e.g. a 529
- * Overloaded) or parked at an empty prompt — a quiet stall that NEITHER the idle
- * flag (it only marks it) NOR the runaway watchdog (it only catches alive+looping)
- * recovers, so the task halts until a human opens the pane and types "continue".
- * This auto-types that `continue` for them.
+ * IDLE-HANDLING — one poll-tick step for a single watched task. A WORKSPACE build
+ * agent can sit idle-but-alive on a transient API error (e.g. a 529 Overloaded),
+ * parked at an empty prompt, or finished-but-unsubmitted. butchr NO LONGER blindly
+ * types "continue" at it: an idle agent is surfaced as a graceful FEEDBACK condition
+ * (refreshIdle flags it + captures `idle_context`; the channel pushes an `idle` event;
+ * the webapp shows action buttons) routed to the workspace's `idle-handling` responder,
+ * who acts deliberately — nudge-with-guidance (tasks.nudgeTask), requeue, or abort. The
+ * plain "continue" nudge is now just ONE of those responder choices, never automatic.
  *
- * SCOPE — this fires ONLY for a live `in_progress` workspace build agent:
- *  - The managed CTO agent is event-driven and idle-BY-DESIGN (idle = waiting for a
- *    channel push); it also never runs under a task watcher, so it can't reach here.
- *  - `in_progress` is the only interactive build phase where `continue` means resume
- *    the work (there is no post-approval agent — approval merges mechanically).
- * Any non-`in_progress` phase (or no log yet, `quietMs === null`) is a NO-OP that
- * leaves the state untouched.
+ * This step's ONLY job is the two things that must happen WITHOUT a responder:
+ *  1. LIVENESS GUARD (the "continuecontinuecontinue into a dead shell" incident fix):
+ *     a herdr/host restart kills claude but leaves the pane as a bare login shell with
+ *     the agent NAME still registered, so `agentExists` lies "alive". The process is the
+ *     ground truth: if claude is NOT in /proc for this session, the pane is DEAD — do
+ *     NOT surface it as a nudgeable idle agent; AUTO-RESUME instead (requeueForResume
+ *     tears down the husk pane and re-dispatches the same session via `--resume`).
+ *     requeueForResume clears the pane, so the watcher's loop-top hands off next tick.
+ *  2. PANE SELF-HEAL: an alive-but-quiet agent is exactly when its stored pane id may
+ *     have been renumbered out from under us (a sibling tab closed) AND when a responder
+ *     (or a human attaching) is about to act on the pane — re-resolve it by name so the
+ *     stored id stays truthful for the nudge/attach/teardown paths.
  *
- * `quietMs` is how long the agent's CLI has been silent (now - log mtime). When it
- * drops back to/under `idleMs` the stall cleared (output resumed), so the
- * consecutive-nudge streak RESETS — the cap counts only truly-unanswered nudges.
- * Otherwise, when shouldNudgeStall says it's time, we best-effort send `continue` +
- * Enter to the agent's pane (a dead/missing pane is a harmless no-op), record the
- * nudge on the task's event timeline, and advance the state. Bounded by
- * `idleNudgeMaxNudges` consecutive nudges before we give up and leave the task
- * flagged `idle` for a human (shouldNudgeStall enforces the cap). `now` is injected
- * so the step is testable without mocking the clock.
+ * SCOPE — fires ONLY for a live `in_progress` workspace build agent (the managed CTO
+ * agent is event-driven/idle-by-design and never runs under a task watcher). A
+ * non-`in_progress` phase or a missing log (`quietMs === null`) is a NO-OP, as is a
+ * quiet duration still under `idleMs` (not idle — refreshIdle already cleared the flag).
  */
-export async function maybeNudgeStalledAgent(
+export async function handleIdleAgent(
   taskId: string,
   phase: string | undefined,
   quietMs: number | null,
-  state: NudgeState,
-  now: number,
-): Promise<NudgeState> {
-  // Not a live build agent, or the log hasn't appeared yet → nothing to nudge.
-  if (quietMs === null || phase !== "in_progress") return state;
-  // Output resumed (or never stalled) → clear any in-flight nudge streak.
-  if (quietMs <= config.idleMs) return { nudgesSent: 0, lastNudgeAt: 0 };
-  // LIVENESS GUARD (the "continuecontinuecontinue into a dead shell" fix): the agent
-  // is quiet — but is its `claude` STILL ALIVE? A herdr/host restart kills claude and
-  // leaves the pane as a bare login shell while herdr keeps the agent name registered,
-  // so `agentExists` would still say "alive" and we'd type `continue` into a dead
-  // shell forever. The process is the ground truth: if claude is NOT in /proc for this
-  // session, do NOT nudge — trigger AUTO-RESUME instead (tear down the husk pane and
-  // re-dispatch the same session via `--resume`). requeueForResume clears the pane, so
-  // the watcher's loop-top sees pane=NULL next tick and hands off to the fresh dispatch.
+): Promise<void> {
+  // Not a live build agent, or the log hasn't appeared yet → nothing to handle.
+  if (quietMs === null || phase !== "in_progress") return;
+  // Not idle (output is recent) → refreshIdle already cleared the flag; nothing to do.
+  if (quietMs <= config.idleMs) return;
+  // LIVENESS GUARD: a quiet agent whose claude is GONE is a dead shell, not an idle
+  // agent — auto-resume it rather than surfacing it as nudgeable. (requeueForResume
+  // clears the pane → the watcher hands off to a fresh dispatch next tick.)
   if (!claudeAlive(getTask(taskId)?.session_id ?? null)) {
     await requeueForResume(
       taskId,
-      "agent process is no longer alive while quiet (herdr/host restart suspected); nudge suppressed",
+      "agent process is no longer alive while idle (herdr/host restart suspected); auto-resuming instead of surfacing as idle",
     );
-    return state;
+    return;
   }
-  // The agent is idle/quiet but ALIVE — exactly the window where its stored pane id may
-  // be stale (a sibling tab closed → herdr renumbered) AND where we're about to act on
-  // the pane (the nudge below; a human may also attach right now). Re-resolve the
-  // CURRENT pane by name and self-heal the stored id so the nudge — and any attach —
-  // target the live pane, not a renumbered-away shell. `send` itself routes by name,
-  // so this also keeps the recorded id truthful for the UI/teardown.
+  // Alive but quiet — a genuine idle agent. Keep its stored pane id truthful so the
+  // responder's nudge (or a human's attach) lands on the live pane, then leave it
+  // flagged `idle` (with context) for the idle-handling responder to act on.
   await currentPaneRepairing(taskId);
-  if (
-    !shouldNudgeStall({
-      quietMs,
-      sinceLastNudgeMs: state.lastNudgeAt === 0 ? null : now - state.lastNudgeAt,
-      nudgesSent: state.nudgesSent,
-      idleMs: config.idleMs,
-      idleNudgeMs: config.idleNudgeMs,
-      maxNudges: config.idleNudgeMaxNudges,
-    })
-  ) {
-    return state;
-  }
-  const nudgesSent = state.nudgesSent + 1;
-  // Type the steering line and submit it, exactly as a human would.
-  await harness.send(taskId, { text: "continue", enter: true });
-  const note =
-    `[butchr] stalled workspace agent auto-nudged (quiet ~${Math.round(quietMs / 1000)}s): ` +
-    `sent 'continue' (nudge ${nudgesSent}/${config.idleNudgeMaxNudges}).`;
-  // Logged as an in_progress→in_progress timeline entry (a within-state event, like
-  // the agent-launched marker) so the nudge is auditable without a status change.
-  recordTaskEvent(taskId, "in_progress", "in_progress", note);
-  console.log(`[butchr] task ${taskId} ${note}`);
-  return { nudgesSent, lastNudgeAt: now };
 }
 
 /**
@@ -947,12 +894,6 @@ function spawnWatcher(
     // against a false "vanished" during the brief agent-registration lag at
     // startup.
     let seenAlive = false;
-    // STALLED-AGENT AUTO-NUDGE state. `nudgesSent` counts the consecutive nudges
-    // sent to the CURRENT uninterrupted stall (reset to 0 the instant output
-    // resumes); `lastNudgeAt` is when the most recent nudge went out (0 = none yet),
-    // so successive nudges stay spaced by the grace period. See shouldNudgeStall.
-    let nudgesSent = 0;
-    let lastNudgeAt = 0;
     while (true) {
       if (abortSignals.has(taskId)) break;
       // Release our slot the moment the task leaves its live agent phase. Once it
@@ -1004,16 +945,11 @@ function spawnWatcher(
         break;
       }
       // While the agent is alive and working, surface whether its CLI has gone
-      // quiet (no recent log output) for the UI's idle indicator. The returned
-      // quiet-duration also drives the stall auto-nudge step below.
+      // quiet (no recent log output) for the UI's idle indicator and capture the
+      // idle context on the flip. The returned quiet-duration drives the idle-handling
+      // step below (liveness guard + pane self-heal; the nudge is now responder-driven).
       const quietMs = refreshIdle(taskId, logFile);
-      ({ nudgesSent, lastNudgeAt } = await maybeNudgeStalledAgent(
-        taskId,
-        cur,
-        quietMs,
-        { nudgesSent, lastNudgeAt },
-        Date.now(),
-      ));
+      await handleIdleAgent(taskId, cur, quietMs);
       await sleep(1000);
     }
 

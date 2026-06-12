@@ -124,6 +124,9 @@ function responderChip(t) {
 // tasks.feedbackStep (incl. the needs_info plan-vs-question split on plan_preview). Used
 // only for the awaiting-who banner copy on the task detail. null for a non-feedback state.
 function feedbackStepLabel(t) {
+  // Idle is orthogonal to status — a flag on a LIVE in_progress agent — but it IS a
+  // feedback condition awaiting the idle-handling responder (mirrors tasks.pendingResponderStep).
+  if (t.status === "in_progress" && t.idle) return "idle handling";
   switch (t.status) {
     case "idea": return "spec generation";
     case "spec_review": return "spec approval";
@@ -2723,6 +2726,30 @@ async function renderTask(id) {
     wrap.appendChild(answerPanel);
   }
 
+  // Idle agent panel — a LIVE in_progress agent that went quiet (the `idle` flag).
+  // GRACEFUL idle-handling (FW-4): show the captured context, then let the operator
+  // STEER it (nudge-with-guidance, or a bare "continue") or re-queue it — replacing the
+  // old blind auto-"continue". Abort lives in the header. A dead-shell pane is never shown
+  // here as nudgeable: the backend auto-resumes it instead, so an idle agent surfaced here
+  // is genuinely alive (and /nudge re-checks liveness regardless).
+  if (t.status === "in_progress" && t.idle) {
+    if (t.idle_context) block("Idle context (recent output)", t.idle_context, wrap);
+    const idlePanel = el("div", { class: "panel", style: "margin-top:18px" });
+    idlePanel.innerHTML = `
+      <h2 style="margin-top:0">Idle agent</h2>
+      <p class="muted" style="margin:0 0 10px">This agent is alive but has gone quiet. Read the context above to judge why it stopped, then steer it with guidance (or a bare “continue”), re-queue it to relaunch its session, or abort it from the header.</p>
+      <label class="field">
+        <span class="lbl">guidance (optional — blank sends a bare “continue”)</span>
+        <textarea id="nudgeText" placeholder="Optional steering note, sent to the agent as if typed by a human. Leave blank to just nudge it to continue."></textarea>
+      </label>
+      <div class="row">
+        <button class="btn success" id="nudge">Nudge</button>
+        <button class="btn" id="requeue">Re-queue</button>
+        <div class="spacer"></div>
+      </div>`;
+    wrap.appendChild(idlePanel);
+  }
+
   mount(wrap);
 
   if (t.status === "aborted" && (t.revert_reason || t.last_dispatch_error)) {
@@ -2830,6 +2857,21 @@ async function renderTask(id) {
       if (!answer) return toast("an answer is required", true);
       action(ev.target, () => api("POST", "/tasks/" + id + "/answer", { answer }),
         { success: "answer sent — agent resuming", onDone: () => backToWorkspace(t.workspace_id) });
+    });
+  }
+
+  // Idle-handling actions (the live, in_progress + idle panel above).
+  if (t.status === "in_progress" && t.idle) {
+    document.getElementById("nudge").addEventListener("click", (ev) => {
+      const text = (document.getElementById("nudgeText").value || "").trim();
+      // A bare nudge sends "continue"; with text it sends guidance. The backend re-checks
+      // liveness and auto-resumes a dead pane instead of poking it.
+      action(ev.target, () => api("POST", "/tasks/" + id + "/nudge", text ? { text } : {}),
+        { success: text ? "guidance sent ✓" : "nudged — sent “continue” ✓" });
+    });
+    document.getElementById("requeue").addEventListener("click", (ev) => {
+      if (!confirm("Re-queue this idle agent? Its current run is torn down and re-launched (resuming its session) from scratch.")) return;
+      action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
     });
   }
 }

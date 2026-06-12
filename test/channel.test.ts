@@ -186,6 +186,66 @@ describe("channel: attention transitions → notifications", () => {
   });
 });
 
+describe("channel: idle surface (FW-4 — idle as a feedback condition)", () => {
+  test("emits an `idle` notification on the in_progress idle 0→1 flip, with context", () => {
+    const bridge = new AttentionBridge();
+    // A busy in_progress agent (idle=0) is NOT an attention transition.
+    expect(
+      bridge.consume(taskUpdated({ id: "x", workspace_id: "d", status: "in_progress", idle: 0 })),
+    ).toBeNull();
+    // It goes idle (idle=1) → an `idle` notification carrying the captured context.
+    const note = bridge.consume(
+      taskUpdated({
+        id: "x",
+        workspace_id: "d",
+        status: "in_progress",
+        idle: 1,
+        idle_context: "…waiting on a 529 retry…",
+      }),
+    );
+    expect(note).not.toBeNull();
+    expect(note!.meta.state).toBe("idle");
+    expect(note!.meta.task_id).toBe("x");
+    expect(note!.content).toContain("agent idle");
+    expect(note!.content).toContain("…waiting on a 529 retry…");
+  });
+
+  test("a re-render of an ALREADY-idle task does not re-notify", () => {
+    const bridge = new AttentionBridge();
+    expect(
+      bridge.consume(taskUpdated({ id: "y", workspace_id: "d", status: "in_progress", idle: 1, idle_context: "a" })),
+    ).not.toBeNull();
+    // Same idle task touched again (still idle) → no fresh idle event.
+    expect(
+      bridge.consume(taskUpdated({ id: "y", workspace_id: "d", status: "in_progress", idle: 1, idle_context: "a" })),
+    ).toBeNull();
+  });
+
+  test("idle clears then re-fires on a fresh flip; a scoped bridge drops other workspaces", () => {
+    const bridge = new AttentionBridge();
+    expect(
+      bridge.consume(taskUpdated({ id: "z", workspace_id: "d", status: "in_progress", idle: 1, idle_context: "a" })),
+    ).not.toBeNull();
+    // Output resumed (idle back to 0) — no notification, but the flag is reset…
+    expect(
+      bridge.consume(taskUpdated({ id: "z", workspace_id: "d", status: "in_progress", idle: 0 })),
+    ).toBeNull();
+    // …so going idle AGAIN re-fires.
+    expect(
+      bridge.consume(taskUpdated({ id: "z", workspace_id: "d", status: "in_progress", idle: 1, idle_context: "b" })),
+    ).not.toBeNull();
+
+    // A scoped bridge only surfaces its own workspace's idle events.
+    const scoped = new AttentionBridge("dir-1");
+    expect(
+      scoped.consume(taskUpdated({ id: "out", workspace_id: "dir-2", status: "in_progress", idle: 1, idle_context: "c" })),
+    ).toBeNull();
+    expect(
+      scoped.consume(taskUpdated({ id: "in", workspace_id: "dir-1", status: "in_progress", idle: 1, idle_context: "d" })),
+    ).not.toBeNull();
+  });
+});
+
 describe("channel: per-workspace scope", () => {
   test("a scoped bridge emits ONLY its workspace's transitions", () => {
     // butchr launches one bridge per workspace's CTO agent, passing BUTCHR_CHANNEL_WORKSPACE.

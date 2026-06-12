@@ -246,6 +246,14 @@ ensureColumn("tasks", "summary", "TEXT");
 // it and clears it as soon as output resumes or the task leaves `running`.
 ensureColumn("tasks", "idle", "INTEGER NOT NULL DEFAULT 0");
 
+// `idle_context` is the ANSI-stripped tail of the agent's run log captured at the
+// instant `idle` flips 0→1, so the idle-handling responder (the CTO agent or a human)
+// can SEE what the agent was doing and where it stopped (a mid-task pause, a finished-
+// but-not-submitted turn, a wedged prompt) instead of blindly poking it. Cleared (NULL)
+// the moment the agent resumes (idle→0) or the task leaves the live build phase, so a
+// stale snapshot never lingers. Set/cleared alongside `idle` (see tasks.setIdle).
+ensureColumn("tasks", "idle_context", "TEXT");
+
 // `session_id` is the Claude Code session UUID butchr assigns to the agent at
 // launch (`--session-id <uuid>`). It is what makes the review handshake durable:
 // once set, butchr can re-launch the SAME session with full prior context via
@@ -756,6 +764,9 @@ export type TaskRow = {
   output_snapshot: string | null;
   conflict: number;
   idle: number;
+  // ANSI-stripped run-log tail captured when `idle` flips on, surfaced to the
+  // idle-handling responder; NULL whenever the task is not idle. See tasks.setIdle.
+  idle_context: string | null;
   review_note: string | null;
   summary: string | null;
   // RAISE handshake (see the `question`/`answer` ensureColumn block above): `question`

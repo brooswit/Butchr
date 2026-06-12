@@ -11,8 +11,11 @@
 //     restart but whose claude is DEAD (+ no `.done`) is auto-resumed, NOT re-adopted;
 //     a clean-exit (`.done`) dead agent is rescued to review; a genuinely-alive agent is
 //     re-adopted untouched (the "don't disturb the live agents" guarantee).
-//   - dispatcher.maybeNudgeStalledAgent: the idle-nudge is SUPPRESSED when claude is
-//     not actually alive — it auto-resumes instead of typing `continue` into a dead shell.
+//   - dispatcher.handleIdleAgent: an idle agent whose claude is NOT actually alive is
+//     auto-resumed (never surfaced as nudgeable); an alive-but-quiet one is left flagged
+//     for the responder (no auto-"continue" anymore).
+//   - tasks.nudgeTask: the responder's nudge re-checks liveness — alive → sends; dead →
+//     auto-resumes instead of typing `continue` into a dead shell (the incident fix).
 //
 // In-process: no real claude/herdr. A fake harness backend (setRunner) records sends
 // and reports the pane as surviving (agentExists=true); the /proc probe is driven by an
@@ -101,8 +104,6 @@ beforeAll(async () => {
   process.env.CLAUDE_CONFIG_DIR = CLAUDE_DIR;
   // Small, deterministic thresholds (used only if this file imports config first).
   process.env.BUTCHR_IDLE_MS = "1000";
-  process.env.BUTCHR_IDLE_NUDGE_MS = "2000";
-  process.env.BUTCHR_IDLE_NUDGE_MAX = "2";
   process.env.BUTCHR_MAX_RESUME_ATTEMPTS = "3";
 
   dbMod = await import("../src/db.ts");
@@ -229,40 +230,57 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
   });
 });
 
-describe("maybeNudgeStalledAgent (the idle-nudge liveness guard)", () => {
-  test("claude DEAD → no 'continue' nudge; auto-resume is triggered instead", async () => {
-    seedRunning("nudge-dead", "sid-nudge-dead");
+describe("dispatcher.handleIdleAgent (the idle liveness guard — no more auto-nudge)", () => {
+  test("claude DEAD while idle → auto-resume (NEVER a 'continue' into a dead shell)", async () => {
+    seedRunning("idle-dead", "sid-idle-dead");
     liveMod.setCmdlineLister(() => []); // dead
-    const next = await dispatchMod.maybeNudgeStalledAgent(
-      "nudge-dead",
-      "in_progress",
-      cfg.idleMs + cfg.idleNudgeMs + 1, // well into a stall
-      { nudgesSent: 0, lastNudgeAt: 0 },
-      1_000_000,
-    );
+    await dispatchMod.handleIdleAgent("idle-dead", "in_progress", cfg.idleMs + 1);
     expect(sends).toEqual([]); // NOT typed into a dead shell
-    expect(next).toEqual({ nudgesSent: 0, lastNudgeAt: 0 }); // streak untouched
     // The task was auto-resumed instead (pane cleared → the watcher hands off).
-    const row = tasksMod.getTask("nudge-dead")!;
+    const row = tasksMod.getTask("idle-dead")!;
     expect(row.herdr_pane_id).toBeNull();
     expect(row.resume_attempts).toBe(1);
-    const notes = dbMod.listTaskEvents("nudge-dead").map((e) => e.note ?? "");
-    expect(notes.some((n) => n.includes("auto-nudged"))).toBe(false);
+    const notes = dbMod.listTaskEvents("idle-dead").map((e) => e.note ?? "");
     expect(notes.some((n) => /auto-resume|FRESH/.test(n))).toBe(true);
   });
 
-  test("claude ALIVE but quiet → the normal 'continue' nudge still fires", async () => {
+  test("claude ALIVE but idle → NOT nudged; left flagged for the responder", async () => {
+    seedRunning("idle-alive", "sid-idle-alive");
+    liveMod.setCmdlineLister(liveSessions("sid-idle-alive")); // alive
+    await dispatchMod.handleIdleAgent("idle-alive", "in_progress", cfg.idleMs + 1);
+    expect(sends).toEqual([]); // the dispatcher no longer auto-types "continue"
+    expect(tasksMod.getTask("idle-alive")!.herdr_pane_id).not.toBeNull(); // left running
+  });
+});
+
+describe("tasks.nudgeTask (the responder's nudge — re-checks liveness)", () => {
+  test("claude ALIVE → sends the steering line ('continue' for a bare nudge)", async () => {
     seedRunning("nudge-alive", "sid-nudge-alive");
+    dbMod.db.query(`UPDATE tasks SET idle=1 WHERE id=?`).run("nudge-alive");
     liveMod.setCmdlineLister(liveSessions("sid-nudge-alive")); // alive
-    const next = await dispatchMod.maybeNudgeStalledAgent(
-      "nudge-alive",
-      "in_progress",
-      cfg.idleMs + cfg.idleNudgeMs + 1,
-      { nudgesSent: 0, lastNudgeAt: 0 },
-      2_000_000,
-    );
+    await tasksMod.nudgeTask("nudge-alive");
     expect(sends).toEqual([["nudge-alive", { text: "continue", enter: true }]]);
-    expect(next).toEqual({ nudgesSent: 1, lastNudgeAt: 2_000_000 });
     expect(tasksMod.getTask("nudge-alive")!.herdr_pane_id).not.toBeNull(); // left running
+  });
+
+  test("guidance text is sent verbatim instead of a bare continue", async () => {
+    seedRunning("nudge-guide", "sid-nudge-guide");
+    dbMod.db.query(`UPDATE tasks SET idle=1 WHERE id=?`).run("nudge-guide");
+    liveMod.setCmdlineLister(liveSessions("sid-nudge-guide")); // alive
+    await tasksMod.nudgeTask("nudge-guide", "check the failing test first");
+    expect(sends).toEqual([["nudge-guide", { text: "check the failing test first", enter: true }]]);
+  });
+
+  test("claude DEAD → NO nudge; routes to auto-resume instead (the incident fix)", async () => {
+    seedRunning("nudge-dead", "sid-nudge-dead");
+    dbMod.db.query(`UPDATE tasks SET idle=1 WHERE id=?`).run("nudge-dead");
+    liveMod.setCmdlineLister(() => []); // dead
+    await tasksMod.nudgeTask("nudge-dead");
+    expect(sends).toEqual([]); // NEVER poke a dead shell
+    const row = tasksMod.getTask("nudge-dead")!;
+    expect(row.herdr_pane_id).toBeNull(); // auto-resumed (pane cleared)
+    expect(row.resume_attempts).toBe(1);
+    const notes = dbMod.listTaskEvents("nudge-dead").map((e) => e.note ?? "");
+    expect(notes.some((n) => /auto-resume|FRESH/.test(n))).toBe(true);
   });
 });

@@ -43,6 +43,7 @@ COMMANDS
   answer <id> -m <text>           Answer a task awaiting input (resumes the agent).
   spec <id> [-m <text>]           Submit the spec for an idea task (-m, or pipe stdin).
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
+  nudge <id> [-m <text>]          Nudge an idle agent: -m sends guidance, else 'continue'.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
   priority <id> <N>               Set a task's dispatch priority (higher = sooner).
   selftest [--workspace <id|path>]      Smoke-test the FULL lifecycle with a throwaway
@@ -500,6 +501,22 @@ async function cmdSpec(positionals, flags) {
   process.stdout.write(`spec submitted for ${id} → ${t.status} (awaiting approval)\n`);
 }
 
+// Nudge a live build agent that has gone IDLE (the idle-handling action). A bare nudge
+// sends "continue"; `-m <text>` sends guidance instead. The server re-checks liveness and
+// auto-resumes a dead pane rather than poking it.
+async function cmdNudge(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("nudge: missing <id>");
+  const body = flags.message ? { text: flags.message } : {};
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/nudge`, body);
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  const what = flags.message ? `guidance sent` : `sent 'continue'`;
+  process.stdout.write(`nudged ${id} → ${t.status} (${what})\n`);
+}
+
 async function cmdRequeue(positionals, flags) {
   const id = positionals[0];
   if (!id) fail("requeue: missing <id>");
@@ -670,6 +687,8 @@ async function main() {
       return cmdSpec(positionals, flags);
     case "requeue":
       return cmdRequeue(positionals, flags);
+    case "nudge":
+      return cmdNudge(positionals, flags);
     case "block":
       return cmdBlock(positionals, flags);
     case "priority":

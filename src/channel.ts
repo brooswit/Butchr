@@ -37,12 +37,15 @@ export const CHANNEL_INSTRUCTIONS =
   CHANNEL_SERVER_NAME +
   "> event is a butchr task that just entered a state needing the CTO's attention " +
   "(a brief awaiting a spec — `spec requested`, a generated spec awaiting approval, a " +
-  "diff awaiting review, an agent question awaiting an answer, or a failed task) — the " +
-  "same attention feed a human sees in the butchr dashboard. These are PUSH " +
-  "notifications to ACT on (write+submit a spec, approve/reject/answer/requeue via the " +
-  "butchr API or CLI); you cannot reply through this channel. For a `spec requested` " +
-  "event, ONLY write+submit the spec when this workspace's `spec-generation` responder " +
-  "is `cto` — if it is `user`, a human will write it, so just observe.";
+  "diff awaiting review, an agent question awaiting an answer, a failed task, or a LIVE " +
+  "build agent that went IDLE — `agent idle`, carrying a snapshot of what it was doing) — " +
+  "the same attention feed a human sees in the butchr dashboard. These are PUSH " +
+  "notifications to ACT on (write+submit a spec, approve/reject/answer/requeue, or for an " +
+  "idle agent: nudge-with-guidance/requeue/abort — via the butchr API or CLI); you cannot " +
+  "reply through this channel. For a `spec requested` event, ONLY write+submit the spec " +
+  "when this workspace's `spec-generation` responder is `cto` — if it is `user`, a human " +
+  "will write it, so just observe. An `agent idle` event is routed the same way by the " +
+  "`idle-handling` responder.";
 
 /**
  * The CTO attention transitions we push. `idea` (a brief awaiting a spec — surfaced as
@@ -72,6 +75,12 @@ const STATE_PHRASE: Record<AttentionState, string> = {
   needs_info: "agent question awaiting an answer",
   aborted: "task failed",
 };
+
+// The IDLE condition is orthogonal to status (a flag on a LIVE in_progress build agent,
+// not a 13th state — see FW-4), so it has its own phrase + `meta.state="idle"` rather than
+// living in STATE_PHRASE/ATTENTION_STATES. It surfaces a stalled/quiet agent to the
+// `idle-handling` responder to act on gracefully (nudge-with-guidance, requeue, or abort).
+const IDLE_PHRASE = "agent idle — needs idle-handling";
 
 /** The channel notification payload (params of `notifications/claude/channel`). */
 export type ChannelNotification = {
@@ -162,6 +171,11 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
  */
 export class AttentionBridge {
   private lastStatus = new Map<string, string>();
+  // Per-task last-seen IDLE flag, tracked SEPARATELY from status because idle is a flag
+  // on an in_progress agent, not a status — we emit an idle notification only on the
+  // 0→1 flip (mirrors the lastStatus "entering" logic, so a re-render of an
+  // already-idle task does not re-notify).
+  private lastIdle = new Map<string, boolean>();
   // workspace_id -> human label, populated from workspace.* events on the same
   // stream (and optionally seeded once at startup). Used only for the content line;
   // meta.workspace is always the stable workspace_id.
@@ -208,6 +222,7 @@ export class AttentionBridge {
     }
     if (e.type === "task.deleted" && typeof e.id === "string") {
       this.lastStatus.delete(e.id);
+      this.lastIdle.delete(e.id);
       return null;
     }
     if (e.type !== "task.updated" && e.type !== "task.created") return null;
@@ -222,10 +237,29 @@ export class AttentionBridge {
     const prev = this.lastStatus.get(id);
     this.lastStatus.set(id, status);
 
+    const dirId = typeof t.workspace_id === "string" ? t.workspace_id : "";
+
+    // IDLE SURFACE (orthogonal to status). A LIVE in_progress build agent that flips
+    // `idle` is a feedback CONDITION awaiting the `idle-handling` responder — but
+    // in_progress is not an attention STATUS, so we detect it here, BEFORE the
+    // attention-status check, and emit only on the 0→1 flip (tracked via lastIdle, like
+    // the status "entering" logic). The notification carries the captured `idle_context`
+    // so the responder can see what the agent was doing and act gracefully.
+    const idleNow = status === "in_progress" && (t.idle === 1 || t.idle === true);
+    const idlePrev = this.lastIdle.get(id) ?? false;
+    this.lastIdle.set(id, idleNow);
+    if (idleNow && !idlePrev) {
+      // PER-WORKSPACE SCOPE: a workspace's CTO agent only sees its own events.
+      if (this.scopeDir && dirId !== this.scopeDir) return null;
+      const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
+      const ctx = tidy(t.idle_context);
+      const content = `[${id}] ${label} — ${IDLE_PHRASE}` + (ctx ? `: ${ctx}` : "");
+      return { content, meta: { task_id: id, workspace: dirId, state: "idle" } };
+    }
+
     if (!isAttentionState(status)) return null;
     if (prev === status) return null; // already in this state — not a fresh transition
 
-    const dirId = typeof t.workspace_id === "string" ? t.workspace_id : "";
     // PER-WORKSPACE SCOPE: drop transitions for OTHER workspaces (a workspace's CTO
     // agent only ever sees its own workspace's attention events). We still update
     // lastStatus above so an unscoped re-fire is suppressed identically.

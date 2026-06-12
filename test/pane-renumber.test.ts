@@ -11,8 +11,8 @@
 //      that models a renumber: `agent get` reports the agent's stable terminal id and
 //      `pane list` reports its CURRENT positional pane id — different from the stale
 //      one butchr stored — so reconcilePane resolves the live pane and flags drift.
-//   2. dispatcher.currentPaneRepairing + maybeNudgeStalledAgent against a FAKE harness
-//      (via setRunner): a stalled task whose stored pane id is STALE has it repaired
+//   2. dispatcher.currentPaneRepairing + tasks.nudgeTask against a FAKE harness
+//      (via setRunner): an idle task whose stored pane id is STALE has it repaired
 //      to the resolved current pane, and the nudge is sent BY NAME (so it lands on the
 //      live pane, never the renumbered-away shell).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -31,6 +31,7 @@ const DIR_ID = "pane-renumber-dir";
 
 let dbMod: typeof import("../src/db.ts");
 let dispatchMod: typeof import("../src/dispatcher.ts");
+let tasksMod: typeof import("../src/tasks.ts");
 let herdrMod: typeof import("../src/herdr.ts");
 let harnessApi: typeof import("../src/harness.ts");
 let liveMod: typeof import("../src/liveness.ts");
@@ -89,18 +90,17 @@ beforeAll(async () => {
   process.env.BUTCHR_LOG_FILE = "";
   process.env.BUTCHR_HERDR_BIN = "true";
   process.env.BUTCHR_IDLE_MS = "1000";
-  process.env.BUTCHR_IDLE_NUDGE_MS = "2000";
-  process.env.BUTCHR_IDLE_NUDGE_MAX = "2";
 
   dbMod = await import("../src/db.ts");
   cfg = (await import("../src/config.ts")).config;
   dispatchMod = await import("../src/dispatcher.ts");
+  tasksMod = await import("../src/tasks.ts");
   herdrMod = await import("../src/herdr.ts");
   harnessApi = await import("../src/harness.ts");
   liveMod = await import("../src/liveness.ts");
-  // The auto-nudge now verifies claude is ACTUALLY alive before sending (see the
-  // liveness guard in maybeNudgeStalledAgent). Report the stalled task's session as a
-  // live /proc process so this file exercises the NUDGE path (not the auto-resume one).
+  // nudgeTask verifies claude is ACTUALLY alive before sending (the liveness guard).
+  // Report the idle task's session as a live /proc process so this file exercises the
+  // NUDGE path (not the auto-resume one).
   liveMod.setCmdlineLister(() => [["claude", "--session-id", "sess-stalled-stale"]]);
 
   // A recording herdr stub that models a renumber: the agent's stable terminal id is
@@ -145,10 +145,6 @@ afterAll(() => {
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-function stalledQuietMs(): number {
-  return cfg.idleMs + cfg.idleNudgeMs + 1;
-}
-
 describe("herdr.reconcilePane (the REAL name-based current-pane resolver)", () => {
   test("detects a renumber: resolves the live pane by name and flags the stored id as drifted", async () => {
     // butchr cached the STALE pane; herdr now has the agent at the CURRENT pane.
@@ -186,26 +182,20 @@ describe("dispatcher.currentPaneRepairing (self-heal the stored pane id)", () =>
   });
 });
 
-describe("dispatcher.maybeNudgeStalledAgent on a task with a STALE pane id", () => {
+describe("tasks.nudgeTask on an idle task with a STALE pane id", () => {
   test("repairs the drifted pane id AND sends 'continue' by agent name", async () => {
     sends = [];
     seedTask("stalled-stale", "in_progress", STALE_PANE);
-    // Give it the session id the injected /proc lister reports alive, so the liveness
-    // guard passes and we exercise the NUDGE (not the auto-resume) path.
-    dbMod.db.query(`UPDATE tasks SET session_id=? WHERE id=?`).run("sess-stalled-stale", "stalled-stale");
-    const now = 5_000_000;
-    const next = await dispatchMod.maybeNudgeStalledAgent(
-      "stalled-stale",
-      "in_progress",
-      stalledQuietMs(),
-      { nudgesSent: 0, lastNudgeAt: 0 },
-      now,
-    );
+    // Mark it idle + give it the session id the injected /proc lister reports alive, so
+    // the liveness guard passes and we exercise the NUDGE (not the auto-resume) path.
+    dbMod.db
+      .query(`UPDATE tasks SET session_id=?, idle=1 WHERE id=?`)
+      .run("sess-stalled-stale", "stalled-stale");
+    await tasksMod.nudgeTask("stalled-stale");
     // The stale stored id was self-healed to the CURRENT pane before nudging.
     expect(storedPane("stalled-stale")).toBe(CURRENT_PANE);
     // The nudge is addressed to the AGENT NAME — herdr routes it to the live pane,
     // never the renumbered-away shell the stale id pointed at.
     expect(sends).toEqual([["stalled-stale", { text: "continue", enter: true }]]);
-    expect(next).toEqual({ nudgesSent: 1, lastNudgeAt: now });
   });
 });

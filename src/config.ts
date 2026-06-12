@@ -459,33 +459,25 @@ export const config = {
    * task is flagged `idle` — claude is alive but nothing is happening in its
    * interactive CLI (waiting on input, blocked, or just quiet). The watcher
    * clears the flag the moment output resumes. `0` disables idle detection.
+   *
+   * Kept CONSERVATIVE (default 60s): the agent runs under `script -f` (flush after
+   * every write), so an agent mid-generation is writing constantly and never trips
+   * this. Only a genuinely-paused/stalled agent flips `idle`. That matters now that
+   * idle is a graceful FEEDBACK surface (it pushes a channel event + shows action
+   * buttons via the `idle-handling` responder, instead of auto-poking): too-sensitive
+   * detection would spam the responder, so this threshold must stay generous.
    */
   idleMs: envInt("BUTCHR_IDLE_MS", 1000 * 60),
 
   /**
-   * STALLED-AGENT AUTO-NUDGE. A WORKSPACE build agent can STALL — sit idle but
-   * alive — on a transient API error (e.g. a 529 Overloaded) or parked at an empty
-   * prompt. The idle detector (`idleMs`) only FLAGS that as `idle`; the runaway
-   * watchdog (`maxRunMs`) only catches an agent that is alive-and-LOOPING. Neither
-   * RECOVERS a quiet stall, so the task halts until a human opens the pane and
-   * types "continue". This is the grace period (ms) AFTER a task is flagged idle
-   * (i.e. beyond `idleMs` of no output) before the watcher auto-nudges the agent by
-   * sending `continue` + Enter to its pane. Picked as a small multiple of `idleMs`
-   * so a brief quiet spell never triggers a nudge. `0` DISABLES auto-nudging
-   * (a stall is just left flagged for a human, the old behavior). Only ever applied
-   * to a live in_progress workspace agent — NEVER the managed CTO agent (which is
-   * event-driven and idle-by-design) or any non-workspace agent.
+   * How many lines of the agent's run-log tail to capture as `idle_context` when a
+   * task flips `idle` — the ANSI-stripped snapshot of WHAT the agent was doing and
+   * WHERE it stopped, surfaced to the idle-handling responder (the CTO channel event
+   * + the webapp idle panel) so it can act gracefully (nudge-with-guidance, requeue,
+   * or abort) rather than poke blindly. `<=0` disables context capture (the flag is
+   * still set). See dispatcher.readRunLogTail / tasks.setIdle.
    */
-  idleNudgeMs: envInt("BUTCHR_IDLE_NUDGE_MS", 1000 * 60 * 2),
-
-  /**
-   * Max CONSECUTIVE auto-nudges butchr sends a single stalled workspace agent
-   * before giving up and leaving it flagged `idle` for a human (so it can never
-   * nudge-loop forever against a truly wedged agent). The counter resets the moment
-   * the agent produces output again (the stall cleared). `<=0` is treated as no
-   * nudging. See `idleNudgeMs` and dispatcher.shouldNudgeStall.
-   */
-  idleNudgeMaxNudges: envInt("BUTCHR_IDLE_NUDGE_MAX", 3),
+  idleContextLines: envInt("BUTCHR_IDLE_CONTEXT_LINES", 40),
 
   /**
    * Optional override for opening a GUI terminal attached to a running task.
