@@ -10,7 +10,7 @@
 // config.specGenCmd's flags (NOT here):
 //  - read-only: only Read/Grep/Glob are allowed (no Write/Edit/Bash) — it inspects the repo
 //    but can't change it.
-//  - no recursion: no --mcp-config, so it can't call butchr's own ask/request_review tools.
+//  - no recursion: no --mcp-config, so it can't call butchr's own raise/request_review tools.
 //
 // We REUSE src/expand.ts's brief→prompt grounding prompt (buildExpandPrompt) and output
 // parser (parseExpansion): generating a spec from a brief is exactly what the webapp's

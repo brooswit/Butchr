@@ -643,7 +643,7 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
     // worktree). First launch → the full prompt (context files + prompt). Resume →
     // a focused prompt: the resumed session already holds the original prompt and
     // prior work in its context, so we inject only what's new. A resume with a
-    // pending ASK `answer` is an ANSWER-resume (the agent paused on a question) →
+    // pending `raise` `answer` is an ANSWER-resume (the agent paused on a question) →
     // hand it the answer; otherwise it's a reject/conflict rework → hand it the
     // review notes.
     const doc = readTaskMd(dir.path, task.id);
