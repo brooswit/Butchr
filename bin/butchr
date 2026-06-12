@@ -189,6 +189,26 @@ function printJson(data) {
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 }
 
+/** Require the leading <id> positional, or fail with the standard usage message. */
+function requireId(positionals, cmd) {
+  const id = positionals[0];
+  if (!id) fail(`${cmd}: missing <id>`);
+  return id;
+}
+
+/**
+ * Standard output tail shared by every command: print the raw API payload under
+ * --json, otherwise write the pre-formatted `text`. Returns so callers can
+ * `return emit(...)` to end the command.
+ */
+function emit(flags, data, text) {
+  if (flags.json) {
+    printJson(data);
+    return;
+  }
+  process.stdout.write(text);
+}
+
 /** Render an array of objects as a fixed-width column table. */
 function table(rows, columns) {
   if (rows.length === 0) return "(none)";
@@ -202,8 +222,8 @@ function table(rows, columns) {
   return out.join("\n");
 }
 
-/** Compact CI badge from a task row: status, or "-" when CI hasn't run. */
-function ciBadge(t) {
+/** Compact CI cell from a task row: status, or "-" when CI hasn't run. */
+function ciCell(t) {
   return t.ci_status ? t.ci_status : "-";
 }
 
@@ -234,37 +254,30 @@ async function cmdHealth(flags) {
     throw new ApiError(`could not reach butchr at ${BASE} — is it running? (${e.message})`);
   }
   const body = await res.json();
-  if (flags.json) {
-    printJson(body);
-  } else {
-    const t = body.tasks || {};
-    const counts = Object.keys(t).length
-      ? Object.entries(t).map(([k, v]) => `${k}=${v}`).join(" ")
-      : "(none)";
-    process.stdout.write(
-      `status:   ${body.status}\n` +
-        `version:  ${body.version}\n` +
-        `uptime:   ${body.uptimeSec}s\n` +
-        `db:       ${body.db?.ok ? "ok" : "DOWN"}\n` +
-        `tick:     ${body.tick?.alive ? "alive" : "STALE"} (count=${body.tick?.count})\n` +
-        `herdr:    ${body.herdr?.reachable ? "reachable" : "unreachable"}\n` +
-        `attention:review=${body.needsAttention?.review ?? 0} failed=${body.needsAttention?.failed ?? 0}\n` +
-        `tasks:    ${counts}\n`,
-    );
-  }
+  const t = body.tasks || {};
+  const counts = Object.keys(t).length
+    ? Object.entries(t).map(([k, v]) => `${k}=${v}`).join(" ")
+    : "(none)";
+  emit(
+    flags,
+    body,
+    `status:   ${body.status}\n` +
+      `version:  ${body.version}\n` +
+      `uptime:   ${body.uptimeSec}s\n` +
+      `db:       ${body.db?.ok ? "ok" : "DOWN"}\n` +
+      `tick:     ${body.tick?.alive ? "alive" : "STALE"} (count=${body.tick?.count})\n` +
+      `herdr:    ${body.herdr?.reachable ? "reachable" : "unreachable"}\n` +
+      `attention:review=${body.needsAttention?.review ?? 0} failed=${body.needsAttention?.failed ?? 0}\n` +
+      `tasks:    ${counts}\n`,
+  );
   // Non-zero exit when the server reports degraded so scripts can gate on it.
   if (res.status !== 200) process.exit(1);
 }
 
 async function cmdDashboard(flags) {
   const d = await api("GET", "/api/dashboard");
-  if (flags.json) {
-    printJson(d);
-    return;
-  }
   if (!d.workspaces.length) {
-    process.stdout.write("(no workspaces registered)\n");
-    return;
+    return emit(flags, d, "(no workspaces registered)\n");
   }
   const out = table(d.workspaces, [
     { header: "WORKSPACE", get: (x) => x.label || x.path },
@@ -275,7 +288,9 @@ async function cmdDashboard(flags) {
     { header: "FAILED", get: (x) => x.failed },
   ]);
   const t = d.totals;
-  process.stdout.write(
+  return emit(
+    flags,
+    d,
     out +
       `\n\ntotals: ${t.workspaces} dirs · ${t.active} active · ${t.review} review · ` +
       `${t.needsAttention} need attention · ${t.failed} failed\n`,
@@ -293,27 +308,22 @@ async function cmdGate(positionals, flags) {
   if (flags.set !== undefined || flags.clear) {
     const gate_cmd = flags.clear ? null : flags.set;
     const v = await api("PATCH", `/api/workspaces/${encodeURIComponent(dirId)}`, { gate_cmd });
-    if (flags.json) {
-      printJson(v);
-      return;
-    }
     const shown = v.gate_cmd === null ? "(default)" : v.gate_cmd === "" ? "(disabled)" : v.gate_cmd;
-    process.stdout.write(`${dirId} gate_cmd = ${shown}\n`);
-    return;
+    return emit(flags, v, `${dirId} gate_cmd = ${shown}\n`);
   }
   // No update flag — show the workspace's effective gate command (from the dashboard
   // rollup, which carries both the override and the resolved effective command).
   const d = await api("GET", "/api/dashboard");
   const entry = d.workspaces.find((x) => x.id === dirId);
-  if (flags.json) {
-    printJson(entry || null);
-    return;
-  }
-  if (!entry) fail(`gate: workspace ${dirId} not found`);
-  const overridden = entry.gate_cmd !== null;
-  process.stdout.write(
-    `${dirId} gate_cmd: ${entry.effective_gate_cmd || "(disabled)"}` +
-      `${overridden ? "" : "  (default — no per-workspace override)"}\n`,
+  if (!flags.json && !entry) fail(`gate: workspace ${dirId} not found`);
+  const overridden = entry && entry.gate_cmd !== null;
+  return emit(
+    flags,
+    entry || null,
+    entry
+      ? `${dirId} gate_cmd: ${entry.effective_gate_cmd || "(disabled)"}` +
+          `${overridden ? "" : "  (default — no per-workspace override)"}\n`
+      : "",
   );
 }
 
@@ -342,15 +352,13 @@ async function cmdLs(flags) {
   if (wantTags.length) {
     tasks = tasks.filter((t) => Array.isArray(t.tags) && t.tags.some((g) => wantTags.includes(g)));
   }
-  if (flags.json) {
-    printJson(tasks);
-    return;
-  }
-  process.stdout.write(
+  return emit(
+    flags,
+    tasks,
     table(tasks, [
       { header: "ID", get: (t) => t.id },
       { header: "STATUS", get: (t) => (t.idle ? `${t.status}*` : t.status) },
-      { header: "CI", get: (t) => ciBadge(t) },
+      { header: "CI", get: (t) => ciCell(t) },
       { header: "TAGS", get: (t) => (t.tags && t.tags.length ? t.tags.join(",") : "-") },
     ]) + "\n",
   );
@@ -384,20 +392,14 @@ async function cmdNew(positionals, flags) {
     `/api/workspaces/${encodeURIComponent(dirId)}/tasks`,
     reqBody,
   );
-  if (flags.json) {
-    printJson(task);
-    return;
-  }
-  process.stdout.write(`created ${task.id} (${task.status})\n`);
+  return emit(flags, task, `created ${task.id} (${task.status})\n`);
 }
 
 async function cmdTemplates(flags) {
   const tpls = await api("GET", "/api/templates");
-  if (flags.json) {
-    printJson(tpls);
-    return;
-  }
-  process.stdout.write(
+  return emit(
+    flags,
+    tpls,
     table(tpls, [
       { header: "NAME", get: (t) => t.name },
       { header: "PLACEHOLDERS", get: (t) => (t.placeholders.length ? t.placeholders.join(",") : "-") },
@@ -407,18 +409,13 @@ async function cmdTemplates(flags) {
 }
 
 async function cmdShow(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("show: missing <id>");
+  const id = requireId(positionals, "show");
   const t = await api("GET", `/api/tasks/${encodeURIComponent(id)}`);
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
   const lines = [
     `id:        ${t.id}`,
     `workspace: ${t.workspace_id}`,
     `status:    ${t.status}${t.idle ? " (idle)" : ""}${t.conflict ? " (conflict)" : ""}`,
-    `ci:        ${ciBadge(t)}`,
+    `ci:        ${ciCell(t)}`,
   ];
   if (t.tags && t.tags.length) lines.push(`tags:      ${t.tags.join(", ")}`);
   if (t.blocked_by && t.blocked_by.length) {
@@ -434,58 +431,44 @@ async function cmdShow(positionals, flags) {
   if (t.summary) lines.push(`\nsummary:\n${t.summary}`);
   const notes = t.review_notes || t.review_note;
   if (notes) lines.push(`\nreview notes:\n${notes}`);
-  process.stdout.write(lines.join("\n") + "\n");
+  return emit(flags, t, lines.join("\n") + "\n");
 }
 
 async function cmdApprove(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("approve: missing <id>");
+  const id = requireId(positionals, "approve");
   const r = await api("POST", `/api/tasks/${encodeURIComponent(id)}/approve`, {});
-  if (flags.json) {
-    printJson(r);
-    return;
-  }
   // approve returns either the task view directly, or {task, conflictSentBack} /
   // {task, revertedOnRed} when the merge couldn't complete cleanly.
+  let text;
   if (r.conflictSentBack) {
-    process.stdout.write(`${id}: merge conflict — sent back to the agent for resolution\n`);
+    text = `${id}: merge conflict — sent back to the agent for resolution\n`;
   } else if (r.revertedOnRed) {
-    process.stdout.write(`${id}: merged then AUTO-REVERTED (post-merge verify failed) — now flagged\n`);
+    text = `${id}: merged then AUTO-REVERTED (post-merge verify failed) — now flagged\n`;
   } else {
     const task = r.task ?? r;
-    process.stdout.write(`approved ${id} (${task.status})\n`);
+    text = `approved ${id} (${task.status})\n`;
   }
+  return emit(flags, r, text);
 }
 
 async function cmdReject(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("reject: missing <id>");
+  const id = requireId(positionals, "reject");
   const note = flags.message;
   if (!note) fail("reject: missing -m <note>");
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/reject`, { note });
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
-  process.stdout.write(`rejected ${id} → ${t.status} (agent will resume with your note)\n`);
+  return emit(flags, t, `rejected ${id} → ${t.status} (agent will resume with your note)\n`);
 }
 
 async function cmdAnswer(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("answer: missing <id>");
+  const id = requireId(positionals, "answer");
   const answer = flags.message;
   if (!answer) fail("answer: missing -m <text>");
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/answer`, { answer });
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
-  process.stdout.write(`answered ${id} → ${t.status} (agent will resume with your answer)\n`);
+  return emit(flags, t, `answered ${id} → ${t.status} (agent will resume with your answer)\n`);
 }
 
 async function cmdSpec(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("spec: missing <id>");
+  const id = requireId(positionals, "spec");
   // The spec is multi-line, so accept it via -m <text> OR piped on stdin (so the CTO
   // agent / operator can `butchr spec <id> < spec.md` or heredoc it).
   let spec = flags.message;
@@ -494,67 +477,43 @@ async function cmdSpec(positionals, flags) {
   }
   if (!spec) fail("spec: provide the spec via -m <text> or pipe it on stdin");
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/spec`, { spec });
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
-  process.stdout.write(`spec submitted for ${id} → ${t.status} (awaiting approval)\n`);
+  return emit(flags, t, `spec submitted for ${id} → ${t.status} (awaiting approval)\n`);
 }
 
 // Nudge a live build agent that has gone IDLE (the idle-handling action). A bare nudge
 // sends "continue"; `-m <text>` sends guidance instead. The server re-checks liveness and
 // auto-resumes a dead pane rather than poking it.
 async function cmdNudge(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("nudge: missing <id>");
+  const id = requireId(positionals, "nudge");
   const body = flags.message ? { text: flags.message } : {};
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/nudge`, body);
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
   const what = flags.message ? `guidance sent` : `sent 'continue'`;
-  process.stdout.write(`nudged ${id} → ${t.status} (${what})\n`);
+  return emit(flags, t, `nudged ${id} → ${t.status} (${what})\n`);
 }
 
 async function cmdRequeue(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("requeue: missing <id>");
+  const id = requireId(positionals, "requeue");
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/requeue`, {});
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
-  process.stdout.write(`requeued ${id} (${t.status})\n`);
+  return emit(flags, t, `requeued ${id} (${t.status})\n`);
 }
 
 async function cmdBlock(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("block: missing <id>");
+  const id = requireId(positionals, "block");
   if (flags.on === undefined) fail("block: missing --on id,id (use --on '' to clear)");
   const blockedBy = parseIdList(flags.on);
   const t = await api("PUT", `/api/tasks/${encodeURIComponent(id)}/blocked_by`, {
     blocked_by: blockedBy,
   });
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
   const onStr = blockedBy.length ? blockedBy.join(", ") : "(cleared)";
-  process.stdout.write(`${id} blocked_by = ${onStr} → ${t.status}\n`);
+  return emit(flags, t, `${id} blocked_by = ${onStr} → ${t.status}\n`);
 }
 
 async function cmdPriority(positionals, flags) {
-  const id = positionals[0];
-  if (!id) fail("priority: missing <id>");
+  const id = requireId(positionals, "priority");
   if (positionals[1] === undefined) fail("priority: missing <N> (the integer priority)");
   const priority = parsePriority(positionals[1]);
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/priority`, { priority });
-  if (flags.json) {
-    printJson(t);
-    return;
-  }
-  process.stdout.write(`${id} priority = ${t.priority} (${t.status})\n`);
+  return emit(flags, t, `${id} priority = ${t.priority} (${t.status})\n`);
 }
 
 // ---- offline DB snapshot / restore ----------------------------------------
@@ -577,20 +536,16 @@ async function serverRunning() {
 async function cmdBackups(flags) {
   const backup = await import("../src/backup.ts");
   const list = backup.listBackups();
-  if (flags.json) {
-    printJson(list);
-    return;
-  }
-  if (list.length === 0) {
-    process.stdout.write("(no snapshots found)\n");
-    return;
-  }
-  process.stdout.write(
-    table(list, [
-      { header: "NAME", get: (b) => b.name },
-      { header: "SIZE", get: (b) => `${Math.round(b.size / 1024)}KB` },
-      { header: "MODIFIED", get: (b) => new Date(b.mtimeMs).toISOString() },
-    ]) + "\n",
+  return emit(
+    flags,
+    list,
+    list.length === 0
+      ? "(no snapshots found)\n"
+      : table(list, [
+          { header: "NAME", get: (b) => b.name },
+          { header: "SIZE", get: (b) => `${Math.round(b.size / 1024)}KB` },
+          { header: "MODIFIED", get: (b) => new Date(b.mtimeMs).toISOString() },
+        ]) + "\n",
   );
 }
 
@@ -610,11 +565,9 @@ async function cmdRestore(positionals, flags) {
   } catch (e) {
     fail(`restore: ${(e && e.message) || String(e)}`);
   }
-  if (flags.json) {
-    printJson(result);
-    return;
-  }
-  process.stdout.write(
+  return emit(
+    flags,
+    result,
     `restored ${result.restored}\n  from: ${result.from}\n` +
       (result.backedUp ? `  previous db saved to: ${result.backedUp}\n` : "") +
       `Start butchr to pick up the restored database.\n`,
@@ -640,13 +593,13 @@ async function cmdSelftest(flags) {
     merge: Boolean(flags.merge),
     timeoutMs,
   });
-  if (flags.json) {
-    printJson(result);
-  } else if (result.ok) {
-    process.stdout.write(`\nPASS — the butchr pipeline is healthy end-to-end.\n`);
-  } else {
-    process.stdout.write(`\nFAIL — ${result.error ?? "see the stage table above"}\n`);
-  }
+  emit(
+    flags,
+    result,
+    result.ok
+      ? `\nPASS — the butchr pipeline is healthy end-to-end.\n`
+      : `\nFAIL — ${result.error ?? "see the stage table above"}\n`,
+  );
   if (!result.ok) process.exit(1);
 }
 
