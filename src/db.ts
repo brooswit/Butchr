@@ -485,22 +485,21 @@ export function migrateStageAxisToStatus(): void {
 }
 migrateStageAxisToStatus();
 
-// CANONICAL STATE-MODEL MIGRATION (one-time, forward-only). The status set was
-// replaced by the CEO's canonical 9-state model (see TaskStatus / STATE_META).
-// The OLD status values fold into the new ones (pre-1.0 — migrate/destroy freely;
-// priority = works forward):
-//   queued        → in_progress  (ready — a build task with no live agent yet; the
-//                                  ready-vs-running distinction is now carried by
-//                                  herdr_pane_id being NULL vs set, not by status)
+// CANONICAL STATE-MODEL MIGRATION (one-time, forward-only). The pre-canonical status
+// set folds into the canonical states (pre-1.0 — migrate/destroy freely; priority =
+// works forward):
+//   queued        → in_progress  (then migrateReadyRunningSplit below moves the ready,
+//                                  pane-NULL ones to `inactive`)
 //   running       → in_progress  (a live build agent — keeps its pane)
 //   review        → in_review
 //   awaiting_input→ needs_info
 //   rejected      → aborted       (no `rejected` state — request-changes loops back)
-//   failed        → aborted       (a dispatch/finalize give-up maps to an idle state)
-// idea / spec_review / blocked / needs_info / in_progress / in_review / finalizing /
-// merged / aborted are already canonical and untouched. Runs every boot but is a
-// no-op once converged (no old values remain). We do NOT rewrite task_events history
-// (from_status/to_status are an immutable audit log of what actually happened).
+// `failed` is DELIBERATELY NOT folded: the 12-state model has a real terminal `failed`
+// state (a dispatch/spec-gen give-up or a post-merge revert), so a legacy `failed` row
+// is ALREADY correct — and, critically, since this runs every boot, folding it would
+// CORRUPT every genuine new `failed` task into `aborted` on the next restart. Runs every
+// boot but is a no-op once converged (no old values remain). We do NOT rewrite
+// task_events history (from_status/to_status are an immutable audit log).
 export function migrateStatusModel(): void {
   const renames: [string, string][] = [
     ["queued", "in_progress"],
@@ -508,7 +507,6 @@ export function migrateStatusModel(): void {
     ["review", "in_review"],
     ["awaiting_input", "needs_info"],
     ["rejected", "aborted"],
-    ["failed", "aborted"],
   ];
   for (const [from, to] of renames) {
     db.query(`UPDATE tasks SET status=? WHERE status=?`).run(to, from);
