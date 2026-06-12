@@ -21,6 +21,7 @@
 // import is `config` (for the default SSE URL); everything else is self-contained so
 // the pieces stay unit-testable without a live butchr or a real claude.
 import { config } from "./config.ts";
+import { ATTENTION_STATES } from "./db.ts";
 import {
   isNotificationOrIdless,
   jsonRpcError,
@@ -50,17 +51,13 @@ export const CHANNEL_INSTRUCTIONS =
 /**
  * The CTO attention transitions we push. `idea` (a brief awaiting a spec — surfaced as
  * `spec requested`) is the front of the pipeline; the rest are the feedback/failure
- * states. The spec lists spec_review / in_review / needs_info / failed; butchr folded the
- * former `failed` state into the canonical terminal `aborted` (see db.ts migration
- * `["failed","aborted"]` + TaskStatus), so "failed" is represented here by `aborted`.
+ * states: spec_review / in_review / needs_info, plus the two terminal failure states
+ * `failed` (an execution failure) and `aborted`. Both terminal states are LIVE and
+ * DISTINCT in the 12-state machine — `failed` is NOT folded into `aborted` — so each
+ * fires its own notification. The membership lives ONCE in db.ts (shared with the
+ * operator dashboard's REVIEW_STATES) and is re-exported here for the bridge + its tests.
  */
-export const ATTENTION_STATES = [
-  "idea",
-  "spec_review",
-  "in_review",
-  "needs_info",
-  "aborted",
-] as const;
+export { ATTENTION_STATES };
 export type AttentionState = (typeof ATTENTION_STATES)[number];
 
 function isAttentionState(s: unknown): s is AttentionState {
@@ -73,6 +70,7 @@ const STATE_PHRASE: Record<AttentionState, string> = {
   spec_review: "generated spec awaiting approval",
   in_review: "diff awaiting review",
   needs_info: "agent question awaiting an answer",
+  failed: "task failed",
   aborted: "task failed",
 };
 
@@ -147,7 +145,9 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
     case "spec_review":
       // The generated spec lives in the task's prompt (task.md); summary is a fallback.
       return firstText(task.summary, task.prompt);
+    case "failed":
     case "aborted":
+      // Both terminal failure states surface the execution/dispatch error the same way.
       return firstText(
         task.last_dispatch_error,
         task.revert_reason,

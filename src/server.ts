@@ -5,7 +5,14 @@ import { dirname, join, resolve } from "node:path";
 import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
 import { computeDiskUsage } from "./disk.ts";
-import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
+import {
+  computeMetrics,
+  db,
+  listTaskEvents,
+  metricRows,
+  REVIEW_STATES,
+  sumStatuses,
+} from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { currentPaneRepairing, dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
@@ -335,9 +342,9 @@ async function healthResponse(): Promise<Response> {
     in_review: tasks.in_review ?? 0,
     needs_info: tasks.needs_info ?? 0,
     failed: tasks.failed ?? 0,
-    total:
-      (tasks.spec_review ?? 0) + (tasks.in_review ?? 0) + (tasks.needs_info ?? 0) +
-      (tasks.failed ?? 0),
+    // Summed over the shared REVIEW_STATES membership (db.ts) — the single source for
+    // the operator pull-signal, identical to the open-coded sum it replaces.
+    total: sumStatuses(tasks, REVIEW_STATES),
   };
 
   // Tick-loop liveness: stale if we've ticked at least once but not within

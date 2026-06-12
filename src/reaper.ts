@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config } from "./config.ts";
-import { db } from "./db.ts";
+import { ALL_STATUSES, db, isTerminal } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
 import { harness } from "./harness.ts";
@@ -17,12 +17,14 @@ import { recoverStuckGates, requeueForResume } from "./tasks.ts";
 
 const git = config.gitBin;
 
-// A task in one of these terminal idle states is DONE — its worktree/branch/herdr
-// pane are safe to reap. Everything else (idea/spec_review/blocked/needs_info/
-// inactive/in_progress/in_review/rolling_back) is still live and must be left alone. In
-// particular `blocked` and `inactive` are pre-dispatch WAITING states, not terminal:
-// their worktree (and the session they will resume into) must survive until they run.
-const TERMINAL = new Set(["merged", "failed", "rolled_back", "aborted"]);
+// A task in a TERMINAL state (merged/failed/rolled_back/aborted — see db.isTerminal) is
+// DONE: its worktree/branch/herdr pane are safe to reap. Everything else (idea/spec_review/
+// blocked/needs_info/inactive/in_progress/in_review/rolling_back) is still live and must be
+// left alone. In particular `blocked` and `inactive` are pre-dispatch WAITING states, not
+// terminal: their worktree (and the session they will resume into) must survive until they
+// run. The terminal membership is sourced ONCE from db (isTerminal / ALL_STATUSES) — no
+// open-coded status list here.
+const TERMINAL_STATUSES = ALL_STATUSES.filter(isTerminal);
 
 // Most recent reapOrphans outcome, retained so /health can surface self-heal
 // activity at a glance (see server.healthResponse). `at` is null until the first
@@ -83,7 +85,7 @@ export async function reapOrphans(
       const task = db
         .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=?`)
         .get(taskId);
-      if (task && !TERMINAL.has(task.status)) continue; // live task — leave alone
+      if (task && !isTerminal(task.status)) continue; // live task — leave alone
 
       const reason = task ? `task ${task.status}` : "no task row";
       // Remove the worktree, then delete its branch. Best-effort: swallow errors
@@ -108,11 +110,14 @@ export async function reapOrphans(
   // never a task id) are never matched here and their panes are never orphaned/reaped.
   // See src/cto-agent.ts.
   if (herdrUp) {
+    // Same terminal membership as the worktree sweep above — derived from db, bound as
+    // placeholders so the SQL IN-list can never drift from isTerminal/ALL_STATUSES.
+    const placeholders = TERMINAL_STATUSES.map(() => "?").join(",");
     const terminal = db
-      .query<TaskRow, []>(
-        `SELECT * FROM tasks WHERE status IN ('merged','failed','rolled_back','aborted')`,
+      .query<TaskRow, string[]>(
+        `SELECT * FROM tasks WHERE status IN (${placeholders})`,
       )
-      .all();
+      .all(...TERMINAL_STATUSES);
     for (const t of terminal) {
       if (!(await harness.agentExists(t.id))) continue;
       // Clears the name via `agent rename --clear` and closes the orphaned

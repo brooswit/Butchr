@@ -115,6 +115,36 @@ describe("1. state metadata (kind + agentType per state)", () => {
     expect(dbMod.isTerminal("rolling_back")).toBe(false);
     expect(dbMod.isTerminal("inactive")).toBe(false);
     expect(dbMod.isTerminal("in_progress")).toBe(false);
+    // ALL_STATUSES.filter(isTerminal) is the single source the reaper derives its
+    // terminal SQL/Set from — assert it equals the canonical four.
+    expect(dbMod.ALL_STATUSES.filter(dbMod.isTerminal).sort()).toEqual(
+      ["aborted", "failed", "merged", "rolled_back"].sort(),
+    );
+  });
+
+  test("REVIEW_STATES / ATTENTION_STATES are well-formed subsets of ALL_STATUSES", () => {
+    const all = new Set(dbMod.ALL_STATUSES);
+    // Every member is a real canonical status (compile-checked too, via `satisfies`).
+    for (const s of dbMod.REVIEW_STATES) expect(all.has(s)).toBe(true);
+    for (const s of dbMod.ATTENTION_STATES) expect(all.has(s)).toBe(true);
+    // REVIEW_STATES ⊆ ATTENTION_STATES.
+    const attention = new Set(dbMod.ATTENTION_STATES);
+    for (const s of dbMod.REVIEW_STATES) expect(attention.has(s)).toBe(true);
+    // ATTENTION_STATES === REVIEW_STATES ∪ {idea, aborted}.
+    expect([...dbMod.ATTENTION_STATES].sort()).toEqual(
+      [...new Set([...dbMod.REVIEW_STATES, "idea", "aborted"])].sort(),
+    );
+    // The operator pull-signal set, exactly.
+    expect([...dbMod.REVIEW_STATES].sort()).toEqual(
+      ["failed", "in_review", "needs_info", "spec_review"].sort(),
+    );
+  });
+
+  test("sumStatuses sums the counts for a membership set (missing keys = 0)", () => {
+    const counts = { spec_review: 2, in_review: 1, needs_info: 3, failed: 4, merged: 9 };
+    // Identical to the open-coded operator needs-attention sum it replaces.
+    expect(dbMod.sumStatuses(counts, dbMod.REVIEW_STATES)).toBe(2 + 1 + 3 + 4);
+    expect(dbMod.sumStatuses({}, dbMod.REVIEW_STATES)).toBe(0);
   });
 
   test("feedbackInfo surfaces each feedback state's artifact + accepted responses", () => {

@@ -755,6 +755,51 @@ export function isTerminal(status: TaskStatus): boolean {
   );
 }
 
+/**
+ * STATUS-MEMBERSHIP SINGLE SOURCES. These name the two semantically-distinct
+ * "needs someone's attention" subsets of the 12-state machine, so logic that used to
+ * open-code them (server.ts's operator pull-signal, channel.ts's CTO push-feed) shares
+ * ONE definition. `as const satisfies readonly TaskStatus[]` compile-checks every member
+ * against the canonical TaskStatus union — a typo or a state that no longer exists is a
+ * build error, giving the membership real teeth.
+ */
+
+/**
+ * REVIEW_STATES — the OPERATOR pull-signal: tasks needing a human's eyes right now (a
+ * generated spec awaiting approval, a diff awaiting review, an agent question awaiting an
+ * answer, or an execution-`failed` task to inspect). This is the dashboard "needs
+ * attention" badge set; see server.healthResponse.
+ */
+export const REVIEW_STATES = [
+  "spec_review",
+  "in_review",
+  "needs_info",
+  "failed",
+] as const satisfies readonly TaskStatus[];
+
+/**
+ * ATTENTION_STATES — the CTO push-feed (channel) set: every state whose ENTRY the CTO
+ * notification channel surfaces. It is REVIEW_STATES plus `idea` (the front of the
+ * pipeline — a brief awaiting a spec) and `aborted` (a terminal abort to inspect). See
+ * src/channel.ts.
+ */
+export const ATTENTION_STATES = [
+  "idea",
+  "spec_review",
+  "in_review",
+  "needs_info",
+  "failed",
+  "aborted",
+] as const satisfies readonly TaskStatus[];
+
+/** Sum the per-status counts for the given membership set (missing keys count as 0). */
+export function sumStatuses(
+  counts: Record<string, number>,
+  states: readonly TaskStatus[],
+): number {
+  return states.reduce((n, s) => n + (counts[s] ?? 0), 0);
+}
+
 export type TaskRow = {
   id: string;
   workspace_id: string;

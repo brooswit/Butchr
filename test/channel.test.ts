@@ -84,15 +84,26 @@ describe("channel: attention transitions → notifications", () => {
         expectText: "Which color should the widget be?",
       },
       {
-        // The spec's "failed" attention state is the canonical `aborted`.
-        state: "aborted",
+        // `failed` is a LIVE, DISTINCT terminal state (NOT folded into `aborted`) — a task
+        // entering it must fire its own notification carrying the execution error.
+        state: "failed",
         task: {
-          id: "t-fail",
+          id: "t-failed",
           workspace_id: "dir-1",
-          status: "aborted",
+          status: "failed",
           last_dispatch_error: "spawn failed after 5 attempts",
         },
         expectText: "spawn failed after 5 attempts",
+      },
+      {
+        state: "aborted",
+        task: {
+          id: "t-abort",
+          workspace_id: "dir-1",
+          status: "aborted",
+          revert_reason: "operator aborted the task",
+        },
+        expectText: "operator aborted the task",
       },
     ];
 
@@ -113,9 +124,9 @@ describe("channel: attention transitions → notifications", () => {
     }
   });
 
-  test("ATTENTION_STATES are exactly the five CTO attention states", () => {
+  test("ATTENTION_STATES are exactly the six CTO attention states", () => {
     expect([...ATTENTION_STATES].sort()).toEqual(
-      ["aborted", "idea", "in_review", "needs_info", "spec_review"].sort(),
+      ["aborted", "failed", "idea", "in_review", "needs_info", "spec_review"].sort(),
     );
   });
 
