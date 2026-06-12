@@ -6,11 +6,14 @@ import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
 import { computeDiskUsage } from "./disk.ts";
 import {
+  ALL_STATUSES,
   computeMetrics,
   db,
+  isTerminal,
   listTaskEvents,
   metricRows,
   REVIEW_STATES,
+  STATE_META,
   sumStatuses,
 } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
@@ -546,6 +549,23 @@ route("GET", "/api/workspaces", async () => json(listWorkspaces()));
 // single source the webapp's step-responder panel and the later feedback-routing tasks
 // read. 404 if the workspace is gone.
 route("GET", "/api/workspaces/:id", async (_req, p) => json(workspaceDetail(p.id!)));
+
+// CANONICAL STATE METADATA. The single source of truth for the 12-state machine —
+// each state's KIND (idle/agent/feedback) and AGENT TYPE — lives in src/db.ts
+// (STATE_META) alongside the ordered status list (ALL_STATUSES). The webapp serves
+// this at boot to BUILD its STATE_KIND / AGENT_TYPE / status-membership tables rather
+// than hand-mirroring the literals, so a state-model change needs editing exactly one
+// file. `terminalStatuses` is the isTerminal subset (which the kind alone can't express —
+// `blocked`/`rolling_back` are also idle-kind but non-terminal), so the client derives
+// its active/Finished split from the server too. Read-only; static for the process
+// lifetime. See public/app.js (boot fetch / applyStateMeta).
+route("GET", "/api/state-meta", async () =>
+  json({
+    stateMeta: STATE_META,
+    allStatuses: ALL_STATUSES,
+    terminalStatuses: ALL_STATUSES.filter(isTerminal),
+  }),
+);
 
 // Built-in TASK TEMPLATES (recipes): the named, parameterized prompt skeletons the
 // CLI `templates` command and the webapp new-task picker list. Each entry carries

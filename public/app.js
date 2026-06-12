@@ -74,27 +74,53 @@ function statusLabel(status) {
 function chip(status) {
   return `<span class="chip ${esc(status)}">${esc(statusLabel(status))}</span>`;
 }
-// STATE-KIND helpers — mirror STATE_META from src/db.ts so the UI can show whether
-// a state is agent-driven, feedback-awaiting, or idle (terminal/blocked).
-const STATE_KIND = {
-  idea: "feedback",
-  spec_review: "feedback",
-  blocked: "idle",
-  needs_info: "feedback",
-  inactive: "agent",
-  in_progress: "agent",
-  in_review: "feedback",
-  merged: "idle",
-  rolling_back: "idle",
-  rolled_back: "idle",
-  failed: "idle",
-  aborted: "idle",
-};
-const AGENT_TYPE = {
-  inactive: "workspace-agent",
-  in_progress: "workspace-agent",
-};
-// What an operator is awaiting for each feedback state (shown as a chip hint).
+// CANONICAL STATE METADATA — owned by the SERVER, never hand-mirrored here. The
+// 12-state machine's kind (idle/agent/feedback), per-state agent type, ordered status
+// list, and terminal subset all live in src/db.ts (STATE_META / ALL_STATUSES /
+// isTerminal) and are served at /api/state-meta. These tables are BUILT from that served
+// meta once at boot (loadStateMeta / applyStateMeta, run before the first render), so a
+// state-model change needs editing exactly one file. Declared `let` and start empty; the
+// helpers and views read them live. If the meta is briefly unavailable the tables stay
+// empty and everything degrades to safe defaults (no crash) rather than mirroring db.ts.
+let STATE_KIND = {};        // status -> "idle" | "agent" | "feedback"
+let AGENT_TYPE = {};        // status -> agent type (only for agent-kind states)
+let ALL_STATUSES = [];      // every canonical status, server's stable order
+let TERMINAL_STATUSES = []; // the terminal (Finished) subset
+let ACTIVE_STATUSES = [];   // non-terminal statuses (stay in the active list)
+// FILTER_STATUSES is ALL_STATUSES with the synthetic `idle` effStatus (an idle RUNNING
+// task — see effStatus) spliced in after in_progress, so it filters independently.
+let FILTER_STATUSES = [];
+
+// Fetch the server-owned state metadata and (re)build every table above from it. Called
+// once at boot BEFORE the first render. On failure the tables stay empty and the helpers
+// degrade rather than crash (the page still loaded, so same-origin meta is rarely down).
+async function loadStateMeta() {
+  try {
+    applyStateMeta(await api("GET", "/state-meta"));
+  } catch (e) {
+    console.error("state-meta load failed; UI degrades to defaults", e);
+  }
+}
+function applyStateMeta(meta) {
+  const stateMeta = (meta && meta.stateMeta) || {};
+  const all = (meta && meta.allStatuses) || [];
+  const terminal = (meta && meta.terminalStatuses) || [];
+  STATE_KIND = {};
+  AGENT_TYPE = {};
+  for (const s of all) {
+    const m = stateMeta[s] || {};
+    STATE_KIND[s] = m.kind || "idle";
+    if (m.agentType) AGENT_TYPE[s] = m.agentType;
+  }
+  ALL_STATUSES = all.slice();
+  TERMINAL_STATUSES = terminal.slice();
+  ACTIVE_STATUSES = all.filter((s) => !terminal.includes(s));
+  FILTER_STATUSES = all.flatMap((s) => (s === "in_progress" ? [s, "idle"] : [s]));
+}
+
+// What an operator is AWAITING for each feedback state (chip hint). Pure UI copy — these
+// strings have no source in db.ts, so they are deliberately NOT part of the served state
+// metadata (unlike the kind/agent-type tables above, which the server now owns).
 const AWAITED_LABEL = {
   idea: "a spec",
   spec_review: "spec approval",
@@ -758,7 +784,9 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted"]
+  // Same status set + order as the filter chips (server's status list with the
+  // synthetic `idle` effStatus spliced in — see applyStateMeta / FILTER_STATUSES).
+  const pills = FILTER_STATUSES
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
         : s === "inactive" && c[s] ? "count-pill has-inactive"
@@ -1300,19 +1328,12 @@ function queueLine(tasks) {
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
-// Lifecycle statuses still in flight — these stay in the main workspace list.
-// Everything else (merged, failed, rolled_back, aborted) is terminal and lives in
-// History. `blocked` and `inactive` are pre-dispatch waiting work, so they group with
-// the active tasks; `rolling_back` is a mechanical merge in flight.
-const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "in_review", "rolling_back"];
-// The four terminal idle states — these are what belongs in the collapsible "Finished"
-// section. Everything NOT in this allowlist is non-terminal and stays VISIBLE in the
-// active list: the feedback states awaiting the operator (spec_review / in_review /
-// needs_info) AND any legacy/non-canonical status a row may still carry. Defining
-// Finished by an explicit allowlist — rather than as the complement of ACTIVE_STATUSES
-// — guarantees a needs-attention task can never be hidden under Finished just because
-// its status isn't in the active list.
-const TERMINAL_STATUSES = ["merged", "failed", "rolled_back", "aborted"];
+// ACTIVE_STATUSES (lifecycle statuses still in flight — they stay in the main workspace
+// list) and TERMINAL_STATUSES (the terminal subset that lives in the collapsible
+// "Finished" section) are now BUILT from the server-owned state meta at boot — see
+// applyStateMeta near the top of this file. TERMINAL_STATUSES is the server's isTerminal
+// subset; ACTIVE_STATUSES is its complement, so a needs-attention feedback state can
+// never be hidden under Finished.
 const HISTORY_KEY = "butchr-history-open";
 
 // Workspace page body mode: the task "List", the pipeline "Board", or the
@@ -1351,10 +1372,10 @@ function historyOpen() {
 
 // ---------- task search + status filtering ----------
 // Filter state is kept in memory only, at module scope, so it survives the full
-// re-render render() performs on every SSE event without being torn down. The
-// statuses here are the *effective* statuses (effStatus), so `idle` and
-// `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted"];
+// re-render render() performs on every SSE event without being torn down. The filter
+// chips iterate FILTER_STATUSES — the server's status list with the synthetic `idle`
+// effStatus spliced in (see applyStateMeta) — so the *effective* statuses (effStatus)
+// `idle` and `in_progress` filter independently, as do all terminal states.
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
@@ -2435,10 +2456,10 @@ async function renderTask(id) {
   headerRight.appendChild(el("div", {
     html: taskChips(t, { plan: true, kind: true }),
   }));
-  // Abort is available from any non-terminal state. Terminal states are
-  // merged/failed/rolled_back/aborted. `rolling_back` is a mechanical merge in flight —
-  // not abortable (there is no live agent to stop).
-  const canAbort = !["merged", "failed", "rolled_back", "aborted", "rolling_back"].includes(t.status);
+  // Abort is available from any non-terminal state (TERMINAL_STATUSES comes from the
+  // server meta), EXCEPT `rolling_back` — a mechanical merge in flight with no live
+  // agent to stop.
+  const canAbort = !TERMINAL_STATUSES.includes(t.status) && t.status !== "rolling_back";
   if (canAbort) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
@@ -2623,6 +2644,17 @@ async function renderTask(id) {
     }));
   }
 
+  // Shared submit wrapper for the feedback control panels below: POST `path` (relative
+  // to this task) with `body`, toast `successMsg`, then return to the workspace list
+  // (the next thing you want after acting). Each panel builder closes over this and
+  // wires its OWN buttons before it's appended, so a control's build + wire live in one
+  // place instead of split across a panel block here and a getElementById block far below.
+  const submitTo = (btn, path, body, successMsg) =>
+    action(btn, () => api("POST", "/tasks/" + id + path, body), {
+      success: successMsg,
+      onDone: () => backToWorkspace(t.workspace_id),
+    });
+
   // diff + review controls (when in_review)
   if (t.status === "in_review") {
     // CI GATE badge — shown BEFORE the diff. Reflects the build/test job butchr
@@ -2654,6 +2686,42 @@ async function renderTask(id) {
         <button class="btn danger" id="reject">Request change</button>
         <div class="spacer"></div>
       </div>`;
+    // Approve carries bespoke advisory-gate confirms (CI / conformance) and
+    // conflict/revert toasts, so it calls action() directly rather than submitTo.
+    controls.querySelector("#approve").addEventListener("click", (ev) => {
+      // CI gate is advisory, not a hard block: warn on a failed build/tests but let
+      // the operator proceed if they confirm.
+      if (t.ci_status === "fail") {
+        const label = (t.ci_summary || "CI failed").split("\n")[0].trim();
+        if (!confirm(`CI failed (${label}). Approve and merge anyway?`)) return;
+      }
+      // SPEC-CONFORMANCE gate is likewise advisory: warn on a flagged concern (the
+      // diff may not fully implement the prompt) but let the operator proceed.
+      if (t.conformance_status === "concern") {
+        const why = (t.conformance_summary || "").trim();
+        if (!confirm(`Conformance concern${why ? `: ${why}` : ""}. Approve and merge anyway?`)) return;
+      }
+      action(ev.target, async () => {
+        const r = await api("POST", "/tasks/" + id + "/approve");
+        // A merge conflict isn't an error — it's sent back to the live agent to
+        // resolve in-context. The SSE refresh will show the task back in in_progress.
+        if (r && r.conflictSentBack) {
+          toast("Merge conflict — sent back to the agent to resolve");
+        } else if (r && r.revertedOnRed) {
+          toast("Merged but verify FAILED — auto-reverted off main", true);
+        } else {
+          toast("approved ✓ — merged, agent wrapping up");
+        }
+      }, { onDone: () => backToWorkspace(t.workspace_id) });
+    });
+    controls.querySelector("#reject").addEventListener("click", (ev) => {
+      // The note sent to the agent is the freeform text plus any inline comments,
+      // composed into one string (composeReviewNote). Either alone is enough to
+      // request changes — so a reviewer can reject purely with per-line comments.
+      const note = composeReviewNote(controls.querySelector("#rnote").value);
+      if (!note) return toast("add a note or at least one inline comment", true);
+      submitTo(ev.target, "/reject", { note }, "changes requested");
+    });
     wrap.appendChild(controls);
   }
 
@@ -2683,6 +2751,11 @@ async function renderTask(id) {
         <button class="btn success" id="submitSpec">Submit spec</button>
         <div class="spacer"></div>
       </div>`;
+    specPanel.querySelector("#submitSpec").addEventListener("click", (ev) => {
+      const spec = (specPanel.querySelector("#spec").value || "").trim();
+      if (!spec) return toast("a spec is required", true);
+      submitTo(ev.target, "/spec", { spec }, "spec submitted ✓ — awaiting approval");
+    });
     wrap.appendChild(specPanel);
   }
 
@@ -2702,6 +2775,19 @@ async function renderTask(id) {
         <button class="btn danger" id="reject">Request changes</button>
         <div class="spacer"></div>
       </div>`;
+    // Approve toasts its own dispatching message, so it calls action() directly; reject
+    // is the common submit-and-leave path.
+    controls.querySelector("#approve").addEventListener("click", (ev) => {
+      action(ev.target, async () => {
+        await api("POST", "/tasks/" + id + "/approve");
+        toast("spec approved ✓ — dispatching workspace agent");
+      }, { onDone: () => backToWorkspace(t.workspace_id) });
+    });
+    controls.querySelector("#reject").addEventListener("click", (ev) => {
+      const note = (controls.querySelector("#rnote").value || "").trim();
+      if (!note) return toast("add a note describing what to change in the spec", true);
+      submitTo(ev.target, "/reject", { note }, "spec changes requested — revising");
+    });
     wrap.appendChild(controls);
   }
 
@@ -2723,6 +2809,11 @@ async function renderTask(id) {
         <button class="btn success" id="sendAnswer">Send answer</button>
         <div class="spacer"></div>
       </div>`;
+    answerPanel.querySelector("#sendAnswer").addEventListener("click", (ev) => {
+      const answer = answerPanel.querySelector("#answer").value.trim();
+      if (!answer) return toast("an answer is required", true);
+      submitTo(ev.target, "/answer", { answer }, "answer sent — agent resuming");
+    });
     wrap.appendChild(answerPanel);
   }
 
@@ -2747,6 +2838,19 @@ async function renderTask(id) {
         <button class="btn" id="requeue">Re-queue</button>
         <div class="spacer"></div>
       </div>`;
+    // Idle actions stay on this page (no backToWorkspace), so they call action()
+    // directly rather than submitTo.
+    idlePanel.querySelector("#nudge").addEventListener("click", (ev) => {
+      const text = (idlePanel.querySelector("#nudgeText").value || "").trim();
+      // A bare nudge sends "continue"; with text it sends guidance. The backend re-checks
+      // liveness and auto-resumes a dead pane instead of poking it.
+      action(ev.target, () => api("POST", "/tasks/" + id + "/nudge", text ? { text } : {}),
+        { success: text ? "guidance sent ✓" : "nudged — sent “continue” ✓" });
+    });
+    idlePanel.querySelector("#requeue").addEventListener("click", (ev) => {
+      if (!confirm("Re-queue this idle agent? Its current run is torn down and re-launched (resuming its session) from scratch.")) return;
+      action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
+    });
     wrap.appendChild(idlePanel);
   }
 
@@ -2789,91 +2893,10 @@ async function renderTask(id) {
     });
   }
 
-  if (t.status === "in_review") {
-    document.getElementById("approve").addEventListener("click", (ev) => {
-      // CI gate is advisory, not a hard block: warn on a failed build/tests but let
-      // the operator proceed if they confirm.
-      if (t.ci_status === "fail") {
-        const label = (t.ci_summary || "CI failed").split("\n")[0].trim();
-        if (!confirm(`CI failed (${label}). Approve and merge anyway?`)) return;
-      }
-      // SPEC-CONFORMANCE gate is likewise advisory: warn on a flagged concern (the
-      // diff may not fully implement the prompt) but let the operator proceed.
-      if (t.conformance_status === "concern") {
-        const why = (t.conformance_summary || "").trim();
-        if (!confirm(`Conformance concern${why ? `: ${why}` : ""}. Approve and merge anyway?`)) return;
-      }
-      action(ev.target, async () => {
-        const r = await api("POST", "/tasks/" + id + "/approve");
-        // A merge conflict isn't an error — it's sent back to the live agent to
-        // resolve in-context. The SSE refresh will show the task back in in_progress.
-        if (r && r.conflictSentBack) {
-          toast("Merge conflict — sent back to the agent to resolve");
-        } else if (r && r.revertedOnRed) {
-          toast("Merged but verify FAILED — auto-reverted off main", true);
-        } else {
-          toast("approved ✓ — merged, agent wrapping up");
-        }
-      }, { onDone: () => backToWorkspace(t.workspace_id) });
-    });
-    document.getElementById("reject").addEventListener("click", (ev) => {
-      // The note sent to the agent is the freeform text plus any inline comments,
-      // composed into one string (composeReviewNote). Either alone is enough to
-      // request changes — so a reviewer can reject purely with per-line comments.
-      const note = composeReviewNote(document.getElementById("rnote").value);
-      if (!note) return toast("add a note or at least one inline comment", true);
-      action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
-        { success: "changes requested", onDone: () => backToWorkspace(t.workspace_id) });
-    });
-  }
-
-  if (t.status === "idea") {
-    document.getElementById("submitSpec").addEventListener("click", (ev) => {
-      const spec = (document.getElementById("spec").value || "").trim();
-      if (!spec) return toast("a spec is required", true);
-      action(ev.target, () => api("POST", "/tasks/" + id + "/spec", { spec }),
-        { success: "spec submitted ✓ — awaiting approval", onDone: () => backToWorkspace(t.workspace_id) });
-    });
-  }
-
-  if (t.status === "spec_review") {
-    document.getElementById("approve").addEventListener("click", (ev) => {
-      action(ev.target, async () => {
-        await api("POST", "/tasks/" + id + "/approve");
-        toast("spec approved ✓ — dispatching workspace agent");
-      }, { onDone: () => backToWorkspace(t.workspace_id) });
-    });
-    document.getElementById("reject").addEventListener("click", (ev) => {
-      const note = (document.getElementById("rnote").value || "").trim();
-      if (!note) return toast("add a note describing what to change in the spec", true);
-      action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
-        { success: "spec changes requested — revising", onDone: () => backToWorkspace(t.workspace_id) });
-    });
-  }
-
-  if (t.status === "needs_info") {
-    document.getElementById("sendAnswer").addEventListener("click", (ev) => {
-      const answer = document.getElementById("answer").value.trim();
-      if (!answer) return toast("an answer is required", true);
-      action(ev.target, () => api("POST", "/tasks/" + id + "/answer", { answer }),
-        { success: "answer sent — agent resuming", onDone: () => backToWorkspace(t.workspace_id) });
-    });
-  }
-
-  // Idle-handling actions (the live, in_progress + idle panel above).
-  if (t.status === "in_progress" && t.idle) {
-    document.getElementById("nudge").addEventListener("click", (ev) => {
-      const text = (document.getElementById("nudgeText").value || "").trim();
-      // A bare nudge sends "continue"; with text it sends guidance. The backend re-checks
-      // liveness and auto-resumes a dead pane instead of poking it.
-      action(ev.target, () => api("POST", "/tasks/" + id + "/nudge", text ? { text } : {}),
-        { success: text ? "guidance sent ✓" : "nudged — sent “continue” ✓" });
-    });
-    document.getElementById("requeue").addEventListener("click", (ev) => {
-      if (!confirm("Re-queue this idle agent? Its current run is torn down and re-launched (resuming its session) from scratch.")) return;
-      action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
-    });
-  }
+  // The feedback control panels (in_review / idea / spec_review / needs_info / idle)
+  // build AND wire their own buttons before mount — see their builders above (each
+  // closes over submitTo / action). Only the header/failed-panel controls (abort,
+  // rollback, aborted-requeue) are wired here, since their nodes live outside those panels.
 }
 
 // Parse a unified diff into per-file groups for a readable, GitHub-style view.
@@ -3594,6 +3617,12 @@ window.addEventListener("hashchange", render);
 setupTheme();
 wireAttention();
 wirePause();
-updateAttention();
-render();
-connectSSE();
+// Load the server-owned state metadata BEFORE the first render so STATE_KIND /
+// AGENT_TYPE / the status-membership lists are populated (see applyStateMeta). On
+// failure the tables stay empty and the UI degrades rather than crashing.
+(async () => {
+  await loadStateMeta();
+  updateAttention();
+  render();
+  connectSSE();
+})();
