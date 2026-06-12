@@ -2682,7 +2682,8 @@ export async function recoverFinalizingTasks(): Promise<number> {
   return rows.length;
 }
 
-/** What recoverStuckGates did across all tasks (for logging / the health surface). */
+/** What recoverStuckGates did across all tasks: CI re-triggers, conformance re-triggers,
+ * and force-settles (gates capped/un-runnable). Surfaced in the startup + backstop logs. */
 export type GateRecoveryResult = { ci: number; conformance: number; settled: number };
 
 /**
