@@ -9,17 +9,19 @@
 // tests across 125 files instead of ~321/37, and an in-flight worktree's failing
 // test auto-reverted an unrelated green merge.
 //
-// The fix scopes test discovery to the repo's OWN `./test`: the default
-// config.verifyCmd passes `bun test ./test`, and bunfig.toml pins `[test] root`
-// to "./test" so even a bare `bun test` is scoped. This test proves BOTH the
-// default gate command and a bare `bun test` (under the repo's bunfig.toml) run
-// ONLY the repo's own suite and are unaffected by a sibling worktree dir — with
-// a STABLE test count regardless of how many siblings exist.
+// The fix is to SCOPE a gate's test discovery to the repo's OWN `./test`: a gate
+// command that runs `bun test ./test` (rather than a bare `bun test`) only sees the
+// repo's suite, and bunfig.toml pins `[test] root` to "./test" so even a bare
+// `bun test` is scoped. This test proves a `./test`-scoped run (and a bare `bun test`
+// under the repo's bunfig.toml) runs ONLY the repo's own suite and is unaffected by a
+// sibling worktree dir — with a STABLE test count regardless of how many siblings
+// exist. (butchr no longer hardcodes a default gate command — the global default is
+// EMPTY and each managed repo configures its own via `gate_cmd` / BUTCHR_VERIFY_CMD —
+// so a repo whose gate runs `bun test` is responsible for scoping it this way.)
 import { describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { config } from "../src/config.ts";
 import { runGate } from "../src/gate.ts";
 
 const REPO_BUNFIG = join(import.meta.dir, "..", "bunfig.toml");
@@ -50,15 +52,7 @@ function makeRepoWithSiblings(siblings: number, withBunfig: boolean): string {
   return root;
 }
 
-describe("default gate command scopes test discovery to ./test", () => {
-  test("config.verifyCmd targets `bun test ./test`, not a bare `bun test`", () => {
-    // The build step is unconstrained, but the test run MUST be path-scoped.
-    expect(config.verifyCmd).toContain("bun test ./test");
-    // No UNSCOPED `bun test` survives once the scoped form is removed — a bare
-    // `bun test` (no path) would glob the whole tree and pick up sibling worktrees.
-    expect(config.verifyCmd.replaceAll("bun test ./test", "")).not.toContain("bun test");
-  });
-
+describe("a `./test`-scoped gate command scopes test discovery to ./test", () => {
   test("the repo's bunfig.toml pins `[test] root` to ./test", () => {
     const toml = require("node:fs").readFileSync(REPO_BUNFIG, "utf8") as string;
     expect(toml).toMatch(/\[test\]/);

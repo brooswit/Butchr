@@ -550,9 +550,13 @@ the gate. A clean exit means it builds and type-resolves:
 bun build src/index.ts --target bun --outfile /dev/null
 ```
 
-Run **both** `bun test` and the build before proposing a change — they are the
-same checks CI and the post-merge verify gate run (`BUTCHR_VERIFY_CMD` defaults
-to exactly `bun build src/index.ts --target bun --outfile /dev/null && bun test`).
+Run **both** `bun test` and the build before proposing a change. These are the
+checks butchr's own CI / verify gate should run against **this** repo — but butchr
+is a general tool that manages *other* repos, so it does **not** hardcode them: the
+gate command defaults to **empty** (no gate) and is configured per managed repo via
+the directory's `gate_cmd` (or a global `BUTCHR_VERIFY_CMD`). When butchr is pointed
+at its own repo (a dev/dogfood setup), set that to
+`bun build src/index.ts --target bun --outfile /dev/null && bun test ./test`.
 
 ---
 

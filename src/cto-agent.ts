@@ -5,7 +5,7 @@
 // review/merge. It is the operator's hands FOR THAT REPO: on each
 // <butchr-cto-channel> push (a spec/diff/question/failure for ONE of that directory's
 // tasks) it acts via the butchr API (127.0.0.1:47800) or `bin/butchr`
-// (approve/reject/answer/requeue); it does NOT edit the butchr codebase directly (all
+// (approve/reject/answer/requeue); it does NOT edit that repo's code directly (all
 // code changes go through tasks). There is NO global/top-level CTO — butchr manages
 // one CTO agent per directory, keyed by directory_id.
 //
@@ -176,7 +176,7 @@ approve / reject / answer / requeue, e.g.:
 
 ## Hard rules
 
-- **Do NOT edit the butchr codebase directly.** All code changes go through tasks
+- **Do NOT edit this repository's code directly.** All code changes go through tasks
   (create an idea/task via the API and let a build agent do it under review).
 - You have no worktree, branch, review, or merge of your own — you are an operator,
   not a builder.

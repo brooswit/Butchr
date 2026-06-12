@@ -163,35 +163,32 @@ export const config = {
   tickMs: envInt("BUTCHR_TICK_MS", 1500),
 
   /**
-   * POST-MERGE VERIFY GATE. After a task's branch fast-forwards into the default
-   * branch (see tasks.approveTask → git.merge), butchr runs this command in the
-   * repo ROOT (the default-branch worktree) to confirm the NEW tip still builds
-   * and its tests pass. If it exits NON-ZERO, the merge is auto-reverted (the
-   * default branch is reset back to its pre-merge tip — see git.resetHard) and the
-   * task is flagged so a broken commit never sits on main. Runs INSIDE the global
-   * merge queue, so a verify+revert can never interleave with another merge.
+   * POST-MERGE VERIFY GATE (and the in-worktree CI gate share this command). After a
+   * task's branch fast-forwards into the default branch (see tasks.approveTask →
+   * git.merge), butchr runs this command in the repo ROOT (the default-branch
+   * worktree) to confirm the NEW tip still builds and its tests pass. If it exits
+   * NON-ZERO, the merge is auto-reverted (the default branch is reset back to its
+   * pre-merge tip — see git.resetHard) and the task is flagged so a broken commit
+   * never sits on main. Runs INSIDE the global merge queue, so a verify+revert can
+   * never interleave with another merge.
    *
-   * Run via `bash -lc` with the repo root as cwd. The default builds the bun entry
-   * and runs the suite — appropriate when butchr manages its OWN repo (the
-   * dogfooding setup). For a repo where this command does not apply, override
-   * BUTCHR_VERIFY_CMD with the right build/test command. Set it EMPTY to DISABLE
-   * the gate entirely (every merge is accepted as before — no verify, no revert).
+   * butchr is a GENERAL tool that manages OTHER people's repos, so there is no
+   * universal build/test command — this global default is therefore EMPTY (the gate
+   * is OFF until configured), and a managed repo opts in to a gate by setting its
+   * build/test command. Configure it PER-DIRECTORY via the directory's `gate_cmd`
+   * (set at register time or via `PUT /api/directories/:id`), or set a global default
+   * for every directory with BUTCHR_VERIFY_CMD. An empty effective command DISABLES
+   * the gate for that directory (every merge is accepted — no verify, no revert).
    *
-   * The test arg is SCOPED to `./test` on purpose. butchr lays out each task's git
-   * worktree as a SUBDIRECTORY of the repo (`<dir>/<taskId>` — see git.worktreePath),
-   * so a bare `bun test` from the repo root (where the post-merge verify gate runs)
-   * would glob the ENTIRE tree and discover+run the test files inside EVERY sibling
-   * task worktree (`<dir>/<otherTask>/test/*.test.ts`) — an in-flight worktree's
-   * failing/interfering test could then auto-revert an unrelated, already-green merge.
-   * Pinning discovery to `./test` makes BOTH gates (in-worktree CI + main-root verify)
-   * run only the repo's OWN suite with a STABLE test count, regardless of how many
-   * sibling worktrees exist. `bunfig.toml` (`[test] root = "./test"`) pins bare
-   * `bun test` the same way as defense-in-depth.
+   * Run via `bash -lc` with the repo root as cwd. If your command runs a test
+   * discoverer, SCOPE it to your repo's own tests (e.g. `bun test ./test`, not a bare
+   * `bun test`): butchr lays out each task's git worktree as a SUBDIRECTORY of the
+   * repo (`<dir>/<taskId>` — see git.worktreePath), so an unscoped discoverer run from
+   * the repo root would glob the ENTIRE tree and pick up the test files inside sibling
+   * task worktrees — an in-flight worktree's failing test could then auto-revert an
+   * unrelated, already-green merge.
    */
-  verifyCmd: env(
-    "BUTCHR_VERIFY_CMD",
-    "bun build src/index.ts --target bun --outfile /dev/null && bun test ./test",
-  ),
+  verifyCmd: env("BUTCHR_VERIFY_CMD", ""),
   /** Max wall-clock (ms) the verify gate may run before it's killed + treated as RED. */
   verifyTimeoutMs: envInt("BUTCHR_VERIFY_TIMEOUT_MS", 1000 * 60 * 10),
 
@@ -517,15 +514,22 @@ export const config = {
 
   /**
    * Command (run via `bash -lc`, cwd = the directory's repo root) that starts the
-   * ONE-WAY CTO notification channel bridge (src/channel.ts). It is registered as an
-   * MCP STDIO server named `butchr-cto-channel` in the CTO agent's generated MCP
-   * config and loaded as a development channel via
+   * ONE-WAY CTO notification channel bridge. The bridge is butchr's OWN code
+   * (`src/channel.ts`), so the default points at it by ABSOLUTE path (derived from
+   * butchr's install dir) rather than `src/channel.ts` — the cwd is the MANAGED
+   * repo's root (a different project that does NOT contain butchr's source), so a
+   * cwd-relative path would never resolve. It is registered as an MCP STDIO server
+   * named `butchr-cto-channel` in the CTO agent's generated MCP config and loaded as
+   * a development channel via
    * `--dangerously-load-development-channels server:butchr-cto-channel`. The bridge
    * derives its SSE URL from butchr's host/port (overridable via
    * BUTCHR_CHANNEL_SSE_URL, which butchr sets on it) and is SCOPED to the directory
    * via BUTCHR_CHANNEL_DIR (set per-launch) so it only pushes that directory's events.
    */
-  ctoChannelCmd: env("BUTCHR_CTO_CHANNEL_CMD", "bun run src/channel.ts"),
+  ctoChannelCmd: env(
+    "BUTCHR_CTO_CHANNEL_CMD",
+    `bun run ${join(import.meta.dir, "channel.ts")}`,
+  ),
 
   /**
    * Command template that LAUNCHES a directory's CTO agent (run via `bash -lc`,

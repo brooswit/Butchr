@@ -64,9 +64,11 @@ afterAll(() => {
 test("listTemplates exposes the built-ins with extracted placeholders", () => {
   const list = templatesMod.listTemplates();
   const names = list.map((t) => t.name).sort();
-  // The task shapes butchr ships as recipes (incl. `rollback`, which drives the
-  // webapp's "Roll back" button).
-  expect(names).toEqual(["add-endpoint", "feature", "refactor-extract", "rollback", "webapp-panel"]);
+  // The repo-agnostic task shapes butchr ships as recipes (incl. `rollback`, which
+  // drives the webapp's "Roll back" button). butchr manages OTHER repos, so the
+  // butchr-architecture-specific recipes (a webapp panel, a REST endpoint) were
+  // dropped — they only ever made sense for editing butchr itself.
+  expect(names).toEqual(["feature", "refactor-extract", "rollback"]);
 
   for (const t of list) {
     expect(typeof t.name).toBe("string");
@@ -145,22 +147,22 @@ test("validateVars rejects non-object vars (400) and coerces values to strings",
 test("a rendered template substitutes into a created task's prompt + task.md", async () => {
   // Mirror what the create route does: render the template, then create the task
   // with the rendered prompt.
-  const prompt = templatesMod.renderTemplate("add-endpoint", {
-    method: "GET",
-    path: "/api/widgets",
-    behavior: "lists widgets",
-    service_fn: "listWidgets",
+  const prompt = templatesMod.renderTemplate("feature", {
+    title: "Add a widgets list",
+    read_first: "src/widgets.ts",
+    requirements: "expose the widgets",
+    scope: "src/widgets.ts",
   });
   const v = await tasksMod.createTask(DIR_ID, prompt, []);
 
   // The substituted values land in the task's stored prompt...
-  expect(v.prompt).toContain("Add a REST endpoint: GET /api/widgets.");
-  expect(v.prompt).toContain("lists widgets");
-  expect(v.prompt).toContain("listWidgets");
+  expect(v.prompt).toContain("Add a widgets list");
+  expect(v.prompt).toContain("READ FIRST: src/widgets.ts");
+  expect(v.prompt).toContain("expose the widgets");
   // ...and round-trip through task.md on disk.
   const doc = taskmdMod.readTaskMd(REPO_ROOT, v.id);
-  expect(doc.prompt).toContain("GET /api/widgets");
-  expect(doc.prompt).toContain("listWidgets");
+  expect(doc.prompt).toContain("Add a widgets list");
+  expect(doc.prompt).toContain("expose the widgets");
 });
 
 // ---- ROLLBACK TEMPLATE -----------------------------------------------------
@@ -181,11 +183,11 @@ test("the rollback template exposes {{task}}/{{sha}} and renders a correct rever
   // It instructs a clean revert of the named task's commit...
   expect(prompt).toContain("Revert the changes introduced by task plush-zebra-6caf (commit abc1234def567).");
   expect(prompt).toContain("git revert");
-  // ...then a real fix-the-fallout pass gated on build + tests...
-  expect(prompt).toContain("bun build src/index.ts --target bun --outfile /dev/null");
-  expect(prompt).toContain("bun test");
+  // ...then a real fix-the-fallout pass gated on the PROJECT's build + tests (no
+  // butchr-specific command — butchr manages other repos)...
+  expect(prompt).toContain("the project's build and test suite green");
   // ...and the standard convention (butchr owns CHANGELOG/version at merge).
-  expect(prompt).toContain("do NOT hand-edit CHANGELOG.md / package.json");
+  expect(prompt).toContain("don't hand-edit those files");
   // No leftover markers once both vars are supplied.
   expect(prompt).not.toContain("{{task}}");
   expect(prompt).not.toContain("{{sha}}");
