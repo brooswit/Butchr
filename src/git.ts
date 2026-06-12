@@ -9,7 +9,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { bumpVersion, isDocsOnlyDiff, promoteUnreleased } from "./changelog.ts";
+import {
+  bumpVersion,
+  isDocsOnlyDiff,
+  promoteUnreleased,
+  unionAdditiveChangelogConflict,
+} from "./changelog.ts";
 import type { VersionBumpLevel } from "./changelog.ts";
 import { config } from "./config.ts";
 import { run, runOrThrow, type ExecResult } from "./exec.ts";
@@ -445,6 +450,84 @@ async function collectConflictAndAbort(
 }
 
 /**
+ * MERGE-LOCK SAFETY NET. On a rebase CONFLICT, attempt to AUTO-RESOLVE it in place IFF
+ * the conflict is a TRIVIAL ADDITIVE changelog conflict — both sides only ADDED bullets
+ * under the same heading (a changelog cascade). This is the single riskiest manual
+ * ritual the CTO reached around butchr for; everything else still bounces to the agent.
+ *
+ * HARD GUARD-RAILS (the whole safety case):
+ *  1. Fires ONLY when the unmerged set is EXACTLY [changelogRel] and non-empty. ANY other
+ *     conflicted file → return false → the caller bounces the WHOLE rebase untouched
+ *     (never a partial resolve).
+ *  2. The union itself NEVER crosses a `## ` heading boundary and only merges bullets —
+ *     enforced by changelog.unionAdditiveChangelogConflict, which returns null otherwise.
+ *  3. Non-additive of ANY kind (an ancestor line edited/removed, a non-bullet added,
+ *     malformed/missing diff3 markers, or a `rebase --continue` that fails for any other
+ *     reason) → return false → bounce. The safe default is always "hand it to the agent."
+ *  4. On a successful auto-resolve it logs a `[butchr]` line (task id + that it unioned
+ *     the changelog) — never a silent rewrite, so the operator can audit it fired.
+ *
+ * Loops because a multi-commit rebase can stop again on the next replayed commit. Returns
+ * true iff the rebase is now COMPLETE (linear atop base); false leaves the rebase STILL
+ * IN PROGRESS so the caller's collectConflictAndAbort aborts it cleanly. An empty
+ * `changelogRel` (no changelog configured) disables the net.
+ */
+async function tryUnionChangelogConflict(
+  rebaseDir: string,
+  base: string,
+  taskId: string,
+  changelogRel: string,
+): Promise<boolean> {
+  const rel = changelogRel.trim();
+  if (!rel) return false; // net disabled — no changelog path configured
+  let unions = 0;
+  // Bounded loop: a backstop far above any real rebase depth. Each iteration must make
+  // progress (a successful --continue) or it returns false and bounces.
+  for (let guard = 0; guard < 1000; guard++) {
+    // GUARD-RAIL 1: the unmerged set must be EXACTLY the changelog. Any other conflicted
+    // file (or none) → bounce the whole rebase untouched.
+    const unmerged = await run([
+      git, "-C", rebaseDir, "diff", "--name-only", "--diff-filter=U",
+    ]);
+    const files = unmerged.ok
+      ? unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+      : [];
+    if (files.length !== 1 || files[0] !== rel) return false;
+
+    // Re-materialize the conflict in diff3 style (without redoing the merge) so the pure
+    // resolver can see the common ancestor, then try the additive union.
+    const clogPath = join(rebaseDir, rel);
+    const co = await run([
+      git, "-C", rebaseDir, "checkout", "--conflict=diff3", "--", rel,
+    ]);
+    if (!co.ok || !existsSync(clogPath)) return false;
+    const resolved = unionAdditiveChangelogConflict(readFileSync(clogPath, "utf8"));
+    if (resolved === null) return false; // GUARD-RAIL 2/3: not a clean additive union → bounce
+
+    writeFileSync(clogPath, resolved, "utf8");
+    await run([git, "-C", rebaseDir, "add", rel]);
+    unions++;
+    // Continue the rebase. `core.editor=true` keeps it non-interactive if git would
+    // otherwise open an editor for the replayed commit message.
+    const cont = await run([
+      git, "-c", "core.editor=true", "-C", rebaseDir, "rebase", "--continue",
+    ]);
+    if (cont.ok) {
+      // GUARD-RAIL 4: observable, never silent.
+      console.log(
+        `[butchr] merge net: auto-unioned ${unions} additive changelog conflict(s) ` +
+          `in ${rel} for task ${taskId} (rebase onto ${base})`,
+      );
+      return true; // rebase complete
+    }
+    // --continue stopped again. If the rebase is genuinely gone (a hard error rather than
+    // a new conflict to inspect), bail; otherwise loop and re-check the unmerged set.
+    if (/no rebase in progress/i.test(`${cont.stderr}\n${cont.stdout}`)) return false;
+  }
+  return false;
+}
+
+/**
  * Whether the task branch's diff vs `base` touches ONLY docs files (so the
  * version bump is skipped). Resolved from the committed range `base...taskId`
  * AFTER the rebase, so it reflects exactly the task's own code changes (not the
@@ -610,12 +693,22 @@ export async function merge(
   const rebaseDir = existsSync(wt) ? wt : dir;
   const rb = await run([git, "-C", rebaseDir, "rebase", base]);
   if (!rb.ok) {
-    // Conflict (or other rebase failure). Abort so the task branch + worktree are
-    // left CLEAN and the base UNTOUCHED; the agent (or a fresh one) integrates
-    // base and re-submits.
-    const { conflict, conflictFiles, message } =
-      await collectConflictAndAbort(rebaseDir, rb, base);
-    return { ok: false, conflict, message, conflictFiles };
+    // SAFETY NET: a purely-additive changelog conflict (both sides only ADDED bullets) is
+    // auto-unioned in place rather than bounced — the riskiest manual ritual. ANY other
+    // file, or a non-additive edit, still bounces untouched (tryUnionChangelogConflict's
+    // guard-rails). On a successful union the rebase is now linear atop base, so we fall
+    // through to the bump + ff below exactly as on a clean rebase.
+    const unioned = await tryUnionChangelogConflict(
+      rebaseDir, base, taskId, opts.changelogPath ?? "",
+    );
+    if (!unioned) {
+      // Conflict (or other rebase failure). Abort so the task branch + worktree are
+      // left CLEAN and the base UNTOUCHED; the agent (or a fresh one) integrates
+      // base and re-submits.
+      const { conflict, conflictFiles, message } =
+        await collectConflictAndAbort(rebaseDir, rb, base);
+      return { ok: false, conflict, message, conflictFiles };
+    }
   }
 
   // Clean rebase — the task branch is now linear atop base. If the workspace opted
@@ -722,6 +815,7 @@ export type RebaseResult = {
 export async function rebaseOntoDefault(
   dir: string,
   taskId: string,
+  changelogPath = "",
 ): Promise<RebaseResult> {
   const base = await defaultBranch(dir);
   const wt = worktreePath(dir, taskId);
@@ -778,6 +872,15 @@ export async function rebaseOntoDefault(
   const rb = await run([git, "-C", wt, "rebase", base]);
   if (rb.ok) {
     return noop({ rebased: true, message: `rebased ${taskId} onto ${base}` });
+  }
+
+  // SAFETY NET: auto-union a purely-additive changelog conflict in place (same guard-rails
+  // as merge() — only the changelog, only additive bullets, else bounce).
+  if (await tryUnionChangelogConflict(wt, base, taskId, changelogPath)) {
+    return noop({
+      rebased: true,
+      message: `rebased ${taskId} onto ${base} (additive changelog conflict auto-unioned)`,
+    });
   }
 
   // Conflict (or other rebase failure). Abort so the branch + worktree are left

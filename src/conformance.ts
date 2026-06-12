@@ -265,9 +265,12 @@ export async function triggerConformance(id: string): Promise<void> {
     // 0 — see tasks.recoverStuckGates / config.maxGateRecoveryAttempts.
     const status = result ? statusFor(result.conforms) : null;
     const summary = result ? (result.reason || (status === "pass" ? "conforms" : "")) : null;
+    // BIND a real verdict to the tip it ran against (sibling of the CI gate's ci_tip), so a
+    // stale verdict can't survive a tip change. A null verdict (couldn't run) binds no tip.
+    const conformance_tip = status ? await git.headSha(wt).catch(() => null) : null;
     // Settle via the shared gate write (same primitive as the CI gate): persist the badge
     // + reset gate_recovery_attempts, guarded on the task still being in_review.
-    if (!settleGate(id, { conformance_status: status, conformance_summary: summary })) return;
+    if (!settleGate(id, { conformance_status: status, conformance_summary: summary, conformance_tip })) return;
     emitUpdated(id);
   } finally {
     conformanceLiveness.clear(id);

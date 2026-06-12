@@ -10,7 +10,30 @@ import {
   checkChangelogUpdated,
   isDocsOnlyDiff,
   promoteUnreleased,
+  unionAdditiveChangelogConflict,
 } from "../src/changelog.ts";
+
+// Build a diff3-style conflicted file body (the shape `git checkout --conflict=diff3`
+// materializes) from the three sides of a single hunk, with optional shared context
+// above/below — so the union tests read like real changelog conflicts.
+function diff3(
+  ours: string[],
+  ancestor: string[],
+  theirs: string[],
+  opts: { before?: string[]; after?: string[] } = {},
+): string {
+  return [
+    ...(opts.before ?? []),
+    "<<<<<<< HEAD",
+    ...ours,
+    "||||||| merged common ancestor",
+    ...ancestor,
+    "=======",
+    ...theirs,
+    ">>>>>>> task-branch",
+    ...(opts.after ?? []),
+  ].join("\n");
+}
 
 describe("bumpVersion", () => {
   test("patch increments only the patch component, preserving formatting", () => {
@@ -191,5 +214,110 @@ describe("checkChangelogUpdated (the opt-in changelog gate)", () => {
         checkChangelogUpdated(["src/app.ts", "CHANGELOG.md"], "CHANGELOG.md", { strict: true }).ok,
       ).toBe(true);
     });
+  });
+});
+
+describe("unionAdditiveChangelogConflict (the additive merge-net resolver)", () => {
+  test("empty ancestor: both sides each ADDED a bullet → union (ours then theirs)", () => {
+    // The classic changelog cascade: two tasks each add a bullet under [Unreleased].
+    const text = diff3(
+      ["- Added feature A"],
+      [],
+      ["- Added feature B"],
+      { before: ["## [Unreleased]", ""], after: ["", "## [0.1.0] - 2026-01-01"] },
+    );
+    const out = unionAdditiveChangelogConflict(text);
+    expect(out).toBe(
+      [
+        "## [Unreleased]",
+        "",
+        "- Added feature A",
+        "- Added feature B",
+        "",
+        "## [0.1.0] - 2026-01-01",
+      ].join("\n"),
+    );
+  });
+
+  test("non-empty ancestor: both added a bullet ABOVE the preserved one → anchor kept", () => {
+    const text = diff3(
+      ["- new from ours", "- existing"],
+      ["- existing"],
+      ["- new from theirs", "- existing"],
+    );
+    expect(unionAdditiveChangelogConflict(text)).toBe(
+      ["- new from ours", "- new from theirs", "- existing"].join("\n"),
+    );
+  });
+
+  test("blank lines among additions are allowed", () => {
+    const text = diff3(["- a", ""], [], ["- b"]);
+    expect(unionAdditiveChangelogConflict(text)).toBe(["- a", "", "- b"].join("\n"));
+  });
+
+  test("only one side added (the other unchanged) → that bullet survives", () => {
+    const text = diff3(["- only ours", "- shared"], ["- shared"], ["- shared"]);
+    expect(unionAdditiveChangelogConflict(text)).toBe(["- only ours", "- shared"].join("\n"));
+  });
+
+  // --- BOUNCES (return null → hand to the agent) ----------------------------
+
+  test("one side EDITED an existing bullet (not just added) → BOUNCE", () => {
+    // ours rewrote the ancestor bullet rather than adding a new one — not additive.
+    const text = diff3(["- existing EDITED"], ["- existing"], ["- existing", "- added"]);
+    expect(unionAdditiveChangelogConflict(text)).toBeNull();
+  });
+
+  test("an ancestor bullet was REMOVED on one side → BOUNCE", () => {
+    const text = diff3(["- b"], ["- a", "- b"], ["- a", "- b", "- c"]);
+    expect(unionAdditiveChangelogConflict(text)).toBeNull();
+  });
+
+  test("a NON-bullet (prose) line was added → BOUNCE", () => {
+    const text = diff3(["Some prose line"], [], ["- a bullet"]);
+    expect(unionAdditiveChangelogConflict(text)).toBeNull();
+  });
+
+  test("a heading inside the hunk (section boundary) → BOUNCE", () => {
+    const text = diff3(
+      ["## [Unreleased]", "- a"],
+      [],
+      ["## [Unreleased]", "- b"],
+    );
+    expect(unionAdditiveChangelogConflict(text)).toBeNull();
+  });
+
+  test("a 2-way conflict with NO diff3 ancestor marker → BOUNCE", () => {
+    const text = ["<<<<<<< HEAD", "- a", "=======", "- b", ">>>>>>> x"].join("\n");
+    expect(unionAdditiveChangelogConflict(text)).toBeNull();
+  });
+
+  test("a malformed / unterminated hunk → BOUNCE", () => {
+    const text = ["<<<<<<< HEAD", "- a", "||||||| anc", "=======", "- b"].join("\n");
+    expect(unionAdditiveChangelogConflict(text)).toBeNull();
+  });
+
+  test("no conflict markers at all → null (nothing to resolve)", () => {
+    expect(unionAdditiveChangelogConflict("## [Unreleased]\n- a\n")).toBeNull();
+  });
+
+  test("content OUTSIDE the hunk passes through verbatim", () => {
+    const text = diff3(["- a"], [], ["- b"], {
+      before: ["# Changelog", "", "## [Unreleased]", ""],
+      after: ["", "## [0.1.0] - 2026-01-01", "- old"],
+    });
+    expect(unionAdditiveChangelogConflict(text)).toBe(
+      [
+        "# Changelog",
+        "",
+        "## [Unreleased]",
+        "",
+        "- a",
+        "- b",
+        "",
+        "## [0.1.0] - 2026-01-01",
+        "- old",
+      ].join("\n"),
+    );
   });
 });

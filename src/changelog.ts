@@ -202,3 +202,129 @@ export function checkChangelogUpdated(
     reason: `${target} was not updated — a code change must add a changelog entry`,
   };
 }
+
+// === ADDITIVE-CONFLICT UNION (merge-lock safety net) =======================
+// The single riskiest manual ritual the CTO reaches around butchr for: a merge-lock
+// rebase that bounces a TRIVIAL ADDITIVE changelog conflict (both sides only ADDED
+// bullets under the same heading) back to an agent, which garbles it. This pure
+// resolver mechanically UNIONs exactly that shape and NOTHING else — see
+// git.tryUnionChangelogConflict for the (heavily-guarded) wiring. Kept here as a
+// pure string transform so the whole safety case is unit-testable (test/changelog.test.ts)
+// on synthetic diff3 input, independent of git.
+
+/** A diff3 conflict marker test: 7 of the marker char, then a space or EOL. */
+const isStart = (l: string): boolean => /^<{7}( |$)/.test(l); // <<<<<<< ours
+const isAncestor = (l: string): boolean => /^\|{7}( |$)/.test(l); // ||||||| ancestor
+const isSep = (l: string): boolean => /^={7}( |$)/.test(l); // =======
+const isEnd = (l: string): boolean => /^>{7}( |$)/.test(l); // >>>>>>> theirs
+
+/** A line that may be ADDED in a purely-additive changelog union: a list bullet
+ * (`- `/`* `/`+ `, any indent) or a blank line. Anything else (prose, a heading,
+ * an edited body line) makes the hunk non-additive → the union bails. */
+function isAdditiveLine(l: string): boolean {
+  return l.trim() === "" || /^\s*[-*+]\s/.test(l);
+}
+
+/** A markdown heading (`#`..`######`). A conflict hunk that contains one straddles a
+ * section boundary, so the union NEVER fires across it (operator guard-rail 2). */
+function isHeading(l: string): boolean {
+  return /^#{1,6}\s/.test(l);
+}
+
+/**
+ * Split one side of a diff3 hunk into the gaps AROUND the ancestor "anchor" lines:
+ * `gaps[k]` holds the lines this side ADDED between anchor k-1 and anchor k (gaps[0]
+ * before the first anchor, gaps[anchors.length] after the last). Requires `anchors`
+ * to appear as an in-ORDER subsequence of `side` (every ancestor line preserved, none
+ * edited or removed) and every added line to be additive — returns null otherwise, so
+ * any non-additive change (an edited/removed ancestor line, a non-bullet addition)
+ * bounces the whole resolve.
+ */
+function splitByAnchors(side: string[], anchors: string[]): string[][] | null {
+  const gaps: string[][] = Array.from({ length: anchors.length + 1 }, () => []);
+  let j = 0; // next ancestor anchor to match
+  for (const line of side) {
+    if (j < anchors.length && line === anchors[j]) {
+      j++; // consumed an anchor; subsequent additions fall in the next gap
+    } else {
+      if (!isAdditiveLine(line)) return null; // a non-bullet edit → not additive
+      gaps[j]!.push(line);
+    }
+  }
+  if (j !== anchors.length) return null; // an ancestor line was edited/removed
+  return gaps;
+}
+
+/**
+ * UNION a purely-additive changelog conflict. Takes the FULL file text WITH diff3
+ * conflict markers (`<<<<<<<` / `|||||||` ancestor / `=======` / `>>>>>>>` — diff3
+ * style is REQUIRED so we can see the common ancestor) and returns the resolved text,
+ * or `null` to BOUNCE (the safe default — hand it to the agent) for ANYTHING that
+ * isn't an unambiguous additive bullet union.
+ *
+ * A hunk unions IFF, relative to the common ancestor, BOTH sides only ADDED bullet
+ * (or blank) lines and neither edited or removed an ancestor line (splitByAnchors).
+ * The union keeps the ancestor anchors in place and, in each gap, emits OURS-added
+ * bullets then THEIRS-added bullets — deterministic, newest-bullets-preserved order.
+ *
+ * Bounces to null on: a 2-way (non-diff3) or malformed/unterminated hunk; a hunk that
+ * contains ANY markdown heading (would union across a `## ` section boundary); a
+ * non-additive change on either side; or no conflict hunk at all. Pure — no fs/git.
+ */
+export function unionAdditiveChangelogConflict(diff3Text: string): string | null {
+  const lines = diff3Text.split("\n");
+  const out: string[] = [];
+  let sawHunk = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!isStart(line)) {
+      out.push(line);
+      continue;
+    }
+    // Parse one hunk: ours … |||||| ancestor … ======= theirs … >>>>>>>
+    sawHunk = true;
+    const ours: string[] = [];
+    const ancestor: string[] = [];
+    const theirs: string[] = [];
+    i++;
+    while (i < lines.length && !isAncestor(lines[i]!)) {
+      if (isSep(lines[i]!) || isEnd(lines[i]!) || isStart(lines[i]!)) return null; // malformed / 2-way (no ancestor)
+      ours.push(lines[i]!);
+      i++;
+    }
+    if (i >= lines.length) return null; // unterminated: missing ancestor marker
+    i++; // skip the |||||||
+    while (i < lines.length && !isSep(lines[i]!)) {
+      if (isEnd(lines[i]!) || isStart(lines[i]!) || isAncestor(lines[i]!)) return null;
+      ancestor.push(lines[i]!);
+      i++;
+    }
+    if (i >= lines.length) return null; // unterminated: missing =======
+    i++; // skip the =======
+    while (i < lines.length && !isEnd(lines[i]!)) {
+      if (isSep(lines[i]!) || isStart(lines[i]!) || isAncestor(lines[i]!)) return null;
+      theirs.push(lines[i]!);
+      i++;
+    }
+    if (i >= lines.length) return null; // unterminated: missing >>>>>>>
+    // (loop's i++ steps past the >>>>>>> end marker.)
+
+    // GUARD: never union across a section boundary — a heading anywhere in the hunk
+    // means the conflict isn't a within-section bullet add.
+    if ([...ours, ...ancestor, ...theirs].some(isHeading)) return null;
+
+    const oursGaps = splitByAnchors(ours, ancestor);
+    const theirsGaps = splitByAnchors(theirs, ancestor);
+    if (!oursGaps || !theirsGaps) return null; // a non-additive change → bounce
+
+    // Reconstruct: ours-added then theirs-added in each gap, anchors preserved.
+    for (let k = 0; k <= ancestor.length; k++) {
+      out.push(...oursGaps[k]!, ...theirsGaps[k]!);
+      if (k < ancestor.length) out.push(ancestor[k]!);
+    }
+  }
+
+  if (!sawHunk) return null; // nothing to resolve — let the caller bounce
+  return out.join("\n");
+}

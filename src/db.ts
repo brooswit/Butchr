@@ -347,6 +347,13 @@ ensureColumn("tasks", "blocked_by", "TEXT");
 // See tasks.ts (triggerCi / runCi, fired from markReview / markReviewFromAgent).
 ensureColumn("tasks", "ci_status", "TEXT");
 ensureColumn("tasks", "ci_summary", "TEXT");
+// `ci_tip` is the task-branch HEAD sha the CI gate ran against, stamped when the gate
+// settles (see tasks.triggerCi). It BINDS a stored pass/fail to the exact tip it gated:
+// if the branch tip later moves (e.g. a pre-dispatch rebase), the stored result is for a
+// DIFFERENT tip and must not be trusted as green — auto-merge re-checks ci_tip against the
+// live HEAD (maybeAutoMerge) and a tip-change invalidates it (invalidateStaleGates). NULL
+// when CI never settled a real result. See conformance_tip for the sibling gate.
+ensureColumn("tasks", "ci_tip", "TEXT");
 
 // SPEC-CONFORMANCE GATE bookkeeping. When a task enters `review`, butchr also runs
 // an advisory read-only reviewer (a headless Claude — see src/conformance.ts) that
@@ -365,6 +372,11 @@ ensureColumn("tasks", "ci_summary", "TEXT");
 // tasks.ts (the triggerConformance hook in markReview / markReviewFromAgent).
 ensureColumn("tasks", "conformance_status", "TEXT");
 ensureColumn("tasks", "conformance_summary", "TEXT");
+// `conformance_tip` is the sibling of `ci_tip` for the conformance gate: the task-branch
+// HEAD sha that gate ran against, stamped on settle (see tasks.triggerConformance), so a
+// stored verdict bound to a stale tip is invalidated when the branch moves. NULL until it
+// settles a real result.
+ensureColumn("tasks", "conformance_tip", "TEXT");
 
 // `revert_reason` records WHY a task's merge was auto-reverted off the default
 // branch: the post-merge verify gate (build + tests) came back RED, so the merge
@@ -921,6 +933,10 @@ export type TaskRow = {
   // `...row` spread (no extra plumbing in taskView).
   ci_status: string | null;
   ci_summary: string | null;
+  // The branch HEAD sha the CI gate ran against (stamped on settle). Binds the stored
+  // ci_status to a specific tip so a stale-green can't survive a tip change. NULL until
+  // CI settles. See the ensureColumn block above.
+  ci_tip: string | null;
   // SPEC-CONFORMANCE GATE: advisory verdict on whether the diff satisfies the prompt,
   // captured on the review transition (see the ensureColumn block above +
   // src/conformance.ts). `conformance_status` is 'checking' | 'pass' | 'concern' | null;
@@ -928,6 +944,9 @@ export type TaskRow = {
   // the `...row` spread (no extra plumbing in taskView), like ci_status/ci_summary.
   conformance_status: string | null;
   conformance_summary: string | null;
+  // The branch HEAD sha the conformance gate ran against (sibling of ci_tip). NULL until
+  // it settles. See the ensureColumn block above.
+  conformance_tip: string | null;
   // Merge-range bookkeeping (see the ensureColumn block above): the SHAs bracketing
   // the commits this task landed (`merge_base_sha..merged_sha`), used to pre-fill a
   // rollback task with the exact commit to revert.

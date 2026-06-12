@@ -73,6 +73,12 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
   // workspace's per-step responder config (responderFor). Lets the webapp + CTO show
   // "awaiting you" vs "awaiting CTO" without cross-referencing the workspace config.
   pending_responder: Responder | null;
+  // The task's git worktree path (`<workspace>/<taskId>` — git.worktreePath). ALWAYS
+  // present whenever the workspace resolves: a DETERMINISTIC path, independent of whether
+  // the worktree currently exists on disk (it's created on dispatch, removed after merge),
+  // so consumers (notably the CTO agent) never have to GUESS or reconstruct it. null only
+  // when the workspace row is gone.
+  worktree_path: string | null;
 };
 
 // --- DURATION ESTIMATES (rough, history-derived) ---------------------------
@@ -400,6 +406,7 @@ export function taskView(id: string): TaskView | null {
     deadBlockers: deadBlockerIds(blocked_by),
     estimate: taskEstimate(id),
     pending_responder: pendingResponder(row),
+    worktree_path: dir ? git.worktreePath(dir.path, id) : null,
   };
 }
 
@@ -453,7 +460,9 @@ function taskSearchText(row: TaskRow, dirPath: string | null): string {
  */
 export function taskListView(workspaceId: string, q?: string): TaskListView[] {
   const needle = (q ?? "").trim();
-  const dirPath = needle ? (getWorkspace(workspaceId)?.path ?? null) : null;
+  // Resolve the workspace path once (cheap): used both for the optional full-text search
+  // and to emit the deterministic worktree_path on every row.
+  const dirPath = getWorkspace(workspaceId)?.path ?? null;
   const out: TaskListView[] = [];
   for (const row of listTasks(workspaceId)) {
     if (needle && !matchesQuery(taskSearchText(row, dirPath), needle)) continue;
@@ -465,6 +474,7 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
       blockerStates: blockerStatesOf(blocked_by),
       deadBlockers: deadBlockerIds(blocked_by),
       pending_responder: pendingResponder(row),
+      worktree_path: dirPath ? git.worktreePath(dirPath, row.id) : null,
     });
   }
   return out;
@@ -1202,7 +1212,9 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   // Behind the tip → do the move under the merge queue so it can't interleave with
   // a concurrent merge advancing the default ref (rebaseOntoDefault re-checks the
   // ancestor relationship inside, since the tip may have advanced before we ran).
-  const res = await runExclusiveMerge(() => git.rebaseOntoDefault(dir.path, id));
+  const res = await runExclusiveMerge(() =>
+    git.rebaseOntoDefault(dir.path, id, workspaceChangelogPath(dir.id)),
+  );
 
   if (res.conflict) {
     // Surface it (NOT a silent dispatch): record the note in task.md (the resumed
@@ -1220,6 +1232,9 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
     );
     return { ok: false, rebased: false, conflict: false };
   }
+  // The branch tip just moved (a rebase/reset) → any gate result bound to the OLD tip is
+  // now stale-green for a different tip; clear it so it re-runs fresh on the next review.
+  if (res.rebased) await invalidateStaleGates(id);
   return { ok: true, rebased: res.rebased, conflict: false };
 }
 
@@ -2312,10 +2327,14 @@ export async function triggerCi(id: string): Promise<void> {
 
     // First line is the badge label; the rest (if any) is the output tail.
     const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
-    // Settle via the shared gate write: persist ci_status/ci_summary + reset
+    // BIND the result to the tip it ran against: stamp the worktree HEAD so a stored green
+    // can never be trusted for a DIFFERENT tip (maybeAutoMerge re-checks ci_tip; a tip move
+    // invalidates it — see invalidateStaleGates). null tip → treated as un-bound (re-runs).
+    const ci_tip = await git.headSha(git.worktreePath(dir.path, id)).catch(() => null);
+    // Settle via the shared gate write: persist ci_status/ci_summary/ci_tip + reset
     // gate_recovery_attempts, guarded on the task still being in_review — if it
     // merged/aborted while CI ran, don't resurrect stale CI state onto it.
-    if (!settleGate(id, { ci_status: result.status, ci_summary: summary })) return;
+    if (!settleGate(id, { ci_status: result.status, ci_summary: summary, ci_tip })) return;
     emitUpdated(id);
 
     // AUTO-MERGE HOOK: CI just settled to 'pass' on a still-in-review task. If
@@ -2326,6 +2345,46 @@ export async function triggerCi(id: string): Promise<void> {
   } finally {
     ciLiveness.clear(id);
   }
+}
+
+/**
+ * STALE-GREEN INVALIDATION. A stored gate result (ci/conformance) is only meaningful for
+ * the EXACT branch tip it ran against (ci_tip / conformance_tip). When the task branch tip
+ * moves — e.g. a pre-dispatch rebase replays the work onto a new base — any settled gate
+ * whose stored tip no longer matches the live worktree HEAD is now STALE and is cleared
+ * (status + summary + tip → NULL) so it can never be trusted as green for a different tip;
+ * it re-runs fresh on the next review entry. A gate still 'running'/'checking', or one
+ * already bound to the current tip, is left untouched. Best-effort: a missing worktree /
+ * git error is a no-op (nothing safely comparable). Returns true iff it cleared anything.
+ */
+export async function invalidateStaleGates(id: string): Promise<boolean> {
+  const row = getTask(id);
+  if (!row) return false;
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) return false;
+  const wt = git.worktreePath(dir.path, id);
+  if (!existsSync(wt)) return false;
+  const head = await git.headSha(wt).catch(() => null);
+  if (!head) return false; // can't compare → leave gates as-is
+
+  const sets: string[] = [];
+  // Only SETTLED results (pass/fail/concern) carry a tip; 'running'/'checking' have none.
+  if ((row.ci_status === "pass" || row.ci_status === "fail") && row.ci_tip && row.ci_tip !== head) {
+    sets.push("ci_status=NULL", "ci_summary=NULL", "ci_tip=NULL");
+  }
+  if (
+    (row.conformance_status === "pass" || row.conformance_status === "concern") &&
+    row.conformance_tip && row.conformance_tip !== head
+  ) {
+    sets.push("conformance_status=NULL", "conformance_summary=NULL", "conformance_tip=NULL");
+  }
+  if (sets.length === 0) return false;
+  db.query(`UPDATE tasks SET ${sets.join(", ")} WHERE id=?`).run(id);
+  console.log(
+    `[butchr] invalidated stale gate result(s) for task ${id} (branch tip moved to ${head.slice(0, 8)})`,
+  );
+  emitUpdated(id);
+  return true;
 }
 
 // --- AUTO-MERGE: land green, low-risk tasks without a human -----------------
@@ -2409,6 +2468,20 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
 
   const dir = getWorkspace(row.workspace_id);
   if (!dir) return false;
+
+  // STALE-GREEN GUARD: trust ci_status='pass' ONLY when it was gated on the CURRENT branch
+  // tip. If the tip moved since CI settled (ci_tip ≠ live HEAD), the green is bound to a
+  // DIFFERENT tip — never auto-merge on it. Re-run CI (its settle re-evaluates auto-merge)
+  // and bail this pass. A missing worktree / git error is treated as "can't confirm" → bail.
+  const head = await git.headSha(git.worktreePath(dir.path, id)).catch(() => null);
+  if (!head || row.ci_tip !== head) {
+    console.log(
+      `[butchr] auto-merge: CI green for ${id} is stale (gated tip ${row.ci_tip ?? "?"} ≠ ` +
+        `current ${head ? head.slice(0, 8) : "?"}); re-running CI before any merge`,
+    );
+    void triggerCi(id);
+    return false;
+  }
 
   // The MAJOR version gate is ALWAYS the human: a release_mode major-bump task needs two
   // consecutive `confirm-major` calls (see confirmMajor) and must NEVER be auto-confirmed.

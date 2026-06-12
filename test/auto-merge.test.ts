@@ -108,9 +108,12 @@ async function seedGreenReviewTask(
   }
   g(["add", "-A"], wt);
   g(["commit", "-q", "-m", "task work"], wt);
+  // Stamp ci_tip to the worktree HEAD just like triggerCi does on settle — a green is only
+  // trusted when it's BOUND to the current branch tip (the stale-green guard).
+  const tip = g(["rev-parse", "HEAD"], wt);
   dbMod.db
-    .query(`UPDATE tasks SET status='in_review', ci_status='pass' WHERE id=?`)
-    .run(id);
+    .query(`UPDATE tasks SET status='in_review', ci_status='pass', ci_tip=? WHERE id=?`)
+    .run(tip, id);
   taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
   return id;
 }
