@@ -99,7 +99,7 @@ const AGENT_TYPE = {
 const AWAITED_LABEL = {
   spec_review: "spec approval",
   in_review: "diff review",
-  needs_info: "answer to question",
+  needs_info: "response to raised item",
 };
 function stateKind(status) {
   return STATE_KIND[status] || "idle";
@@ -112,14 +112,15 @@ function awaitedLabel(status) {
 function effStatus(t) {
   return t.status === "in_progress" && t.idle ? "idle" : t.status;
 }
-// Renders a task's badge cluster — the status chip plus the optional plan /
+// Renders a task's badge cluster — the status chip plus the optional plan-preview /
 // conflict badges — as an HTML string. Each badge's markup lives here only, so how
 // a chip *looks* can't drift across the views. Which badges a view shows stays the
 // caller's call (History/table stay lean, the detail header shows all), passed via
 // opts; taskChips renders exactly the set requested. The conflict badge is always
 // included when set — every view already shows it.
-// `kind` shows a small state-kind chip (agent/feedback/idle) plus for feedback states
-// the awaited artifact label — surfacing the canonical 3-kind model in the UI.
+// `plan` shows the plan-preview badge (if the task opted into that gate); `kind` shows
+// a small state-kind chip (agent/feedback/idle) plus for feedback states the awaited
+// artifact label — surfacing the canonical 3-kind model in the UI.
 function taskChips(t, { plan = false, kind = false } = {}) {
   const st = effStatus(t);
   const kindStr = stateKind(st);
@@ -133,8 +134,7 @@ function taskChips(t, { plan = false, kind = false } = {}) {
           : "idle state"
       )}">${esc(kindStr)}${awaited ? ": " + esc(awaited) : ""}</span>`
     : "";
-  return (plan && t.kind === "plan" ? '<span class="chip plan">plan</span> ' : "")
-    + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
+  return (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
     + chip(st)
     + kindChip
     + (t.conflict ? ' <span class="chip aborted">conflict</span>' : "")
@@ -946,7 +946,7 @@ function openGateModal(dir) {
 // into a proper, grounded task prompt dropped into the textarea for review/edit. The
 // manual "write your own prompt" path and the template dropdown both still work.
 //
-// The five less-common knobs (blocked_by, model, tags, priority, plan / plan-preview)
+// The five less-common knobs (blocked_by, model, tags, priority, plan-preview)
 // are collapsed behind an "Advanced" disclosure (closed by default). Context is
 // intentionally left empty (the agent reads files itself). Submits to the existing
 // create endpoint; the new task surfaces via the SSE-driven re-render.
@@ -990,10 +990,6 @@ function openNewTaskModal(workspaceId) {
           <input type="number" step="1" id="nt-priority" placeholder="0" />
         </label>
         <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
-          <input type="checkbox" id="nt-plan" />
-          <span class="lbl" style="margin:0">Plan task — writes no code; decomposes the request into sub-tasks (wired by dependency)</span>
-        </label>
-        <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
           <input type="checkbox" id="nt-plan-preview" />
           <span class="lbl" style="margin:0">Plan-preview — the agent proposes a plan and pauses for your approval before writing code</span>
         </label>
@@ -1032,7 +1028,6 @@ function openNewTaskModal(workspaceId) {
   const modelEl = body.querySelector("#nt-model");
   const tagsEl = body.querySelector("#nt-tags");
   const priorityEl = body.querySelector("#nt-priority");
-  const planEl = body.querySelector("#nt-plan");
   const planPreviewEl = body.querySelector("#nt-plan-preview");
   const ideaEl = body.querySelector("#nt-idea");
   const tplEl = body.querySelector("#nt-template");
@@ -1116,12 +1111,9 @@ function openNewTaskModal(workspaceId) {
     }
     // Split the comma-separated blocker list into trimmed, non-empty ids.
     const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
-    // plan / plan-preview don't apply to an idea task (its first step is spec generation,
-    // not a build agent), so force them off in idea mode.
-    const kind = (!idea && planEl.checked) ? "plan" : "task";
-    // Optional plan-preview gate — the agent proposes a plan and pauses for approval
-    // before writing code. Mutually independent of a plan task; ignored for one (a
-    // plan task writes no code, so there is nothing to gate).
+    // The plan-preview gate doesn't apply to an idea task (its first step is spec
+    // generation, not a build agent), so force it off in idea mode. When on, the agent
+    // proposes a plan and pauses for approval before writing code.
     const plan_preview = !idea && planPreviewEl.checked;
     // Optional model — omit when blank so the backend defaults it.
     const model = modelEl.value.trim() || null;
@@ -1140,8 +1132,8 @@ function openNewTaskModal(workspaceId) {
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/workspaces/" + workspaceId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview, idea });
-      toast(idea ? "idea created" : kind === "plan" ? "plan task created" : plan_preview ? "plan-preview task created" : "task created");
+      await api("POST", "/workspaces/" + workspaceId + "/tasks", { prompt, blocked_by, model, tags, priority, plan_preview, idea });
+      toast(idea ? "idea created" : plan_preview ? "plan-preview task created" : "task created");
       close();
       render();
     } catch (e) {
@@ -1583,7 +1575,7 @@ function buildViewToggle(repaint) {
 }
 
 // Reverse the blocked_by edges into a dependents map: blocker id → [ids of tasks
-// that list it in their blocked_by]. Used to walk a plan's sub-task graph the
+// that list it in their blocked_by]. Used to walk the dependency graph the
 // other way (from a gating task down to what it gates) for the progress rollup and
 // the graph-node annotations. Purely client-side from the already-fetched list.
 function reverseDeps(tasks) {
@@ -1805,11 +1797,10 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
       class: "tg-node " + st, transform: `translate(${p.x},${p.y})`,
       tabindex: "0", role: "link", "aria-label": `${id} — ${st}${prog}`,
     });
-    g.appendChild(svg("title", {}, `${id} · ${st}${t.kind === "plan" ? " · plan" : ""}${prog}`));
+    g.appendChild(svg("title", {}, `${id} · ${st}${prog}`));
     g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
     g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: idY }, id));
-    g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY },
-      st + (t.kind === "plan" ? " · plan" : "")));
+    g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY }, st));
     if (subTotal) {
       const bw = NW - 16;
       g.appendChild(svg("rect", { class: "tg-prog-track", x: 8, y: NH - 5, width: bw, height: 3, rx: 1.5 }));
@@ -2135,8 +2126,8 @@ function fmtEstimate(est) {
     + `<span class="muted">· ${label} · n=${est.n} · ${esc(bucket)} · rough</span>`;
 }
 
-// Critical-path estimate across a task's dependency chain (a plan's sub-tasks, or a
-// blocked task's blockers). Returns null when there's nothing pending to chain.
+// Critical-path estimate across a task's dependency chain (a blocked task's
+// blockers). Returns null when there's nothing pending to chain.
 function fmtChain(chain) {
   if (!chain || chain.taskCount === 0 || chain.p50Ms == null) return null;
   const n = chain.taskCount;
@@ -2257,7 +2248,7 @@ function renderTranscriptPanel(id) {
 }
 
 // Sub-task PROGRESS ROLLUP — for a task that GATES others (its id appears in their
-// blocked_by, e.g. the children a plan decomposed into), summarize how far the
+// blocked_by), summarize how far the
 // dependent sub-tree has landed. Walks the reversed edges of the workspace's task
 // list (no extra API field needed) to find the transitive sub-tree, then counts the
 // merged ones. Returns null when the task gates nothing, so a leaf task shows no
@@ -2284,7 +2275,7 @@ function block(heading, text, parent) {
 
 // One ".blocker-row": the id (linked to its task) plus an optional status chip, with
 // a "dead" flag (terminal blocker that will never merge) adding the class + warning.
-// Pass a falsy `status` to omit the chip (the spawned-sub-task list, which is id-only).
+// Pass a falsy `status` to omit the chip (an id-only row).
 function blockerRow(id, status, { dead = false } = {}) {
   const row = el("div", { class: "blocker-row" + (dead ? " dead" : "") });
   row.innerHTML = `<a class="bk-id" href="#/task/${esc(id)}">${esc(id)}</a>`
@@ -2293,7 +2284,7 @@ function blockerRow(id, status, { dead = false } = {}) {
   return row;
 }
 
-// The shared scaffold behind the task-detail dependency panels (blocked-by, spawned,
+// The shared scaffold behind the task-detail dependency panels (blocked-by,
 // rollup): a ".panel" (distinguished by `cls`) with a margin-collapsed h2 heading, an
 // optional chain-estimate line, optional `lead` nodes (the rollup's summary/bar), and
 // a ".blockers" list of `rows`.
@@ -2307,8 +2298,8 @@ function listPanel(heading, rows, { chainLine, cls = "", lead } = {}) {
 }
 
 // Render the sub-task progress rollup panel: "N/M merged", a progress bar, and the
-// direct dependents with their live statuses (so a plan's progress reads at a
-// glance). Live-updates for free — the task page re-renders on every SSE event.
+// direct dependents with their live statuses (so the gated sub-tree's progress reads
+// at a glance). Live-updates for free — the task page re-renders on every SSE event.
 // Returns null when there's nothing to roll up.
 function rollupPanel(rollup) {
   if (!rollup) return null;
@@ -2394,8 +2385,8 @@ async function renderTask(id) {
   </div>`;
   wrap.appendChild(meta);
 
-  // Rough critical-path estimate across this task's dependency chain (plan
-  // sub-tasks, or a blocked task's blockers). Best-effort — a fetch failure or a
+  // Rough critical-path estimate across this task's dependency chain (a blocked
+  // task's blockers). Best-effort — a fetch failure or a
   // null chain just omits the line. The task's OWN estimate already rides on
   // t.estimate (shown in the meta grid above).
   const estData = await api("GET", "/tasks/" + id + "/estimate").catch(() => null);
@@ -2420,15 +2411,6 @@ async function renderTask(id) {
       { dead: dead.has(bid) },
     ));
     wrap.appendChild(listPanel(head, rows, { chainLine, cls: "blocked-panel" }));
-  }
-
-  // spawned sub-tasks — a PLAN task records the sub-tasks it decomposed the request
-  // into (see propose_subtasks). Surface them with links so the operator can follow
-  // the decomposition. Shown whenever the task spawned any.
-  if (Array.isArray(t.spawned_subtasks) && t.spawned_subtasks.length) {
-    const heading = `Spawned ${t.spawned_subtasks.length} sub-task${t.spawned_subtasks.length === 1 ? "" : "s"}`;
-    const rows = t.spawned_subtasks.map((sid) => blockerRow(sid, null));
-    wrap.appendChild(listPanel(heading, rows, { chainLine, cls: "spawned-panel" }));
   }
 
   // sub-task progress rollup — if this task GATES others (its id is in their
@@ -2584,18 +2566,19 @@ async function renderTask(id) {
     wrap.appendChild(controls);
   }
 
-  // needs_info answer box — the agent paused mid-task by calling the MCP `ask`
-  // tool, so the task holds a pending question. Mirrors the review change-request
-  // box: show the question, take an answer, and POST it. On answer butchr re-launches
-  // the SAME agent session via `--resume` with the answer injected.
+  // needs_info answer box — the agent paused mid-task by calling the MCP `raise`
+  // tool, so the task holds something the agent raised (a question, a suggested task
+  // change, or a suggested decomposition). Mirrors the review change-request box: show
+  // what was raised, take a response, and POST it. On answer butchr re-launches the
+  // SAME agent session via `--resume` with the response injected.
   if (t.status === "needs_info") {
-    if (t.question) block("Agent's question", t.question, wrap);
+    if (t.question) block("Agent raised", t.question, wrap);
     const answerPanel = el("div", { class: "panel", style: "margin-top:18px" });
     answerPanel.innerHTML = `
-      <h2 style="margin-top:0">Answer</h2>
+      <h2 style="margin-top:0">Respond</h2>
       <label class="field">
-        <span class="lbl">your answer (required)</span>
-        <textarea id="answer" placeholder="Answer the agent's question. It goes back to the same agent, which butchr re-launches in-context (--resume) to continue."></textarea>
+        <span class="lbl">your response (required)</span>
+        <textarea id="answer" placeholder="Respond to what the agent raised. It goes back to the same agent, which butchr re-launches in-context (--resume) to continue."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="sendAnswer">Send answer</button>

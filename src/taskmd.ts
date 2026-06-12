@@ -14,10 +14,10 @@ export type TaskMeta = {
   created: string;
   status: TaskStatus;
   context: string[];
-  // 'task' (default) or 'plan' — a PLAN task decomposes a request into sub-tasks
-  // instead of writing code (see db.ts `kind` + tasks.proposeSubtasks). Stored in
-  // the front matter so renderAgentPrompt can hand a plan task the decomposition
-  // protocol rather than the review protocol. Optional/absent reads back as "task".
+  // 'task' (default) or 'rollback' — a ROLLBACK task builds a revert like any task but
+  // lands via its own `rolling_back`→`rolled_back` lifecycle tail (see db.ts `kind` +
+  // tasks.finalizeMerge). Stored in the front matter so the DB row's kind is recoverable
+  // from disk. Optional/absent reads back as "task".
   kind?: TaskKind;
   // Optional per-task model (e.g. 'opus'/'sonnet'/'haiku' or a full 'claude-*' id)
   // requested at creation and threaded into the agent launch (db.ts `model` column).
@@ -64,9 +64,9 @@ const REVIEW_PROTOCOL = [
   "tests where applicable, and confirm every requirement is met.",
   "",
   "ONLY end your turn when you either (a) call `request_review` because the task is",
-  "fully done, or (b) call `ask`/`raise` because you are genuinely blocked on a",
-  "decision. Otherwise, keep working. Once the task IS complete and you have called",
-  "`request_review`, STOP — do not re-submit or loop again.",
+  "fully done, or (b) call `raise` because you are genuinely blocked on a decision (or",
+  "the task itself looks wrong). Otherwise, keep working. Once the task IS complete and",
+  "you have called `request_review`, STOP — do not re-submit or loop again.",
   "",
   "# How to submit your work for review",
   "",
@@ -85,63 +85,30 @@ const REVIEW_PROTOCOL = [
   "  further is required from you.",
   "",
   "If anything about the requirements, conventions, or a design judgment call is",
-  "ambiguous, use the **butchr** MCP server's `ask` tool to put a clarifying",
-  "question — prefer asking over guessing. `ask` is ALSO non-blocking: it records",
-  "your question and returns immediately, after which you should STOP and exit.",
-  "butchr surfaces the question to whoever operates (the CTO/operator via API/CLI,",
-  "or a human in the webapp); once answered, butchr RE-LAUNCHES you in the same",
-  "session with the answer so you can continue. Do not wait for the answer inline.",
+  "ambiguous — or the TASK ITSELF looks wrong (wrong scope, should be split, or",
+  "should be decomposed into sub-tasks) — use the **butchr** MCP server's `raise`",
+  "tool. You are a WORKER, not a task-manager: you do not create or edit tasks; you",
+  "raise a question, a suggested task change, or a suggested decomposition, and the",
+  "operator/CTO acts on it. `raise` is ALSO non-blocking: it records your message and",
+  "returns immediately, after which you should STOP and exit. butchr surfaces it to",
+  "whoever operates (the CTO/operator via API/CLI, or a human in the webapp); once",
+  "answered, butchr RE-LAUNCHES you in the same session with the response so you can",
+  "continue. Do not wait for the response inline. Prefer raising over guessing.",
   "",
   "You do NOT need to commit or clean up — butchr captures your worktree changes",
   "automatically. After calling `request_review`, stop.",
-].join("\n");
-
-// Appended to a PLAN task's rendered prompt instead of REVIEW_PROTOCOL. A plan task
-// writes NO code: it analyzes the request and submits a DECOMPOSITION through the
-// butchr MCP `propose_subtasks` tool. butchr validates the proposed graph, creates
-// the sub-tasks (wiring their blocked_by among one another), and completes the plan
-// task. See tasks.proposeSubtasks / mcp.ts.
-const PLAN_PROTOCOL = [
-  "# How to submit your decomposition",
-  "",
-  "This is a **PLAN task**: do NOT write code. Your job is to ANALYZE the request",
-  "above (read the repository with your tools as needed) and break it into an",
-  "ordered set of concrete sub-tasks, then submit them by calling the",
-  "`propose_subtasks` tool provided by the **butchr** MCP server.",
-  "",
-  "Pass `subtasks`: an array where each entry is `{ prompt, context?, blocked_by? }`:",
-  "",
-  "- `prompt` (required): the full instructions for that sub-task's agent — written",
-  "  like a normal butchr task prompt (it will run its own agent in its own worktree).",
-  "- `context` (optional): a list of repo-relative file paths the sub-task should read.",
-  "- `blocked_by` (optional): the INDICES (0-based positions in this same `subtasks`",
-  "  array) of the sibling sub-tasks that must merge BEFORE this one runs. Use this to",
-  "  express ordering/dependencies. Reference siblings by their array index, NOT by id",
-  "  (the ids do not exist yet). A cyclic or self-referential graph is rejected.",
-  "",
-  "You may also pass an optional `summary` describing the decomposition.",
-  "",
-  "`propose_subtasks` returns IMMEDIATELY with the created sub-task ids and records",
-  "them against this plan task; once it returns you should STOP and exit. butchr",
-  "creates the sub-tasks (wiring their dependencies) and completes this plan task.",
-  "",
-  "If anything about the request is ambiguous, use the **butchr** MCP server's `ask`",
-  "tool to put a clarifying question before proposing — prefer asking over guessing.",
-  "`ask` is non-blocking: it records your question and returns immediately, after",
-  "which you should STOP and exit; butchr surfaces it to whoever operates and, once",
-  "answered, RE-LAUNCHES you in the same session with the answer to continue.",
 ].join("\n");
 
 // Appended to a PLAN-PREVIEW task's FIRST rendered prompt instead of REVIEW_PROTOCOL.
 // A plan-preview task IS an ordinary work task (it writes code), but it must get the
 // operator's sign-off on its approach FIRST: before touching any code, the agent
 // submits a concise implementation plan via the butchr MCP `propose_plan` tool, which
-// parks the task in `awaiting_input` holding the plan (reusing the ASK handshake) and
+// parks the task in `needs_info` holding the plan (reusing the `raise` handshake) and
 // returns immediately so the agent exits. The operator answers 'proceed' (or sends
 // steering notes); butchr re-launches the SAME session via `--resume` with that
 // decision, at which point the agent implements and submits via request_review like
 // any other task (the answer-resume prompt — renderAnswerPrompt — carries the
-// review protocol). See mcp.ts (propose_plan) / tasks.markAwaitingInputFromAgent.
+// review protocol). See mcp.ts (propose_plan) / tasks.markNeedsInfoFromAgent.
 const PLAN_PREVIEW_PROTOCOL = [
   "# First, propose a plan (PLAN-PREVIEW gate)",
   "",
@@ -158,11 +125,11 @@ const PLAN_PREVIEW_PROTOCOL = [
   "this SAME session with their decision, at which point you IMPLEMENT the work and",
   "submit it for review with `request_review` exactly as a normal task would.",
   "",
-  "If anything about the request is ambiguous, use the **butchr** MCP server's `ask`",
-  "tool to put a clarifying question before proposing — prefer asking over guessing.",
-  "`ask` is also non-blocking: it records your question and returns immediately, after",
+  "If anything about the request is ambiguous, use the **butchr** MCP server's `raise`",
+  "tool to put a clarifying question before proposing — prefer raising over guessing.",
+  "`raise` is also non-blocking: it records your message and returns immediately, after",
   "which you should STOP and exit; once answered butchr re-launches you in the same",
-  "session with the answer to continue.",
+  "session with the response to continue.",
 ].join("\n");
 
 /** Absolute path to a task's directory under .butchr/tasks/. */
@@ -252,11 +219,12 @@ export function appendRejection(
 const CLARIFY_SECTION = "## Clarifications";
 
 /**
- * Append a question/answer pair to task.md's Clarifications section — the durable
- * audit trail of the ASK handshake (a running agent asked via the MCP `ask` tool
- * and an operator answered). Purely for the record/UI; the resume itself injects the
- * answer from the `answer` column, mirroring how appendRejection logs review notes
- * while the resume reads them back.
+ * Append a raised-item/answer pair to task.md's Clarifications section — the durable
+ * audit trail of the `raise` handshake (a running agent raised a question / suggested
+ * task change / decomposition via the MCP `raise` tool and an operator answered).
+ * Purely for the record/UI; the resume itself injects the answer from the `answer`
+ * column, mirroring how appendRejection logs review notes while the resume reads them
+ * back.
  */
 export function appendAnswer(
   workspaceRoot: string,
@@ -277,19 +245,19 @@ export function appendAnswer(
 
 /**
  * Build the prompt for an ANSWER-driven re-launch. The agent paused mid-task by
- * calling the MCP `ask` tool (parking the task in `awaiting_input` and exiting);
+ * calling the MCP `raise` tool (parking the task in `needs_info` and exiting);
  * an operator answered, and butchr resumes the SAME `claude --resume <session-id>`
- * session — so it still has the original prompt, its prior work, and its own
- * question in context. This is a focused message: the answer plus a reminder to
- * continue and submit, exactly like renderReworkPrompt is for a reject.
+ * session — so it still has the original prompt, its prior work, and what it raised
+ * in context. This is a focused message: the answer plus a reminder to continue and
+ * submit, exactly like renderReworkPrompt is for a reject.
  */
 export function renderAnswerPrompt(answer: string, reground = ""): string {
   const body =
-    `You paused this task to ask a clarifying question via the \`ask\` tool. Here ` +
-    `is the answer:\n\n${answer.trim()}\n\nUse it to continue the task. When the ` +
-    `work is complete, call \`request_review\` (or use \`ask\` again if something ` +
-    `else is genuinely ambiguous).`;
-  const focused = [`# Answer to your question`, "", body].join("\n");
+    `You paused this task by raising something via the \`raise\` tool. Here is the ` +
+    `operator's response:\n\n${answer.trim()}\n\nUse it to continue the task. When ` +
+    `the work is complete, call \`request_review\` (or use \`raise\` again if ` +
+    `something else is genuinely ambiguous or the task itself looks wrong).`;
+  const focused = [`# Response to what you raised`, "", body].join("\n");
   // If the task was edited while it was paused, the re-grounding block (the CURRENT
   // prompt + context) leads, so the agent re-grounds before reading the answer.
   const head = reground.trim() ? reground.trim() + "\n\n---\n\n" : "";
@@ -429,7 +397,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       if (key === "id") meta.id = val;
       else if (key === "created") meta.created = val;
       else if (key === "status") meta.status = (val as TaskStatus) || "in_progress";
-      else if (key === "kind") meta.kind = val === "plan" ? "plan" : val === "rollback" ? "rollback" : "task";
+      else if (key === "kind") meta.kind = val === "rollback" ? "rollback" : "task";
       else if (key === "model") meta.model = val || null;
       else if (key === "plan_preview") meta.plan_preview = val === "true";
       // NOTE: a legacy `stage:` line from the retracted idea→spec→build axis is simply
@@ -504,22 +472,15 @@ export function renderAgentPrompt(workspaceRoot: string, doc: TaskDoc): string {
   }
   parts.push(body);
   // Hand the agent the matching protocol for this FIRST launch:
-  //  - a PLAN task (kind='plan') decomposes the request via propose_subtasks;
   //  - a PLAN-PREVIEW task proposes a plan via propose_plan and pauses for approval
   //    BEFORE writing code (it implements on the answer-resume — renderAnswerPrompt);
-  //  - an ordinary task does the work and submits via request_review.
+  //  - an ordinary task (incl. a rollback task) does the work and submits via request_review.
   //
   // NOTE: an `idea`-state task is NEVER rendered here — its work (generating a spec from
   // the brief) is done by the CTO-fork spec generator in the dispatcher (src/cto.ts), not
   // by a build agent. By the time renderAgentPrompt runs, the task has advanced to
   // `queued` ('ready') with the generated spec as its prompt, so it gets the normal flow.
-  parts.push(
-    doc.meta.kind === "plan"
-      ? PLAN_PROTOCOL
-      : doc.meta.plan_preview
-        ? PLAN_PREVIEW_PROTOCOL
-        : REVIEW_PROTOCOL,
-  );
+  parts.push(doc.meta.plan_preview ? PLAN_PREVIEW_PROTOCOL : REVIEW_PROTOCOL);
   return parts.join("\n\n---\n\n");
 }
 

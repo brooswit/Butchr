@@ -1,14 +1,14 @@
 // Tests for the DIRECTORY TASK-LIST projection (tasks.taskListView, behind
 // `GET /api/workspaces/:id/tasks`). Per CONTRIBUTING §3 the list endpoint returns
 // the parsed `taskView` shape — NOT raw DB rows — so the webapp/CLI consume one
-// consistent form: `blocked_by` / `spawned_subtasks` come back as real id arrays
-// (the DB stores them as JSON-string TEXT) and each blocker's status is precomputed
+// consistent form: `blocked_by` comes back as a real id array
+// (the DB stores it as JSON-string TEXT) and each blocker's status is precomputed
 // (`blockerStates` / `deadBlockers`). It is the LIGHTER sibling of taskView: it does
 // NOT carry the task.md-derived prompt/context/review_notes or the duration estimate
 // (the list/board/graph views don't use those).
 //
 // Pure / in-process: no real claude or herdr. Rows are seeded straight into the DB
-// so we control status / blocked_by / spawned_subtasks / created_at ordering.
+// so we control status / blocked_by / created_at ordering.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,31 +44,27 @@ afterAll(() => {
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-/** Seed a bare DB-row task with explicit status / blocked_by / spawned_subtasks. */
+/** Seed a bare DB-row task with explicit status / blocked_by. */
 function seed(opts: {
   id: string;
   status: string;
   createdAt: string;
   blockedBy?: string[];
-  spawnedSubtasks?: string[];
-  kind?: string;
   idle?: number;
   ciStatus?: string;
   workspaceId?: string;
 }): string {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, blocked_by, spawned_subtasks,
-         kind, idle, ci_status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, blocked_by,
+         idle, ci_status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       opts.id,
       opts.workspaceId ?? DIR_ID,
       opts.status,
       opts.blockedBy ? JSON.stringify(opts.blockedBy) : null,
-      opts.spawnedSubtasks ? JSON.stringify(opts.spawnedSubtasks) : null,
-      opts.kind ?? "task",
       opts.idle ?? 0,
       opts.ciStatus ?? null,
       opts.createdAt,
@@ -76,20 +72,13 @@ function seed(opts: {
   return opts.id;
 }
 
-test("parses blocked_by / spawned_subtasks into real id arrays (not JSON strings)", () => {
+test("parses blocked_by into real id arrays (not JSON strings)", () => {
   seed({ id: "lv-blk-merged", status: "merged", createdAt: "2026-01-01T00:00:00.000Z" });
   seed({
     id: "lv-task",
     status: "blocked",
     createdAt: "2026-01-01T00:00:01.000Z",
     blockedBy: ["lv-blk-merged"],
-  });
-  seed({
-    id: "lv-plan",
-    status: "decomposed",
-    kind: "plan",
-    createdAt: "2026-01-01T00:00:02.000Z",
-    spawnedSubtasks: ["lv-blk-merged", "lv-task"],
   });
 
   const byId = new Map(tasksMod.taskListView(DIR_ID).map((t) => [t.id, t]));
@@ -98,14 +87,9 @@ test("parses blocked_by / spawned_subtasks into real id arrays (not JSON strings
   expect(Array.isArray(task.blocked_by)).toBe(true);
   expect(task.blocked_by).toEqual(["lv-blk-merged"]);
 
-  const plan = byId.get("lv-plan")!;
-  expect(Array.isArray(plan.spawned_subtasks)).toBe(true);
-  expect(plan.spawned_subtasks).toEqual(["lv-blk-merged", "lv-task"]);
-
-  // A task with no deps reports empty arrays, never null / a raw string.
+  // A task with no deps reports an empty array, never null / a raw string.
   const blk = byId.get("lv-blk-merged")!;
   expect(blk.blocked_by).toEqual([]);
-  expect(blk.spawned_subtasks).toEqual([]);
 });
 
 test("precomputes blockerStates and deadBlockers (matching the detail view)", () => {

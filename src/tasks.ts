@@ -3,7 +3,7 @@
 import { config } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
-import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
+import type { TaskRow, TaskStatus } from "./db.ts";
 import {
   classifyPathType,
   computeEstimateStats,
@@ -37,7 +37,7 @@ import { existsSync, readFileSync } from "node:fs";
 // merge — a blocked task with any dead blocker is stuck until the operator edits
 // its blocked_by set (see setBlockedBy). We Omit the raw column so the array shape
 // wins.
-export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks" | "tags"> & {
+export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
   prompt: string;
   context: string[];
   review_notes: string;
@@ -45,9 +45,6 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "spawned_subtasks" | "tags">
   // Free-form organizational labels (the DB stores them as raw JSON TEXT). Empty
   // array when none. Set at creation; the webapp + CLI filter on them. See `tags`.
   tags: string[];
-  // For a PLAN task, the ids of the sub-tasks it decomposed the request into (empty
-  // for ordinary tasks / a plan that hasn't proposed yet). See proposeSubtasks.
-  spawned_subtasks: string[];
   // The current status of each blocker by id (or "gone" if its row no longer
   // exists), so the webapp can render the dependency list without extra fetches.
   blockerStates: Record<string, string>;
@@ -97,22 +94,15 @@ export function taskEstimate(id: string): Estimate | null {
 }
 
 /**
- * The critical-path estimate for a task's dependency chain: for a PLAN task, the
- * longest path across its spawned sub-tasks; for an ordinary task, the path to its
- * own merge through its blockers. Returns null when there's nothing to chain (a
- * plain task with no blockers — its single estimate already covers it) or the task
- * is gone.
+ * The critical-path estimate for a task's dependency chain: the path to its own
+ * merge through its blockers. Returns null when there's nothing to chain (a task
+ * with no blockers — its single estimate already covers it) or the task is gone.
  */
 export function taskChainEstimate(id: string): ChainEstimate | null {
   const row = getTask(id);
   if (!row) return null;
   const rows = estimateInputRows();
   const stats = computeEstimateStats(rows);
-  if (row.kind === "plan") {
-    const subs = parseBlockedBy(row.spawned_subtasks);
-    if (subs.length === 0) return null;
-    return estimateChain(subs, rows, stats);
-  }
   if (parseBlockedBy(row.blocked_by).length === 0) return null;
   return estimateChain([id], rows, stats);
 }
@@ -141,10 +131,7 @@ function terminalOrOk(id: string): "terminal" | "ok" {
  * rolled back (`rolled_back`). See the canonical state model in db.ts. */
 const DEAD_BLOCKER_STATES = new Set<TaskStatus>(["aborted", "failed", "rolled_back"]);
 
-/**
- * Parse a JSON-array-of-task-ids column into a clean string[]. Named for `blocked_by`,
- * but also reused to parse the identically-shaped `spawned_subtasks` column.
- */
+/** Parse a JSON-array-of-task-ids column (e.g. `blocked_by`) into a clean string[]. */
 export function parseBlockedBy(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -329,7 +316,6 @@ export function taskView(id: string): TaskView | null {
     review_notes,
     blocked_by,
     tags: parseTags(row.tags),
-    spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
     blockerStates: blockerStatesOf(blocked_by),
     deadBlockers: deadBlockerIds(blocked_by),
     estimate: taskEstimate(id),
@@ -339,7 +325,7 @@ export function taskView(id: string): TaskView | null {
 // The workspace task-list projection: the same parsed/enriched shape taskView
 // returns, MINUS the task.md-derived fields (prompt / context / review_notes) and
 // the per-task duration estimate. The list / board / graph views only need the
-// runtime row plus parsed blocked_by / spawned_subtasks and the server-computed
+// runtime row plus parsed blocked_by and the server-computed
 // blocker status, so this skips reading every task.md from disk (and the per-row
 // estimate recompute) that the full taskView would do.
 export type TaskListView = Omit<
@@ -371,8 +357,8 @@ function taskSearchText(row: TaskRow, dirPath: string | null): string {
 /**
  * List a workspace's tasks in the taskView shape (newest first). Per CONTRIBUTING
  * §3, endpoints return the parsed projection rather than raw rows so the webapp and
- * CLI consume one consistent shape: blocked_by / spawned_subtasks come back as real
- * id arrays and each blocker's status is precomputed (blockerStates / deadBlockers).
+ * CLI consume one consistent shape: blocked_by comes back as a real
+ * id array and each blocker's status is precomputed (blockerStates / deadBlockers).
  * A lighter sibling of taskView — it does NOT read task.md (no prompt/context
  * bodies) or compute the duration estimate, neither of which the list views use.
  *
@@ -395,7 +381,6 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
       ...row,
       blocked_by,
       tags: parseTags(row.tags),
-      spawned_subtasks: parseBlockedBy(row.spawned_subtasks),
       blockerStates: blockerStatesOf(blocked_by),
       deadBlockers: deadBlockerIds(blocked_by),
     });
@@ -418,7 +403,7 @@ function emitUpdated(id: string): void {
  *
  *  - `background: true` runs the teardown fire-and-forget (each step swallows its
  *    own error so a teardown failure can't strand the call OR skip the cleanup) and
- *    returns at once — used by proposeSubtasks, which must not block the MCP response.
+ *    returns at once.
  *  - `background: false` (default) AWAITS the teardown, letting a herdr.teardownTask
  *    failure PROPAGATE to the caller (git.cleanup still swallows its own error) —
  *    used by finalizeMerge / abortTask, which gate their status write on it.
@@ -681,11 +666,7 @@ export async function createTask(
     id,
     null,
     status,
-    taskIdea
-      ? "idea task created"
-      : kind === "plan"
-        ? "plan task created"
-        : "task created",
+    taskIdea ? "idea task created" : "task created",
   );
 
   if (status === "blocked") logDeadBlockers(id, blockers);
@@ -724,199 +705,6 @@ function normalizeBlockedBy(ids: string[]): string[] {
     out.push(id);
   }
   return out;
-}
-
-// --- AUTO-DECOMPOSE: a plan task spawning its sub-tasks ----------------------
-//
-// A PLAN task (kind='plan') runs an agent whose job is to ANALYZE the request and
-// propose a DECOMPOSITION: an ordered array of sub-task specs, each with a prompt
-// and a `blocked_by` set expressed as INDICES of sibling specs (the sub-task ids do
-// not exist yet). The agent submits this through the per-task MCP `propose_subtasks`
-// tool, which calls proposeSubtasks below. butchr validates the proposed graph
-// (cycle/self/range), creates the sub-tasks in dependency order (translating each
-// sibling index to the real id it was created with), records the created ids on the
-// plan task, and completes the plan task (terminal — it merges nothing of its own).
-
-/** One proposed sub-task in a plan's decomposition (see proposeSubtasks). */
-export type SubtaskSpec = {
-  /** The sub-task's agent prompt (required, non-empty). */
-  prompt: string;
-  /** Optional repo-relative context files for the sub-task to read. */
-  context?: string[];
-  /** Indices (into the proposal array) of sibling sub-tasks that must merge first. */
-  blocked_by?: number[];
-};
-
-/**
- * Validate the proposed dependency graph (indices only) and return a CREATION ORDER
- * — a permutation of [0..n) in which every spec appears AFTER all of its sibling
- * blockers — or null if the graph is invalid (a self-reference, an out-of-range
- * index, or a cycle). Kahn's algorithm: repeatedly emit nodes whose remaining
- * in-edges (their blockers) are all already emitted; if we can't emit all n, the
- * leftover nodes form a cycle. This is the up-front guard so a cyclic proposal is
- * rejected BEFORE any sub-task is created; createTask's wouldCreateCycle then guards
- * the real wiring as well.
- */
-export function planCreationOrder(specs: SubtaskSpec[]): number[] | null {
-  const n = specs.length;
-  // Normalize each spec's blocker indices: integers in [0,n), no self-reference,
-  // de-duplicated. Any malformed index invalidates the whole proposal.
-  const deps: Set<number>[] = [];
-  for (let i = 0; i < n; i++) {
-    const set = new Set<number>();
-    for (const raw of specs[i]!.blocked_by ?? []) {
-      if (!Number.isInteger(raw) || raw < 0 || raw >= n || raw === i) return null;
-      set.add(raw);
-    }
-    deps.push(set);
-  }
-  // Kahn: emit any node all of whose blockers are already emitted.
-  const order: number[] = [];
-  const emitted = new Set<number>();
-  while (order.length < n) {
-    let progressed = false;
-    for (let i = 0; i < n; i++) {
-      if (emitted.has(i)) continue;
-      let ready = true;
-      for (const d of deps[i]!) if (!emitted.has(d)) { ready = false; break; }
-      if (!ready) continue;
-      emitted.add(i);
-      order.push(i);
-      progressed = true;
-    }
-    if (!progressed) return null; // remaining nodes form a cycle
-  }
-  return order;
-}
-
-/**
- * Apply a PLAN task's proposed decomposition: validate the graph, create the
- * sub-tasks (wiring blocked_by among the siblings), record them on the plan task,
- * and COMPLETE the plan task. Returns the created sub-task ids (in proposal order).
- *
- * Non-blocking, like request_review: it transitions the plan task to a terminal
- * state (it writes no code of its own → nothing to merge) and lets the agent exit.
- * Idempotent — a duplicate call on an already-completed plan returns its previously
- * spawned ids without re-creating anything.
- *
- * Rejections (HttpError): plan task missing (404) or not a plan (409); an empty
- * proposal or a spec with a blank prompt (400); an invalid graph — out-of-range
- * index, self-reference, or cycle (400). On a graph error NOTHING is created.
- */
-export async function proposeSubtasks(
-  planId: string,
-  specs: SubtaskSpec[],
-  summary?: string,
-): Promise<{ created: string[]; plan: TaskView }> {
-  const plan = getTask(planId);
-  if (!plan) throw new HttpError(404, `task not found: ${planId}`);
-  if (plan.kind !== "plan") {
-    throw new HttpError(409, `task ${planId} is not a plan task`);
-  }
-  // Idempotency: a plan that already completed its decomposition just reports it.
-  if (plan.status === "merged") {
-    return { created: parseBlockedBy(plan.spawned_subtasks), plan: taskView(planId)! };
-  }
-  const dir = getWorkspace(plan.workspace_id);
-  if (!dir) throw new HttpError(404, "workspace not found");
-
-  if (!Array.isArray(specs) || specs.length === 0) {
-    throw new HttpError(400, "a decomposition must contain at least one sub-task");
-  }
-  for (const s of specs) {
-    if (!s || typeof s.prompt !== "string" || !s.prompt.trim()) {
-      throw new HttpError(400, "every sub-task needs a non-empty prompt");
-    }
-  }
-
-  const order = planCreationOrder(specs);
-  if (!order) {
-    throw new HttpError(
-      400,
-      "the proposed decomposition has an invalid dependency graph (a cycle, " +
-        "self-reference, or out-of-range index)",
-    );
-  }
-
-  // Create in dependency order so each sub-task's sibling blockers already exist as
-  // real tasks by the time we wire them. idxToId maps a proposal index to its id.
-  const idxToId = new Map<number, string>();
-  const createdInOrder: string[] = [];
-  for (const idx of order) {
-    const spec = specs[idx]!;
-    const blockerIds = (spec.blocked_by ?? []).map((b) => idxToId.get(b)!);
-    try {
-      const sub = await createTask(
-        plan.workspace_id,
-        spec.prompt,
-        spec.context ?? [],
-        blockerIds,
-        "task",
-      );
-      idxToId.set(idx, sub.id);
-      createdInOrder.push(sub.id);
-    } catch (e) {
-      // A graph error is impossible here (planCreationOrder validated it and the
-      // wiring is acyclic by construction), so this is an unexpected failure (e.g.
-      // a git/worktree error). Roll back what we created so the plan doesn't leave a
-      // half-built decomposition behind, then surface the error.
-      for (const id of createdInOrder) await abortTask(id).catch(() => {});
-      throw e;
-    }
-  }
-
-  // Created ids in the ORIGINAL proposal order (not creation order) — that's the
-  // order the agent listed them and the most useful for display.
-  const created = specs.map((_, i) => idxToId.get(i)!);
-
-  // Record the spawned ids + summary and COMPLETE the plan task. It writes no code,
-  // so there is nothing to merge — move it straight to the terminal `merged` state
-  // (with merged_at) and clear its pane, mirroring the non-blocking request_review
-  // path; the agent exits after this returns. The plan's worktree/branch + herdr tab
-  // are torn down best-effort (fire-and-forget so the MCP response returns at once
-  // and we never block on — or race — the agent's own exit).
-  const snapshot = readRunLogSnapshot(planId);
-  const when = nowIso();
-  const planRes = db.query(
-    `UPDATE tasks SET status='merged', spawned_subtasks=?, summary=COALESCE(?, summary),
-       output_snapshot=COALESCE(?, output_snapshot), herdr_pane_id=NULL, idle=0, conflict=0,
-       completed_at=COALESCE(completed_at, ?), merged_at=COALESCE(merged_at, ?)
-       WHERE id=? AND status IN ('in_progress','needs_info')`,
-  ).run(
-    JSON.stringify(created),
-    summary ?? null,
-    snapshot || null,
-    when,
-    when,
-    planId,
-  );
-  if (planRes.changes > 0) {
-    recordTaskEvent(
-      planId,
-      plan.status,
-      "merged",
-      `plan decomposed into ${created.length} sub-task${created.length === 1 ? "" : "s"}`,
-    );
-    // Mirror task.md ONLY when the guarded UPDATE actually transitioned the row.
-    // If the plan was aborted out from under the agent at the same instant it called
-    // propose_subtasks, the UPDATE matches 0 rows (the DB row stays 'aborted'); writing
-    // task.md='merged' here would desync the disk artifact from the DB — exactly the
-    // class setStatus exists to prevent. So it stays inside this guard, next to the
-    // (already-gated) recordTaskEvent.
-    updateTaskMdStatus(dir.path, planId, "merged");
-  }
-  // Capture the plan agent's token usage / model (before the worktree is discarded),
-  // then tear down the agent's tab/pane and discard the (codeless) worktree + branch
-  // in the background — best-effort, never blocking the caller.
-  void teardownAndDiscard(dir, plan, { captureUsage: true, background: true });
-
-  emitUpdated(planId);
-  // A task could have been blocked on this plan task; its completion may unblock it.
-  reevaluateAllBlocked();
-  console.log(
-    `[butchr] plan task ${planId} spawned ${created.length} sub-task(s): ${created.join(", ")}`,
-  );
-  return { created, plan: taskView(planId)! };
 }
 
 /**
@@ -2015,11 +1803,11 @@ export function markReviewFromAgent(
 
 /**
  * Park the live build agent's task in `needs_info` because the agent called the MCP
- * `ask` tool (the ad-hoc feedback stage the `in_progress` agent can enter). Mirrors
+ * `raise` tool (the ad-hoc feedback stage the `in_progress` agent can enter). Mirrors
  * markReviewFromAgent's non-blocking shape: the agent EXITS right after this returns,
  * so needs_info is pure DB state with no live process (we clear herdr_pane_id — its
- * pane is about to close). Stores the agent's `question` (surfaced in /health + the
- * webapp) and the run-log snapshot for the answerer.
+ * pane is about to close). Stores what the agent raised in `question` (surfaced in
+ * /health + the webapp) and the run-log snapshot for the answerer.
  *
  * Returns:
  *  - "ok"        → parked in needs_info (or already there — a duplicate ask).

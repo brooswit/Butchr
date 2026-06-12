@@ -316,23 +316,21 @@ ensureColumn("tasks", "conformance_summary", "TEXT");
 // pre-merge, in-worktree, advisory review badge.
 ensureColumn("tasks", "revert_reason", "TEXT");
 
-// AUTO-DECOMPOSE / PLAN tasks. `kind` distinguishes an ordinary work task ('task',
-// the default) from a PLAN task ('plan'). A plan task runs an agent like any other,
-// but writes NO code: its job is to ANALYZE the request and propose a decomposition
-// into sub-tasks, which it submits through the per-task MCP `propose_subtasks` tool.
-// butchr validates the proposed dependency graph (reusing wouldCreateCycle), creates
-// the sub-tasks (wiring their blocked_by among themselves), records their ids on the
-// plan task in `spawned_subtasks` (a JSON-array TEXT column), and completes the plan
-// task (terminal `merged`, since nothing is merged to a branch). The webapp keys on
-// `kind`/`spawned_subtasks` to badge a plan task and link the sub-tasks it spawned.
-// A third kind, 'rollback' (created from the built-in `rollback` template — see the
-// webapp's "Roll back" button + src/templates.ts), is an ordinary build task whose
-// revert lands through its OWN lifecycle tail: it shows `rolling_back` while the
-// mechanical merge runs and lands `rolled_back` (terminal) instead of `merged`. See
-// tasks.finalizeMerge. See tasks.proposeSubtasks / mcp.ts (propose_subtasks) /
-// taskmd.renderAgentPrompt.
+// TASK KIND. `kind` distinguishes an ordinary work task ('task', the default) from a
+// 'rollback' task (created from the built-in `rollback` template — see the webapp's
+// "Roll back" button + src/templates.ts): an ordinary build task whose revert lands
+// through its OWN lifecycle tail — it shows `rolling_back` while the mechanical merge
+// runs and lands `rolled_back` (terminal) instead of `merged` (see tasks.finalizeMerge).
+//
+// RETIRED: the old 'plan' kind + its `spawned_subtasks` column (the AUTO-DECOMPOSE
+// path) were removed — agents are WORKERS, not task-managers, so an agent no longer
+// decomposes work into sub-tasks (a suggested decomposition is now RAISED to the
+// operator via the `raise` MCP tool, acted on through the REST API). We KEEP the `kind`
+// column (rollback uses it) but deliberately do NOT add an `ensureColumn` for
+// `spawned_subtasks` and do NOT drop it: a fresh DB never has it, while an OLD DB keeps
+// it ORPHANED (never read or written), avoiding a destructive ALTER on the live table.
+// See mcp.ts (raise) / tasks.createTask.
 ensureColumn("tasks", "kind", "TEXT NOT NULL DEFAULT 'task'");
-ensureColumn("tasks", "spawned_subtasks", "TEXT");
 
 // AUTO-MERGE bookkeeping. Set to 1 when butchr auto-approved + merged this task
 // (CI-green + low-risk) instead of a human approving it — see config.autoMergeEnabled
@@ -378,17 +376,19 @@ ensureColumn("tasks", "usage_cache_read_tokens", "INTEGER");
 ensureColumn("tasks", "usage_cache_creation_tokens", "INTEGER");
 ensureColumn("tasks", "cost_usd", "REAL");
 
-// AWAITING-INPUT HANDSHAKE. When a running agent calls the MCP `ask` tool, butchr
-// records its clarifying question and parks the task in status='awaiting_input'
-// (the agent returns immediately and exits — no live process, exactly like the
-// non-blocking review handshake). Whoever operates answers through ONE unified
-// surface (API / CLI / webapp), and butchr re-launches the SAME Claude session via
-// `--resume` with the answer injected (mirroring reject→resume):
-//   - `question` is the agent's pending question, surfaced while status='awaiting_input'
-//     (webapp answer box + /health needsAttention). Cleared when the question is answered.
-//   - `answer` is the operator's answer, held transiently for the resume dispatch to
+// RAISE HANDSHAKE. When a running agent calls the MCP `raise` tool, butchr records
+// what it raised (a question, a suggested task change, or a suggested decomposition)
+// and parks the task in status='needs_info' (the agent returns immediately and exits —
+// no live process, exactly like the non-blocking review handshake). Whoever operates
+// answers through ONE unified surface (API / CLI / webapp), and butchr re-launches the
+// SAME Claude session via `--resume` with the response injected (mirroring
+// reject→resume):
+//   - `question` holds the agent's pending raised item, surfaced while
+//     status='needs_info' (webapp answer box + /health needsAttention). Cleared when it
+//     is answered. (Column name predates the broader `raise`; kept to preserve rows.)
+//   - `answer` is the operator's response, held transiently for the resume dispatch to
 //     inject into the prompt, then consumed (cleared) the moment the agent re-launches
-//     (markRunning). Orthogonal to `status`. See tasks.markAwaitingInputFromAgent /
+//     (markRunning). Orthogonal to `status`. See tasks.markNeedsInfoFromAgent /
 //     tasks.answerTask / dispatcher.dispatch (the answer-resume prompt).
 ensureColumn("tasks", "question", "TEXT");
 ensureColumn("tasks", "answer", "TEXT");
@@ -414,7 +414,7 @@ ensureColumn("tasks", "path_type", "TEXT");
 // webapp filter bar + the CLI `ls --tag`) and shown as chips. Settable only at
 // creation for now. NULL / "[]" means no tags. A JSON column (not a join table)
 // keeps it consistent with the additive single-column pattern used by `blocked_by`
-// / `spawned_subtasks` above. See tasks.ts (parseTags / normalizeTags) — surfaced
+// above. See tasks.ts (parseTags / normalizeTags) — surfaced
 // as a real string[] on the serialized TaskView, and round-tripped in task.md's
 // front matter (taskmd.ts).
 ensureColumn("tasks", "tags", "TEXT");
@@ -430,15 +430,14 @@ ensureColumn("tasks", "tags", "TEXT");
 ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
 
 // PLAN-PREVIEW GATE. 1 when a task opts into the plan-preview gate, else 0 (the
-// default every existing row backfills to). A plan-preview task does NOT decompose
-// like a `kind='plan'` task (it is an ordinary work task that writes code) — instead
-// its FIRST dispatch renders a prompt that instructs the agent to submit a concise
-// implementation PLAN via the MCP `propose_plan` tool and STOP, parking the task in
-// `awaiting_input` (reusing the ASK handshake) holding the plan. The operator reviews
-// the plan and answers 'proceed' or steering notes; butchr re-launches the SAME
-// session via `--resume` with the decision and the agent then implements + calls
-// request_review as normal. Orthogonal to `kind` and `status`. Set only at creation
-// (API/CLI/webapp). See tasks.createTask / mcp.ts (propose_plan) /
+// default every existing row backfills to). A plan-preview task is an ordinary work
+// task that writes code, but its FIRST dispatch renders a prompt that instructs the
+// agent to submit a concise implementation PLAN via the MCP `propose_plan` tool and
+// STOP, parking the task in `needs_info` (reusing the `raise` feedback handshake)
+// holding the plan. The operator reviews the plan and answers 'proceed' or steering
+// notes; butchr re-launches the SAME session via `--resume` with the decision and the
+// agent then implements + calls request_review as normal. Orthogonal to `kind` and
+// `status`. Set only at creation (API/CLI/webapp). See tasks.createTask / mcp.ts (propose_plan) /
 // taskmd.renderAgentPrompt's plan-preview protocol.
 ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
 
@@ -559,13 +558,12 @@ export type WorkspaceRow = {
   created_at: string;
 };
 
-// A task's KIND: an ordinary work task, a PLAN task whose job is to decompose a
-// request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks),
-// or a ROLLBACK task (built from the `rollback` template) whose job is to revert a
-// merged change — it runs the normal build/review pipeline but lands as `rolled_back`
-// (terminal) via its own `rolling_back` merge state instead of `merged` (see
-// tasks.finalizeMerge).
-export type TaskKind = "task" | "plan" | "rollback";
+// A task's KIND: an ordinary work task, or a ROLLBACK task (built from the `rollback`
+// template) whose job is to revert a merged change — it runs the normal build/review
+// pipeline but lands as `rolled_back` (terminal) via its own `rolling_back` merge state
+// instead of `merged` (see tasks.finalizeMerge). The old 'plan' kind was retired (see
+// the `kind` column comment above).
+export type TaskKind = "task" | "rollback";
 
 // ===========================================================================
 // THE CANONICAL TASK STATE MACHINE (the CEO's exact model).
@@ -703,10 +701,11 @@ export type TaskRow = {
   idle: number;
   review_note: string | null;
   summary: string | null;
-  // ASK handshake (see the `question`/`answer` ensureColumn block above): `question`
-  // is the agent's pending clarifying question while status='awaiting_input';
-  // `answer` is the operator's reply, held transiently for the resume dispatch and
-  // consumed at re-launch. Surfaced on TaskView via the `...row` spread.
+  // RAISE handshake (see the `question`/`answer` ensureColumn block above): `question`
+  // holds what the agent raised (question / suggested task change / decomposition)
+  // while status='needs_info'; `answer` is the operator's response, held transiently
+  // for the resume dispatch and consumed at re-launch. Surfaced on TaskView via the
+  // `...row` spread.
   question: string | null;
   answer: string | null;
   dispatch_attempts: number;
@@ -750,12 +749,10 @@ export type TaskRow = {
   // AUTO-MERGE: 1 when butchr auto-merged this task (CI-green + low-risk), else 0.
   // Surfaced on TaskView via the `...row` spread. See tasks.maybeAutoMerge.
   auto_merged: number;
-  // AUTO-DECOMPOSE: 'task' (default) or 'plan'. A plan task decomposes a request
-  // into sub-tasks. `spawned_subtasks` is the raw JSON-array TEXT of the sub-task
-  // ids a plan task created (null for ordinary tasks / before it ran). Parsed via
-  // tasks.parseBlockedBy and surfaced as a string[] on TaskView. See above.
+  // TASK KIND: 'task' (default) or 'rollback' (see the `kind` column comment above).
+  // The retired `spawned_subtasks` column (the removed plan-decompose path) is
+  // intentionally absent from this row type — orphaned in old DBs, never read/written.
   kind: TaskKind;
-  spawned_subtasks: string | null;
   // PER-TASK MODEL + TOKEN/COST (see the ensureColumn block above). `model` is the
   // requested model (null = default); `model_used` is what the transcript shows ran;
   // the `usage_*_tokens` are cumulative session token counts; `cost_usd` is a

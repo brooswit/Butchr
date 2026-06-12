@@ -49,6 +49,15 @@ itself via the `request_review` MCP tool, and on "request changes" (or a `needs_
 answer) the same live agent resumes in-context (`claude --resume <session-id>`)
 rather than being restarted.
 
+**The agent's MCP surface is exactly two tools** (`src/mcp.ts`): `request_review`
+(submit work for review) and `raise` (escalate ANYTHING to the operator/CTO — a
+question, a suggested change to the task itself, or a suggested decomposition into
+sub-tasks; it parks the task in `needs_info` and resumes the session on the answer).
+Agents are **workers, not task-managers**: there is no agent-side task CRUD and no
+autonomous decomposition — a raised suggestion is acted on by the operator/CTO
+through the REST API. (A `plan_preview` task additionally gets a one-shot
+`propose_plan` tool for its pre-coding plan gate — see `src/mcp.ts`.)
+
 **Resume re-grounding.** A resume re-enters the *same* session, so its prompt is a
 **focused** message (the answer, or the review notes) — it relies on the session
 still holding the original prompt + context. But a task can be **edited while it's
@@ -554,8 +563,8 @@ library (`Bun.serve`, `Bun.spawn`, `bun:sqlite`, `fetch`, `node:fs`/`node:path`/
 `node:os`) plus the external `git` and `herdr` binaries. The webapp under
 `public/` is vanilla JS — no framework, no build step.
 
-**Do not add an npm dependency without explicit approval from the CTO** (ask via
-the butchr `ask` tool if you're an agent, or open it as a question first). This
+**Do not add an npm dependency without explicit approval from the CTO** (raise it
+via the butchr `raise` tool if you're an agent, or open it as a question first). This
 keeps install/boot trivial (just Bun + the repo), keeps the supply-chain surface
 at zero, and keeps the supervised/systemd deploy a single `bun run`. If you
 think you need a library, first check whether the Bun stdlib already covers it —
@@ -653,7 +662,7 @@ evolution.
 **Serialization — `taskView`.** `taskView(id)` in `src/tasks.ts` is the
 canonical task projection returned by the API and emitted over SSE: it merges the
 DB row with the on-disk `task.md` (prompt, context, review notes) and computes
-`blocked_by` / `blockerStates` / `deadBlockers` / `spawned_subtasks`. Return
+`blocked_by` / `blockerStates` / `deadBlockers`. Return
 `taskView(id)` from new endpoints and SSE events instead of raw rows so the shape
 the webapp and CLI consume stays consistent. The matching `WorkspaceView`
 (`listWorkspaces`) is the workspace equivalent.

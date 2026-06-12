@@ -1,6 +1,6 @@
-// Regression test for butchr's ASK -> NEEDS_INFO -> ANSWER -> RESUME path —
-// the unified non-blocking handshake that replaced the old auto-answer-via-CTO
-// mechanism (src/cto.ts, now retired).
+// Regression test for butchr's RAISE -> NEEDS_INFO -> ANSWER -> RESUME path —
+// the unified non-blocking handshake the agent drives with the MCP `raise` tool
+// (questions / suggested task changes / suggested decompositions).
 //
 // Like reject-resume.test.ts this covers ONLY the pure / in-process logic: a butchr
 // task agent's sandbox has no live claude or herdr, so nothing spawns a real agent
@@ -10,7 +10,7 @@
 // verified separately by the operator (it needs a live stack).
 //
 // What this exercises:
-//   1. tasks.markNeedsInfoFromAgent — the MCP `ask` tool's core: in_progress ->
+//   1. tasks.markNeedsInfoFromAgent — the MCP `raise` tool's core: in_progress ->
 //      needs_info, stores the question, clears the pane (the agent exits), and
 //      reports terminal/notfound for non-running tasks. NON-blocking, no CTO Claude.
 //   2. tasks.answerTask — answer validation, needs_info -> in_progress transition,
@@ -104,7 +104,7 @@ function dbRow(id: string) {
     .get(id)!;
 }
 
-describe("markNeedsInfoFromAgent (the `ask` tool core)", () => {
+describe("markNeedsInfoFromAgent (the `raise` tool core)", () => {
   test("in_progress -> needs_info: stores the question, clears the pane", () => {
     const id = seedTask({
       id: "ask-ok",
@@ -230,7 +230,7 @@ describe("renderAnswerPrompt", () => {
   test("includes the answer verbatim and points the agent back at request_review", () => {
     const answer = "Use the per-user cache; invalidate it on logout.";
     const prompt = taskmdMod.renderAnswerPrompt(answer);
-    expect(prompt).toContain("Answer to your question");
+    expect(prompt).toContain("Response to what you raised");
     expect(prompt).toContain(answer);
     expect(prompt).toContain("request_review");
   });

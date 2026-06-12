@@ -16,7 +16,6 @@
 // reject it re-launches the SAME Claude session (`--resume <session-id>`) with the
 // notes. This is what makes review durable across an agent or butchr restart — an
 // MCP server cannot wake an idle Claude Code client, so we never park a call.
-import { HttpError } from "./workspaces.ts";
 import type { TaskRow } from "./db.ts";
 import {
   isNotificationOrIdless,
@@ -28,9 +27,7 @@ import {
   getTask,
   markNeedsInfoFromAgent,
   markReviewFromAgent,
-  proposeSubtasks,
 } from "./tasks.ts";
-import type { SubtaskSpec } from "./tasks.ts";
 
 const REQUEST_REVIEW_TOOL = {
   name: "request_review",
@@ -52,86 +49,47 @@ const REQUEST_REVIEW_TOOL = {
   },
 } as const;
 
-const ASK_TOOL = {
-  name: "ask",
+// The ONE tool an agent uses to escalate ANYTHING about its task to the operator/CTO:
+// a clarifying question, a suggested change to the task itself, OR a suggested
+// decomposition into sub-tasks. The agent is a WORKER, not a task-manager — it never
+// creates/edits tasks; it RAISES, and the operator/CTO acts on it via the full REST
+// API. Non-blocking: it parks the task in `needs_info` holding the agent's message
+// (markNeedsInfoFromAgent) and returns at once so the agent exits, exactly like the
+// review handshake; the operator's answer resumes the SAME session via `--resume`.
+const RAISE_TOOL = {
+  name: "raise",
   description:
-    "Ask a clarifying question about this task — requirements, conventions, design " +
-    "judgment calls. Returns IMMEDIATELY (does NOT block): it records your question " +
-    "and parks the task awaiting an answer, after which you should STOP and exit. " +
-    "Whoever operates answers through butchr (the CTO/operator via API/CLI, or a " +
-    "human in the webapp); once answered, butchr RE-LAUNCHES you in this same " +
-    "session with the answer so you can continue. Prefer asking over guessing when " +
-    "something is genuinely ambiguous.",
+    "Raise something about this task to the operator/CTO. Use this ONE tool for ANY " +
+    "of: (a) a clarifying QUESTION (requirements, conventions, a design judgment " +
+    "call); (b) a SUGGESTED CHANGE to the task itself (its scope/prompt is wrong, it " +
+    "should be re-scoped, split, or its dependencies changed); or (c) a suggested " +
+    "DECOMPOSITION of the work into sub-tasks. You are a WORKER, not a task-manager: " +
+    "you do NOT create or edit tasks yourself — describe what you'd suggest and let " +
+    "the operator act on it. Returns IMMEDIATELY (does NOT block): it records your " +
+    "message and parks the task awaiting a response, after which you should STOP and " +
+    "exit. Whoever operates answers through butchr (the CTO/operator via the REST " +
+    "API/CLI, or a human in the webapp); once answered, butchr RE-LAUNCHES you in this " +
+    "same session with the response so you can continue. Prefer raising over guessing " +
+    "when something is genuinely ambiguous or the task itself looks wrong.",
   inputSchema: {
     type: "object",
     properties: {
-      question: {
+      message: {
         type: "string",
-        description: "The clarifying question to put to the operator/CTO.",
+        description:
+          "What you are raising — a question, a suggested change to this task, or a " +
+          "suggested decomposition into sub-tasks. Be specific and self-contained.",
       },
     },
-    required: ["question"],
-    additionalProperties: false,
-  },
-} as const;
-
-// Exposed ONLY for PLAN tasks (kind='plan'). The agent submits its decomposition —
-// an ordered array of sub-task specs whose `blocked_by` reference siblings by INDEX
-// (the ids don't exist yet) — and butchr creates the wired sub-tasks + completes the
-// plan task. Non-blocking, like request_review (see tasks.proposeSubtasks).
-const PROPOSE_SUBTASKS_TOOL = {
-  name: "propose_subtasks",
-  description:
-    "Submit a decomposition of this PLAN task's request into sub-tasks. Returns " +
-    "IMMEDIATELY with the created sub-task ids; after it returns, stop and exit. " +
-    "Pass `subtasks`: an array of { prompt, context?, blocked_by? }. `prompt` is the " +
-    "full instructions for that sub-task's own agent. `context` is an optional list " +
-    "of repo-relative file paths it should read. `blocked_by` is an optional list of " +
-    "INDICES (0-based positions in this same `subtasks` array) of sibling sub-tasks " +
-    "that must merge before this one runs — reference siblings by index, not id (the " +
-    "ids don't exist yet). butchr validates the graph (a cycle/self-reference is " +
-    "rejected), creates the sub-tasks wiring their dependencies, and completes this " +
-    "plan task. Do NOT write code in a plan task.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      subtasks: {
-        type: "array",
-        description: "Ordered sub-task specs the request decomposes into.",
-        items: {
-          type: "object",
-          properties: {
-            prompt: { type: "string", description: "The sub-task's agent prompt." },
-            context: {
-              type: "array",
-              items: { type: "string" },
-              description: "Optional repo-relative file paths the sub-task should read.",
-            },
-            blocked_by: {
-              type: "array",
-              items: { type: "integer" },
-              description:
-                "Indices of sibling sub-tasks (in this array) that must merge first.",
-            },
-          },
-          required: ["prompt"],
-          additionalProperties: false,
-        },
-      },
-      summary: {
-        type: "string",
-        description: "Optional short summary of the decomposition.",
-      },
-    },
-    required: ["subtasks"],
+    required: ["message"],
     additionalProperties: false,
   },
 } as const;
 
 // Exposed ONLY for PLAN-PREVIEW tasks (plan_preview=1). On its first launch such a
 // task is instructed to submit a concise implementation PLAN here BEFORE writing any
-// code; this reuses the ASK handshake (markAwaitingInputFromAgent) to park the task
-// in `awaiting_input` holding the plan, returning at once so the agent exits. The
+// code; this reuses the `raise` feedback handshake (markNeedsInfoFromAgent) to park
+// the task in `needs_info` holding the plan, returning at once so the agent exits. The
 // operator answers 'proceed'/steering notes and butchr resumes the SAME session with
 // the decision, at which point the agent implements + request_review as normal.
 const PROPOSE_PLAN_TOOL = {
@@ -242,10 +200,11 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
       return rpcResult(msg.id, {});
 
     case "tools/list": {
-      // Each tool's optional `gate` decides whether it is offered for THIS task: a
-      // PLAN task gets the decomposition tool, an ordinary task gets the review tool,
-      // a PLAN-PREVIEW task additionally gets propose_plan, and `ask` (no gate) is
-      // offered to all. (handleMcp already verified the task exists.)
+      // Each tool's optional `gate` decides whether it is offered for THIS task: the
+      // agent surface is exactly `request_review` + `raise` (both un-gated, offered to
+      // every task), plus `propose_plan` ONLY for a PLAN-PREVIEW task (its gate). The
+      // CTO acts on a raised suggestion/decomposition via the REST API — there is no
+      // agent-side task CRUD. (handleMcp already verified the task exists.)
       const task = getTask(taskId)!;
       const tools = TOOLS
         .filter((t) => !t.gate || t.gate(task))
@@ -283,17 +242,16 @@ type ToolEntry = {
 };
 
 // The tool registry. Order here is the order tools appear in `tools/list`:
-// PLAN tasks see [propose_subtasks, ask]; a PLAN-PREVIEW task sees
-// [propose_plan, request_review, ask]; an ordinary task sees [request_review, ask].
+// a PLAN-PREVIEW task sees [propose_plan, request_review, raise]; an ordinary task
+// sees [request_review, raise].
 const TOOLS: ToolEntry[] = [
-  { def: PROPOSE_SUBTASKS_TOOL, gate: (t) => t.kind === "plan", run: runProposeSubtasks },
   {
     def: PROPOSE_PLAN_TOOL,
-    gate: (t) => t.kind !== "plan" && !!t.plan_preview,
+    gate: (t) => !!t.plan_preview,
     run: runProposePlan,
   },
-  { def: REQUEST_REVIEW_TOOL, gate: (t) => t.kind !== "plan", run: runRequestReview },
-  { def: ASK_TOOL, run: runAsk },
+  { def: REQUEST_REVIEW_TOOL, run: runRequestReview },
+  { def: RAISE_TOOL, run: runRaise },
 ];
 
 // Shared dispatcher for `tools/call`: look the tool up in the registry, extract its
@@ -320,8 +278,8 @@ function terminalStatusResult(taskId: string): ToolResult {
 }
 
 /**
- * Shared AWAITING-INPUT handshake behind `ask` and `propose_plan`: validate the raw
- * input, park the task in `awaiting_input` holding it (markNeedsInfoFromAgent), and
+ * Shared NEEDS-INFO handshake behind `raise` and `propose_plan`: validate the raw
+ * input, park the task in `needs_info` holding it (markNeedsInfoFromAgent), and
  * return the non-blocking success result — or a terminal-status result if the task
  * moved out from under the agent. The two tools differ ONLY in their input field
  * (passed as `raw`), validation-error string (`field`), and success prose (`message`).
@@ -361,66 +319,30 @@ async function runRequestReview(taskId: string, args: any): Promise<ToolResult> 
 }
 
 /**
- * `propose_subtasks` (PLAN tasks): validate + create the decomposition's sub-tasks
- * (wiring blocked_by among them) and complete the plan task. A validation failure
- * (bad/cyclic graph, blank prompt, wrong task kind) comes back as an `isError` tool
- * result so the agent sees the message and can re-propose, rather than crashing the
- * MCP server.
+ * `raise`: record whatever the agent is raising (a question, a suggested task change,
+ * or a suggested decomposition) and park the task in `needs_info`, then RETURN AT ONCE
+ * (non-blocking) — the unified feedback handshake that mirrors request_review. The
+ * agent should exit after this call; butchr surfaces the message through one surface
+ * (API + CLI + webapp), and on an answer re-launches the SAME Claude session
+ * (`--resume`) with the response injected (see tasks.markNeedsInfoFromAgent /
+ * answerTask). If the task is already terminal (merged/aborted out from under the
+ * agent), report that instead.
  */
-async function runProposeSubtasks(taskId: string, args: any): Promise<ToolResult> {
-  const subtasks: unknown = args.subtasks;
-  const summary: string | undefined =
-    typeof args.summary === "string" ? args.summary : undefined;
-
-  if (!Array.isArray(subtasks)) {
-    return textResult("`propose_subtasks` requires a `subtasks` array.", true);
-  }
-
-  try {
-    const { created } = await proposeSubtasks(
-      taskId,
-      subtasks as SubtaskSpec[],
-      summary,
-    );
-    return toolResult({
-      status: "decomposed",
-      created,
-      message:
-        `Created ${created.length} sub-task(s): ${created.join(", ")}. The ` +
-        `dependencies were wired and this plan task is complete. You can stop now.`,
-    });
-  } catch (e) {
-    // A validation HttpError is a normal "re-propose" signal for the agent; any
-    // other error is reported the same way (never crashes the server).
-    const detail = e instanceof HttpError ? e.message : (e as Error).message;
-    return textResult(`Could not create sub-tasks: ${detail}`, true);
-  }
-}
-
-/**
- * `ask`: record the agent's clarifying question and park the task in
- * `awaiting_input`, then RETURN AT ONCE (non-blocking) — the unified AWAITING-INPUT
- * handshake that mirrors request_review. The agent should exit after this call;
- * butchr surfaces the question through one surface (API + CLI + webapp), and on an
- * answer re-launches the SAME Claude session (`--resume`) with the answer injected
- * (see tasks.markAwaitingInputFromAgent / answerTask). If the task is already
- * terminal (merged/aborted out from under the agent), report that instead.
- */
-async function runAsk(taskId: string, args: any): Promise<ToolResult> {
-  return awaitingInputTool(taskId, args.question, {
-    field: "`ask` requires a non-empty `question` string.",
+async function runRaise(taskId: string, args: any): Promise<ToolResult> {
+  return awaitingInputTool(taskId, args.message, {
+    field: "`raise` requires a non-empty `message` string.",
     message:
-      "Your question has been recorded and this task is now awaiting an answer. " +
+      "What you raised has been recorded and this task is now awaiting a response. " +
       "You can stop now — do not wait. butchr will surface it to whoever operates " +
       "(the CTO/operator via API/CLI, or a human in the webapp) and, once answered, " +
-      "RE-LAUNCH you in this same session with the answer so you can continue.",
+      "RE-LAUNCH you in this same session with the response so you can continue.",
   });
 }
 
 /**
  * `propose_plan` (PLAN-PREVIEW tasks): record the agent's implementation plan and
- * park the task in `awaiting_input` for operator approval, then RETURN AT ONCE
- * (non-blocking). REUSES the ASK handshake (markAwaitingInputFromAgent) — the plan is
+ * park the task in `needs_info` for operator approval, then RETURN AT ONCE
+ * (non-blocking). REUSES the `raise` handshake (markNeedsInfoFromAgent) — the plan is
  * stored exactly like a clarifying question, and the operator's answer ('proceed' /
  * steering notes) resumes the SAME Claude session via `--resume` (answerTask), at
  * which point the agent implements + request_review as normal. The agent should exit

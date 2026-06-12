@@ -1,6 +1,6 @@
 // Tests for butchr's PLAN-PREVIEW gate (see db.ts `plan_preview`,
 // tasks.createTask(planPreview), taskmd.renderAgentPrompt's plan-preview protocol,
-// and mcp.ts propose_plan). The gate REUSES the ASK -> NEEDS_INFO -> ANSWER ->
+// and mcp.ts propose_plan). The gate REUSES the RAISE -> NEEDS_INFO -> ANSWER ->
 // RESUME handshake: a plan-preview agent proposes a plan via the MCP `propose_plan`
 // tool, the task parks in `needs_info` holding the plan, the operator answers
 // 'proceed', and the SAME claude session resumes to implement + request_review.
@@ -16,7 +16,7 @@
 //      renderAgentPrompt hands the FIRST launch the plan-preview protocol (propose_plan,
 //      not request_review).
 //   2. tools/list gating: a plan-preview task is offered propose_plan (+ request_review
-//      + ask); an ordinary task is NOT offered propose_plan.
+//      + raise); an ordinary task is NOT offered propose_plan.
 //   3. The agent calling propose_plan parks the task in needs_info holding the plan,
 //      non-blocking (markNeedsInfoFromAgent core), and rejects a blank plan.
 //   4. answerTask('proceed') re-queues the task PRESERVING session_id, and
@@ -148,13 +148,17 @@ describe("tools/list gating", () => {
     const ppTools = (await rpc(pp.id, "tools/list")).result.tools.map((t: any) => t.name);
     const ordTools = (await rpc(ord.id, "tools/list")).result.tools.map((t: any) => t.name);
 
+    // The agent surface is request_review + raise, plus propose_plan ONLY for a
+    // plan-preview task. propose_subtasks no longer exists for any task.
     expect(ppTools).toContain("propose_plan");
     expect(ppTools).toContain("request_review");
-    expect(ppTools).toContain("ask");
+    expect(ppTools).toContain("raise");
     expect(ppTools).not.toContain("propose_subtasks");
 
     expect(ordTools).not.toContain("propose_plan");
     expect(ordTools).toContain("request_review");
+    expect(ordTools).toContain("raise");
+    expect(ordTools).not.toContain("ask");
   });
 });
 

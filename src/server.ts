@@ -599,17 +599,14 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
   const body = await readJson(req);
   // Optional blocked_by: [taskId,...] — the task starts `blocked` until every
   // listed blocker has merged (validated + cycle-checked inside createTask).
-  // Optional kind: "plan" creates an AUTO-DECOMPOSE task that breaks the request
-  // into sub-tasks via the propose_subtasks MCP tool instead of writing code.
-  // The built-in `rollback` template (the webapp's "Roll back" button) creates a
-  // 'rollback'-kind task — it builds a revert like any task but lands via its own
-  // `rolling_back`→`rolled_back` lifecycle tail (see tasks.finalizeMerge).
+  // Optional kind: the built-in `rollback` template (the webapp's "Roll back" button)
+  // creates a 'rollback'-kind task — it builds a revert like any task but lands via its
+  // own `rolling_back`→`rolled_back` lifecycle tail (see tasks.finalizeMerge). Any other
+  // task is an ordinary 'task'.
   const kind =
-    body.kind === "plan"
-      ? "plan"
-      : body.kind === "rollback" || body.template === "rollback"
-        ? "rollback"
-        : "task";
+    body.kind === "rollback" || body.template === "rollback"
+      ? "rollback"
+      : "task";
   // Optional model: an alias (opus/sonnet/haiku/fable) or full id, threaded into the
   // agent launch. Unset → claude's current default. Validated inside createTask.
   // Optional tags: an array of free-form organizational labels (validated +
@@ -742,7 +739,7 @@ route("POST", "/api/tasks/:id/reject", async (req, p) => {
   return json(await rejectTask(p.id!, body.note));
 });
 
-// Answer a task parked in `awaiting_input` (the agent called the MCP `ask` tool).
+// Answer a task parked in `needs_info` (the agent called the MCP `raise` tool).
 // This is the unified answer surface shared by the operator CLI (`butchr answer`),
 // the webapp answer box, and any API caller. On answer butchr re-queues the task and
 // re-launches the SAME agent session via `--resume` with the answer injected (see
