@@ -72,6 +72,22 @@ async function branchOwnCommitCount(dir: string, base: string, taskId: string): 
 }
 
 /**
+ * Count of commits on the default branch that the task branch does NOT yet contain
+ * (the `taskId..base` range) — i.e. how many commits BEHIND the current default tip
+ * the branch is. 0 means the branch already contains the tip (it is "on tip"). The
+ * behind-count sibling of the private branchOwnCommitCount (which counts the branch's
+ * OWN commits, the `base..taskId` range). Best-effort: 0 on any git error (fail closed
+ * — treat as not-behind). Used by the read-only readiness view (tasks.taskReadiness).
+ */
+export async function commitsBehind(dir: string, taskId: string): Promise<number> {
+  const base = await defaultBranch(dir);
+  const count = await run([
+    git, "-C", dir, "rev-list", "--count", `${taskId}..${base}`,
+  ]);
+  return count.ok ? parseInt(count.stdout.trim(), 10) || 0 : 0;
+}
+
+/**
  * Absolute path to a task's git worktree: <dir>/<taskId>. The single source of
  * truth for where a task's checkout lives — used by createWorktree/diff/merge here
  * and by the CI gate (tasks.ts) to run build/tests in the task's tree.

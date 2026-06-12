@@ -4,7 +4,15 @@ import { checkChangelogUpdated } from "./changelog.ts";
 import type { VersionBumpLevel } from "./changelog.ts";
 import { config } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
-import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
+import {
+  ALL_STATUSES,
+  db,
+  estimateRows,
+  isTerminal,
+  matchesQuery,
+  nowIso,
+  recordTaskEvent,
+} from "./db.ts";
 import type { TaskRow, TaskStatus, WorkspaceRow } from "./db.ts";
 import {
   classifyPathType,
@@ -16,6 +24,7 @@ import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
 import {
   HttpError,
   getWorkspace,
+  listWorkspaces,
   responderFor,
   workspaceChangelogPath,
   workspaceGateCmd,
@@ -79,7 +88,66 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
   // so consumers (notably the CTO agent) never have to GUESS or reconstruct it. null only
   // when the workspace row is gone.
   worktree_path: string | null;
+  // STRUCTURED GATES — the CI / conformance / changelog gate state grouped into one
+  // block so a reader gets "what's green" without re-deriving it from the loose
+  // ci_status / conformance_status columns (which still spread above, unchanged). PURE
+  // (no git I/O): ci + conformance read straight off the row; changelog reports the
+  // gate's CONFIGURATION (off/on/strict) since its pass/fail needs the live diff (the
+  // readiness view computes that). See gatesView. This keeps taskView synchronous (it's
+  // published on every SSE task.updated), which a live git probe would break.
+  gates: TaskGates;
 };
+
+/**
+ * The structured GATES block on a task view (see TaskView.gates). `ci` / `conformance`
+ * mirror the row's stored gate columns (status: 'running'|'pass'|'fail' for CI,
+ * 'checking'|'pass'|'concern' for conformance, or null when the gate never ran /
+ * is disabled; `tip` is the branch sha the gate ran against). `changelog` reports the
+ * gate's CONFIGURATION for this workspace, NOT a per-diff verdict (which needs git):
+ *   - `off`    — no changelog path configured for the workspace (gate disabled).
+ *   - `on`     — a code change must update the changelog (docs-only diffs exempt).
+ *   - `strict` — release_mode: EVERY non-empty diff must update the changelog.
+ */
+export type TaskGates = {
+  ci: { status: string | null; summary: string | null; tip: string | null };
+  conformance: { status: string | null; summary: string | null; tip: string | null };
+  changelog: { status: "off" | "on" | "strict"; detail: string };
+};
+
+/**
+ * Build a task's structured GATES block from its already-stored columns + the
+ * workspace's gate configuration. PURE — no git/fs I/O — so it is safe to call inside
+ * the synchronous, hot taskView / taskListView path. The changelog sub-block is
+ * config-derived (off/on/strict) because the actual pass/fail of a changelog gate is
+ * folded into the CI gate (tasks.triggerCi) and a per-diff verdict needs the live file
+ * list (computed by taskReadiness instead).
+ */
+export function gatesView(row: TaskRow): TaskGates {
+  const clogPath = workspaceChangelogPath(row.workspace_id).trim();
+  let changelog: TaskGates["changelog"];
+  if (!clogPath) {
+    changelog = { status: "off", detail: "changelog gate disabled (no path configured)" };
+  } else if (workspaceReleaseMode(row.workspace_id)) {
+    changelog = {
+      status: "strict",
+      detail: `release_mode: every non-empty diff must update ${clogPath} (enforced by the CI gate)`,
+    };
+  } else {
+    changelog = {
+      status: "on",
+      detail: `a code change must update ${clogPath} (enforced by the CI gate; docs-only diffs exempt)`,
+    };
+  }
+  return {
+    ci: { status: row.ci_status, summary: row.ci_summary, tip: row.ci_tip },
+    conformance: {
+      status: row.conformance_status,
+      summary: row.conformance_summary,
+      tip: row.conformance_tip,
+    },
+    changelog,
+  };
+}
 
 // --- DURATION ESTIMATES (rough, history-derived) ---------------------------
 
@@ -407,6 +475,7 @@ export function taskView(id: string): TaskView | null {
     estimate: taskEstimate(id),
     pending_responder: pendingResponder(row),
     worktree_path: dir ? git.worktreePath(dir.path, id) : null,
+    gates: gatesView(row),
   };
 }
 
@@ -475,9 +544,281 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
       deadBlockers: deadBlockerIds(blocked_by),
       pending_responder: pendingResponder(row),
       worktree_path: dirPath ? git.worktreePath(dirPath, row.id) : null,
+      gates: gatesView(row),
     });
   }
   return out;
+}
+
+// --- CROSS-WORKSPACE READ-ONLY SURFACES (CTO observability) ----------------
+//
+// The PULL side of the operator/CTO channel: list/stats/attention/readiness reads
+// that reconstruct pipeline state in ONE call instead of walking per-workspace task
+// lists, the sqlite file, or git by hand. All read-only — no transitions, no I/O
+// beyond the cheap git probes readiness needs.
+
+/**
+ * Cross-workspace TASK LIST in the light TaskListView shape (newest-first across ALL
+ * workspaces), with optional filters:
+ *  - `workspace` — restrict to one workspace id (unknown id → empty list).
+ *  - `status`    — restrict to one task status.
+ *  - `q`         — case-insensitive full-text filter over the same searchable text the
+ *                  per-workspace list uses (id + summary + review notes + task.md prompt).
+ * Reuses the per-row projection of taskListView so a row's shape never diverges between
+ * the per-workspace and cross-workspace lists. The cross-workspace sort is by created_at
+ * DESC (the per-workspace query is already newest-first; this re-orders the merged set).
+ */
+export function allTasksView(
+  opts: { status?: string; workspace?: string; q?: string } = {},
+): TaskListView[] {
+  const needle = (opts.q ?? "").trim();
+  const workspaces = opts.workspace
+    ? (getWorkspace(opts.workspace) ? [getWorkspace(opts.workspace)!] : [])
+    : db
+        .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
+        .all();
+  const out: TaskListView[] = [];
+  for (const ws of workspaces) {
+    for (const row of listTasks(ws.id)) {
+      if (opts.status && row.status !== opts.status) continue;
+      if (needle && !matchesQuery(taskSearchText(row, ws.path), needle)) continue;
+      const blocked_by = parseBlockedBy(row.blocked_by);
+      out.push({
+        ...row,
+        blocked_by,
+        tags: parseTags(row.tags),
+        blockerStates: blockerStatesOf(blocked_by),
+        deadBlockers: deadBlockerIds(blocked_by),
+        pending_responder: pendingResponder(row),
+        worktree_path: git.worktreePath(ws.path, row.id),
+        gates: gatesView(row),
+      });
+    }
+  }
+  // Merge-sort the per-workspace (already newest-first) lists into one newest-first set.
+  out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+  return out;
+}
+
+/** Global pipeline rollup: status counts across ALL workspaces + a per-workspace breakdown. */
+export type StatsRollup = {
+  /** Total task count across all workspaces (the `idle` pseudo-bucket is NOT counted —
+   * it is peeled out of in_progress, not a distinct status). */
+  totalTasks: number;
+  /** Number of registered workspaces. */
+  workspaces: number;
+  /** Status → summed count across every workspace, plus the `idle` pseudo-bucket (a flag
+   * on a LIVE in_progress agent, peeled out of in_progress — mirrors workspaces.counts). */
+  totals: Record<string, number>;
+  /** Per-workspace status counts (the same per-status map the dashboard/workspace views use). */
+  byWorkspace: Array<{
+    id: string;
+    label: string | null;
+    path: string;
+    counts: Record<string, number>;
+  }>;
+};
+
+/**
+ * The /api/stats rollup: counts by status across every workspace, replacing a drop to
+ * `bun -e` against the DB. Built from listWorkspaces() (which already folds each
+ * workspace's per-status `counts`, including the `idle` peel-out), so the idle pseudo-
+ * bucket logic lives in exactly one place. `totalTasks` sums every real status bucket
+ * (NOT idle — it would double-count, being peeled from in_progress).
+ */
+export function statsRollup(): StatsRollup {
+  const wss = listWorkspaces();
+  const totals: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
+  totals.idle = 0;
+  let totalTasks = 0;
+  const byWorkspace = wss.map((ws) => {
+    for (const [status, n] of Object.entries(ws.counts)) {
+      totals[status] = (totals[status] ?? 0) + n;
+      if (status !== "idle") totalTasks += n;
+    }
+    return { id: ws.id, label: ws.label, path: ws.path, counts: ws.counts };
+  });
+  return { totalTasks, workspaces: wss.length, totals, byWorkspace };
+}
+
+/**
+ * Why a task is on the attention feed — the categorized reason GET /api/attention
+ * carries so "is anything waiting on me" is one reliable call. Mirrors the feedback
+ * STEP model (workspaces.RESPONDER_STEPS) plus the two non-step attention conditions
+ * (`major-confirm` and the terminal `failed`):
+ *   spec-approval   — a generated spec awaiting approval (spec_review).
+ *   plan-approval   — a plan-preview plan awaiting approval (needs_info + plan_preview).
+ *   answer-question — an agent raised a question (needs_info, no plan_preview).
+ *   diff-review     — a finished diff awaiting review (in_review).
+ *   major-confirm   — an in_review release_mode MAJOR task awaiting the human double-confirm.
+ *   idle-handling   — a live build agent went idle (in_progress + idle).
+ *   failed          — a terminal execution failure to inspect.
+ */
+export type AttentionReason =
+  | "spec-approval"
+  | "plan-approval"
+  | "answer-question"
+  | "diff-review"
+  | "major-confirm"
+  | "idle-handling"
+  | "failed";
+
+export type AttentionItem = {
+  id: string;
+  workspace_id: string;
+  workspace_label: string | null;
+  status: TaskStatus;
+  kind: TaskKind;
+  reason: AttentionReason;
+  /** The resolved responder (`cto`/`user`) for the pending feedback step, or null
+   * (a `failed` task is not a feedback state — no responder is awaited). */
+  pending_responder: Responder | null;
+  /** A short human hook: the request_review summary, the raised question, or the
+   * failure / review note — whichever fits the reason. */
+  detail: string | null;
+  /** The most relevant "waiting since" timestamp (review-entry time, else created). */
+  since: string | null;
+};
+
+/**
+ * Categorize a single attention row. Pure (row + workspace release_mode) so the mapping
+ * can't drift from the state machine — it reuses the same discriminators as the feedback
+ * step map (plan_preview for needs_info) and the major-confirm gate (release_mode +
+ * version_bump='major'). An in_review release_mode major task reads `major-confirm`
+ * rather than `diff-review`, since approval alone parks it pending the human confirm.
+ */
+export function attentionReason(row: TaskRow, releaseMode: boolean): AttentionReason | null {
+  switch (row.status) {
+    case "failed":
+      return "failed";
+    case "spec_review":
+      return "spec-approval";
+    case "needs_info":
+      return row.plan_preview ? "plan-approval" : "answer-question";
+    case "in_review":
+      return releaseMode && row.version_bump === "major" ? "major-confirm" : "diff-review";
+    case "in_progress":
+      return row.idle ? "idle-handling" : null;
+    default:
+      return null;
+  }
+}
+
+/** The short hook text for an attention item, picked to match its reason. */
+function attentionDetail(row: TaskRow, reason: AttentionReason): string | null {
+  switch (reason) {
+    case "answer-question":
+    case "plan-approval":
+      return row.question ?? null;
+    case "failed":
+      return row.last_dispatch_error ?? row.review_note ?? row.summary ?? null;
+    case "idle-handling":
+      return row.idle_context ?? row.summary ?? null;
+    default:
+      return row.summary ?? row.review_note ?? null;
+  }
+}
+
+/**
+ * The /api/attention feed: a structured list of every task awaiting the operator right
+ * now — the PULL side of the push-only CTO channel, so a missing list can never give a
+ * false "idle" read. Selects the feedback/failed states plus a live IDLE build agent in
+ * ONE query and categorizes each (attentionReason). Oldest-first (longest-waiting at the
+ * top — what to look at first).
+ */
+export function attentionList(): AttentionItem[] {
+  const rows = db
+    .query<TaskRow, []>(
+      `SELECT * FROM tasks
+        WHERE status IN ('spec_review','in_review','needs_info','failed')
+           OR (status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1)
+        ORDER BY created_at ASC`,
+    )
+    .all();
+  const items: AttentionItem[] = [];
+  for (const row of rows) {
+    const reason = attentionReason(row, workspaceReleaseMode(row.workspace_id));
+    if (!reason) continue;
+    items.push({
+      id: row.id,
+      workspace_id: row.workspace_id,
+      workspace_label: getWorkspace(row.workspace_id)?.label ?? null,
+      status: row.status,
+      kind: row.kind,
+      reason,
+      pending_responder: pendingResponder(row),
+      detail: attentionDetail(row, reason),
+      since: row.completed_at ?? row.created_at ?? null,
+    });
+  }
+  return items;
+}
+
+/**
+ * Pure ALL-GATES-GREEN predicate for the readiness view. A gate is GREEN when it is
+ * passing OR not blocking, and RED when it failed, raised a concern, or is still in
+ * flight:
+ *   - CI:          'pass' or null (disabled / never ran) → green; 'fail' / 'running' → red.
+ *   - conformance: 'pass' or null (disabled / never ran) → green; 'concern' / 'checking' → red.
+ *   - changelog:   the caller's precomputed checkChangelogUpdated().ok (true when the gate
+ *                  is disabled, the diff is exempt, or the changelog was updated).
+ * Pure (no I/O) so it is unit-testable against a synthetic row + boolean. The conformance
+ * 'concern' verdict is deliberately NOT green — only a clean pass counts.
+ */
+export function gatesGreen(row: TaskRow, changelogOk: boolean): boolean {
+  const ciGreen = row.ci_status === null || row.ci_status === "pass";
+  const confGreen = row.conformance_status === null || row.conformance_status === "pass";
+  return ciGreen && confGreen && changelogOk;
+}
+
+/** The mergeability snapshot GET /api/tasks/:id/readiness returns. */
+export type TaskReadiness = {
+  /** The branch already contains the current default tip (behindBy === 0). */
+  onTip: boolean;
+  /** How many commits behind the default tip the branch is (0 when on tip). */
+  behindBy: number;
+  /** The branch's changed files vs the default branch (committed + uncommitted union). */
+  changedFiles: string[];
+  /** Whether ALL applicable gates are green (see gatesGreen). */
+  gatesGreen: boolean;
+  /** Changed files NOT covered by the GLOBAL auto-merge allowlist (config.autoMergeAllowlist)
+   * — i.e. what keeps the task out of low-risk auto-merge. Named for the auto-merge set
+   * specifically so a future PER-TASK allowlist can report its own violations alongside. */
+  outsideAutoMergeAllowlist: string[];
+};
+
+/**
+ * GET /api/tasks/:id/readiness — the merge-readiness snapshot, replacing manual
+ * merge-base / rev-list / diff. Computes the branch's position vs the default tip
+ * (onTip / behindBy), its changed files, whether every gate is green (running the PURE
+ * changelog check against the live diff), and which changed files fall outside the
+ * auto-merge allowlist. 404 if the task or its workspace is gone.
+ */
+export async function taskReadiness(id: string): Promise<TaskReadiness> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+
+  const behindBy = await git.commitsBehind(dir.path, id);
+  const { files: changedFiles } = await git.diffStat(dir.path, id);
+
+  const changelogPath = workspaceChangelogPath(row.workspace_id).trim();
+  const changelogOk = changelogPath
+    ? checkChangelogUpdated(changedFiles, changelogPath, {
+        strict: workspaceReleaseMode(row.workspace_id),
+      }).ok
+    : true;
+
+  return {
+    onTip: behindBy === 0,
+    behindBy,
+    changedFiles,
+    gatesGreen: gatesGreen(row, changelogOk),
+    outsideAutoMergeAllowlist: changedFiles.filter(
+      (f) => !fileAllowed(f, config.autoMergeAllowlist),
+    ),
+  };
 }
 
 function emitUpdated(id: string): void {
@@ -2406,8 +2747,12 @@ const autoMerging = new Set<string>();
  *  - a `*.ext` glob (e.g. `*.md`) → matches TOP-LEVEL files with that extension
  *    only (no slash in the path), per the spec's "top-level *.md"; or
  *  - a plain path → matches that exact file or anything beneath it as a dir.
+ *
+ * Exported so the read-only readiness view (taskReadiness) can report which changed
+ * files fall OUTSIDE the auto-merge allowlist, reusing the exact membership rule the
+ * auto-merge gate applies.
  */
-function fileAllowed(file: string, allowlist: string[]): boolean {
+export function fileAllowed(file: string, allowlist: string[]): boolean {
   const f = file.replace(/^\.\//, "");
   for (const raw of allowlist) {
     const entry = raw.trim();

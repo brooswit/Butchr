@@ -659,12 +659,56 @@ const MIGRATIONS: Array<() => void> = [
 ];
 
 /**
+ * LAST-BOOT MIGRATION OUTCOME — the snapshot the read-only /api/health surfaces so an
+ * operator can confirm the boot migration pass ran cleanly in ONE pull instead of
+ * grepping the journal. `at` is when the last pass finished (null before the first
+ * run); `ran` is how many of the ordered steps executed; `ok` is true iff the whole
+ * pass completed without throwing; `error` names the failing step + message when a
+ * migration threw. On a successfully BOOTED server `ok` is always true (a thrown
+ * migration aborts boot — see runMigrations), so the value's worth is the timestamp +
+ * step count confirming the pass converged this boot.
+ */
+export type MigrationOutcome = {
+  at: string | null;
+  ran: number;
+  ok: boolean;
+  error: { step: number; message: string } | null;
+};
+
+let lastMigrationOutcome: MigrationOutcome = { at: null, ran: 0, ok: false, error: null };
+
+/** The last-boot migration outcome snapshot (see MigrationOutcome). Read-only; safe pre-run (returns the unset default). */
+export function getLastMigrationOutcome(): MigrationOutcome {
+  return lastMigrationOutcome;
+}
+
+/**
  * Run the ordered boot migrations once, in order, against the module DB. Invoked
  * at module load; also exported so a test can re-run the full pass and assert it is
  * a clean idempotent no-op (every step is presence-guarded / IF NOT EXISTS).
+ *
+ * Records the pass outcome into lastMigrationOutcome (getLastMigrationOutcome) for the
+ * /api/health migration block — pure instrumentation. A throwing migration records the
+ * failure (which step + message) and then RE-THROWS, preserving the existing
+ * crash-on-failed-migration boot behavior.
  */
 export function runMigrations(): void {
-  for (const run of MIGRATIONS) run();
+  let ran = 0;
+  for (let i = 0; i < MIGRATIONS.length; i++) {
+    try {
+      MIGRATIONS[i]!();
+      ran++;
+    } catch (e) {
+      lastMigrationOutcome = {
+        at: nowIso(),
+        ran,
+        ok: false,
+        error: { step: i, message: (e as Error).message },
+      };
+      throw e;
+    }
+  }
+  lastMigrationOutcome = { at: nowIso(), ran, ok: true, error: null };
 }
 runMigrations();
 

@@ -9,6 +9,7 @@ import {
   ALL_STATUSES,
   computeMetrics,
   db,
+  getLastMigrationOutcome,
   isTerminal,
   listTaskEvents,
   metricRows,
@@ -50,8 +51,10 @@ import { getLastReap } from "./reaper.ts";
 import pkg from "../package.json" with { type: "json" };
 import {
   abortTask,
+  allTasksView,
   answerTask,
   approveTask,
+  attentionList,
   confirmMajor,
   createTask,
   getTask,
@@ -61,11 +64,13 @@ import {
   setBlockedBy,
   setPriority,
   setVersionBump,
+  statsRollup,
   submitSpec,
   taskChainEstimate,
   taskDiff,
   taskEstimate,
   taskListView,
+  taskReadiness,
   taskView,
 } from "./tasks.ts";
 import { listTemplates, renderTemplate } from "./templates.ts";
@@ -406,6 +411,12 @@ async function healthResponse(): Promise<Response> {
     // its PAUSED banner + pause/resume control off this.
     paused: isPaused(),
     db: { ok: dbOk },
+    // LAST-BOOT MIGRATION OUTCOME (see db.getLastMigrationOutcome): when the boot
+    // migration pass ran, how many steps executed, whether it converged cleanly, and
+    // the failing step + message if one threw — so an operator confirms a clean boot
+    // migration in this ONE pull instead of grepping the journal. On a booted server
+    // `ok` is true (a thrown migration aborts boot); the value's worth is the timestamp.
+    migration: getLastMigrationOutcome(),
     tick: {
       alive: tickAlive,
       count: tickCount,
@@ -542,6 +553,33 @@ route("GET", "/api/metrics", async (req) => {
 // summary line + per-card counts and lets a supervisor pull per-workspace
 // needs-attention without walking every workspace's task list. Read-only.
 route("GET", "/api/dashboard", async () => json(dashboard()));
+
+// CROSS-WORKSPACE TASK LIST. The PULL view that replaces walking each workspace's task
+// list (or dropping to `bun -e` against the DB): every task across all workspaces in the
+// light TaskListView shape, newest-first. Optional filters: `?workspace=<id>` (one
+// workspace), `?status=<status>` (one task status), and `?q=` (the same case-insensitive
+// full-text filter the per-workspace list uses). Read-only. See tasks.allTasksView.
+route("GET", "/api/tasks", async (req) => {
+  const url = new URL(req.url);
+  return json(
+    allTasksView({
+      status: url.searchParams.get("status") ?? undefined,
+      workspace: url.searchParams.get("workspace") ?? undefined,
+      q: url.searchParams.get("q") ?? undefined,
+    }),
+  );
+});
+
+// GLOBAL STATS ROLLUP: status counts across ALL workspaces (+ the `idle` pseudo-bucket),
+// a total task count, and a per-workspace breakdown. Replaces counting tasks by hand
+// against the sqlite file. Read-only. See tasks.statsRollup.
+route("GET", "/api/stats", async () => json(statsRollup()));
+
+// ATTENTION FEED: the PULL side of the push-only CTO channel — a structured list of every
+// task awaiting the operator right now (plan-approval / diff-review / needs-info /
+// major-confirm / idle-handling / failed), so "is anything waiting on me" is one reliable
+// call (a 404'd list previously gave a false "idle" read). Read-only. See tasks.attentionList.
+route("GET", "/api/attention", async () => json(attentionList()));
 
 // Workspaces
 route("GET", "/api/workspaces", async () => json(listWorkspaces()));
@@ -725,6 +763,15 @@ route("GET", "/api/tasks/:id", async (_req, p) => {
 route("GET", "/api/tasks/:id/diff", async (_req, p) => {
   const d = await taskDiff(p.id!);
   return json({ diff: d });
+});
+
+// MERGE-READINESS snapshot: { onTip, behindBy, changedFiles, gatesGreen,
+// outsideAutoMergeAllowlist[] } — replaces manual merge-base / rev-list / diff when
+// deciding whether a task is ready to land. Read-only (cheap git probes only). 404 if
+// the task or its workspace is gone. See tasks.taskReadiness.
+route("GET", "/api/tasks/:id/readiness", async (_req, p) => {
+  requireTask(p.id!);
+  return json(await taskReadiness(p.id!));
 });
 
 // ROUGH duration estimate for a task (see src/estimate.ts): a loose p50–p90 range
