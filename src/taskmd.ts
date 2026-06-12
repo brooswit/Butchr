@@ -27,6 +27,11 @@ export type TaskMeta = {
   // column). Round-tripped in the front matter as a YAML list. Absent reads back as
   // [] — existing task.md files (which carry no `tags:` line) parse unchanged.
   tags?: string[];
+  // Optional per-task FILE ALLOWLIST attached at creation (db.ts `allowlist` column):
+  // the glob/path entries the task's diff may touch, enforced by the CI gate. Round-
+  // tripped in the front matter as a YAML list. Absent reads back as [] — existing
+  // task.md files (which carry no `allowlist:` line) parse unchanged.
+  allowlist?: string[];
   // PLAN-PREVIEW GATE (db.ts `plan_preview` column). When true, the FIRST rendered
   // prompt hands the agent the plan-preview protocol (propose a plan via the MCP
   // `propose_plan` tool and pause for operator approval) instead of diving straight
@@ -166,6 +171,12 @@ function serializeFrontMatter(meta: TaskMeta): string {
   if (meta.tags && meta.tags.length) {
     lines.push("tags:");
     for (const t of meta.tags) lines.push(`  - ${t}`);
+  }
+  // Only emit an allowlist line when the task declares one — an empty/absent set omits
+  // it and parses back as [], keeping existing task.md files unchanged.
+  if (meta.allowlist && meta.allowlist.length) {
+    lines.push("allowlist:");
+    for (const a of meta.allowlist) lines.push(`  - ${a}`);
   }
   if (meta.context.length === 0) {
     lines.push("context: []");
@@ -368,6 +379,7 @@ export function parseTaskMd(raw: string): TaskDoc {
     kind: "task",
     model: null,
     tags: [],
+    allowlist: [],
     plan_preview: false,
   };
 
@@ -376,9 +388,9 @@ export function parseTaskMd(raw: string): TaskDoc {
   if (fm) {
     rest = raw.slice(fm[0].length);
     const fmLines = fm[1]!.split("\n");
-    // `context` and `tags` are both multi-line YAML lists; track which (if any) we're
-    // currently accumulating `- item` lines into.
-    let inList: "context" | "tags" | null = null;
+    // `context`, `tags`, and `allowlist` are all multi-line YAML lists; track which (if
+    // any) we're currently accumulating `- item` lines into.
+    let inList: "context" | "tags" | "allowlist" | null = null;
     // Parse an inline list `[a, b]` into a clean string array.
     const inline = (val: string): string[] =>
       val.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -386,7 +398,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       const item = line.match(/^\s*-\s+(.*)$/);
       if (inList && item) {
         const v = item[1]!.trim();
-        if (v) (inList === "context" ? meta.context : meta.tags!).push(v);
+        if (v) (inList === "context" ? meta.context : meta[inList]!).push(v);
         continue;
       }
       inList = null;
@@ -403,11 +415,11 @@ export function parseTaskMd(raw: string): TaskDoc {
       // NOTE: a legacy `stage:` line from the retracted idea→spec→build axis is simply
       // ignored here (the key falls through unrecognized) — task.md files written by the
       // old code parse cleanly under the unified single-status pipeline.
-      else if (key === "context" || key === "tags") {
-        const target: "context" | "tags" = key;
+      else if (key === "context" || key === "tags" || key === "allowlist") {
+        const target: "context" | "tags" | "allowlist" = key;
         if (val === "") inList = target;
         else if (val === "[]") meta[target] = [];
-        // inline list `context: [a, b]` / `tags: [a, b]` support
+        // inline list `context: [a, b]` / `tags: [a, b]` / `allowlist: [a, b]` support
         else if (val.startsWith("[")) meta[target] = inline(val);
       }
     }

@@ -37,11 +37,14 @@ const ID_COMMANDS = [
   "confirm-major",
   "reject",
   "answer",
+  "plan-approve",
+  "plan-reject",
   "spec",
   "nudge",
   "requeue",
   "block",
   "priority",
+  "wait",
 ];
 
 for (const cmd of ID_COMMANDS) {

@@ -338,12 +338,17 @@ butchr health                          # server health snapshot (exit 1 if degra
 butchr ls [--workspace <id>] [--status <s>]  # compact id/status/ci table (idle shows status*)
 butchr new <workspace> -m "<prompt>"   # create a task; <workspace> is a workspace id OR path
         [--blocked-by id,id]           #   start it blocked on those task ids
-butchr show <id>                       # status, ci, summary, review notes, blockers
+        [--allowlist a,b]              #   file allowlist: CI gate fails if the diff strays
+butchr show <id>                       # status, ci, liveness, summary, review notes, blockers
 butchr approve <id>                    # approve a task in review (merges its branch)
 butchr reject <id> -m "<note>"         # send a reviewed task back for rework
+butchr plan-approve <id> [-m "<text>"] # approve a plan-preview plan (-m adds steering notes)
+butchr plan-reject <id> -m "<text>"    # reject a proposed plan with feedback (agent re-proposes)
 butchr spec <id> -m "<spec>"           # submit the spec for an idea task (-m, or pipe stdin)
 butchr requeue <id>                    # re-queue a failed/stuck task for a fresh dispatch
 butchr block <id> --on id,id           # replace blocked_by (use --on '' to clear)
+butchr wait <id> --until <state>       # block until the task reaches <state> (e.g. in_review)
+butchr restart [--verify]              # restart the server; --verify blocks until it's healthy
 butchr backups                         # list local DB snapshots (OFFLINE)
 butchr restore <file|latest> [--force] # restore the DB from a snapshot (OFFLINE)
 butchr --help                          # full usage
@@ -351,7 +356,11 @@ butchr --help                          # full usage
 
 Each subcommand maps onto exactly one REST route (the route table in
 `src/server.ts`); the CLI adds no server behavior. The lone exceptions are
-`backups` / `restore`, which are **offline** filesystem operations.
+`backups` / `restore`, which are **offline** filesystem operations. `wait` and
+`restart --verify` are **blocking** helpers (they poll `/api/tasks/:id` and
+`/health` respectively) so you no longer hand-roll curl+sleep loops; `restart`
+relies on a supervisor that relaunches the process (the deployed systemd
+`Restart=always`).
 
 ### Health
 

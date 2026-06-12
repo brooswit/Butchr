@@ -59,7 +59,7 @@ import { existsSync, readFileSync } from "node:fs";
 // merge — a blocked task with any dead blocker is stuck until the operator edits
 // its blocked_by set (see setBlockedBy). We Omit the raw column so the array shape
 // wins.
-export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
+export type TaskView = Omit<TaskRow, "blocked_by" | "tags" | "allowlist"> & {
   prompt: string;
   context: string[];
   review_notes: string;
@@ -67,6 +67,10 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
   // Free-form organizational labels (the DB stores them as raw JSON TEXT). Empty
   // array when none. Set at creation; the webapp + CLI filter on them. See `tags`.
   tags: string[];
+  // The task's FILE ALLOWLIST: the glob/path entries its diff is permitted to touch
+  // (the DB stores them as raw JSON TEXT). Empty array when none (the CI scope gate is
+  // inert). Set at creation; enforced by the CI gate. See `allowlist` / triggerCi.
+  allowlist: string[];
   // The current status of each blocker by id (or "gone" if its row no longer
   // exists), so the webapp can render the dependency list without extra fetches.
   blockerStates: Record<string, string>;
@@ -96,7 +100,51 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
   // readiness view computes that). See gatesView. This keeps taskView synchronous (it's
   // published on every SSE task.updated), which a live git probe would break.
   gates: TaskGates;
+  // AGENT-LIVENESS VERDICT — the idle/stall dispatcher step's judgement, surfaced so the
+  // operator/CTO reads "working | stalled | dead" off the task view instead of probing
+  // herdr panes / /proc / the spinner / the file-count by hand. null whenever the task
+  // isn't a live `in_progress` agent. See livenessView for the (cheap) computation.
+  liveness: Liveness | null;
 };
+
+/**
+ * The AGENT-LIVENESS verdict on a live build agent (see TaskView.liveness). One of:
+ *  - `working` — the agent's run log was written within the idle window → producing output.
+ *  - `stalled` — alive (its claude process is in /proc) but its run log has gone quiet past
+ *                the idle threshold (the `idle` flag) → parked / waiting on a transient error.
+ *  - `dead`    — quiet AND no live claude process for the session → a dead shell (a herdr/host
+ *                restart killed it; the dispatcher auto-resumes these on its next tick).
+ * `evidence` is a short human-readable note on the signals behind the verdict.
+ */
+export type Liveness = {
+  state: "working" | "stalled" | "dead";
+  evidence: string;
+};
+
+/**
+ * Compute a task's agent-liveness verdict from its stored signals — null unless the task
+ * is a live `in_progress` agent. CHEAP enough for the hot taskView path: a `working`
+ * agent (idle flag clear → recent output PROVES it's alive) returns WITHOUT scanning
+ * /proc; the /proc liveness probe (claudeAlive) runs ONLY for an already-quiet (`idle`)
+ * agent — exactly the bounded "agent has gone quiet" case liveness.ts sanctions, never
+ * per-tick on a busy one. So a busy agent emitting frequent task.updated never hits /proc.
+ */
+export function livenessView(row: TaskRow): Liveness | null {
+  if (row.status !== "in_progress") return null;
+  if (!row.idle) {
+    return { state: "working", evidence: "run log written within the idle window — producing output" };
+  }
+  if (claudeAlive(row.session_id)) {
+    return {
+      state: "stalled",
+      evidence: "claude process is alive but its run log has been quiet past the idle threshold",
+    };
+  }
+  return {
+    state: "dead",
+    evidence: "no live claude process for this session — a dead shell (the dispatcher auto-resumes it)",
+  };
+}
 
 /**
  * The structured GATES block on a task view (see TaskView.gates). `ci` / `conformance`
@@ -273,6 +321,33 @@ export function validateTags(tags: unknown): string[] {
   const normalized = normalizeTags(tags);
   if (normalized.some((t) => t.length > 40)) {
     throw new HttpError(400, "each tag must be 40 characters or fewer");
+  }
+  return normalized;
+}
+
+/**
+ * Parse the `allowlist` JSON-array TEXT column into a clean string[]. Same shape as
+ * `tags`/`blocked_by` but named for the FILE-ALLOWLIST semantics — each entry is a
+ * glob/path the task is permitted to change (matched by fileAllowed). Empty when none.
+ */
+export function parseAllowlist(raw: string | null): string[] {
+  return parseBlockedBy(raw);
+}
+
+/**
+ * Validate + normalize the optional per-task `allowlist` field from an API/CLI body: an
+ * array of non-empty glob/path strings (each ≤ 200 chars), trimmed/de-duped, blanks
+ * dropped (reusing normalizeTags — identical cleaning, different semantics). Anything
+ * non-array-of-strings is a 400. Absent/null → [] (no allowlist → the gate is inert).
+ */
+export function validateAllowlist(allowlist: unknown): string[] {
+  if (allowlist === undefined || allowlist === null) return [];
+  if (!Array.isArray(allowlist) || allowlist.some((a) => typeof a !== "string")) {
+    throw new HttpError(400, "allowlist must be an array of strings");
+  }
+  const normalized = normalizeTags(allowlist);
+  if (normalized.some((a) => a.length > 200)) {
+    throw new HttpError(400, "each allowlist entry must be 200 characters or fewer");
   }
   return normalized;
 }
@@ -470,12 +545,14 @@ export function taskView(id: string): TaskView | null {
     review_notes,
     blocked_by,
     tags: parseTags(row.tags),
+    allowlist: parseAllowlist(row.allowlist),
     blockerStates: blockerStatesOf(blocked_by),
     deadBlockers: deadBlockerIds(blocked_by),
     estimate: taskEstimate(id),
     pending_responder: pendingResponder(row),
     worktree_path: dir ? git.worktreePath(dir.path, id) : null,
     gates: gatesView(row),
+    liveness: livenessView(row),
   };
 }
 
@@ -540,11 +617,13 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
       ...row,
       blocked_by,
       tags: parseTags(row.tags),
+      allowlist: parseAllowlist(row.allowlist),
       blockerStates: blockerStatesOf(blocked_by),
       deadBlockers: deadBlockerIds(blocked_by),
       pending_responder: pendingResponder(row),
       worktree_path: dirPath ? git.worktreePath(dirPath, row.id) : null,
       gates: gatesView(row),
+      liveness: livenessView(row),
     });
   }
   return out;
@@ -1066,6 +1145,7 @@ export async function createTask(
   planPreview: boolean = false,
   idea: boolean = false,
   versionBump: unknown = "patch",
+  allowlist: string[] = [],
 ): Promise<TaskView> {
   const dir = getWorkspace(workspaceId);
   if (!dir) throw new HttpError(404, `workspace not found: ${workspaceId}`);
@@ -1075,6 +1155,8 @@ export async function createTask(
   const taskModel = validateModel(model);
   // Validate + normalize the organizational labels (trim/dedupe/length-cap).
   const taskTags = validateTags(tags);
+  // Validate + normalize the per-task file allowlist (the CI scope gate; [] = inert).
+  const taskAllowlist = validateAllowlist(allowlist);
   const taskPriority = validatePriority(priority);
   const taskPlanPreview = validatePlanPreview(planPreview);
   const taskIdea = validateIdea(idea);
@@ -1125,13 +1207,14 @@ export async function createTask(
       model: taskModel,
       tags: taskTags,
       plan_preview: taskPlanPreview,
+      allowlist: taskAllowlist,
     },
     prompt,
   );
 
   db.query(
-    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, priority, plan_preview, version_bump, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     workspaceId,
@@ -1140,6 +1223,7 @@ export async function createTask(
     kind,
     taskModel,
     JSON.stringify(taskTags),
+    JSON.stringify(taskAllowlist),
     taskPriority,
     taskPlanPreview ? 1 : 0,
     taskVersionBump,
@@ -2499,6 +2583,57 @@ export async function answerTask(id: string, answer: string): Promise<TaskView> 
   return outcome.task;
 }
 
+/**
+ * STRUCTURED PLAN APPROVE/REJECT — the plan-approval responder step's distinct surface,
+ * separate from the freeform /answer used for in-implementation questions. Both resume the
+ * SAME agent session (the needs_info → inactive resume, via resumeWithAnswer); they differ
+ * only in the DECISION injected on resume:
+ *   - approvePlan → "your plan is APPROVED — implement it" (+ optional steering notes).
+ *   - rejectPlan  → "your plan is NOT approved — revise + re-submit via propose_plan" (with
+ *                   the required change-request feedback).
+ * Guarded on the task actually being at the plan-approval step (needs_info + plan_preview —
+ * pendingResponderStep === "plan-approval"); a 409 otherwise so the structured endpoints
+ * stay distinct from /answer (which accepts any needs_info). See the plan-preview protocol
+ * in taskmd.ts / the propose_plan MCP tool. Returns the post-transition task view.
+ */
+function requirePlanApproval(id: string): { row: TaskRow; dirPath: string } {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (pendingResponderStep(row) !== "plan-approval") {
+    throw new HttpError(
+      409,
+      `task is not awaiting plan approval (status=${row.status}` +
+        `${row.plan_preview ? "" : ", not a plan-preview task"}) — use /answer for an in-implementation question`,
+    );
+  }
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+  return { row, dirPath: dir.path };
+}
+
+export async function approvePlan(id: string, note?: string): Promise<TaskView> {
+  const { row, dirPath } = requirePlanApproval(id);
+  const steering = (note ?? "").trim();
+  const decision = steering
+    ? `Your implementation plan is APPROVED with the following steering notes:\n\n${steering}\n\n` +
+      `Proceed to IMPLEMENT the plan now (incorporating these notes), then call request_review when done.`
+    : `Your implementation plan is APPROVED. Proceed to IMPLEMENT it now, then call request_review when done.`;
+  await resumeWithAnswer(id, dirPath, row, decision);
+  return taskView(id)!;
+}
+
+export async function rejectPlan(id: string, note: string): Promise<TaskView> {
+  const { row, dirPath } = requirePlanApproval(id);
+  const feedback = (note ?? "").trim();
+  if (!feedback) throw new HttpError(400, "a plan change-request note is required");
+  const decision =
+    `Your implementation plan was NOT approved — changes are requested BEFORE you implement. ` +
+    `Revise the plan to address the following, then submit the REVISED plan again via the ` +
+    `propose_plan tool (do NOT start implementing yet):\n\n${feedback}`;
+  await resumeWithAnswer(id, dirPath, row, decision);
+  return taskView(id)!;
+}
+
 // --- CI GATE: build + test on the review transition ------------------------
 //
 // When a task enters `review`, butchr asynchronously builds the project and runs
@@ -2662,6 +2797,30 @@ export async function triggerCi(id: string): Promise<void> {
         });
         if (!check.ok) {
           result = { status: "fail", label: "changelog not updated", detail: check.reason };
+        }
+      }
+    }
+
+    // PER-TASK ALLOWLIST GATE: another opt-in gate concern layered ON TOP of the
+    // build/test command. When the task declares a file `allowlist`, every changed file
+    // must fall under it (the same fileAllowed membership rule the auto-merge allowlist
+    // uses); any STRAY file FAILS the gate — catching scope creep mechanically instead of
+    // by hand-diffing. Only checked once the prior gates are still green (a build/changelog
+    // failure is the priority signal); a fail here downgrades the badge to red, which also
+    // blocks auto-merge below. An empty allowlist is inert (every file allowed).
+    if (result.status === "pass") {
+      const allowlist = parseAllowlist(row.allowlist);
+      if (allowlist.length) {
+        const { files } = await git.diffStat(dir.path, id);
+        const stray = files.filter((f) => !fileAllowed(f, allowlist));
+        if (stray.length) {
+          result = {
+            status: "fail",
+            label: `${stray.length} file(s) outside allowlist`,
+            detail:
+              `changed files outside this task's allowlist [${allowlist.join(", ")}]:\n` +
+              stray.join("\n"),
+          };
         }
       }
     }

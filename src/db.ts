@@ -493,6 +493,17 @@ ensureColumn("tasks", "path_type", "TEXT");
 // front matter (taskmd.ts).
 ensureColumn("tasks", "tags", "TEXT");
 
+// PER-TASK FILE ALLOWLIST. A JSON-array TEXT column holding the glob/path entries a
+// task is ALLOWED to change — the same membership rule the auto-merge allowlist uses
+// (tasks.fileAllowed: a `dir/` prefix, a top-level `*.ext` glob, or an exact path).
+// When non-empty, the CI gate (tasks.triggerCi) FAILS the task if its diff touches any
+// file outside the set, so scope creep is caught mechanically instead of by hand-diffing.
+// NULL / "[]" means no allowlist (the gate is inert — every file is allowed), so existing
+// rows backfill to "no restriction" and non-allowlist tasks are unchanged. Set only at
+// creation (API/CLI/webapp), round-tripped in task.md's front matter. See tasks.ts
+// (parseAllowlist / validateAllowlist) + the `allowlist` gate block in triggerCi.
+ensureColumn("tasks", "allowlist", "TEXT");
+
 // PER-TASK DISPATCH PRIORITY. Higher = dispatched sooner: the dispatcher's queued
 // selection orders by `priority DESC, created_at ASC`, so a high-priority task
 // JUMPS the queue ahead of older lower-priority ones while ties stay FIFO (see
@@ -971,6 +982,11 @@ export type TaskRow = {
   // tasks.parseTags; surfaced as a real string[] on the serialized TaskView. Set
   // at creation; filtered on in the webapp + CLI. See the `tags` column comment.
   tags: string | null;
+  // Raw JSON-array TEXT of the task's FILE ALLOWLIST glob/path entries (or null). Parsed
+  // via tasks.parseAllowlist; surfaced as a real string[] on the serialized TaskView. When
+  // non-empty, the CI gate fails any diff that strays outside it. See the `allowlist`
+  // column comment + tasks.triggerCi.
+  allowlist: string | null;
   // CI GATE: build/test outcome captured on the review transition (see tasks.ts).
   // `ci_status` is 'running' | 'pass' | 'fail' | null; `ci_summary` carries a short
   // badge label on its first line plus an output tail. Surfaced on TaskView via the

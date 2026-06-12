@@ -216,6 +216,15 @@ function tagChips(t) {
     .join("")}</span>`;
 }
 
+// The agent-liveness verdict (working/stalled/dead) as a colored chip — the idle/stall
+// dispatcher step's judgement, so the operator reads it off the task view instead of
+// probing herdr panes / /proc / the spinner by hand. Reuses the status-chip color classes
+// (running=green, idle=amber, failed=red). Pass the t.liveness object.
+function livenessChip(lv) {
+  const cls = lv.state === "working" ? "has-running" : lv.state === "stalled" ? "has-idle" : "has-failed";
+  return `<span class="chip ${cls}">${esc(lv.state)}</span>`;
+}
+
 // The agent is live (attachable) whenever it has a herdr pane: a running/idle
 // `in_progress` build agent until butchr closes the pane. Gating on herdr_pane_id
 // mirrors the /terminal endpoint exactly — the button shows iff the attach would succeed.
@@ -2514,7 +2523,9 @@ async function renderTask(id) {
   const meta = el("div", { class: "panel" });
   meta.innerHTML = `<div class="meta-grid">
     <div class="k">status</div><div class="v">${esc(effStatus(t))}</div>
+    ${t.liveness ? `<div class="k">liveness</div><div class="v" title="${esc(t.liveness.evidence)}">${livenessChip(t.liveness)}</div>` : ""}
     ${Array.isArray(t.tags) && t.tags.length ? `<div class="k">tags</div><div class="v">${tagChips(t)}</div>` : ""}
+    ${Array.isArray(t.allowlist) && t.allowlist.length ? `<div class="k">allowlist</div><div class="v">${t.allowlist.map((a) => `<code>${esc(a)}</code>`).join(" ")}</div>` : ""}
     <div class="k">priority</div><div class="v">${esc(String(t.priority ?? 0))}</div>
     <div class="k">created</div><div class="v">${esc(t.created_at || "—")}</div>
     <div class="k">started</div><div class="v">${esc(t.started_at || "—")}</div>
@@ -2872,12 +2883,40 @@ async function renderTask(id) {
     wrap.appendChild(controls);
   }
 
-  // needs_info answer box — the agent paused mid-task by calling the MCP `raise`
-  // tool, so the task holds something the agent raised (a question, a suggested task
-  // change, or a suggested decomposition). Mirrors the review change-request box: show
-  // what was raised, take a response, and POST it. On answer butchr re-launches the
-  // SAME agent session via `--resume` with the response injected.
-  if (t.status === "needs_info") {
+  // needs_info — the agent paused by calling an MCP tool. Two distinct surfaces, keyed off
+  // whether this is a PLAN-PREVIEW task at the plan-approval step (t.plan_preview):
+  //   - plan-approval → a STRUCTURED plan review: Approve (resume to implement, with optional
+  //     steering) or Reject (send the plan back for revision with required feedback). These
+  //     POST /plan/{approve,reject}, distinct from the freeform /answer.
+  //   - any other needs_info → the freeform answer box (the agent raised a question / a
+  //     suggested task change / a decomposition). On answer butchr re-launches the SAME
+  //     agent session via `--resume` with the response injected.
+  if (t.status === "needs_info" && t.plan_preview) {
+    if (t.question) block("Proposed plan", t.question, wrap);
+    const planPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    planPanel.innerHTML = `
+      <h2 style="margin-top:0">Review plan</h2>
+      <p class="muted" style="margin:0 0 10px">Approve to let the agent implement this plan, or request changes with feedback — the agent revises and re-proposes. Both resume the same session in-context.</p>
+      <label class="field">
+        <span class="lbl">feedback (optional for approve · required to request changes)</span>
+        <textarea id="planNote" placeholder="On approve: optional steering notes folded into the implementation. On request-changes: what the plan must change before implementing."></textarea>
+      </label>
+      <div class="row">
+        <button class="btn success" id="planApprove">Approve plan</button>
+        <button class="btn danger-outline" id="planReject">Request changes</button>
+        <div class="spacer"></div>
+      </div>`;
+    planPanel.querySelector("#planApprove").addEventListener("click", (ev) => {
+      const note = (planPanel.querySelector("#planNote").value || "").trim();
+      submitTo(ev.target, "/plan/approve", note ? { note } : {}, "plan approved — agent implementing");
+    });
+    planPanel.querySelector("#planReject").addEventListener("click", (ev) => {
+      const note = (planPanel.querySelector("#planNote").value || "").trim();
+      if (!note) return toast("add feedback describing what the plan must change", true);
+      submitTo(ev.target, "/plan/reject", { note }, "plan changes requested — agent revising");
+    });
+    wrap.appendChild(planPanel);
+  } else if (t.status === "needs_info") {
     if (t.question) block("Agent raised", t.question, wrap);
     const answerPanel = el("div", { class: "panel", style: "margin-top:18px" });
     answerPanel.innerHTML = `

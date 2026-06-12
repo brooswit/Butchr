@@ -53,12 +53,14 @@ import {
   abortTask,
   allTasksView,
   answerTask,
+  approvePlan,
   approveTask,
   attentionList,
   confirmMajor,
   createTask,
   getTask,
   nudgeTask,
+  rejectPlan,
   rejectTask,
   requeueTask,
   setBlockedBy,
@@ -404,6 +406,9 @@ async function healthResponse(): Promise<Response> {
   const body = {
     status: healthy ? "ok" : "degraded",
     version: (pkg as { version?: string }).version ?? "unknown",
+    // Process id of THIS server. Lets `butchr restart --verify` confirm the relaunch by
+    // waiting for /health to answer with a DIFFERENT pid (a genuinely fresh process).
+    pid: process.pid,
     uptimeSec: Math.round(process.uptime()),
     // DISPATCHER PAUSE: true while NEW agent dispatch is halted (maintenance /
     // drain-only mode). Running/review/idle tasks are unaffected; this only gates
@@ -536,6 +541,23 @@ function setPauseResponse(value: boolean): Response {
 }
 route("POST", "/api/pause", async () => setPauseResponse(true));
 route("POST", "/api/resume", async () => setPauseResponse(false));
+
+// RESTART the server process. Responds IMMEDIATELY with the current pid/version, then
+// raises SIGTERM on ourselves so index.ts's graceful shutdown runs (stop loops + final DB
+// snapshot + clean exit) and the process supervisor relaunches us. butchr re-adopts running
+// tasks and re-drives gates on boot, so a restart resumes cleanly. REQUIRES a supervisor
+// that relaunches on exit (the deployed systemd unit's Restart=always — see deploy/
+// butchr.service); `butchr restart --verify` blocks on /health afterward and reports
+// honestly if the server does not come back (so a non-supervised run isn't left silently
+// down). The SIGTERM is deferred a tick so this response flushes to the client first.
+route("POST", "/api/restart", async () => {
+  setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
+  return json({
+    restarting: true,
+    pid: process.pid,
+    version: (pkg as { version?: string }).version ?? "unknown",
+  });
+});
 
 // Operational metrics for the webapp's Metrics view. Read-only aggregates over
 // all tasks (see db.computeMetrics): status counts, merged-per-day throughput,
@@ -750,6 +772,9 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
     body.plan_preview ?? false,
     idea,
     body.version_bump ?? "patch",
+    // Optional allowlist: an array of glob/path entries the task's diff may touch; when
+    // non-empty the CI gate fails a diff that strays outside it. Validated inside createTask.
+    body.allowlist ?? [],
   );
   return json(view, 201);
 });
@@ -888,6 +913,21 @@ route("POST", "/api/tasks/:id/reject", async (req, p) => {
 route("POST", "/api/tasks/:id/answer", async (req, p) => {
   const body = await readJson(req);
   return json(await answerTask(p.id!, body.answer));
+});
+
+// STRUCTURED PLAN APPROVE/REJECT — the plan-approval responder step's own surface, distinct
+// from the freeform /answer used for in-implementation questions. /plan/approve resumes the
+// agent to IMPLEMENT (an optional `note`/`feedback` adds steering); /plan/reject sends the
+// plan back for revision with the required change-request feedback (the agent re-proposes via
+// propose_plan). Both 409 unless the task is at the plan-approval step (needs_info + plan_preview).
+// See tasks.approvePlan / tasks.rejectPlan.
+route("POST", "/api/tasks/:id/plan/approve", async (req, p) => {
+  const body = await readJson(req).catch(() => ({}));
+  return json(await approvePlan(p.id!, body.note ?? body.feedback));
+});
+route("POST", "/api/tasks/:id/plan/reject", async (req, p) => {
+  const body = await readJson(req);
+  return json(await rejectPlan(p.id!, body.note ?? body.feedback));
 });
 
 // Submit the SPEC for a task parked in `idea` (a brief awaiting a spec). The

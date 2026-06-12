@@ -34,6 +34,8 @@ COMMANDS
       [--priority N]                Dispatch priority (higher = sooner; default 0).
       [--plan]                      Plan-preview gate: the agent proposes a plan and
                                     pauses for your approval before writing code.
+      [--allowlist a,b]             File allowlist (glob/path entries, comma-separated):
+                                    the CI gate FAILS if the diff strays outside it.
       [--bump patch|minor|major]    Declared semver bump applied at merge in a
                                     release_mode workspace (default patch; inert
                                     otherwise). A major bump needs confirm-major x2.
@@ -48,11 +50,20 @@ COMMANDS
                                     resets the streak. Approve alone only PARKS a major.
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   answer <id> -m <text>           Answer a task awaiting input (resumes the agent).
+  plan-approve <id> [-m <text>]   Approve a plan-preview task's proposed plan (resumes the
+                                    agent to implement; -m adds optional steering notes).
+  plan-reject <id> -m <text>      Reject a proposed plan with required feedback; the agent
+                                    revises and re-proposes (distinct from answer).
   spec <id> [-m <text>]           Submit the spec for an idea task (-m, or pipe stdin).
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   nudge <id> [-m <text>]          Nudge an idle agent: -m sends guidance, else 'continue'.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
   priority <id> <N>               Set a task's dispatch priority (higher = sooner).
+  wait <id> --until <state>       Block until the task reaches <state> (e.g. in_review,
+       [--timeout <sec>]            merged, idle); exits non-zero on a timeout or if the
+       [--interval <sec>]           task reaches a DIFFERENT terminal state first.
+  restart [--verify]              Restart the butchr server (POST /api/restart). --verify
+          [--timeout <sec>]        blocks until it comes back healthy (db + tick green).
   selftest [--workspace <id|path>]      Smoke-test the FULL lifecycle with a throwaway
      [--merge] [--timeout <sec>]    probe in the sandbox (dispatch→review→cleanup).
                                     --merge also approves+merges then rolls it back.
@@ -73,10 +84,10 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--workspace", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set", "--bump"]);
+const VALUE_FLAGS = new Set(["--workspace", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set", "--bump", "--allowlist", "--until", "--interval"]);
 
 // Boolean flags: present → true, consume no following token.
-const BOOLEAN_FLAGS = new Set(["--merge", "--clear", "--plan"]);
+const BOOLEAN_FLAGS = new Set(["--merge", "--clear", "--plan", "--verify"]);
 
 function parseArgs(argv) {
   const positionals = [];
@@ -382,7 +393,11 @@ async function cmdNew(positionals, flags) {
   const dirId = await resolveWorkspaceId(dir);
   const blockedBy = parseIdList(flags["blocked-by"]);
   const tags = parseIdList(flags.tag);
-  const reqBody = { blocked_by: blockedBy, tags };
+  // Optional file allowlist (comma-separated glob/path entries) — the CI gate fails a diff
+  // that strays outside it. Omitted (empty) leaves the gate inert. Reuses parseIdList's
+  // split/trim/drop-blanks (the list shape is identical, just different semantics).
+  const allowlist = parseIdList(flags.allowlist);
+  const reqBody = { blocked_by: blockedBy, tags, allowlist };
   // Optional dispatch priority — higher dispatches sooner; omit to default to 0.
   if (flags.priority !== undefined) reqBody.priority = parsePriority(flags.priority);
   // Optional plan-preview gate — the agent proposes a plan and pauses for operator
@@ -433,7 +448,11 @@ async function cmdShow(positionals, flags) {
     `status:    ${t.status}${t.idle ? " (idle)" : ""}${t.conflict ? " (conflict)" : ""}`,
     `ci:        ${ciCell(t)}`,
   ];
+  // Agent-liveness verdict (working/stalled/dead) for a live in_progress agent — read it
+  // here instead of probing herdr panes / /proc / the spinner by hand.
+  if (t.liveness) lines.push(`liveness:  ${t.liveness.state} — ${t.liveness.evidence}`);
   if (t.tags && t.tags.length) lines.push(`tags:      ${t.tags.join(", ")}`);
+  if (t.allowlist && t.allowlist.length) lines.push(`allowlist: ${t.allowlist.join(", ")}`);
   if (t.blocked_by && t.blocked_by.length) {
     lines.push(`blocked_by: ${t.blocked_by.join(", ")}`);
     if (t.deadBlockers && t.deadBlockers.length) {
@@ -504,6 +523,27 @@ async function cmdAnswer(positionals, flags) {
   if (!answer) fail("answer: missing -m <text>");
   const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/answer`, { answer });
   return emit(flags, t, `answered ${id} → ${t.status} (agent will resume with your answer)\n`);
+}
+
+// Structured plan-approval: approve a plan-preview task's proposed plan (the agent resumes
+// to implement). An optional -m adds steering notes. Distinct from `answer` — it 409s unless
+// the task is at the plan-approval step. See POST /api/tasks/:id/plan/approve.
+async function cmdPlanApprove(positionals, flags) {
+  const id = requireId(positionals, "plan-approve");
+  const body = flags.message ? { note: flags.message } : {};
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/plan/approve`, body);
+  const how = flags.message ? "approved with steering notes" : "approved";
+  return emit(flags, t, `plan ${how} for ${id} → ${t.status} (agent will implement)\n`);
+}
+
+// Structured plan-rejection: send a proposed plan back for revision with required feedback
+// (the agent re-proposes via propose_plan). See POST /api/tasks/:id/plan/reject.
+async function cmdPlanReject(positionals, flags) {
+  const id = requireId(positionals, "plan-reject");
+  const note = flags.message;
+  if (!note) fail("plan-reject: missing -m <feedback>");
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/plan/reject`, { note });
+  return emit(flags, t, `plan rejected for ${id} → ${t.status} (agent will revise + re-propose)\n`);
 }
 
 async function cmdSpec(positionals, flags) {
@@ -642,6 +682,97 @@ async function cmdSelftest(flags) {
   if (!result.ok) process.exit(1);
 }
 
+// ---- wait / restart (blocking ergonomics) ---------------------------------
+
+/** Sleep helper for the polling loops below. */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The terminal task states (mirrors src/db.ts isTerminal). `wait` fails fast if a task
+// reaches one of these that ISN'T the awaited state — it'll never advance further.
+const TERMINAL_STATES = new Set(["merged", "aborted", "rolled_back", "failed"]);
+
+/** Parse a `--timeout/--interval <seconds>` flag into ms, or fall back to a default. */
+function parseSeconds(raw, name, fallbackMs) {
+  if (raw === undefined) return fallbackMs;
+  const secs = Number(raw);
+  if (!Number.isFinite(secs) || secs <= 0) fail(`${name} must be a positive number of seconds`);
+  return Math.floor(secs * 1000);
+}
+
+// Block until a task reaches `--until <state>` (replacing hand-rolled curl+sleep loops).
+// `<state>` matches the task's status, plus the synthetic `idle` (a running agent gone
+// quiet). Exits 0 when reached; non-zero on a timeout or if the task lands in a DIFFERENT
+// terminal state first. Polls GET /api/tasks/:id every `--interval` (default 2s).
+async function cmdWait(positionals, flags) {
+  const id = requireId(positionals, "wait");
+  const until = (flags.until ?? "").trim();
+  if (!until) fail("wait: missing --until <state>");
+  const timeoutMs = parseSeconds(flags.timeout, "wait: --timeout", 600000);
+  const intervalMs = parseSeconds(flags.interval, "wait: --interval", 2000);
+  const deadline = Date.now() + timeoutMs;
+  // `idle` is a flag on a running agent, not a status — match it explicitly.
+  const reached = (t) => (until === "idle" ? t.status === "in_progress" && t.idle : t.status === until);
+  for (;;) {
+    const t = await api("GET", `/api/tasks/${encodeURIComponent(id)}`);
+    if (reached(t)) {
+      return emit(flags, t, `${id} reached ${until} (status=${t.status}${t.idle ? ", idle" : ""})\n`);
+    }
+    // A terminal state that isn't what we're waiting for → it will never advance; bail now.
+    if (TERMINAL_STATES.has(t.status) && t.status !== until) {
+      flags.json && printJson(t);
+      fail(`wait: ${id} reached terminal state '${t.status}' while waiting for '${until}'`);
+    }
+    if (Date.now() >= deadline) {
+      flags.json && printJson(t);
+      fail(`wait: timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${id} to reach '${until}' (status=${t.status})`);
+    }
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+  }
+}
+
+// Fetch /health directly (it 503s when degraded without an `error` body, so don't route it
+// through api()). Returns the parsed body + http status, or null if unreachable.
+async function fetchHealth() {
+  try {
+    const res = await fetch(BASE + "/health");
+    return { body: await res.json(), status: res.status };
+  } catch {
+    return null;
+  }
+}
+
+// Restart the butchr server (POST /api/restart → the server SIGTERMs itself; its supervisor
+// relaunches it). --verify blocks until /health answers healthy from a FRESH process (a
+// different pid than before the restart), then reports the db/tick/herdr self-check. Without
+// --verify it just fires the restart and returns. Exits non-zero if --verify times out.
+async function cmdRestart(flags) {
+  const before = await fetchHealth();
+  const oldPid = before?.body?.pid ?? null;
+  const r = await api("POST", "/api/restart", {});
+  if (!flags.verify) {
+    return emit(flags, r, `restart requested (pid ${r.pid}, v${r.version}); server is going down + relaunching\n`);
+  }
+  const timeoutMs = parseSeconds(flags.timeout, "restart: --timeout", 60000);
+  const deadline = Date.now() + timeoutMs;
+  // Wait for a healthy /health from a NEW process: status 200 (db ok + tick alive) AND a pid
+  // that changed from before the restart (so we don't read the old process on its way down).
+  for (;;) {
+    await sleep(1000);
+    const h = await fetchHealth();
+    if (h && h.status === 200 && h.body?.pid && (oldPid === null || h.body.pid !== oldPid)) {
+      const herdrNote = h.body.herdr?.reachable ? "" : " (warning: herdr unreachable)";
+      return emit(
+        flags,
+        { restarted: true, ...h.body },
+        `restarted ✓ — healthy (pid ${h.body.pid}, v${h.body.version}, db ok, tick alive)${herdrNote}\n`,
+      );
+    }
+    if (Date.now() >= deadline) {
+      fail(`restart: server did not come back healthy within ${Math.round(timeoutMs / 1000)}s — check the supervisor / logs`);
+    }
+  }
+}
+
 // ---- entrypoint -----------------------------------------------------------
 
 async function main() {
@@ -677,6 +808,14 @@ async function main() {
       return cmdReject(positionals, flags);
     case "answer":
       return cmdAnswer(positionals, flags);
+    case "plan-approve":
+      return cmdPlanApprove(positionals, flags);
+    case "plan-reject":
+      return cmdPlanReject(positionals, flags);
+    case "wait":
+      return cmdWait(positionals, flags);
+    case "restart":
+      return cmdRestart(flags);
     case "spec":
       return cmdSpec(positionals, flags);
     case "requeue":
