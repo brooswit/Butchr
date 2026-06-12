@@ -93,6 +93,13 @@ describe("a normal task enters 'ready' (in_progress) directly", () => {
     const prompt = taskmdMod.renderAgentPrompt(REPO_ROOT, taskmdMod.readTaskMd(REPO_ROOT, view.id));
     expect(prompt).toContain("request_review");
     expect(prompt).not.toContain("IDEA/SPEC");
+    // The build agent is told to self-drive to completion (the baked-in "keep going"
+    // persistence) and to STOP only on request_review or ask/raise — replacing the
+    // external "continue" nudge.
+    expect(prompt).toContain("Keep going until the task is done");
+    expect(prompt).toContain("AUTONOMOUSLY and CONTINUOUSLY");
+    expect(prompt).toContain("SELF-VERIFY");
+    expect(prompt).toContain("`ask`/`raise`");
   });
 
   test("validateIdea coerces/validates the flag", () => {

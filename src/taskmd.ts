@@ -51,6 +51,22 @@ const REVIEW_BANNER = "<!-- appended by butchr on each rejection -->";
 // returns at once, after which the agent should EXIT. butchr owns the rest of the
 // lifecycle (merge on approve, resume-with-notes on reject).
 const REVIEW_PROTOCOL = [
+  "# Keep going until the task is done",
+  "",
+  "Work AUTONOMOUSLY and CONTINUOUSLY through this task to completion. Keep going on",
+  "your own — do NOT stop, pause, or sit idle partway, and do NOT ask for confirmation",
+  "to proceed on work that is already specified. After finishing one step, immediately",
+  "continue to the next; drive the whole task in one self-sustained loop without",
+  "waiting to be nudged.",
+  "",
+  "Before submitting, SELF-VERIFY the work is genuinely COMPLETE: build and run the",
+  "tests where applicable, and confirm every requirement is met.",
+  "",
+  "ONLY end your turn when you either (a) call `request_review` because the task is",
+  "fully done, or (b) call `ask`/`raise` because you are genuinely blocked on a",
+  "decision. Otherwise, keep working. Once the task IS complete and you have called",
+  "`request_review`, STOP — do not re-submit or loop again.",
+  "",
   "# How to submit your work for review",
   "",
   "When you have completed ALL of the requested work, call the `request_review`",
