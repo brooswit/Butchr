@@ -80,8 +80,8 @@ something mechanical):
 
 | state | kind | meaning |
 |-------|------|---------|
-| `idea` | agent (ceo-agent) | a one-line brief; first dispatch runs the CTO-fork spec generator |
-| `spec_review` | feedback | a generated spec awaiting approval → `inactive`, or request-changes → `idea` |
+| `idea` | feedback (brief) | a one-line brief **awaiting a spec**; butchr runs no agent — it pushes a `spec requested` channel event and waits for the spec-generation responder to submit a spec (`POST /api/tasks/:id/spec`) → `spec_review` |
+| `spec_review` | feedback | a submitted spec awaiting approval → `inactive`, or request-changes → `idea` |
 | `blocked` | idle | waiting on `blocked_by` dependencies; auto-unblocks to `inactive` |
 | `needs_info` | feedback | an agent asked a question; on answer it resumes (→ `inactive`) |
 | `inactive` | agent (workspace) | **READY** — queued for the dispatcher, no live agent yet |
@@ -341,6 +341,7 @@ butchr new <workspace> -m "<prompt>"   # create a task; <workspace> is a workspa
 butchr show <id>                       # status, ci, summary, review notes, blockers
 butchr approve <id>                    # approve a task in review (merges its branch)
 butchr reject <id> -m "<note>"         # send a reviewed task back for rework
+butchr spec <id> -m "<spec>"           # submit the spec for an idea task (-m, or pipe stdin)
 butchr requeue <id>                    # re-queue a failed/stuck task for a fresh dispatch
 butchr block <id> --on id,id           # replace blocked_by (use --on '' to clear)
 butchr backups                         # list local DB snapshots (OFFLINE)
@@ -603,7 +604,6 @@ src/
   dispatcher.ts   dispatcher loop + per-task fallback watcher + workspace self-heal
   conformance.ts  read-only review gate (judge diff vs prompt)
   expand.ts       brief → task-prompt expander
-  cto.ts          idea → task-spec generator (CTO-fork)
   server.ts       REST + SSE + MCP + static file serving (the route table)
 public/
   index.html / style.css / app.js   vanilla webapp
@@ -769,7 +769,7 @@ decision that applies to **all** of that workspace's tasks) and **defaults every
 
 | Step | Responds to |
 |------|-------------|
-| `spec-generation` | Turning an idea/brief into a spec. |
+| `spec-generation` | Turning an idea/brief into a spec (the `idea` state). **Wired:** see below. |
 | `spec-approval` | Approving a generated spec before it builds (the `spec_review` state). |
 | `plan-approval` | Approving a plan-preview plan before code is written (the plan-preview gate). |
 | `diff-review` | Reviewing the finished diff before it merges (the `in_review` state). |
@@ -780,8 +780,19 @@ It is stored per workspace as a single JSON column (`workspaces.step_responders`
 = all `cto`), read through `workspaces.responderFor(workspaceId, step)` /
 `resolveStepResponders(workspaceId)`, and set via **`GET`/`PATCH /api/workspaces/:id`**
 (the `GET` returns the **fully-resolved** map — every step present with its effective
-value) or the webapp's **Step responders** panel. **This is configuration only for now —
-nothing routes off it yet; the routing that consumes it lands in follow-up work.**
+value) or the webapp's **Step responders** panel.
+
+**`spec-generation` is wired.** When an `idea` task is created it does **not** fork a
+spec generator — it parks in `idea` (a feedback/waiting state) and butchr pushes a
+`spec requested` event on the one-way CTO channel carrying the brief + task id. The
+responder writes the spec and submits it via **`POST /api/tasks/:id/spec { spec }`**
+(`tasks.submitSpec` → the unified feedback path), which rewrites the prompt brief → spec
+and advances the task to `spec_review`. The two responders use the **same endpoint** and
+differ only in *surface*: for `cto` the persistent CTO agent reacts to the channel push
+(it checks `responderFor(workspace, 'spec-generation')` and acts only when it is `cto`);
+for `user` the webapp renders a "write the spec" form on the idea task. The endpoint stays
+open to both, so a human can always submit even on a `cto` workspace. The other steps are
+configuration-only for now — routing that consumes them lands in follow-up work.
 
 ---
 

@@ -77,7 +77,7 @@ function chip(status) {
 // STATE-KIND helpers — mirror STATE_META from src/db.ts so the UI can show whether
 // a state is agent-driven, feedback-awaiting, or idle (terminal/blocked).
 const STATE_KIND = {
-  idea: "agent",
+  idea: "feedback",
   spec_review: "feedback",
   blocked: "idle",
   needs_info: "feedback",
@@ -91,12 +91,12 @@ const STATE_KIND = {
   aborted: "idle",
 };
 const AGENT_TYPE = {
-  idea: "ceo-agent",
   inactive: "workspace-agent",
   in_progress: "workspace-agent",
 };
 // What an operator is awaiting for each feedback state (shown as a chip hint).
 const AWAITED_LABEL = {
+  idea: "a spec",
   spec_review: "spec approval",
   in_review: "diff review",
   needs_info: "response to raised item",
@@ -805,7 +805,8 @@ async function renderWorkspace(id) {
   launch.appendChild(el("small", { class: "muted" },
     `Tasks run concurrently, each in its own worktree. ${queueLine(tasks)}`));
   // The two creation entry points sit together on the right: the full New-task form,
-  // and the lightweight "Add idea" path (jot a brief; butchr specs it unattended).
+  // and the lightweight "Add idea" path (jot a brief; butchr parks it awaiting a spec
+  // from the workspace's spec-generation responder).
   const launchBtns = el("div", { class: "row", style: "gap:8px" });
   const ideaBtn = el("button", { class: "btn ghost", id: "add-idea" }, "Add idea");
   ideaBtn.addEventListener("click", () => openAddIdeaModal(id));
@@ -1053,7 +1054,7 @@ function openNewTaskModal(workspaceId) {
         </label>
         <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
           <input type="checkbox" id="nt-idea" />
-          <span class="lbl" style="margin:0">New Idea — submit the one-line idea above as-is; butchr drafts the spec automatically (CTO-fork) and queues it as ready (no Expand or prompt needed)</span>
+          <span class="lbl" style="margin:0">New Idea — submit the one-line idea above as-is; butchr parks it awaiting a spec and requests one from this workspace's spec-generation responder (the CTO agent, or you in the webapp), then it goes to spec review (no Expand or prompt needed)</span>
         </label>
       </div>
     </div>`;
@@ -1156,9 +1157,9 @@ function openNewTaskModal(workspaceId) {
 
   create.addEventListener("click", async () => {
     // NEW IDEA mode: the one-line idea box IS the submission (the operator gives a brief,
-    // not a spec). butchr's CTO-fork drafts the spec automatically, so neither Expand nor
-    // a full prompt is required — fall back to the prompt textarea only if the idea box is
-    // empty. Normal mode requires the prompt textarea as before.
+    // not a spec). The task parks awaiting a spec from the workspace's spec-generation
+    // responder, so neither Expand nor a full prompt is required — fall back to the prompt
+    // textarea only if the idea box is empty. Normal mode requires the prompt textarea as before.
     const idea = ideaEl.checked;
     const brief = briefEl.value.trim();
     const prompt = idea ? (brief || promptEl.value.trim()) : promptEl.value.trim();
@@ -1202,20 +1203,21 @@ function openNewTaskModal(workspaceId) {
 }
 
 // ---------- add-idea modal ----------
-// The UNATTENDED idea path: jot a one-line brief and let butchr spec it. Deliberately
-// minimal — just a brief + Submit — in contrast to the full New-task modal. POSTs
-// { prompt: <brief>, idea: true } to the existing create endpoint; that task's first
-// dispatch runs the CTO-fork spec generator, which turns the brief into a full spec
-// and parks it at spec_review for approval. The workspace is already scoped here, so
-// no selector is needed; the new idea task surfaces via the SSE-driven re-render.
+// The lightweight idea path: jot a one-line brief and let the spec-generation responder
+// spec it. Deliberately minimal — just a brief + Submit — in contrast to the full
+// New-task modal. POSTs { prompt: <brief>, idea: true } to the existing create endpoint;
+// the task PARKS in `idea` (a `spec requested` event is pushed on the CTO channel) until
+// the workspace's spec-generation responder (the CTO agent, or a human via the task's
+// spec form) submits a spec, advancing it to spec_review. The workspace is already scoped
+// here, so no selector is needed; the new idea task surfaces via the SSE-driven re-render.
 function openAddIdeaModal(workspaceId) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
     <label class="field" style="margin-bottom:6px">
-      <span class="lbl">idea — a one-line brief; butchr drafts the full spec automatically and parks it for your approval</span>
+      <span class="lbl">idea — a one-line brief; butchr requests a spec from this workspace's spec-generation responder (the CTO agent, or you), then parks it for spec review</span>
       <textarea id="ai-brief" placeholder="Describe the idea in a sentence or two…"></textarea>
     </label>
-    <small class="hint muted">No prompt or expansion needed — record the idea and butchr's spec generator turns it into a reviewable spec.</small>`;
+    <small class="hint muted">No prompt or expansion needed — record the idea and the spec-generation responder turns it into a reviewable spec.</small>`;
   const briefEl = body.querySelector("#ai-brief");
 
   const foot = el("div", { class: "m-foot" });
@@ -2605,13 +2607,39 @@ async function renderTask(id) {
     wrap.appendChild(controls);
   }
 
-  // spec_review — the CEO agent generated a spec; operator approves to start the
-  // workspace agent, or requests changes to revise the spec (back to idea).
+  // idea — a brief AWAITING a spec. butchr runs NO agent for it: it pushes a `spec
+  // requested` event on the CTO channel and waits for the workspace's spec-generation
+  // responder to submit a spec (POST /tasks/:id/spec), which advances it to spec_review.
+  // The responder (cto/user) is per-workspace config and only frames this UI — the editor
+  // is ALWAYS available so a human can submit, but for a `cto` workspace the CTO agent
+  // normally handles it from the channel push.
+  if (t.status === "idea") {
+    const specResponder = (dir && dir.step_responders && dir.step_responders["spec-generation"]) || "cto";
+    if (t.review_note) block("Spec changes requested", t.review_note, wrap);
+    const specPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    specPanel.innerHTML = `
+      <h2 style="margin-top:0">${specResponder === "user" ? "Write the spec" : "Spec requested"}</h2>
+      <p class="muted" style="margin:0 0 10px">${specResponder === "user"
+        ? "This workspace's spec-generation responder is <strong>you (user)</strong>. Turn the brief above into a concrete, repo-grounded spec and submit it to advance the task to spec review."
+        : "The <strong>CTO agent</strong> is this workspace's spec-generation responder and will write the spec from the brief (it was notified on the CTO channel). You can also write and submit one yourself below."}</p>
+      <label class="field" style="margin-bottom:6px">
+        <span class="lbl">spec (required)</span>
+        <textarea id="spec" placeholder="Write the full spec for this brief — what to build, where, and how it should be verified."></textarea>
+      </label>
+      <div class="row">
+        <button class="btn success" id="submitSpec">Submit spec</button>
+        <div class="spacer"></div>
+      </div>`;
+    wrap.appendChild(specPanel);
+  }
+
+  // spec_review — a spec was submitted (by the CTO agent or a human); operator approves
+  // to start the workspace agent, or requests changes to revise the spec (back to idea).
   if (t.status === "spec_review") {
     const controls = el("div", { class: "panel", style: "margin-top:18px" });
     controls.innerHTML = `
       <h2 style="margin-top:0">Review spec</h2>
-      <p class="muted" style="margin:0 0 10px">The CTO-fork agent has drafted a spec from the idea. Approve to dispatch the workspace agent, or request changes to revise the spec.</p>
+      <p class="muted" style="margin:0 0 10px">A spec was submitted for this idea. Approve to dispatch the workspace agent, or request changes to revise the spec.</p>
       <label class="field" style="margin-bottom:6px">
         <span class="lbl">change request note (required if requesting changes)</span>
         <textarea id="rnote" placeholder="What needs to change in the spec?"></textarea>
@@ -2719,6 +2747,15 @@ async function renderTask(id) {
       if (!note) return toast("add a note or at least one inline comment", true);
       action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
         { success: "changes requested", onDone: () => backToWorkspace(t.workspace_id) });
+    });
+  }
+
+  if (t.status === "idea") {
+    document.getElementById("submitSpec").addEventListener("click", (ev) => {
+      const spec = (document.getElementById("spec").value || "").trim();
+      if (!spec) return toast("a spec is required", true);
+      action(ev.target, () => api("POST", "/tasks/" + id + "/spec", { spec }),
+        { success: "spec submitted ✓ — awaiting approval", onDone: () => backToWorkspace(t.workspace_id) });
     });
   }
 

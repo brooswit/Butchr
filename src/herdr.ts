@@ -571,8 +571,8 @@ export async function startAgentInFreshTab(
 }
 
 /**
- * Run one HEADLESS, read-only agent invocation (the CTO-fork spec generator, the
- * conformance reviewer, the brief expander). Unlike the interactive agent these do
+ * Run one HEADLESS, read-only agent invocation (the conformance reviewer, the brief
+ * expander). Unlike the interactive agent these do
  * NOT go through a herdr PTY — they are plain child processes — but they live on
  * the backend so ALL Claude execution sits behind the one swappable seam.
  *

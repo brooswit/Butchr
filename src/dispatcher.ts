@@ -26,8 +26,7 @@ import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
-import { generateSpec } from "./cto.ts";
+import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -50,7 +49,6 @@ function sanitizeTypescript(raw: string): string {
 }
 
 const dispatching = new Set<string>(); // task ids mid-dispatch
-const ideating = new Set<string>(); // idea task ids mid spec-generation
 const watching = new Set<string>(); // task ids with an active watcher
 // Task ids whose watcher has been told to bail WITHOUT moving the task to
 // review — set by abortTask, consumed (and cleared) by the watcher.
@@ -347,26 +345,6 @@ export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
     .all(nowStr);
 }
 
-/**
- * The tick's IDEA gate: `idea`-state tasks eligible to run the CTO-fork spec generator
- * right now (highest-PRIORITY first, then oldest-first), honoring the same backoff
- * (next_dispatch_at) and PAUSE rules as the queued gate — generating a spec is "new
- * work", so maintenance mode (drain-only) suppresses it too. An idea task whose spec
- * generation keeps failing waits out markSpecGenFailure's backoff before retrying.
- */
-export function selectIdeaForDispatch(nowStr: string): QueuedRow[] {
-  if (paused) return [];
-  return db
-    .query<QueuedRow, [string]>(
-      `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
-         FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
-         WHERE t.status='idea'
-           AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
-         ORDER BY t.priority DESC, t.created_at ASC`,
-    )
-    .all(nowStr);
-}
-
 let ticking = false;
 async function tick(): Promise<void> {
   if (ticking) return;
@@ -410,19 +388,10 @@ async function tick(): Promise<void> {
     // selectQueuedForDispatch.
     const nowStr = new Date().toISOString();
 
-    // IDEA pass: run the CTO-fork spec generator for any eligible `idea`-state task
-    // (front of the unified pipeline). This is NOT a build agent — it turns the brief
-    // into a spec headlessly and advances the task to `queued` ('ready'), where the
-    // queued pass below dispatches it normally. Suppressed while paused (see
-    // selectIdeaForDispatch). The `ideating` set guards against double-running the same
-    // idea across overlapping ticks (mirrors `dispatching` for build tasks).
-    for (const row of selectIdeaForDispatch(nowStr)) {
-      if (ideating.has(row.id)) continue;
-      const dir = dirOf(row);
-      ideating.add(row.id);
-      // Fire-and-forget, concurrently.
-      generateSpecForIdea(dir, row).finally(() => ideating.delete(row.id));
-    }
+    // NOTE: `idea`-state tasks are NOT dispatched. An idea is a WAITING/feedback state —
+    // it holds a brief and waits for the spec-generation responder (the CTO agent or a
+    // human) to submit a spec via POST /api/tasks/:id/spec, which advances it to
+    // spec_review. The dispatcher only launches build agents for `inactive` tasks below.
 
     // The queued tasks eligible to launch this tick — empty while dispatch is
     // PAUSED (drain-only maintenance mode), so no new agent starts even though the
@@ -444,42 +413,6 @@ async function tick(): Promise<void> {
     }
   } finally {
     ticking = false;
-  }
-}
-
-/**
- * Run the CTO-fork spec generator for one `idea`-state task and advance it. Reads the
- * task's brief (its initial prompt) from task.md, ensures the worktree exists so the spec
- * writer has the repo to ground against, then calls generateSpec (src/cto.ts):
- *  - SUCCESS → promoteIdeaToReady rewrites the task.md prompt to the spec and advances the
- *    task to `queued` ('ready') / `blocked` (if it has unmerged blockers).
- *  - FAILURE (null spec, or a thrown error) → markSpecGenFailure applies the bounded
- *    retry/backoff and gives up to `failed` at the cap.
- * Best-effort: never throws (the tick must not break on one idea's failure).
- */
-export async function generateSpecForIdea(dir: WorkspaceRow, task: TaskRow): Promise<void> {
-  try {
-    // Ensure the worktree exists (idempotent) so the read-only spec writer can ground
-    // itself against the repo's CONTRIBUTING.md / code.
-    const worktree = await git.createWorktree(dir.path, task.id);
-    const doc = readTaskMd(dir.path, task.id);
-    const brief = doc.prompt;
-    // On a REVISE round (the operator requested spec changes via spec_review →
-    // request_changes), the accumulated review notes carry what to change; thread them
-    // into the generator so the regenerated spec addresses the feedback.
-    const notes = doc.reviewNotes?.trim() || undefined;
-    const spec = await generateSpec({ brief, cwd: worktree, taskId: task.id, notes });
-    if (spec && spec.trim()) {
-      promoteIdeaToSpecReview(task.id, spec);
-    } else {
-      markSpecGenFailure(
-        task.id,
-        "the CTO-fork spec generator produced no spec (disabled, timed out, " +
-          "errored, or returned empty output)",
-      );
-    }
-  } catch (e) {
-    markSpecGenFailure(task.id, (e as Error).message);
   }
 }
 

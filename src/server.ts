@@ -47,6 +47,7 @@ import {
   requeueTask,
   setBlockedBy,
   setPriority,
+  submitSpec,
   taskChainEstimate,
   taskDiff,
   taskEstimate,
@@ -654,10 +655,10 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
   // the agent proposes a plan and pauses for operator approval before writing code
   // (see tasks.createTask / taskmd.renderAgentPrompt). Validated inside createTask.
   // Optional idea: true creates the task in the unified pipeline's FRONT state `idea` —
-  // the `prompt` is treated as a one-line operator BRIEF, and the task's first dispatch
-  // runs the CTO-fork spec generator (src/cto.ts) to turn the brief into a spec before it
-  // advances to `queued` ('ready') and dispatches the build agent. Omitted/false is
-  // today's ordinary work task, fully backward-compatible. We also honor a legacy
+  // the `prompt` is treated as a one-line operator BRIEF, and the task WAITS (no agent)
+  // for the spec-generation responder to submit a spec via POST /api/tasks/:id/spec,
+  // which advances it to `spec_review`. Omitted/false is today's ordinary work task,
+  // fully backward-compatible. We also honor a legacy
   // `stage: 'idea'` body (the retracted idea→spec→build axis) as `idea: true` so older
   // clients keep working. Validated inside createTask.
   const idea = body.idea === true || body.stage === "idea";
@@ -776,6 +777,18 @@ route("POST", "/api/tasks/:id/reject", async (req, p) => {
 route("POST", "/api/tasks/:id/answer", async (req, p) => {
   const body = await readJson(req);
   return json(await answerTask(p.id!, body.answer));
+});
+
+// Submit the SPEC for a task parked in `idea` (a brief awaiting a spec). The
+// spec-generation responder — the persistent CTO agent (when the workspace's
+// `spec-generation` responder is `cto`) or a human in the webapp (when it is `user`) —
+// POSTs the written spec here. butchr rewrites the task's prompt brief → spec and advances
+// idea → spec_review. Both responders use this SAME endpoint; they differ only in surface
+// (the CTO reacts to the channel `spec requested` push, the user fills the webapp form).
+// 409 if the task isn't in `idea`; 400 if the spec is blank.
+route("POST", "/api/tasks/:id/spec", async (req, p) => {
+  const body = await readJson(req);
+  return json(await submitSpec(p.id!, body.spec));
 });
 
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {

@@ -228,10 +228,13 @@ ensureColumn("workspaces", "cto_enabled", "INTEGER");
 // overrides; an unset step (or NULL/empty/garbage value) defaults to `cto` — today's
 // full-auto behavior. The step set + read helper (responderFor / resolveStepResponders)
 // + validation live in src/workspaces.ts; the config is settable via PATCH
-// /api/workspaces/:id and the webapp's step-responder panel. THIS IS CONFIG STORAGE
-// ONLY — nothing routes off it yet; later tasks (kill the CTO-fork, route
-// approval/review/answer, idle-as-feedback) consume it. Settable per workspace; NULL
-// (the default every existing row backfills to) means "all steps cto".
+// /api/workspaces/:id and the webapp's step-responder panel. The `spec-generation` step
+// is WIRED: an `idea` task parks awaiting a spec and butchr pushes a `spec requested`
+// channel event; the responder submits the spec via POST /api/tasks/:id/spec (the CTO
+// agent for `cto`, a human in the webapp for `user`). The remaining steps
+// (approval/review/answer, idle-as-feedback) are config-only for now; later tasks consume
+// them. Settable per workspace; NULL (the default every existing row backfills to) means
+// "all steps cto".
 ensureColumn("workspaces", "step_responders", "TEXT");
 
 // `summary` holds the agent's optional request_review summary (shown in review).
@@ -496,9 +499,10 @@ ensureColumn("tasks", "grounding_fp", "TEXT");
 // design (task playful-rabbit-0405) carried a SECOND axis (`stage` = idea|spec|build)
 // orthogonal to `status`; the CEO retracted it as over-complicated. The idea-vs-rest
 // distinction is now carried by the SINGLE status pipeline via a new FRONT state,
-// `idea` — a task that has NO spec yet, whose dispatch RUNS the CTO-fork spec generator
-// (see src/cto.ts + dispatcher) and then advances to `queued` ('ready') carrying the
-// generated spec as its prompt. The `stage` column is no longer written or read.
+// `idea` — a task that has NO spec yet. butchr does NOT run an agent for it; it WAITS for
+// the spec-generation responder (the CTO agent or a human) to submit a spec via
+// POST /api/tasks/:id/spec, which advances it to `spec_review` carrying that spec as its
+// prompt. The `stage` column is no longer written or read.
 //
 // MIGRATION (backward-compatible, one-time): any task still in the PRE-SPEC idea stage
 // (stage='idea' and not yet dispatched — queued/blocked) becomes status='idea'; every
@@ -629,14 +633,17 @@ export type TaskKind = "task" | "rollback";
 //
 //   AGENT TYPE     which agent
 //   -------------  -------------------------------------------------------------
-//   ceo-agent      the headless, read-only CTO-fork (src/cto.ts) that writes specs.
 //   workspace-agent the interactive agent that builds the code in the worktree.
 //
 // THE 12 STATES (happy path: idea → spec_review → inactive → in_progress → in_review →
 // (approve) merged; needs_info is an ad-hoc feedback stage ANY agent state can enter
 // and then resume):
 //
-//   idea         agent/ceo-agent     — the CEO agent writes the SPEC from the brief.
+//   idea         feedback (brief)     — a one-line brief AWAITING a spec. butchr does NOT
+//                                       run an agent: it pushes a `spec requested` channel
+//                                       event and waits for the spec-generation responder
+//                                       (the CTO agent, or a human in the webapp) to submit
+//                                       the spec via POST /api/tasks/:id/spec → spec_review.
 //   spec_review  feedback (spec)      — operator approves → inactive, or requests
 //                                       changes → revise the spec (back to idea).
 //   blocked      idle                 — waiting on blocked_by dependencies.
@@ -657,8 +664,8 @@ export type TaskKind = "task" | "rollback";
 //   rolled_back  idle (terminal)      — a rollback task's revert landed on the default
 //                                       branch (the rollback equivalent of `merged`).
 //   merged       idle (terminal)      — landed on the default branch.
-//   failed       idle (terminal)      — an EXECUTION/dispatch failure: a dispatch or
-//                                       spec-gen give-up, or a post-merge verify revert.
+//   failed       idle (terminal)      — an EXECUTION/dispatch failure: a dispatch
+//                                       give-up, or a post-merge verify revert.
 //                                       (NOT operator-initiated — see `aborted`.)
 //   aborted      idle (terminal)      — DELIBERATELY cancelled by the operator. Reserved
 //                                       strictly for operator cancel; failures use `failed`.
@@ -686,8 +693,9 @@ export type TaskStatus =
 
 /** The three kinds of state. */
 export type StateKind = "idle" | "agent" | "feedback";
-/** Which agent runs an `agent`-kind state. */
-export type AgentType = "ceo-agent" | "workspace-agent";
+/** Which agent runs an `agent`-kind state. (Only the workspace agent runs tasks now —
+ * `idea` no longer forks a spec-writing agent; it WAITS for a responder's spec.) */
+export type AgentType = "workspace-agent";
 /** A state's category: its kind, and (for agent states) which agent runs it. */
 export type StateMeta = { kind: StateKind; agentType?: AgentType };
 
@@ -695,10 +703,10 @@ export type StateMeta = { kind: StateKind; agentType?: AgentType };
  * The single source of truth categorizing each canonical state — its KIND, and for
  * AGENT states the agent TYPE. Logic (dispatcher/reconcile/feedback) and the UI both
  * derive their behavior from this map rather than hard-coding status lists, so the
- * 3-kind / 2-agent-type model has exactly ONE definition.
+ * kind / agent-type model has exactly ONE definition.
  */
 export const STATE_META: Record<TaskStatus, StateMeta> = {
-  idea: { kind: "agent", agentType: "ceo-agent" },
+  idea: { kind: "feedback" },
   spec_review: { kind: "feedback" },
   blocked: { kind: "idle" },
   needs_info: { kind: "feedback" },

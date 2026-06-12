@@ -1,20 +1,22 @@
 // Tests for the CANONICAL 12-STATE TASK STATE MACHINE (the CEO's exact model) and the
 // UNIFIED FEEDBACK MECHANISM. Covers:
 //   1. STATE METADATA — every state's kind (idle|agent|feedback) and, for agent states,
-//      its agentType (ceo-agent|workspace-agent), via db.STATE_META, plus db.isTerminal.
-//   2. THE spec_review GATE — idea → spec_review (NOT auto-build); approve → inactive
-//      (ready); request-changes → idea (revise the spec, re-running the CTO-fork generator).
+//      its agentType (workspace-agent), via db.STATE_META, plus db.isTerminal.
+//   2. THE idea/spec_review GATES — idea is a WAITING/feedback state; submitSpec advances
+//      idea → spec_review (NOT auto-build); approve → inactive (ready); request-changes →
+//      idea (revise → await a new spec).
 //   3. in_review APPROVE → MECHANICAL MERGE → merged (no finalize agent — butchr rebases,
 //      gates, and merges directly on approve).
 //   4. needs_info ROUND-TRIP — an agent asks (markNeedsInfoFromAgent) → answer → resume
 //      (→ inactive).
-//   5. THE UNIFIED FEEDBACK MECHANISM — feedbackInfo + respondToFeedback drive all three
+//   5. THE UNIFIED FEEDBACK MECHANISM — feedbackInfo + respondToFeedback drive all four
 //      feedback states through one code path (artifact → response → forward/resume).
 //
-// In-process: no real claude or herdr (BUTCHR_HERDR_BIN=true). The CTO-fork spec writer
-// is mocked (setSpecWriter) and the conformance runner silenced; gate_cmd="" disables
-// the CI + post-merge verify gates so review/merge never shell out a real build.
-// createTask runs for real (worktree + task.md + DB row), so we set up a throwaway repo.
+// In-process: no real claude or herdr (BUTCHR_HERDR_BIN=true). The spec is submitted via
+// the public submitSpec API (no fork to mock) and the conformance runner is silenced;
+// gate_cmd="" disables the CI + post-merge verify gates so review/merge never shell out a
+// real build. createTask runs for real (worktree + task.md + DB row), so we set up a
+// throwaway repo.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -28,8 +30,6 @@ const DIR_ID = "sm-dir";
 let tasksMod: typeof import("../src/tasks.ts");
 let dbMod: typeof import("../src/db.ts");
 let taskmdMod: typeof import("../src/taskmd.ts");
-let ctoMod: typeof import("../src/cto.ts");
-let dispatcherMod: typeof import("../src/dispatcher.ts");
 let conformanceMod: typeof import("../src/conformance.ts");
 
 function g(args: string[], cwd = REPO_ROOT): string {
@@ -37,9 +37,6 @@ function g(args: string[], cwd = REPO_ROOT): string {
 }
 function row(id: string) {
   return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;
-}
-function dirRow() {
-  return dbMod.db.query<any, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(DIR_ID)!;
 }
 
 beforeAll(async () => {
@@ -61,8 +58,6 @@ beforeAll(async () => {
   dbMod = await import("../src/db.ts");
   taskmdMod = await import("../src/taskmd.ts");
   tasksMod = await import("../src/tasks.ts");
-  ctoMod = await import("../src/cto.ts");
-  dispatcherMod = await import("../src/dispatcher.ts");
   conformanceMod = await import("../src/conformance.ts");
 
   dbMod.db
@@ -94,7 +89,7 @@ async function buildReadyTask(prompt: string, file: string, content: string): Pr
 describe("1. state metadata (kind + agentType per state)", () => {
   test("STATE_META categorizes every canonical state exactly", () => {
     const M = dbMod.STATE_META;
-    expect(M.idea).toEqual({ kind: "agent", agentType: "ceo-agent" });
+    expect(M.idea).toEqual({ kind: "feedback" });
     expect(M.spec_review).toEqual({ kind: "feedback" });
     expect(M.blocked).toEqual({ kind: "idle" });
     expect(M.needs_info).toEqual({ kind: "feedback" });
@@ -123,6 +118,11 @@ describe("1. state metadata (kind + agentType per state)", () => {
   });
 
   test("feedbackInfo surfaces each feedback state's artifact + accepted responses", () => {
+    // `idea` is now a feedback state: a brief awaiting a submitted spec.
+    expect(tasksMod.feedbackInfo("idea")).toMatchObject({
+      artifact: "brief",
+      accepts: ["submit_spec"],
+    });
     expect(tasksMod.feedbackInfo("spec_review")).toMatchObject({
       artifact: "spec",
       accepts: ["approve", "request_changes"],
@@ -138,19 +138,20 @@ describe("1. state metadata (kind + agentType per state)", () => {
     // Non-feedback states have no feedback info.
     expect(tasksMod.feedbackInfo("inactive")).toBeNull();
     expect(tasksMod.feedbackInfo("in_progress")).toBeNull();
-    expect(tasksMod.feedbackInfo("idea")).toBeNull();
     expect(tasksMod.feedbackInfo("merged")).toBeNull();
   });
 });
 
-describe("2. the spec_review gate (idea → spec_review, NOT auto-build)", () => {
-  test("an idea generates a spec and STOPS in spec_review (does not auto-build)", async () => {
+describe("2. the idea/spec_review gates (idea waits for a spec, then spec_review)", () => {
+  test("idea is a waiting/feedback state: submitSpec advances it to spec_review (no auto-build)", async () => {
     const SPEC = "Add a spec_review.txt file containing the word reviewed.";
-    ctoMod.setSpecWriter(async () => SPEC);
     const idea = await tasksMod.createTask(DIR_ID, "make a spec_review file", [], [], "task", null, [], 0, false, true);
     expect(row(idea.id).status).toBe("idea");
+    // It is a WAITING state — no agent was launched (no pane/session).
+    expect(row(idea.id).herdr_pane_id).toBeNull();
+    expect(row(idea.id).session_id).toBeNull();
 
-    await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
+    await tasksMod.submitSpec(idea.id, SPEC);
 
     // It parks in spec_review carrying the spec as its prompt — it did NOT advance to
     // inactive on its own.
@@ -162,9 +163,8 @@ describe("2. the spec_review gate (idea → spec_review, NOT auto-build)", () =>
   });
 
   test("approving the spec FORWARDS to inactive (ready to build)", async () => {
-    ctoMod.setSpecWriter(async () => "Add approved_spec.txt with the word ok.");
     const idea = await tasksMod.createTask(DIR_ID, "approve me", [], [], "task", null, [], 0, false, true);
-    await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
+    await tasksMod.submitSpec(idea.id, "Add approved_spec.txt with the word ok.");
     expect(row(idea.id).status).toBe("spec_review");
 
     const out = await tasksMod.approveTask(idea.id);
@@ -173,36 +173,37 @@ describe("2. the spec_review gate (idea → spec_review, NOT auto-build)", () =>
     expect(row(idea.id).herdr_pane_id).toBeNull();
   });
 
-  test("requesting spec changes sends it BACK to idea and re-generates with the notes", async () => {
-    let calls = 0;
-    let sawNotes: string | undefined;
-    ctoMod.setSpecWriter(async (input) => {
-      calls++;
-      sawNotes = input.notes;
-      return `Spec v${calls}: add specrev_${calls}.txt`;
-    });
+  test("requesting spec changes sends it BACK to idea to await a revised spec (note preserved)", async () => {
     const idea = await tasksMod.createTask(DIR_ID, "needs revision", [], [], "task", null, [], 0, false, true);
-    await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
+    await tasksMod.submitSpec(idea.id, "Spec v1: add specrev_1.txt");
     expect(row(idea.id).status).toBe("spec_review");
-    expect(calls).toBe(1);
 
-    // Request changes → back to idea (revise).
+    // Request changes → back to idea (revise); the note is recorded for the responder.
     const view = await tasksMod.rejectTask(idea.id, "Please also add error handling.");
     expect(view.status).toBe("idea");
     expect(row(idea.id).review_note).toContain("error handling");
 
-    // Re-run the CEO agent: it sees the change notes and produces a revised spec → spec_review again.
-    await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
-    expect(calls).toBe(2);
-    expect(sawNotes).toContain("error handling");
-    expect(row(idea.id).status).toBe("spec_review");
+    // The responder submits a revised spec via the same endpoint → spec_review again.
+    const after = await tasksMod.submitSpec(idea.id, "Spec v2: add specrev_2.txt + error handling");
+    expect(after.status).toBe("spec_review");
     expect(tasksMod.taskView(idea.id)!.prompt).toContain("Spec v2");
   });
 
+  test("idea rejects an `approve`/`answer` response (it awaits submit_spec)", async () => {
+    const idea = await tasksMod.createTask(DIR_ID, "wrong response on idea", [], [], "task", null, [], 0, false, true);
+    let err: any;
+    try {
+      await tasksMod.approveTask(idea.id);
+    } catch (e) {
+      err = e;
+    }
+    expect(err?.status).toBe(409);
+    expect(row(idea.id).status).toBe("idea");
+  });
+
   test("spec_review rejects an `answer` response (it awaits approve/request-changes)", async () => {
-    ctoMod.setSpecWriter(async () => "Add x.txt");
     const idea = await tasksMod.createTask(DIR_ID, "wrong response", [], [], "task", null, [], 0, false, true);
-    await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
+    await tasksMod.submitSpec(idea.id, "Add x.txt");
     let err: any;
     try {
       await tasksMod.answerTask(idea.id, "an answer");
@@ -273,10 +274,10 @@ describe("4. needs_info round-trip (any agent stage → ask → answer → resum
 
 describe("5. the unified feedback mechanism (one code path)", () => {
   test("respondToFeedback drives spec_review/in_review/needs_info through one entry point", async () => {
-    // spec_review approve via respondToFeedback.
-    ctoMod.setSpecWriter(async () => "Add unified.txt");
+    // idea submit_spec → spec_review, then approve, both via respondToFeedback.
     const a = await tasksMod.createTask(DIR_ID, "unified spec", [], [], "task", null, [], 0, false, true);
-    await dispatcherMod.generateSpecForIdea(dirRow(), row(a.id));
+    const rs = await tasksMod.respondToFeedback(a.id, { type: "submit_spec", spec: "Add unified.txt" });
+    expect(rs.task.status).toBe("spec_review");
     const r1 = await tasksMod.respondToFeedback(a.id, { type: "approve" });
     expect(r1.task.status).toBe("inactive");
 

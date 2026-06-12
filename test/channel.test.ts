@@ -42,6 +42,18 @@ describe("channel: attention transitions → notifications", () => {
       expectText: string;
     }> = [
       {
+        // `idea` is the front of the pipeline — a brief awaiting a spec, surfaced as
+        // `spec requested` (the brief lives in the task's prompt).
+        state: "idea",
+        task: {
+          id: "t-idea",
+          workspace_id: "dir-1",
+          status: "idea",
+          prompt: "add a dark-mode toggle to the header",
+        },
+        expectText: "add a dark-mode toggle to the header",
+      },
+      {
         state: "spec_review",
         task: {
           id: "t-spec",
@@ -101,10 +113,29 @@ describe("channel: attention transitions → notifications", () => {
     }
   });
 
-  test("ATTENTION_STATES are exactly the four CTO attention states", () => {
+  test("ATTENTION_STATES are exactly the five CTO attention states", () => {
     expect([...ATTENTION_STATES].sort()).toEqual(
-      ["aborted", "in_review", "needs_info", "spec_review"].sort(),
+      ["aborted", "idea", "in_review", "needs_info", "spec_review"].sort(),
     );
+  });
+
+  test("an idea task entering the pipeline pushes a `spec requested` event with the brief", () => {
+    const bridge = new AttentionBridge();
+    bridge.seedWorkspaceLabels([{ id: "dir-1", label: "webapp" }]);
+    // A brand-new idea task arrives as a task.created event.
+    const note = bridge.consume({
+      type: "task.created",
+      task: {
+        id: "t-new-idea",
+        workspace_id: "dir-1",
+        status: "idea",
+        prompt: "wire up SSO",
+      },
+    });
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({ task_id: "t-new-idea", workspace: "dir-1", state: "idea" });
+    expect(note!.content).toContain("spec requested");
+    expect(note!.content).toContain("wire up SSO");
   });
 
   test("a re-emitted same-status update is NOT a fresh transition", () => {

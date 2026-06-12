@@ -57,18 +57,15 @@ const dataDir = env("BUTCHR_DATA_DIR", join(home, ".local", "share", "butchr"));
 // The HTTP bind host, hoisted so `loopbackHost` can be derived from it once below.
 const host = env("BUTCHR_HOST", "127.0.0.1");
 
-// The read-only, non-recursing claude recipe shared by the three headless agents
-// (conformance reviewer, brief expander, CTO-fork spec generator). `-p` runs
-// headless + prints the verdict then exits; `--permission-mode dontAsk` +
-// `--allowedTools "Read Grep Glob"` makes it read-only (no Write/Edit/Bash) and
-// auto-resolves tool requests; NO `--mcp-config`/`--dangerously-skip-permissions`
-// so it can't recurse into butchr's own tools. `session` is interpolated right
-// after `-p` (a trailing space included by the caller): "" for the two non-forking
-// reviewers, "{{CTO_SESSION}} " for the spec generator (substituted downstream into
-// `--resume <id> --fork-session` or nothing). `{{PROMPT_FILE}}` → the rendered prompt.
-function readonlyClaude(session: string): string {
+// The read-only, non-recursing claude recipe shared by the two headless agents
+// (conformance reviewer, brief expander). `-p` runs headless + prints the verdict then
+// exits; `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` makes it
+// read-only (no Write/Edit/Bash) and auto-resolves tool requests; NO
+// `--mcp-config`/`--dangerously-skip-permissions` so it can't recurse into butchr's own
+// tools. `{{PROMPT_FILE}}` → the rendered prompt.
+function readonlyClaude(): string {
   return (
-    `claude -p ${session}--permission-mode dontAsk ` +
+    `claude -p --permission-mode dontAsk ` +
     '--allowedTools "Read Grep Glob" -- "$(cat {{PROMPT_FILE}})"'
   );
 }
@@ -389,7 +386,7 @@ export const config = {
    * this is ADVISORY (it never hard-blocks approval) and best-effort (a failure or an
    * unparseable verdict leaves conformance NULL). Set it EMPTY to DISABLE the gate.
    */
-  conformanceCmd: env("BUTCHR_CONFORMANCE_CMD", readonlyClaude("")),
+  conformanceCmd: env("BUTCHR_CONFORMANCE_CMD", readonlyClaude()),
   /** Max wall-clock (ms) the conformance reviewer may run before it's killed (→ NULL verdict). */
   conformanceTimeoutMs: envInt("BUTCHR_CONFORMANCE_TIMEOUT_MS", 120000),
   /**
@@ -414,42 +411,9 @@ export const config = {
    * target repo. Set it EMPTY to DISABLE expansion (the endpoint then 502s and the
    * operator writes the prompt by hand). See src/expand.ts.
    */
-  expandBriefCmd: env("BUTCHR_EXPAND_BRIEF_CMD", readonlyClaude("")),
+  expandBriefCmd: env("BUTCHR_EXPAND_BRIEF_CMD", readonlyClaude()),
   /** Max wall-clock (ms) the brief expander may run before it's killed (→ failure). */
   expandBriefTimeoutMs: envInt("BUTCHR_EXPAND_BRIEF_TIMEOUT_MS", 120000),
-
-  /**
-   * IDEA → SPEC generation (the CTO-fork). The unified pipeline's FRONT state is
-   * `idea`: a task created from a one-line operator brief with NO spec yet. The
-   * dispatcher does NOT launch a build agent for it — it runs THIS command to turn the
-   * brief into a detailed, repo-grounded SPEC (the task's real prompt), then advances
-   * the task to `queued` ('ready') where it dispatches the build agent as usual. See
-   * src/cto.ts (generateSpec) + dispatcher.
-   *
-   * This REVIVES the retired CTO-fork mechanism. It reuses the conformance/expander's
-   * headless, read-only, non-recursing claude recipe so the spec writer can inspect the
-   * repo (CONTRIBUTING.md / code) but never mutate it and can't recurse into butchr's own tools:
-   *  - `-p` runs headless and prints the spec to stdout, then exits.
-   *  - `--permission-mode dontAsk` + `--allowedTools "Read Grep Glob"` → read-only.
-   *  - NO `--mcp-config` / `--dangerously-skip-permissions`: no recursion.
-   *  - `{{CTO_SESSION}}` expands to `--resume <ctoSessionId> --fork-session` when
-   *    `ctoSessionId` is set — FORKING the CTO's session into a throwaway so the spec is
-   *    written WITH the CTO's accumulated context but the real session isn't mutated —
-   *    or to nothing for a fresh read-only session.
-   *  - `{{PROMPT_FILE}}` → a temp file holding the rendered spec-writing prompt (avoids
-   *    shell-escaping). Run via `bash -lc`, cwd = the idea task's worktree.
-   * Set it EMPTY to DISABLE spec generation (an idea task then fails to advance and the
-   * operator is shown the error). See src/cto.ts.
-   */
-  specGenCmd: env("BUTCHR_SPEC_GEN_CMD", readonlyClaude("{{CTO_SESSION}} ")),
-  /** Max wall-clock (ms) the CTO-fork spec generator may run before it's killed (→ failure). */
-  specGenTimeoutMs: envInt("BUTCHR_SPEC_GEN_TIMEOUT_MS", 1000 * 60 * 5),
-  /**
-   * Optional CTO session id to RESUME + FORK so the spec generator inherits the CTO's
-   * prior context. When set, `{{CTO_SESSION}}` in `specGenCmd` resolves to
-   * `--resume <id> --fork-session`; when empty it resolves to nothing (a fresh session).
-   */
-  ctoSessionId: env("BUTCHR_CTO_SESSION_ID", ""),
 
   /**
    * AUTO-MERGE green, low-risk tasks (opt-in; DEFAULT OFF). When enabled, a task
@@ -571,9 +535,7 @@ export const config = {
    * comma-separated `workspaceId=sessionId` map. On a workspace's FIRST CTO launch
    * (no persisted session yet) butchr RESUMES that workspace's seeded session when
    * present, else starts fresh and captures the new id; every later relaunch resumes
-   * the persisted id. This replaces the old single global BUTCHR_CTO_SESSION_ID seed
-   * for the MANAGED CTO agent (that env is still honored ONLY by the separate
-   * read-only spec-generator fork — see config.ctoSessionId / src/cto.ts).
+   * the persisted id. This is the per-workspace session seed for the MANAGED CTO agent.
    */
   ctoAgentSessionSeeds: envMap("BUTCHR_CTO_AGENT_SESSION_IDS"),
 

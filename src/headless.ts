@@ -1,6 +1,6 @@
 // Shared scaffold for the HEADLESS, read-only, tempfile-prompt agent runners — the
-// spec-conformance reviewer (src/conformance.ts), the brief expander (src/expand.ts),
-// and the CTO-fork spec generator (src/cto.ts). All three followed the identical
+// spec-conformance reviewer (src/conformance.ts) and the brief expander (src/expand.ts).
+// Both follow the identical
 // recipe: bail when the command template is empty (gate disabled), write the rendered
 // prompt to a temp file under `<dataDir>/<subdir>/` (so the agent reads it via
 // `$(cat …)` with no shell-escaping), substitute `{{PROMPT_FILE}}` (plus any
@@ -32,7 +32,7 @@ export type RunHeadlessWithPromptArgs = {
   timeoutMs: number;
   /**
    * Extra placeholder → value substitutions applied to the command BEFORE
-   * `{{PROMPT_FILE}}` (e.g. `{{CTO_SESSION}}` for the CTO-fork spec generator).
+   * `{{PROMPT_FILE}}` (for command templates that carry their own placeholders).
    */
   extraVars?: Record<string, string>;
 };

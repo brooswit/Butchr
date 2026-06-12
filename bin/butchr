@@ -41,6 +41,7 @@ COMMANDS
   approve <id>                    Approve a task in review (merges its branch).
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   answer <id> -m <text>           Answer a task awaiting input (resumes the agent).
+  spec <id> [-m <text>]           Submit the spec for an idea task (-m, or pipe stdin).
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
   priority <id> <N>               Set a task's dispatch priority (higher = sooner).
@@ -481,6 +482,24 @@ async function cmdAnswer(positionals, flags) {
   process.stdout.write(`answered ${id} → ${t.status} (agent will resume with your answer)\n`);
 }
 
+async function cmdSpec(positionals, flags) {
+  const id = positionals[0];
+  if (!id) fail("spec: missing <id>");
+  // The spec is multi-line, so accept it via -m <text> OR piped on stdin (so the CTO
+  // agent / operator can `butchr spec <id> < spec.md` or heredoc it).
+  let spec = flags.message;
+  if (!spec && !process.stdin.isTTY) {
+    spec = (await Bun.stdin.text()).trim();
+  }
+  if (!spec) fail("spec: provide the spec via -m <text> or pipe it on stdin");
+  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/spec`, { spec });
+  if (flags.json) {
+    printJson(t);
+    return;
+  }
+  process.stdout.write(`spec submitted for ${id} → ${t.status} (awaiting approval)\n`);
+}
+
 async function cmdRequeue(positionals, flags) {
   const id = positionals[0];
   if (!id) fail("requeue: missing <id>");
@@ -647,6 +666,8 @@ async function main() {
       return cmdReject(positionals, flags);
     case "answer":
       return cmdAnswer(positionals, flags);
+    case "spec":
+      return cmdSpec(positionals, flags);
     case "requeue":
       return cmdRequeue(positionals, flags);
     case "block":

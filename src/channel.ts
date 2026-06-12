@@ -36,18 +36,23 @@ export const CHANNEL_INSTRUCTIONS =
   "One-way CTO notification channel. Each <" +
   CHANNEL_SERVER_NAME +
   "> event is a butchr task that just entered a state needing the CTO's attention " +
-  "(a generated spec awaiting approval, a diff awaiting review, an agent question " +
-  "awaiting an answer, or a failed task) — the same attention feed a human sees in " +
-  "the butchr dashboard. These are PUSH notifications to ACT on (approve/reject/" +
-  "answer/requeue via the butchr API or CLI); you cannot reply through this channel.";
+  "(a brief awaiting a spec — `spec requested`, a generated spec awaiting approval, a " +
+  "diff awaiting review, an agent question awaiting an answer, or a failed task) — the " +
+  "same attention feed a human sees in the butchr dashboard. These are PUSH " +
+  "notifications to ACT on (write+submit a spec, approve/reject/answer/requeue via the " +
+  "butchr API or CLI); you cannot reply through this channel. For a `spec requested` " +
+  "event, ONLY write+submit the spec when this workspace's `spec-generation` responder " +
+  "is `cto` — if it is `user`, a human will write it, so just observe.";
 
 /**
- * The CTO attention transitions we push. The spec lists spec_review / in_review /
- * needs_info / failed; butchr folded the former `failed` state into the canonical
- * terminal `aborted` (see db.ts migration `["failed","aborted"]` + TaskStatus), so
- * "failed" is represented here by `aborted`.
+ * The CTO attention transitions we push. `idea` (a brief awaiting a spec — surfaced as
+ * `spec requested`) is the front of the pipeline; the rest are the feedback/failure
+ * states. The spec lists spec_review / in_review / needs_info / failed; butchr folded the
+ * former `failed` state into the canonical terminal `aborted` (see db.ts migration
+ * `["failed","aborted"]` + TaskStatus), so "failed" is represented here by `aborted`.
  */
 export const ATTENTION_STATES = [
+  "idea",
   "spec_review",
   "in_review",
   "needs_info",
@@ -61,6 +66,7 @@ function isAttentionState(s: unknown): s is AttentionState {
 
 // A short human phrase per attention state for the notification's content line.
 const STATE_PHRASE: Record<AttentionState, string> = {
+  idea: "spec requested",
   spec_review: "generated spec awaiting approval",
   in_review: "diff awaiting review",
   needs_info: "agent question awaiting an answer",
@@ -122,6 +128,9 @@ function firstText(...candidates: unknown[]): string {
  */
 function attentionText(task: Record<string, unknown>, state: AttentionState): string {
   switch (state) {
+    case "idea":
+      // The brief (the idea task's prompt) is what the responder needs to write a spec.
+      return firstText(task.prompt, task.summary);
     case "needs_info":
       return firstText(task.question, task.summary);
     case "in_review":

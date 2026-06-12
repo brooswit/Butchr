@@ -3,8 +3,8 @@
 // herdr (the PTY/workspace manager) for everything — provisioning a workspace,
 // launching the interactive agent under a PTY, probing liveness, resolving its
 // pane, reading its output, and tearing it down — and to bare `Bun.spawn` for the
-// headless read-only agents (the CTO-fork spec generator, the conformance reviewer,
-// the brief expander). That coupling made butchr inseparable from herdr.
+// headless read-only agents (the conformance reviewer, the brief expander). That
+// coupling made butchr inseparable from herdr.
 //
 // `AgentRunner` (a.k.a. the ExecBackend) is the seam: it names every operation the
 // rest of butchr needs from the agent runtime, so the herdr implementation lives
@@ -52,8 +52,8 @@ export type SendInput =
   | { keys: string[] };
 
 /**
- * One HEADLESS, read-only agent invocation (the CTO-fork spec generator, the
- * conformance reviewer, the brief expander). The caller has already substituted
+ * One HEADLESS, read-only agent invocation (the conformance reviewer, the brief
+ * expander). The caller has already substituted
  * its command template and written any temp prompt file; the backend only has to
  * RUN the command (via `bash -lc`) in `cwd`, bounded by `timeoutMs`, and hand back
  * its stdout for the caller to parse. This is the agent-execution path that does

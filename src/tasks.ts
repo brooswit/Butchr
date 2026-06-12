@@ -571,9 +571,9 @@ export function validatePlanPreview(planPreview: unknown): boolean {
  * Validate the optional `idea` flag from an API/CLI body. Returns a boolean, defaulting
  * to false when unset/null. Rejects (400) any non-boolean value. When true, the task is
  * created in the unified pipeline's FRONT state `idea`: the `prompt` is treated as a
- * one-line operator BRIEF, and the task's first "dispatch" runs the CTO-fork spec
- * generator (src/cto.ts) to turn the brief into a spec before it advances to `queued`
- * ('ready'). See createTask / dispatcher.
+ * one-line operator BRIEF, and the task WAITS (no agent runs) for the spec-generation
+ * responder to submit a spec via POST /api/tasks/:id/spec (submitSpec), which advances it
+ * to `spec_review`. See createTask / submitSpec.
  */
 export function validateIdea(idea: unknown): boolean {
   if (idea === undefined || idea === null) return false;
@@ -624,13 +624,14 @@ export async function createTask(
 
   const created = nowIso();
   // FRONT STATE: an `idea` task (created from a one-line brief, no spec yet) starts in
-  // `idea` — its first dispatch runs the CEO/CTO-fork spec generator, then it advances
-  // to `spec_review` for the operator's sign-off (see promoteIdeaToSpecReview). Any
-  // blockers are recorded but only gate the post-approval `inactive` transition, not
-  // the spec-writing front state. A 'New task' (already carrying a spec) starts directly
-  // in `inactive` (ready — queued for the dispatcher, no live agent yet) unless it has
-  // unmerged blockers, in which case it waits in `blocked` and auto-unblocks to
-  // `inactive` later.
+  // `idea` — a WAITING/feedback state. butchr runs NO agent for it: it pushes a `spec
+  // requested` event on the CTO channel and waits for the spec-generation responder (the
+  // CTO agent or a human) to submit the spec via submitSpec, which advances it to
+  // `spec_review` for sign-off. Any blockers are recorded but only gate the post-approval
+  // `inactive` transition, not the spec-writing front state. A 'New task' (already
+  // carrying a spec) starts directly in `inactive` (ready — queued for the dispatcher, no
+  // live agent yet) unless it has unmerged blockers, in which case it waits in `blocked`
+  // and auto-unblocks to `inactive` later.
   const status: TaskStatus = taskIdea
     ? "idea"
     : allBlockersMerged(blockers)
@@ -1050,111 +1051,38 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   return { ok: true, rebased: res.rebased, conflict: false };
 }
 
-// --- IDEA → SPEC_REVIEW: the CEO/CTO-fork spec generation handshake ----------
-//
-// The pipeline's FRONT state is `idea`: a task created from a one-line brief with no
-// spec yet (see createTask). The dispatcher runs the CEO agent — the CTO-fork spec
-// generator (src/cto.ts, headless + read-only) — to turn the brief into a repo-grounded
-// SPEC, then calls promoteIdeaToSpecReview to advance the task to `spec_review`, where
-// the operator approves the spec (→ in_progress) or requests changes (→ revise the spec,
-// back to idea). A generation FAILURE goes through markSpecGenFailure (bounded
-// backoff/retry, then give-up to `aborted`). The blocker check is deferred to the
-// spec_review approval (see respondToFeedback).
-
-/**
- * Advance an `idea` task to `spec_review` once its spec is generated. Rewrites the
- * task.md prompt from the operator's brief to the full SPEC (so the SPEC becomes the
- * task's prompt AND the artifact the operator reviews), then transitions idea →
- * spec_review. Clears any spec-gen backoff/error. Guarded on status='idea' so a
- * concurrent abort wins. Returns true iff it advanced the task.
- */
-export function promoteIdeaToSpecReview(id: string, spec: string): boolean {
-  const row = getTask(id);
-  if (!row || row.status !== "idea") return false;
-  const clean = (spec ?? "").trim();
-  if (!clean) return false;
-  const dir = getWorkspace(row.workspace_id);
-  if (dir) updateTaskMdPrompt(dir.path, id, clean);
-
-  if (
-    !setStatus(id, "spec_review", {
-      from: "idea",
-      note: "spec generated — awaiting operator approval",
-      set: {
-        dispatch_attempts: 0,
-        last_dispatch_error: null,
-        next_dispatch_at: null,
-        // Clear any prior change-request note now that a fresh spec exists.
-        review_note: null,
-      },
-    })
-  ) {
-    return false; // moved under us (e.g. aborted)
-  }
-  console.log(`[butchr] idea task ${id} → spec_review (spec generated)`);
-  return true;
-}
-
-/**
- * Record a CTO-fork spec-generation FAILURE for an `idea` task (generateSpec returned
- * null / threw, or the dispatcher's spec-gen step failed) and apply the SAME bounded
- * retry/backoff/give-up state machine as markDispatchFailure — except the task stays in
- * `idea` between retries (it has not produced a spec yet) rather than re-queuing as a
- * build task. At/over the attempt cap it moves to the terminal `failed` state (an
- * execution failure, NOT an operator cancel — see `aborted`); the operator can delete +
- * recreate the idea if they want to try again.
- */
-export function markSpecGenFailure(id: string, err: string): void {
-  const row = getTask(id);
-  if (!row || row.status !== "idea") return;
-  const attempts = (row.dispatch_attempts ?? 0) + 1;
-
-  if (attempts >= config.maxDispatchAttempts) {
-    // setStatus mirrors the new status into task.md + records the audit event. A
-    // spec-generation give-up is an EXECUTION failure → the terminal idle state
-    // `failed` (reserve `aborted` for a deliberate operator cancel); last_dispatch_error
-    // explains why.
-    setStatus(id, "failed", {
-      from: "idea",
-      note: `spec generation gave up after ${attempts} attempt${attempts === 1 ? "" : "s"}`,
-      set: { dispatch_attempts: attempts, last_dispatch_error: err, next_dispatch_at: null, completed_at: keep(nowIso()) },
-    });
-    console.error(`[butchr] idea task ${id} spec generation failed after ${attempts} attempts: ${err}`);
-    return;
-  }
-
-  const nextAt = new Date(Date.now() + dispatchBackoffMs(attempts)).toISOString();
-  db.query(
-    `UPDATE tasks SET dispatch_attempts=?, last_dispatch_error=?, next_dispatch_at=? WHERE id=? AND status='idea'`,
-  ).run(attempts, err, nextAt, id);
-  console.warn(
-    `[butchr] idea task ${id} spec generation attempt ${attempts}/${config.maxDispatchAttempts} ` +
-      `failed; retrying after ${nextAt}: ${err}`,
-  );
-  emitUpdated(id);
-}
-
 // ===========================================================================
-// THE UNIFIED FEEDBACK MECHANISM (spec_review / in_review / needs_info).
+// THE UNIFIED FEEDBACK MECHANISM (idea / spec_review / in_review / needs_info).
 // ===========================================================================
-// The three FEEDBACK states share ONE shape and ONE code path: butchr surfaces an
-// ARTIFACT, awaits an OPERATOR RESPONSE, then either FORWARDS the task to the next
-// state or RESUMES the agent. They differ only in (artifact, which responses are
-// valid, where each response routes):
+// The four FEEDBACK states share ONE shape and ONE code path: butchr surfaces an
+// ARTIFACT, awaits a RESPONSE (from the step's responder — the CTO agent or a human),
+// then either FORWARDS the task to the next state or RESUMES the agent. They differ only
+// in (artifact, which responses are valid, where each response routes):
 //
-//   state        artifact   approve →               request_changes →        answer →
-//   -----------  ---------  ----------------------  -----------------------  -----------------
-//   spec_review  spec       inactive/blocked        idea (re-generate spec)  —
-//   in_review    diff       MECHANICAL MERGE        inactive (resume)        —
-//                           (merged/rolled_back;
-//                            conflict→inactive)
-//   needs_info   question   —                       —                        inactive (resume)
+//   state        artifact   response          routes to
+//   -----------  ---------  ----------------  -------------------------------------------
+//   idea         brief      submit_spec       spec_review (the spec becomes the prompt)
+//   spec_review  spec       approve           inactive/blocked (build)
+//                           request_changes   idea (revise → await a new spec)
+//   in_review    diff       approve           MECHANICAL MERGE (merged/rolled_back;
+//                                             conflict→inactive)
+//                           request_changes   inactive (resume the agent)
+//   needs_info   question   answer            inactive (resume the agent)
 //
-// respondToFeedback is that single path; approveTask / rejectTask / answerTask are
-// thin public wrappers over it (kept for the existing API / CLI / test surface).
+// respondToFeedback is that single path; submitSpec / approveTask / rejectTask /
+// answerTask are thin public wrappers over it (kept for the API / CLI / test surface).
+//
+// SPEC GENERATION (idea → spec_review): the FRONT state `idea` holds a one-line brief and
+// NO spec. butchr does NOT run an agent for it — it pushes a `spec requested` event on the
+// CTO notification channel (src/channel.ts) and WAITS. Whoever is the workspace's
+// `spec-generation` responder (the persistent CTO agent for `cto`, a human in the webapp
+// for `user` — see workspaces.responderFor) writes the spec and submits it via
+// submitSpec / POST /api/tasks/:id/spec, which rewrites the prompt brief → spec and
+// advances the task to spec_review. The blocker check is deferred to the spec_review
+// approval (see respondToFeedback's approve branch).
 
-export type FeedbackArtifact = "spec" | "diff" | "question";
-export type FeedbackResponseType = "approve" | "request_changes" | "answer";
+export type FeedbackArtifact = "brief" | "spec" | "diff" | "question";
+export type FeedbackResponseType = "submit_spec" | "approve" | "request_changes" | "answer";
 
 /**
  * Describe a feedback state's artifact + the responses it accepts (or null when the
@@ -1165,6 +1093,8 @@ export function feedbackInfo(
   status: TaskStatus,
 ): { artifact: FeedbackArtifact; awaiting: string; accepts: FeedbackResponseType[] } | null {
   switch (status) {
+    case "idea":
+      return { artifact: "brief", awaiting: "a spec for the brief", accepts: ["submit_spec"] };
     case "spec_review":
       return { artifact: "spec", awaiting: "operator approval of the generated spec", accepts: ["approve", "request_changes"] };
     case "in_review":
@@ -1177,6 +1107,7 @@ export function feedbackInfo(
 }
 
 export type FeedbackResponse =
+  | { type: "submit_spec"; spec: string }
   | { type: "approve" }
   | { type: "request_changes"; note: string }
   | { type: "answer"; answer: string };
@@ -1206,6 +1137,36 @@ export async function respondToFeedback(
   }
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
+
+  // ---- SUBMIT SPEC (idea → spec_review) ----
+  // The spec-generation responder (the CTO agent or a human) wrote the spec for this
+  // idea's brief. Rewrite the task.md prompt brief → spec (so the SPEC becomes the task's
+  // prompt AND the artifact reviewed at spec_review), then advance idea → spec_review.
+  if (response.type === "submit_spec") {
+    const spec = (response.spec ?? "").trim();
+    if (!spec) throw new HttpError(400, "a spec is required");
+    updateTaskMdPrompt(dir.path, id, spec);
+    if (
+      !setStatus(id, "spec_review", {
+        from: "idea",
+        note: "spec submitted — awaiting approval",
+        set: {
+          // Clear any prior change-request note now that a fresh spec exists, and any
+          // stale dispatch/backoff bookkeeping a re-revised idea might carry.
+          review_note: null,
+          dispatch_attempts: 0,
+          last_dispatch_error: null,
+          next_dispatch_at: null,
+        },
+      })
+    ) {
+      // Moved under us (e.g. aborted) — return whatever it is now.
+      emitUpdated(id);
+      return { task: taskView(id)! };
+    }
+    console.log(`[butchr] idea task ${id} → spec_review (spec submitted)`);
+    return { task: taskView(id)! };
+  }
 
   // ---- APPROVE ----
   if (response.type === "approve") {
@@ -1239,11 +1200,12 @@ export async function respondToFeedback(
     if (!note) throw new HttpError(400, "a change-request note is required");
     appendRejection(dir.path, id, note, nowIso());
     if (row.status === "spec_review") {
-      // REVISE the spec: log the note and send the task back to `idea` so the CEO
-      // agent re-runs the spec generator addressing it (then → spec_review again).
+      // REVISE the spec: log the note and send the task back to `idea`, which re-pushes a
+      // `spec requested` event and WAITS for the responder to submit a revised spec
+      // (addressing the note, which is preserved in review_note) → spec_review again.
       setStatus(id, "idea", {
         from: "spec_review",
-        note: "spec changes requested — regenerating",
+        note: "spec changes requested — awaiting revised spec",
         set: {
           review_note: note,
           dispatch_attempts: 0,
@@ -1271,6 +1233,17 @@ export async function respondToFeedback(
   if (!answer) throw new HttpError(400, "answer is required");
   await resumeWithAnswer(id, dir.path, row, answer);
   return { task: taskView(id)! };
+}
+
+/**
+ * Submit the SPEC for an `idea` task (the spec-generation responder — the CTO agent or a
+ * human in the webapp — wrote it). Rewrites the task's prompt brief → spec and advances
+ * idea → spec_review. Thin wrapper over the unified feedback mechanism; returns the
+ * post-transition task view. 409 if the task isn't in `idea`; 400 on a blank spec.
+ */
+export async function submitSpec(id: string, spec: string): Promise<TaskView> {
+  const outcome = await respondToFeedback(id, { type: "submit_spec", spec });
+  return outcome.task;
 }
 
 /**

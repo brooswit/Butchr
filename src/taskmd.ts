@@ -329,12 +329,12 @@ export function updateTaskMdStatus(
 
 /**
  * Replace the body of the "## Prompt" section in a task.md, in place. Used when an
- * `idea`-state task's CTO-fork spec generator produces its spec: the brief the
- * operator typed (stored as the initial prompt) is swapped for the full generated
- * SPEC, so when the task advances to `queued` ('ready') the build agent's rendered
- * prompt (renderAgentPrompt → doc.prompt) IS the spec. No-op if the file or the
- * Prompt section is missing. Preserves the front matter and everything from the next
- * `## ` heading (e.g. "## Review Notes") onward.
+ * `idea`-state task's spec is SUBMITTED (by the spec-generation responder via
+ * submitSpec): the brief the operator typed (stored as the initial prompt) is swapped
+ * for the full SPEC, so when the task advances to `spec_review` and then `inactive`
+ * ('ready') the build agent's rendered prompt (renderAgentPrompt → doc.prompt) IS the
+ * spec. No-op if the file or the Prompt section is missing. Preserves the front matter
+ * and everything from the next `## ` heading (e.g. "## Review Notes") onward.
  */
 export function updateTaskMdPrompt(
   workspaceRoot: string,
@@ -476,10 +476,10 @@ export function renderAgentPrompt(workspaceRoot: string, doc: TaskDoc): string {
   //    BEFORE writing code (it implements on the answer-resume — renderAnswerPrompt);
   //  - an ordinary task (incl. a rollback task) does the work and submits via request_review.
   //
-  // NOTE: an `idea`-state task is NEVER rendered here — its work (generating a spec from
-  // the brief) is done by the CTO-fork spec generator in the dispatcher (src/cto.ts), not
-  // by a build agent. By the time renderAgentPrompt runs, the task has advanced to
-  // `queued` ('ready') with the generated spec as its prompt, so it gets the normal flow.
+  // NOTE: an `idea`-state task is NEVER rendered here — it has no spec yet and runs no
+  // agent; it WAITS for the spec-generation responder to submit a spec (submitSpec). By
+  // the time renderAgentPrompt runs, the task has advanced through spec_review to
+  // `inactive` ('ready') with the submitted spec as its prompt, so it gets the normal flow.
   parts.push(doc.meta.plan_preview ? PLAN_PREVIEW_PROTOCOL : REVIEW_PROTOCOL);
   return parts.join("\n\n---\n\n");
 }
