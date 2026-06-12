@@ -69,12 +69,12 @@ function transitions(id: string): [string | null, string][] {
 }
 
 describe("task_events audit timeline", () => {
-  test("createTask records the creation event (null -> in_progress) with a note", async () => {
+  test("createTask records the creation event (null -> inactive) with a note", async () => {
     const view = await tasksMod.createTask(DIR_ID, "do a thing", [], []);
     const events = dbMod.listTaskEvents(view.id);
     expect(events.length).toBe(1);
     expect(events[0]!.from_status).toBeNull();
-    expect(events[0]!.to_status).toBe("in_progress");
+    expect(events[0]!.to_status).toBe("inactive");
     expect(events[0]!.note).toBe("task created");
     expect(events[0]!.task_id).toBe(view.id);
     expect(typeof events[0]!.at).toBe("string");
@@ -90,7 +90,7 @@ describe("task_events audit timeline", () => {
     const view = await tasksMod.createTask(DIR_ID, "lifecycle task", [], []);
     const id = view.id;
 
-    // in_progress -> in_progress (pane set, status unchanged — markRunning records pane only)
+    // inactive -> in_progress (markRunning flips it to running + records the pane)
     tasksMod.markRunning(id, "pane-1", "sess-lifecycle-1", "tab-1");
     expect(tasksMod.getTask(id)!.status).toBe("in_progress");
 
@@ -101,20 +101,20 @@ describe("task_events audit timeline", () => {
     // A DUPLICATE request_review (in_review -> in_review) is NOT a transition: no event.
     expect(tasksMod.markReviewFromAgent(id, "still done")).toBe("ok");
 
-    // in_review -> in_progress (reviewer requested changes; re-queued for resume)
+    // in_review -> inactive (reviewer requested changes; re-queued for resume)
     await tasksMod.rejectTask(id, "please tweak the thing");
-    expect(tasksMod.getTask(id)!.status).toBe("in_progress");
+    expect(tasksMod.getTask(id)!.status).toBe("inactive");
 
-    // in_progress -> aborted
+    // inactive -> aborted
     await tasksMod.abortTask(id);
     expect(tasksMod.getTask(id)!.status).toBe("aborted");
 
     expect(transitions(id)).toEqual([
-      [null, "in_progress"],
-      ["in_progress", "in_progress"], // agent launched (markRunning first-launch marker)
+      [null, "inactive"],
+      ["inactive", "in_progress"], // agent launched (markRunning flip)
       ["in_progress", "in_review"],
-      ["in_review", "in_progress"],
-      ["in_progress", "aborted"],
+      ["in_review", "inactive"],
+      ["inactive", "aborted"],
     ]);
 
     // Every event carries a non-empty explanatory note.
@@ -123,38 +123,38 @@ describe("task_events audit timeline", () => {
     }
   });
 
-  test("setBlockedBy and unblock record blocked<->in_progress transitions", async () => {
+  test("setBlockedBy and unblock record blocked<->inactive transitions", async () => {
     const blocker = await tasksMod.createTask(DIR_ID, "dep", [], []);
-    const t = await tasksMod.createTask(DIR_ID, "movable", [], []); // starts in_progress
+    const t = await tasksMod.createTask(DIR_ID, "movable", [], []); // starts inactive
 
-    // in_progress -> blocked (operator added an unmerged dependency)
+    // inactive -> blocked (operator added an unmerged dependency)
     await tasksMod.setBlockedBy(t.id, [blocker.id]);
     expect(tasksMod.getTask(t.id)!.status).toBe("blocked");
 
-    // blocked -> in_progress (dependency set cleared by the operator)
+    // blocked -> inactive (dependency set cleared by the operator)
     await tasksMod.setBlockedBy(t.id, []);
-    expect(tasksMod.getTask(t.id)!.status).toBe("in_progress");
+    expect(tasksMod.getTask(t.id)!.status).toBe("inactive");
 
     expect(transitions(t.id)).toEqual([
-      [null, "in_progress"],
-      ["in_progress", "blocked"],
-      ["blocked", "in_progress"],
+      [null, "inactive"],
+      ["inactive", "blocked"],
+      ["blocked", "inactive"],
     ]);
   });
 
-  test("auto-unblock (reevaluate) records blocked -> in_progress when blockers merge", async () => {
+  test("auto-unblock (reevaluate) records blocked -> inactive when blockers merge", async () => {
     const blocker = await tasksMod.createTask(DIR_ID, "to-merge", [], []);
     const t = await tasksMod.createTask(DIR_ID, "waiter", [], [blocker.id]);
     expect(tasksMod.getTask(t.id)!.status).toBe("blocked");
 
-    // Mark the blocker merged and re-evaluate — the waiter promotes to in_progress.
+    // Mark the blocker merged and re-evaluate — the waiter promotes to inactive.
     dbMod.db.query(`UPDATE tasks SET status='merged' WHERE id=?`).run(blocker.id);
     tasksMod.reevaluateAllBlocked();
-    expect(tasksMod.getTask(t.id)!.status).toBe("in_progress");
+    expect(tasksMod.getTask(t.id)!.status).toBe("inactive");
 
     expect(transitions(t.id)).toEqual([
       [null, "blocked"],
-      ["blocked", "in_progress"],
+      ["blocked", "inactive"],
     ]);
   });
 });

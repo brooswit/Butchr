@@ -260,7 +260,7 @@ describe("END TO END: edits during needs_info reach the resumed agent", () => {
       "ORIGINAL: build the widget.",
       ["src/original.ts"],
     );
-    expect(dbRow(view.id).status).toBe("in_progress");
+    expect(dbRow(view.id).status).toBe("inactive");
     await dispatchMod.dispatch(dirRow(), dbRow(view.id));
     const id = view.id;
 
@@ -294,9 +294,9 @@ describe("END TO END: edits during needs_info reach the resumed agent", () => {
     );
     taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "needs_info" as any);
 
-    // 4. Answer it → re-queued in_progress for the --resume relaunch.
+    // 4. Answer it → re-queued inactive (ready) for the --resume relaunch.
     await tasksMod.answerTask(id, "Use the on-disk store.");
-    expect(dbRow(id).status).toBe("in_progress");
+    expect(dbRow(id).status).toBe("inactive");
 
     // 5. Re-dispatch (the resume). The stored fingerprint no longer matches the edited
     // task.md, so the rendered prompt must RE-GROUND the agent in the current task.

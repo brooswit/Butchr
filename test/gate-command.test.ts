@@ -143,12 +143,13 @@ describe("dashboard aggregation", () => {
     dbMod.db
       .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(DIR_C, join(REPO_ROOT, DIR_C), "Dash C", dbMod.nowIso());
-    seedTask("dc-q", DIR_C, "in_progress");          // ready (no pane) → in_progress bucket
+    seedTask("dc-q", DIR_C, "inactive");             // ready (no pane) → inactive bucket
     seedTask("dc-b", DIR_C, "blocked");              // blocked bucket
     seedTask("dc-r", DIR_C, "in_progress", 0, "pane-dc-r"); // live agent (non-idle) → in_progress
     seedTask("dc-i", DIR_C, "in_progress", 1, "pane-dc-i"); // idle (in_progress + pane + idle flag)
-    seedTask("dc-f", DIR_C, "finalizing");           // finalizing bucket
+    seedTask("dc-rb", DIR_C, "rolling_back");        // rolling_back bucket (mechanical revert merge)
     seedTask("dc-rev", DIR_C, "in_review");          // review/feedback bucket
+    seedTask("dc-failed", DIR_C, "failed");          // terminal execution failure → failed bucket
     seedTask("dc-merged", DIR_C, "merged");          // terminal — not counted in any bucket
     seedTask("dc-abort", DIR_C, "aborted");          // terminal
   });
@@ -157,17 +158,18 @@ describe("dashboard aggregation", () => {
     const d = dirsMod.dashboard();
     const c = d.workspaces.find((x) => x.id === DIR_C)!;
     expect(c).toBeTruthy();
-    // active = in_progress(dc-q, dc-r) + idle(dc-i) + blocked(dc-b) + finalizing(dc-f) = 5
+    // active = inactive(dc-q) + in_progress(dc-r) + idle(dc-i) + blocked(dc-b) + rolling_back(dc-rb) = 5
     expect(c.active).toBe(5);
     // review = in_review(dc-rev) = 1
     expect(c.review).toBe(1);
-    // failed is always 0 in the canonical model (aborted is terminal, not a failure bucket)
-    expect(c.failed).toBe(0);
-    // needs-attention = review (no failed bucket in new model)
-    expect(c.needsAttention).toBe(1);
-    // Terminal merged/aborted land in counts but not the buckets.
+    // failed = failed(dc-failed) = 1 (terminal execution failures, surfaced for a human)
+    expect(c.failed).toBe(1);
+    // needs-attention = review + failed
+    expect(c.needsAttention).toBe(2);
+    // Terminal merged/failed/aborted land in counts but merged/aborted aren't active buckets.
     expect(c.counts.merged).toBe(1);
     expect(c.counts.aborted).toBe(1);
+    expect(c.counts.failed).toBe(1);
     // The effective gate command is surfaced for the dashboard's gate display.
     expect(c.effective_gate_cmd).toBe(configMod.config.verifyCmd);
     expect(c.gate_cmd).toBeNull();

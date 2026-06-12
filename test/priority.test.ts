@@ -20,13 +20,13 @@ let dbMod: typeof import("../src/db.ts");
 let dispatcherMod: typeof import("../src/dispatcher.ts");
 let tasksMod: typeof import("../src/tasks.ts");
 
-// Insert a ready (in_progress, no pane) task directly with an explicit created_at + priority so the
+// Insert a ready (inactive, no pane) task directly with an explicit created_at + priority so the
 // ordering is deterministic (no reliance on insert timing).
 function insertQueued(id: string, createdAt: string, priority: number): void {
   dbMod.db
     .query(
       `INSERT INTO tasks (id, workspace_id, status, priority, created_at)
-       VALUES (?, ?, 'in_progress', ?, ?)`,
+       VALUES (?, ?, 'inactive', ?, ?)`,
     )
     .run(id, DIR_ID, priority, createdAt);
 }

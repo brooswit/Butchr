@@ -163,9 +163,12 @@ describe("an immediate exec failure routes to the dispatch-failure path, not in_
     );
 
     const row = dbRow(id);
-    // Under the attempt cap → stays in_progress (pane cleared = READY), NOT moved to in_review.
-    expect(row.status).toBe("in_progress");
+    // Under the attempt cap → re-armed READY `inactive` (pane cleared), NOT moved to
+    // in_review — and NOT left stranded as in_progress+null-pane (which the dispatcher,
+    // keying on `inactive`, would never pick up).
+    expect(row.status).toBe("inactive");
     expect(row.status).not.toBe("in_review");
+    expect(row.status).not.toBe("in_progress");
     expect(row.dispatch_attempts).toBe(1);
     expect(row.next_dispatch_at).toBeTruthy();
     expect(row.last_dispatch_error).toContain("failed to launch");

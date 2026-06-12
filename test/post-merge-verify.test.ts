@@ -94,12 +94,12 @@ describe("post-merge verify gate", () => {
     const id = await seedReviewTaskWithWork("feature.txt", "feature\n");
     const tipBefore = g(["rev-parse", "HEAD"]);
 
-    await tasksMod.approveTask(id); // in_review → finalizing
-    const out = await tasksMod.finalizeMerge(id); // finalizing → merge attempt → revert
+    // approve runs the mechanical merge synchronously → merge attempt → revert.
+    const out = await tasksMod.approveTask(id);
 
-    // Decision: reverted, not merged.
+    // Decision: reverted, not merged → terminal `failed` (an execution failure).
     expect(out.revertedOnRed).toBe(true);
-    expect(out.task.status).toBe("aborted");
+    expect(out.task.status).toBe("failed");
 
     // The default branch is back exactly at its pre-merge tip — the bad commit
     // did NOT survive on main, and its file is gone from the repo root worktree.
@@ -109,12 +109,12 @@ describe("post-merge verify gate", () => {
     // The task is flagged with the failing output, and its work is preserved
     // (branch + worktree kept) for inspection / a fixup re-run.
     const row = dbRow(id);
-    expect(row.status).toBe("aborted");
+    expect(row.status).toBe("failed");
     expect(row.revert_reason).toContain("boom");
     expect(row.last_dispatch_error).toContain("boom");
     expect(g(["rev-parse", "--verify", id])).toBeTruthy(); // task branch still exists
     expect(existsSync(join(REPO_ROOT, id))).toBe(true); // worktree kept
-    expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("aborted");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("failed");
   });
 
   test("GREEN verify lets the merge stand (task merged, branch cleaned up)", async () => {
@@ -122,8 +122,7 @@ describe("post-merge verify gate", () => {
     const id = await seedReviewTaskWithWork("greenfile.txt", "green\n");
     const tipBefore = g(["rev-parse", "HEAD"]);
 
-    await tasksMod.approveTask(id); // in_review → finalizing
-    const out = await tasksMod.finalizeMerge(id); // finalizing → merged
+    const out = await tasksMod.approveTask(id); // in_review → mechanical merge → merged
 
     expect(out.revertedOnRed).toBeFalsy();
     expect(out.task.status).toBe("merged");
@@ -151,15 +150,13 @@ describe("post-merge verify gate", () => {
     verifyMod.setVerifyRunner(async () => ({ ok: false, output: "still red" }));
     const redId = await seedReviewTaskWithWork("red.txt", "red\n");
     const tip0 = g(["rev-parse", "HEAD"]);
-    await tasksMod.approveTask(redId);
-    const redOut = await tasksMod.finalizeMerge(redId);
+    const redOut = await tasksMod.approveTask(redId);
     expect(redOut.revertedOnRed).toBe(true);
     expect(g(["rev-parse", "HEAD"])).toBe(tip0); // main restored
 
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
     const greenId = await seedReviewTaskWithWork("after.txt", "after\n");
-    await tasksMod.approveTask(greenId);
-    const greenOut = await tasksMod.finalizeMerge(greenId);
+    const greenOut = await tasksMod.approveTask(greenId);
     expect(greenOut.task.status).toBe("merged");
     expect(existsSync(join(REPO_ROOT, "after.txt"))).toBe(true);
   });
@@ -172,8 +169,7 @@ describe("verify runner default (disabled when verifyCmd is empty)", () => {
     // via a stub that mirrors the skip behavior, then confirm approveTask merges.
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "", skipped: true }));
     const id = await seedReviewTaskWithWork("skip.txt", "skip\n");
-    await tasksMod.approveTask(id); // in_review → finalizing
-    const out = await tasksMod.finalizeMerge(id); // finalizing → merged
+    const out = await tasksMod.approveTask(id); // in_review → mechanical merge → merged
     expect(out.task.status).toBe("merged");
     expect(existsSync(join(REPO_ROOT, "skip.txt"))).toBe(true);
   });

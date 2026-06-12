@@ -6,7 +6,7 @@ import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispat
 import { initFileLogging } from "./log.ts";
 import { reapDeadRunningAgents, reapOrphans, reapStuckGates } from "./reaper.ts";
 import { startServer } from "./server.ts";
-import { recoverFinalizingTasks, recoverStuckGates } from "./tasks.ts";
+import { recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
 
 async function main(): Promise<void> {
@@ -39,10 +39,12 @@ async function main(): Promise<void> {
     console.log(`[butchr] rescued ${rescued} task(s) whose agent ended while butchr was offline`);
   }
 
-  // Complete any task left mid-finalize (the branch already merged to main).
-  const finalized = await recoverFinalizingTasks();
-  if (finalized > 0) {
-    console.log(`[butchr] finalized ${finalized} task(s) left finalizing from a prior run`);
+  // Re-drive any ROLLBACK task left mid-merge in `rolling_back` (butchr stopped while
+  // its mechanical revert merge was in flight) so it lands or bounces rather than
+  // stranding. Ordinary in_review tasks need no recovery (the operator re-approves).
+  const rolledBack = await recoverRollingBackTasks();
+  if (rolledBack > 0) {
+    console.log(`[butchr] re-drove ${rolledBack} rollback task(s) left rolling_back from a prior run`);
   }
 
   // GATE RECOVERY (sibling of the agent auto-resume above): the CI build/test gate and
@@ -62,8 +64,8 @@ async function main(): Promise<void> {
 
   // Reap leaked worktrees/branches + herdr husks from tasks that reached a
   // terminal state (or vanished) but whose filesystem/herdr artifacts survived a
-  // restart. Runs AFTER reconcile + finalize so re-adopted running tasks and
-  // just-finalized ones aren't mistaken for orphans.
+  // restart. Runs AFTER reconcile + rollback-recovery so re-adopted running tasks and
+  // just-landed ones aren't mistaken for orphans.
   const { worktrees: reapedWt, husks: reapedHusks } = await reapOrphans(herdrUp);
   if (reapedWt > 0 || reapedHusks > 0) {
     console.log(
@@ -123,7 +125,7 @@ async function main(): Promise<void> {
   // Crash supervision: if anything escapes to the top level, don't limp along in
   // a half-broken state — log it and exit non-zero so the supervisor (see
   // scripts/supervise.sh) relaunches a fresh, healthy process. On boot we
-  // re-queue running tasks and finalize finalizing ones, so a restart resumes
+  // re-adopt running tasks and re-drive rolling_back ones, so a restart resumes
   // cleanly rather than orphaning work.
   process.on("uncaughtException", (err) => {
     console.error("[butchr] uncaught exception:", err);

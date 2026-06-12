@@ -154,7 +154,7 @@ describe("markNeedsInfoFromAgent (the `ask` tool core)", () => {
 });
 
 describe("answerTask", () => {
-  test("needs_info -> in_progress: stores answer, clears question, PRESERVES session_id", async () => {
+  test("needs_info -> inactive: stores answer, clears question, PRESERVES session_id", async () => {
     const SESSION = "sess-answer-aaaa-bbbb";
     const id = seedTask({ id: "ans-ok", status: "in_progress", sessionId: SESSION });
     tasksMod.markNeedsInfoFromAgent(id, "Per-user or global cache?");
@@ -162,22 +162,22 @@ describe("answerTask", () => {
     const answer = "Per-user — keyed by the authenticated user id.";
     const view = await tasksMod.answerTask(id, answer);
 
-    // Re-queued for the --resume relaunch.
-    expect(view.status).toBe("in_progress");
+    // Re-queued (READY `inactive`) for the --resume relaunch.
+    expect(view.status).toBe("inactive");
     const row = dbRow(id);
-    expect(row.status).toBe("in_progress");
+    expect(row.status).toBe("inactive");
     // The answer is held for the dispatcher to inject; the question is cleared.
     expect(row.answer).toBe(answer);
     expect(row.question).toBeNull();
     // The whole point of resume: the session id is untouched.
     expect(row.session_id).toBe(SESSION);
 
-    // task.md records the Q&A and the in_progress status.
+    // task.md records the Q&A and the inactive status.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, id), "utf8");
     expect(md).toContain("Clarifications");
     expect(md).toContain("Per-user or global cache?");
     expect(md).toContain(answer);
-    expect(md).toContain("status: in_progress");
+    expect(md).toContain("status: inactive");
   });
 
   test("answering a task NOT in needs_info errors with 409", async () => {
@@ -237,7 +237,7 @@ describe("renderAnswerPrompt", () => {
 });
 
 describe("answer-resume relaunch (dispatcher.resolveLaunchCommand)", () => {
-  // After answerTask the row is in_progress, carries an `answer`, and keeps started_at +
+  // After answerTask the row is inactive, carries an `answer`, and keeps started_at +
   // session_id — so the dispatcher resumes the SAME claude session and injects the
   // answer prompt. We assert resolveLaunchCommand picks the --resume path; the
   // answer-vs-rework prompt selection itself is renderAnswerPrompt (above).

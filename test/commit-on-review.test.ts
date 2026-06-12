@@ -83,7 +83,7 @@ afterAll(() => {
  */
 async function liveBuild(prompt: string): Promise<string> {
   const v = await tasksMod.createTask(DIR_ID, prompt);
-  expect(v.status).toBe("in_progress");
+  expect(v.status).toBe("inactive"); // ready; markRunning flips it to in_progress
   tasksMod.markRunning(v.id, `pane-${v.id}`, `sess-${v.id}`, `tab-${v.id}`);
   return v.id;
 }
@@ -123,10 +123,10 @@ describe("commit-on-review durability", () => {
     expect(commitsAhead(id)).toBeGreaterThan(0);
     expect(g(["show", `${id}:wip.txt`])).toBe("half-done work");
 
-    // Answering resumes the agent to in_progress — the WIP commit must SURVIVE the
+    // Answering resumes the agent (→ inactive) — the WIP commit must SURVIVE the
     // resume (no git reset of the branch) so the agent continues on top of it.
     const view = await tasksMod.answerTask(id, "Per-user.");
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(commitsAhead(id)).toBeGreaterThan(0);
     expect(g(["show", `${id}:wip.txt`])).toBe("half-done work");
     // And the worktree file is untouched, so the resumed agent sees its prior work.
@@ -143,26 +143,22 @@ describe("commit-on-review durability", () => {
     const afterFirst = commitsAhead(id);
     expect(afterFirst).toBeGreaterThan(0);
 
-    // Reviewer requests changes → resume to in_progress. The WIP commit and the
+    // Reviewer requests changes → resume (→ inactive). The WIP commit and the
     // worktree file both survive the resume.
     await tasksMod.rejectTask(id, "also add file2");
-    expect(row(id).status).toBe("in_progress");
+    expect(row(id).status).toBe("inactive");
     expect(commitsAhead(id)).toBe(afterFirst);
     expect(existsSync(join(wt, "file1.txt"))).toBe(true);
+    // Resume the build agent (inactive → in_progress) for the rework pass.
+    tasksMod.markRunning(id, `pane-rw-${id}`, `sess-${id}`, `tab-rw-${id}`);
 
     // Resumed agent makes FURTHER (uncommitted) changes on top of the WIP commit.
     writeFileSync(join(wt, "file2.txt"), "second pass\n");
     expect(tasksMod.markReviewFromAgent(id, "v2")).toBe("ok");
     expect(row(id).status).toBe("in_review");
 
-    // Approve → finalize → merge. The agent's further changes must merge cleanly.
+    // Approve → MECHANICAL merge. The agent's further changes must merge cleanly.
     await tasksMod.approveTask(id);
-    expect(row(id).status).toBe("finalizing");
-    tasksMod.markRunning(id, `pane-fin-${id}`, `sess-${id}`, `tab-fin-${id}`);
-    expect(tasksMod.markReviewFromAgent(id, "wrapped up")).toBe("ok");
-    for (let i = 0; i < 100 && row(id).status !== "merged"; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
     expect(row(id).status).toBe("merged");
     // BOTH the first-pass and the further changes landed on the default branch.
     expect(existsSync(join(REPO_ROOT, "file1.txt"))).toBe(true);

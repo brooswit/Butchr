@@ -185,9 +185,9 @@ function serializeFrontMatter(meta: TaskMeta): string {
   lines.push(`id: ${meta.id}`);
   lines.push(`created: ${meta.created}`);
   lines.push(`status: ${meta.status}`);
-  // Only emit a kind line for plan tasks — ordinary tasks omit it and parse back as
-  // the "task" default, keeping existing task.md files unchanged.
-  if (meta.kind === "plan") lines.push(`kind: ${meta.kind}`);
+  // Only emit a kind line for non-default kinds (plan / rollback) — ordinary tasks omit
+  // it and parse back as the "task" default, keeping existing task.md files unchanged.
+  if (meta.kind !== "task") lines.push(`kind: ${meta.kind}`);
   // Only emit a model line when one was requested — an unset model omits it and
   // parses back as null (the default), keeping existing task.md files unchanged.
   if (meta.model) lines.push(`model: ${meta.model}`);
@@ -429,7 +429,7 @@ export function parseTaskMd(raw: string): TaskDoc {
       if (key === "id") meta.id = val;
       else if (key === "created") meta.created = val;
       else if (key === "status") meta.status = (val as TaskStatus) || "in_progress";
-      else if (key === "kind") meta.kind = val === "plan" ? "plan" : "task";
+      else if (key === "kind") meta.kind = val === "plan" ? "plan" : val === "rollback" ? "rollback" : "task";
       else if (key === "model") meta.model = val || null;
       else if (key === "plan_preview") meta.plan_preview = val === "true";
       // NOTE: a legacy `stage:` line from the retracted idea→spec→build axis is simply
@@ -546,22 +546,3 @@ export function renderReworkPrompt(workspaceRoot: string, doc: TaskDoc, reground
   return head + focused + "\n\n---\n\n" + REVIEW_PROTOCOL;
 }
 
-/**
- * Build the prompt for the FINALIZING phase. The operator APPROVED the task in
- * `in_review`; the workspace agent is resumed (`claude --resume <session-id>`, so it
- * still has the full task + review history in context) to do POST-APPROVAL 'final
- * thoughts' — a last wrap-up pass (tidy comments/docs, remove stray debug, a final
- * self-check) BEFORE butchr finalizes the merge. This is a focused message: it tells
- * the agent its work was approved and to call `request_review` again the moment its
- * wrap-up is done (which signals butchr to land the merge). Best-effort: butchr
- * finalizes regardless of whether the agent makes further changes.
- */
-export function renderFinalizePrompt(): string {
-  const body =
-    `Your work was APPROVED. Before butchr lands the merge, do a brief FINAL pass: ` +
-    `tidy up comments/docs touched by this change, remove any stray debugging, and ` +
-    `give the diff one last self-review. Keep it minimal — do NOT start new work. ` +
-    `When you're done (or if there's nothing to wrap up), call \`request_review\` ` +
-    `again to signal butchr to finalize and merge your branch.`;
-  return [`# Approved — final thoughts before merge`, "", body].join("\n") + "\n\n---\n\n" + REVIEW_PROTOCOL;
-}

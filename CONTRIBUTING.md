@@ -63,6 +63,48 @@ the focused answer/rework message. An *unedited* task resumes with the focused
 message byte-for-byte as before. (Review notes are excluded from the fingerprint —
 they already flow into the rework prompt.)
 
+**The 12-state model** (`TaskStatus` / `STATE_META` / `isTerminal` in `src/db.ts`).
+Each state has a *kind* — `agent` (an agent runs or is about to), `feedback` (butchr
+surfaced an artifact and awaits the operator), or `idle` (terminal, or waiting on
+something mechanical):
+
+| state | kind | meaning |
+|-------|------|---------|
+| `idea` | agent (ceo-agent) | a one-line brief; first dispatch runs the CTO-fork spec generator |
+| `spec_review` | feedback | a generated spec awaiting approval → `inactive`, or request-changes → `idea` |
+| `blocked` | idle | waiting on `blocked_by` dependencies; auto-unblocks to `inactive` |
+| `needs_info` | feedback | an agent asked a question; on answer it resumes (→ `inactive`) |
+| `inactive` | agent (workspace) | **READY** — queued for the dispatcher, no live agent yet |
+| `in_progress` | agent (workspace) | a **LIVE** workspace agent is building the code |
+| `in_review` | feedback | a diff awaiting approval → mechanical merge, or request-changes → `inactive` |
+| `rolling_back` | idle | a rollback task's revert is being mechanically merged |
+| `rolled_back` | idle (terminal) | a rollback task's revert landed on the default branch |
+| `merged` | idle (terminal) | landed on the default branch |
+| `failed` | idle (terminal) | an **execution/dispatch failure** (give-up or post-merge revert) |
+| `aborted` | idle (terminal) | a **deliberate operator cancel** |
+
+**Ready vs. running** is carried by the *status* itself: `inactive` is READY (the
+dispatcher launches its agent) and `in_progress` is a LIVE agent. `markRunning` flips
+`inactive` → `in_progress` atomically with recording the herdr pane, so a running task
+always has a pane and a ready task never does. A dispatch failure / resume / conflict
+bounce re-arms the task as `inactive`.
+
+**Approve merges mechanically** (no post-approval agent). Approving an `in_review` task
+runs the merge directly (`finalizeMerge`): rebase onto the default branch → run the gate
+→ merge → teardown → `merged`. A rebase **conflict** bounces the task back to `inactive`
+so the *same* agent resumes in-context to resolve it (reusing the `request_review` resume
+machinery), then re-reviews. A post-merge verify failure auto-reverts off the default
+branch and lands the task in `failed`.
+
+**`failed` vs `aborted`.** `failed` is reserved for execution/dispatch failures — a
+dispatch give-up, a spec-gen give-up, or a post-merge verify revert. `aborted` is
+reserved strictly for a deliberate operator cancel.
+
+**Rollback** (the webapp "Roll back" button) creates a `kind='rollback'` task from the
+built-in `rollback` template. It builds a revert like any task, but lands through its own
+lifecycle tail: `rolling_back` while the revert merges, then terminal `rolled_back`
+instead of `merged`.
+
 **Concurrency — fully concurrent.** Every queued task is dispatched immediately
 and runs in parallel; there is no per-workspace "one at a time" limit. Each task
 gets its own git worktree on its own branch, so tasks are isolated at the
@@ -320,18 +362,21 @@ trip 503.
 
 On boot (`src/index.ts`) butchr repairs state left by a prior run, **after**
 re-adopting running agents (`reconcileRunningTasks`) so live/just-merged work is
-never mistaken for garbage. Watch the log for: re-adopted running agents;
-**auto-resumed** agents killed by a host/herdr restart (see "Restart resilience"
-below); rescued tasks whose agent ended while butchr was offline; finalized tasks
-left mid-wrap-up (`recoverFinalizingTasks`); **re-triggered CI/conformance gates** left
-stuck mid-flight by a restart (`recoverStuckGates` — see "Gate recovery" below); and
-`reapOrphans` (`src/reaper.ts`), a
-conservative once-on-boot sweep that removes **leaked git worktrees + branches** and
-**herdr husks** for tasks in a terminal state (`merged` / `aborted` / `rejected`) or
-with no DB row — it never touches the main worktree or a worktree whose task is still
-queued/running/review/finalizing, and skips herdr deregistration entirely when
-herdr is down (worktree reaping still runs). This is the automated fix for the old
-"an aborted task's worktree/branch survived a restart" bug.
+never mistaken for garbage. The **ready/running split migration** (`src/db.ts`)
+re-buckets legacy rows: an old `in_progress`+no-pane row becomes `inactive` (ready),
+an `in_progress`+pane row stays `in_progress` (re-adopted), and any lingering
+`finalizing` row is routed to `in_review` for the operator to re-approve. Watch the
+log for: re-adopted running agents; **auto-resumed** agents killed by a host/herdr
+restart (see "Restart resilience" below); rescued tasks whose agent ended while butchr
+was offline; rollback tasks re-driven from `rolling_back` (`recoverRollingBackTasks`);
+**re-triggered CI/conformance gates** left stuck mid-flight by a restart
+(`recoverStuckGates` — see "Gate recovery" below); and `reapOrphans` (`src/reaper.ts`),
+a conservative once-on-boot sweep that removes **leaked git worktrees + branches** and
+**herdr husks** for tasks in a terminal state (`merged` / `failed` / `rolled_back` /
+`aborted`) or with no DB row — it never touches the main worktree or a worktree whose
+task is still live (`inactive` / `in_progress` / `in_review` / `rolling_back` /
+`blocked` / …), and skips herdr deregistration entirely when herdr is down (worktree
+reaping still runs). This is the automated fix for the old
 
 ### Restart resilience (auto-resume on host/herdr restart)
 

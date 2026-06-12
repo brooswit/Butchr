@@ -25,8 +25,8 @@ import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
 import { claudeAlive } from "./liveness.ts";
-import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderFinalizePrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, finalizeMerge, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
+import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
+import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, markSpecGenFailure, maybeAutoMerge, prepareBranchForDispatch, promoteIdeaToSpecReview, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
 import { generateSpec } from "./cto.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
@@ -230,15 +230,14 @@ export function dispatcherHealth(): { lastTickAt: number; tickCount: number; tic
 export async function reconcileRunningTasks(
   herdrUp: boolean,
 ): Promise<{ adopted: number; rescued: number; resumed: number; skipped: number }> {
-  // A LIVE agent task is one in an agent phase (in_progress build, or finalizing
-  // wrap-up) that recorded a pane — i.e. it was RUNNING when butchr stopped. Ready
-  // (pane-NULL) agent tasks are never-launched/rework and are handled by the normal
-  // tick, not here.
+  // A LIVE agent task is one that is `in_progress` (a running build agent) — by the
+  // 12-state model a running task always recorded a pane. Ready `inactive` tasks are
+  // never-launched/rework and are handled by the normal tick, not here.
   const rows = db
     .query<QueuedRow, []>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
-         WHERE t.status IN ('in_progress','finalizing') AND t.herdr_pane_id IS NOT NULL`,
+         WHERE t.status='in_progress' AND t.herdr_pane_id IS NOT NULL`,
     )
     .all();
   if (rows.length === 0) return { adopted: 0, rescued: 0, resumed: 0, skipped: 0 };
@@ -298,37 +297,30 @@ export async function reconcileRunningTasks(
       if (r === "rescued") rescued++;
       else if (r === "resumed" || r === "fresh") resumed++;
     } else {
-      // Agent gone and it EXITED on its own (`.done` present), or a `finalizing` agent
-      // died. Rescue PHASE-AWARE: a build agent → in_review for a human; a finalize
-      // agent → land the merge directly (the operator already approved). Close its
-      // (now husk) tab defensively.
+      // Agent gone — the build (in_progress) agent ended on its own (`.done` present)
+      // while butchr was offline. Rescue it to in_review for a human. Close its (now
+      // husk) tab defensively.
       await harness.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
       const snapshot = readRunLogSnapshot(row.id);
-      if (row.status === "finalizing") {
-        await finalizeMerge(row.id).catch(() => {});
-        rescued++;
-        console.log(`[butchr] finalized task ${row.id} (finalize agent gone while offline)`);
-      } else {
-        markInReview(
-          row.id,
-          `[butchr] moved to review automatically: the agent ended while butchr ` +
-            `was offline. Output captured as-is.\n\n${snapshot}`,
-        );
-        rescued++;
-        console.log(`[butchr] rescued task ${row.id} → in_review (agent ended while offline)`);
-      }
+      markInReview(
+        row.id,
+        `[butchr] moved to review automatically: the agent ended while butchr ` +
+          `was offline. Output captured as-is.\n\n${snapshot}`,
+      );
+      rescued++;
+      console.log(`[butchr] rescued task ${row.id} → in_review (agent gone while offline)`);
     }
   }
   return { adopted, rescued, resumed, skipped: 0 };
 }
 
 /**
- * The tick's NEW-DISPATCH gate: the `queued` tasks eligible to launch an agent
- * right now, highest-PRIORITY first then oldest-first. Returns an EMPTY list when
+ * The tick's NEW-DISPATCH gate: the `inactive` (ready) tasks eligible to launch an
+ * agent right now, highest-PRIORITY first then oldest-first. Returns an EMPTY list when
  * dispatch is PAUSED, which is how maintenance mode stops new work without touching
  * anything in flight.
  *
- * Selection (when not paused): status='queued' AND the dispatch backoff has
+ * Selection (when not paused): status='inactive' AND the dispatch backoff has
  * elapsed (next_dispatch_at IS NULL or <= now — ISO-8601 strings compare
  * correctly), so a repeatedly-failing task can't hot-loop. ORDERED BY
  * `priority DESC, created_at ASC`: a higher-priority task JUMPS the queue ahead of
@@ -340,17 +332,15 @@ export async function reconcileRunningTasks(
  */
 export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
   if (paused) return [];
-  // READY agent-phase tasks: an `in_progress` (build) or `finalizing` (final-thoughts)
-  // task with NO live pane (herdr_pane_id IS NULL) is one the dispatcher should launch
-  // — a task with a pane already has a live agent. This single gate covers fresh
-  // builds, reworks/resumes, answer-resumes, and the post-approval finalize launch.
+  // READY tasks: a task in `inactive` is queued for the dispatcher to launch its
+  // workspace agent (markRunning then flips it to `in_progress`). This single gate
+  // covers fresh builds, reworks/resumes, answer-resumes, and conflict-bounce resumes.
   // Backoff (next_dispatch_at) and priority ordering apply uniformly.
   return db
     .query<QueuedRow, [string]>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
-         WHERE t.status IN ('in_progress','finalizing')
-           AND t.herdr_pane_id IS NULL
+         WHERE t.status='inactive'
            AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
          ORDER BY t.priority DESC, t.created_at ASC`,
     )
@@ -662,11 +652,7 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
     // detect a prompt/context edit made while the task was paused (see below).
     const groundingFp = groundingFingerprint(doc);
     let rendered: string;
-    if (task.status === "finalizing") {
-      // FINALIZE phase: the workspace agent is resumed to do post-approval 'final
-      // thoughts' before butchr lands the merge (see renderFinalizePrompt).
-      rendered = renderFinalizePrompt();
-    } else if (isResume) {
+    if (isResume) {
       // A resume re-enters the SAME `--resume` session, which still holds the prompt +
       // context the agent saw when it was last grounded. If the task's prompt/context was
       // EDITED while it waited (needs_info / in_review) — e.g. an operator revised it via
@@ -885,9 +871,8 @@ export async function currentPaneRepairing(taskId: string): Promise<string | und
  * SCOPE — this fires ONLY for a live `in_progress` workspace build agent:
  *  - The managed CTO agent is event-driven and idle-BY-DESIGN (idle = waiting for a
  *    channel push); it also never runs under a task watcher, so it can't reach here.
- *  - The short-lived `finalizing` (final-thoughts) phase is not a stall risk and is
- *    skipped — only `in_progress` is an interactive build prompt where `continue`
- *    means resume the work.
+ *  - `in_progress` is the only interactive build phase where `continue` means resume
+ *    the work (there is no post-approval agent — approval merges mechanically).
  * Any non-`in_progress` phase (or no log yet, `quietMs === null`) is a NO-OP that
  * leaves the state untouched.
  *
@@ -1038,14 +1023,14 @@ function spawnWatcher(
     while (true) {
       if (abortSignals.has(taskId)) break;
       // Release our slot the moment the task leaves its live agent phase. Once it
-      // reaches in_review/needs_info/merged/aborted the agent has submitted/exited —
-      // there is nothing left to rescue. We watch BOTH agent phases that hold a live
-      // pane: `in_progress` (build) and `finalizing` (final thoughts). Any other state
-      // means the task was reclaimed elsewhere, so we stop looping; otherwise we'd hold
-      // the `watching` slot forever and tick() would skip the task.
+      // reaches in_review/needs_info/inactive/merged/failed/aborted the agent has
+      // submitted/exited — there is nothing left to rescue. The only live agent phase
+      // that holds a pane is `in_progress` (the build). Any other state means the task
+      // was reclaimed elsewhere, so we stop looping; otherwise we'd hold the `watching`
+      // slot forever and tick() would skip the task.
       const curTask = getTask(taskId);
       const cur = curTask?.status;
-      if (cur !== "in_progress" && cur !== "finalizing") break;
+      if (cur !== "in_progress") break;
       // AUTO-RESUME HAND-OFF: the pane was cleared (NULL) out from under us — the
       // nudge guard auto-resumed a dead-claude agent (requeueForResume), a reaper
       // backstop did, or an operator re-queued. A fresh dispatch+watcher will own it;
@@ -1111,11 +1096,11 @@ function spawnWatcher(
     }
 
     // If the agent already submitted (in_review / needs_info) or the task moved on
-    // (merged/aborted), there is nothing to rescue. Only a task still sitting in a
-    // live agent phase (in_progress/finalizing) here means the agent ended WITHOUT
-    // submitting. `phase` is captured for the phase-aware rescue below.
+    // (inactive/merged/failed/aborted), there is nothing to rescue. Only a task still
+    // sitting in the live build phase (`in_progress`) here means the agent ended
+    // WITHOUT submitting.
     const phase = getTask(taskId)?.status;
-    if (phase !== "in_progress" && phase !== "finalizing") {
+    if (phase !== "in_progress") {
       watching.delete(taskId);
       return;
     }
@@ -1201,18 +1186,10 @@ function spawnWatcher(
     // moving to review so abortTask's terminal state stands.
     if (consumeAbort(taskId)) return;
 
-    // Rescue PHASE-AWARE: a build (in_progress) agent that ended without submitting →
-    // in_review for a human to inspect; a finalize agent that ended → land the merge
-    // directly (the operator already approved — see finalizeMerge). Re-read the phase
-    // in case it changed while we captured output.
-    if (getTask(taskId)?.status === "finalizing") {
-      void finalizeMerge(taskId).catch(() => {});
-      watching.delete(taskId);
-      console.log(`[butchr] task ${taskId} → finalized (${reason})`);
-    } else {
-      markInReview(taskId, snapshot);
-      watching.delete(taskId);
-      console.log(`[butchr] task ${taskId} → in_review (${reason})`);
-    }
+    // RESCUE: the build (in_progress) agent ended without submitting → move the task
+    // to in_review for a human to inspect (approval then merges mechanically).
+    markInReview(taskId, snapshot);
+    watching.delete(taskId);
+    console.log(`[butchr] task ${taskId} → in_review (${reason})`);
   })();
 }

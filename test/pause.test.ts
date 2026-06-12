@@ -5,10 +5,10 @@
 // at `true`, so any herdr probe is a harmless no-op). The behavioral assertion
 // uses the REAL function the tick calls — selectQueuedForDispatch — so the gate
 // itself is exercised, not a replica:
-//   1. when NOT paused, an eligible READY `in_progress` task (herdr_pane_id NULL)
+//   1. when NOT paused, an eligible READY `inactive` task
 //      is selected for dispatch;
 //   2. when PAUSED, the selection is EMPTY (no new agent is launched), even though
-//      the task is still `in_progress` and eligible;
+//      the task is still `inactive` and eligible;
 //   3. resume restores selection;
 //   4. the flag persists to the `settings` table (key 'dispatch_paused'), which is
 //      what keeps a pause in effect across a butchr restart.
@@ -44,13 +44,13 @@ beforeAll(async () => {
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 
-  // One plain, immediately-eligible READY `in_progress` task (herdr_pane_id NULL,
+  // One plain, immediately-eligible READY `inactive` task (herdr_pane_id NULL,
   // no dispatch backoff). This is the new dispatchable state (was `queued`).
   dbMod.db
     .query(
       `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`,
     )
-    .run("pause-q1", DIR_ID, "in_progress", null, dbMod.nowIso());
+    .run("pause-q1", DIR_ID, "inactive", null, dbMod.nowIso());
 });
 
 afterAll(() => {
@@ -64,20 +64,20 @@ const ids = (now: string) =>
   dispatcherMod.selectQueuedForDispatch(now).map((r) => r.id);
 
 describe("dispatcher pause gate", () => {
-  test("not paused by default: an eligible READY in_progress task is selected", () => {
+  test("not paused by default: an eligible READY inactive task is selected", () => {
     expect(dispatcherMod.isPaused()).toBe(false);
     expect(ids(new Date().toISOString())).toContain("pause-q1");
   });
 
-  test("paused: no in_progress task is dispatched (drain-only)", () => {
+  test("paused: no inactive task is dispatched (drain-only)", () => {
     dispatcherMod.setPaused(true);
     expect(dispatcherMod.isPaused()).toBe(true);
-    // The task is still in_progress + eligible (READY), but the gate returns nothing.
+    // The task is still inactive + eligible (READY), but the gate returns nothing.
     expect(ids(new Date().toISOString())).toEqual([]);
     const row = dbMod.db
       .query<{ status: string }, [string]>(`SELECT status FROM tasks WHERE id=?`)
       .get("pause-q1");
-    expect(row?.status).toBe("in_progress");
+    expect(row?.status).toBe("inactive");
   });
 
   test("paused state is persisted to the settings table (survives restart)", () => {

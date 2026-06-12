@@ -143,11 +143,11 @@ test("--merge: approves, confirms merge, then reverts to clean the sandbox", asy
     taskSequence: [
       { id: "probe-1", status: "in_progress" },
       { id: "probe-1", status: "in_review", ci_status: "pass" },
-      { id: "probe-1", status: "finalizing" },
       { id: "probe-1", status: "merged", merge_base_sha: "base0", merged_sha: "tip9" },
     ],
-    // Approve succeeds (no conflictSentBack); merge range comes from the polled merged task.
-    approve: { task: { id: "probe-1", status: "finalizing" } },
+    // Approve runs the mechanical merge synchronously (no conflictSentBack); the merge
+    // range comes from the polled merged task.
+    approve: { task: { id: "probe-1", status: "merged" } },
     onAbort: () => (aborted = true),
   });
   const result = await runSelftest({

@@ -177,19 +177,19 @@ describe("maybeNudgeStalledAgent (the watcher's per-tick step)", () => {
     expect(nudgeEvents("stalled-build").length).toBe(1);
   });
 
-  test("the finalizing (non-build) phase is never nudged", async () => {
+  test("a non-build phase (in_review) is never nudged", async () => {
     sends = [];
-    seedTask("finalizing-task", "finalizing");
+    seedTask("review-task", "in_review");
     const next = await dispatchMod.maybeNudgeStalledAgent(
-      "finalizing-task",
-      "finalizing",
+      "review-task",
+      "in_review",
       stalledQuietMs(),
       { nudgesSent: 0, lastNudgeAt: 0 },
       2_000_000,
     );
     expect(sends).toEqual([]); // no send — only the in_progress build phase qualifies
     expect(next).toEqual({ nudgesSent: 0, lastNudgeAt: 0 }); // untouched
-    expect(nudgeEvents("finalizing-task").length).toBe(0);
+    expect(nudgeEvents("review-task").length).toBe(0);
   });
 
   test("output resuming (quiet back under idleMs) clears the nudge streak", async () => {

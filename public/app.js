@@ -51,18 +51,21 @@ function fmtTime(iso) {
   if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
-// CANONICAL STATUS LABELS for the 9-state model. Maps internal status keys to their
+// CANONICAL STATUS LABELS for the 12-state model. Maps internal status keys to their
 // friendly display labels. Any status not listed shows verbatim (fallback for
 // unknown values from historical audit logs). The chip CSS class stays the raw status.
 const STATUS_LABELS = {
   spec_review: "spec review",
+  inactive: "ready",
   in_progress: "in progress",
   in_review: "in review",
   needs_info: "needs info",
-  finalizing: "finalizing",
+  rolling_back: "rolling back",
+  rolled_back: "rolled back",
   idea: "idea",
   blocked: "blocked",
   merged: "merged",
+  failed: "failed",
   aborted: "aborted",
 };
 function statusLabel(status) {
@@ -78,16 +81,19 @@ const STATE_KIND = {
   spec_review: "feedback",
   blocked: "idle",
   needs_info: "feedback",
+  inactive: "agent",
   in_progress: "agent",
   in_review: "feedback",
-  finalizing: "agent",
+  rolling_back: "idle",
+  rolled_back: "idle",
   merged: "idle",
+  failed: "idle",
   aborted: "idle",
 };
 const AGENT_TYPE = {
   idea: "ceo-agent",
+  inactive: "workspace-agent",
   in_progress: "workspace-agent",
-  finalizing: "workspace-agent",
 };
 // What an operator is awaiting for each feedback state (shown as a chip hint).
 const AWAITED_LABEL = {
@@ -148,10 +154,9 @@ function tagChips(t) {
     .join("")}</span>`;
 }
 
-// The agent is live (attachable) whenever it has a herdr pane: running/idle, while
-// blocked on the request_review handshake in `review`, and during `finalizing` (its
-// post-merge wrap-up) until butchr closes the pane. Gating on herdr_pane_id mirrors
-// the /terminal endpoint exactly — the button shows iff the attach would succeed.
+// The agent is live (attachable) whenever it has a herdr pane: a running/idle
+// `in_progress` build agent until butchr closes the pane. Gating on herdr_pane_id
+// mirrors the /terminal endpoint exactly — the button shows iff the attach would succeed.
 function isLive(t) {
   return !!t.herdr_pane_id;
 }
@@ -721,15 +726,17 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "idle", "in_review", "finalizing", "merged", "aborted"]
+  const pills = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "rolling_back", "rolled_back", "merged", "failed", "aborted"]
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
+        : s === "inactive" && c[s] ? "count-pill has-inactive"
         : s === "in_progress" && c[s] ? "count-pill has-running"
         : s === "idle" && c[s] ? "count-pill has-idle"
         : s === "in_review" && c[s] ? "count-pill has-review"
         : s === "spec_review" && c[s] ? "count-pill has-review"
         : s === "needs_info" && c[s] ? "count-pill has-awaiting"
-        : s === "finalizing" && c[s] ? "count-pill has-finalizing"
+        : s === "rolling_back" && c[s] ? "count-pill has-rolling-back"
+        : s === "failed" && c[s] ? "count-pill has-failed"
         : "count-pill";
       return `<span class="${cls}">${statusLabel(s)} <b>${c[s] || 0}</b></span>`;
     }).join("");
@@ -1191,14 +1198,16 @@ function queueLine(tasks) {
   const specRev = tasks.filter((t) => t.status === "spec_review").length;
   const b = tasks.filter((t) => t.status === "blocked").length;
   const ni = tasks.filter((t) => t.status === "needs_info").length;
+  const ready = tasks.filter((t) => t.status === "inactive").length;
   const r = tasks.filter((t) => t.status === "in_progress" && !t.idle).length;
   const i = tasks.filter((t) => t.status === "in_progress" && t.idle).length;
   const inRev = tasks.filter((t) => t.status === "in_review").length;
-  const f = tasks.filter((t) => t.status === "finalizing").length;
+  const rb = tasks.filter((t) => t.status === "rolling_back").length;
   const parts = [];
   if (r) parts.push(`${r} in progress`);
   if (i) parts.push(`${i} idle`);
-  if (f) parts.push(`${f} finalizing`);
+  if (ready) parts.push(`${ready} ready`);
+  if (rb) parts.push(`${rb} rolling back`);
   if (inRev) parts.push(`${inRev} in review`);
   if (specRev) parts.push(`${specRev} spec review`);
   if (ni) parts.push(`${ni} needs info`);
@@ -1208,18 +1217,18 @@ function queueLine(tasks) {
 }
 
 // Lifecycle statuses still in flight — these stay in the main workspace list.
-// Everything else (merged, aborted) is terminal and lives in History.
-// `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
-const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "in_review", "finalizing"];
-// The ONLY two terminal idle states — these are what belongs in the collapsible
-// "Finished" section. Everything NOT in this allowlist is non-terminal and stays
-// VISIBLE in the active list: the feedback states awaiting the operator
-// (spec_review / in_review / needs_info) AND any legacy/non-canonical status a row
-// may still carry (e.g. `failed` / `rejected`, which historically backed a revert
-// or dispatch give-up). Defining Finished by an explicit allowlist — rather than as
-// the complement of ACTIVE_STATUSES — guarantees a needs-attention task can never be
-// hidden under Finished just because its status isn't in the active list.
-const TERMINAL_STATUSES = ["merged", "aborted"];
+// Everything else (merged, failed, rolled_back, aborted) is terminal and lives in
+// History. `blocked` and `inactive` are pre-dispatch waiting work, so they group with
+// the active tasks; `rolling_back` is a mechanical merge in flight.
+const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "in_review", "rolling_back"];
+// The four terminal idle states — these are what belongs in the collapsible "Finished"
+// section. Everything NOT in this allowlist is non-terminal and stays VISIBLE in the
+// active list: the feedback states awaiting the operator (spec_review / in_review /
+// needs_info) AND any legacy/non-canonical status a row may still carry. Defining
+// Finished by an explicit allowlist — rather than as the complement of ACTIVE_STATUSES
+// — guarantees a needs-attention task can never be hidden under Finished just because
+// its status isn't in the active list.
+const TERMINAL_STATUSES = ["merged", "failed", "rolled_back", "aborted"];
 const HISTORY_KEY = "butchr-history-open";
 
 // Workspace page body mode: the task "List", the pipeline "Board", or the
@@ -1261,7 +1270,7 @@ function historyOpen() {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "idle", "in_review", "finalizing", "merged", "aborted"];
+const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "rolling_back", "rolled_back", "merged", "failed", "aborted"];
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
@@ -1864,20 +1873,20 @@ function buildGraphGenSlider(maxGen, onChange) {
 // ---------- pipeline / merge-train board ----------
 // The board view: the workspace's active (in-flight) tasks grouped into lanes in
 // pipeline order — closest-to-landing first — so "what's happening / what's next"
-// reads at a glance. Lanes: Ready to merge (review) · Merging (finalizing, only
-// when present) · In progress (running/idle) · Blocked (each card shows the
-// blockers it's waiting on and their current status) · Queued. Blocked (the
-// planned upcoming work) reads before the ready-to-dispatch Queued lane.
-// Terminal-state tasks
-// (merged/aborted/rejected/failed) aren't part of the pipeline and are omitted —
+// reads at a glance. Lanes: Spec review · In review (ready to merge) · Needs info ·
+// Rolling back (a mechanical revert merge in flight, only when present) · In progress
+// (running/idle) · Ready (inactive — queued to dispatch) · Blocked (each card shows the
+// blockers it's waiting on and their current status) · Idea. Terminal-state tasks
+// (merged/failed/rolled_back/aborted) aren't part of the pipeline and are omitted —
 // they live in the List view's Finished section. Re-rendered wholesale on every
 // SSE event by the workspace view, so it live-updates for free.
 const BOARD_LANES = [
   { key: "spec_review", title: "Spec review", hint: "spec review", match: (t) => t.status === "spec_review" },
   { key: "in_review", title: "In review", hint: "in review", match: (t) => t.status === "in_review" },
   { key: "needs_info", title: "Needs info", hint: "needs info", match: (t) => t.status === "needs_info" },
-  { key: "finalizing", title: "Finalizing", hint: "finalizing", match: (t) => t.status === "finalizing" },
+  { key: "rolling_back", title: "Rolling back", hint: "rolling back", match: (t) => t.status === "rolling_back" },
   { key: "in_progress", title: "In progress", hint: "in progress", match: (t) => t.status === "in_progress" },
+  { key: "inactive", title: "Ready", hint: "ready", match: (t) => t.status === "inactive" },
   { key: "blocked", title: "Blocked", hint: "blocked", match: (t) => t.status === "blocked" },
   { key: "idea", title: "Idea", hint: "idea", match: (t) => t.status === "idea" },
 ];
@@ -1904,9 +1913,9 @@ function renderBoard(tasks) {
 
   for (const lane of BOARD_LANES) {
     const items = active.filter(lane.match).sort(byCreated);
-    // Always render the five core lanes so the pipeline skeleton stays visible;
-    // the finalizing and spec_review lanes only appear when something is present.
-    if ((lane.key === "finalizing" || lane.key === "spec_review") && items.length === 0) continue;
+    // Always render the core lanes so the pipeline skeleton stays visible;
+    // the rolling_back and spec_review lanes only appear when something is present.
+    if ((lane.key === "rolling_back" || lane.key === "spec_review") && items.length === 0) continue;
     board.appendChild(boardLane(lane, items, byId));
   }
   return board;
@@ -2343,9 +2352,10 @@ async function renderTask(id) {
   headerRight.appendChild(el("div", {
     html: taskChips(t, { plan: true, kind: true }),
   }));
-  // Abort is available from any non-terminal state. Terminal states are merged/aborted.
-  // finalizing is an agent state (still in flight) — it IS abortable.
-  const canAbort = !["merged", "aborted"].includes(t.status);
+  // Abort is available from any non-terminal state. Terminal states are
+  // merged/failed/rolled_back/aborted. `rolling_back` is a mechanical merge in flight —
+  // not abortable (there is no live agent to stop).
+  const canAbort = !["merged", "failed", "rolled_back", "aborted", "rolling_back"].includes(t.status);
   if (canAbort) {
     const abortBtn = el("button", { class: "btn ghost danger-outline", id: "abort" }, "Abort task");
     headerRight.appendChild(abortBtn);
@@ -2509,10 +2519,10 @@ async function renderTask(id) {
   // agent summary (from request_review)
   if (t.summary) block("Agent summary", t.summary, wrap);
 
-  // output snapshot — on a merged task this is the agent's post-merge wrap-up
-  // captured during the finalizing phase; otherwise the rescue snapshot.
+  // output snapshot — the agent's last captured output (its final build output on a
+  // merged task, or the rescue snapshot otherwise).
   if (t.output_snapshot) {
-    block(t.status === "merged" ? "Agent wrap-up" : "Agent output (snapshot)", t.output_snapshot, wrap);
+    block(t.status === "merged" ? "Agent output" : "Agent output (snapshot)", t.output_snapshot, wrap);
   }
 
   // agent transcript — a readable, lazily-fetched view of what the session's agent

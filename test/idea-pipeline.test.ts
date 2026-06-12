@@ -1,13 +1,12 @@
-// Tests for the UNIFIED task-state pipeline (idea → spec_review → in_progress →
-// in_review → finalizing → merged, with the lateral states). The CEO's SINGLE state
-// machine:
+// Tests for the UNIFIED task-state pipeline (idea → spec_review → inactive → in_progress
+// → in_review → merged, with the lateral states). The CEO's SINGLE state machine:
 //   - createTask({idea:true}) creates the task in the FRONT state `idea` (a one-line
 //     brief, no spec yet) — NOT a build agent.
 //   - the dispatcher runs the CTO-fork spec generator (src/cto.ts, mocked here) to turn
 //     the brief into a SPEC via promoteIdeaToSpecReview, then advances the task to
 //     `spec_review` for the operator's sign-off — where the operator approves to
-//     in_progress.
-//   - createTask() (no idea) creates directly in `in_progress` ('ready') — CHANGED.
+//     `inactive` (ready).
+//   - createTask() (no idea) creates directly in `inactive` ('ready') — CHANGED.
 //   - the retracted `stage` axis is folded out: the DB migration flips legacy stage='idea'
 //     rows to status='idea'; everything else is untouched; task.md `stage:` lines are
 //     ignored on parse.
@@ -82,10 +81,10 @@ function dirRow() {
   return dbMod.db.query<any, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(DIR_ID)!;
 }
 
-describe("a normal task enters 'ready' (in_progress) directly", () => {
-  test("createTask() with no idea flag is unchanged: status=in_progress, normal review protocol", async () => {
+describe("a normal task enters 'ready' (inactive) directly", () => {
+  test("createTask() with no idea flag: status=inactive (ready), normal review protocol", async () => {
     const view = await tasksMod.createTask(DIR_ID, "Do some ordinary work.");
-    expect(view.status).toBe("in_progress"); // 'ready' (no live agent yet)
+    expect(view.status).toBe("inactive"); // 'ready' (no live agent yet)
     // No stage line is ever written, and the FIRST rendered prompt is the normal review
     // protocol — there is no idea/spec protocol anymore.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, view.id), "utf8");
@@ -166,14 +165,14 @@ describe("idea → (spec via CTO-fork, mocked) → spec_review", () => {
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, idea.id), "utf8");
     expect(md).toContain(SPEC);
     expect(md).not.toContain(BRIEF);
-    // After the operator approves spec_review → in_progress, the agent prompt contains
+    // After the operator approves spec_review → inactive, the agent prompt contains
     // the spec and the request_review protocol.
     const built = taskmdMod.renderAgentPrompt(REPO_ROOT, taskmdMod.readTaskMd(REPO_ROOT, idea.id));
     expect(built).toContain(SPEC);
     expect(built).toContain("request_review");
   });
 
-  test("a spec-generation FAILURE keeps the task in 'idea' (bounded retry) then gives up to 'aborted'", async () => {
+  test("a spec-generation FAILURE keeps the task in 'idea' (bounded retry) then gives up to 'failed'", async () => {
     // Make the generator fail (returns null).
     ctoMod.setSpecWriter(async () => null);
     const idea = await tasksMod.createTask(
@@ -187,17 +186,17 @@ describe("idea → (spec via CTO-fork, mocked) → spec_review", () => {
     expect(r.dispatch_attempts).toBe(1);
     expect(r.next_dispatch_at).toBeTruthy();
 
-    // Burn through the remaining attempts: at the cap it moves to 'aborted'.
+    // Burn through the remaining attempts: at the cap it moves to 'failed'.
     for (let i = 0; i < 10 && row(idea.id).status === "idea"; i++) {
       // Clear the backoff so markSpecGenFailure increments each call deterministically.
       dbMod.db.query(`UPDATE tasks SET next_dispatch_at=NULL WHERE id=?`).run(idea.id);
       await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
     }
-    expect(row(idea.id).status).toBe("aborted");
+    expect(row(idea.id).status).toBe("failed");
   });
 });
 
-describe("the full idea → spec_review → in_progress → in_review → finalizing → merged pipeline", () => {
+describe("the full idea → spec_review → inactive → in_progress → in_review → merged pipeline", () => {
   test("an idea flows through the single state machine end-to-end", async () => {
     const SPEC = "Add pipeline.txt containing the word built.";
     ctoMod.setSpecWriter(async () => SPEC);
@@ -213,12 +212,12 @@ describe("the full idea → spec_review → in_progress → in_review → finali
     expect(row(t.id).status).toBe("spec_review");
     expect(tasksMod.taskView(t.id)!.prompt).toBe(SPEC);
 
-    // spec_review → in_progress: operator approves the spec.
+    // spec_review → inactive: operator approves the spec.
     await tasksMod.approveTask(t.id);
-    expect(row(t.id).status).toBe("in_progress");
+    expect(row(t.id).status).toBe("inactive");
     expect(row(t.id).herdr_pane_id).toBeNull();
 
-    // in_progress → running: simulate the dispatcher launching the build agent.
+    // inactive → in_progress: simulate the dispatcher launching the build agent.
     tasksMod.markRunning(t.id, "pane-x", "idea-session-1234", "tab-x");
     expect(row(t.id).status).toBe("in_progress");
     expect(row(t.id).herdr_pane_id).toBe("pane-x");
@@ -234,31 +233,22 @@ describe("the full idea → spec_review → in_progress → in_review → finali
     expect(state).toBe("ok");
     expect(row(t.id).status).toBe("in_review");
 
-    // in_review → finalizing: approving forwards to finalizing.
-    const approveOut = await tasksMod.approveTask(t.id);
-    expect(approveOut.task.status).toBe("finalizing");
-
-    // The finalize agent is recorded running.
-    tasksMod.markRunning(t.id, "pane-fin", "idea-session-fin", "tab-fin");
-
-    // finalizing → merged: the finalize agent calls markReviewFromAgent which fires
-    // finalizeMerge. Poll briefly for the merge.
+    // in_review → merged: approving runs the MECHANICAL merge directly (no finalize agent).
     const tipBefore = g(["rev-parse", "HEAD"]);
-    tasksMod.markReviewFromAgent(t.id, "wrapped up");
-    for (let i = 0; i < 100 && row(t.id).status !== "merged"; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    const approveOut = await tasksMod.approveTask(t.id);
+    expect(approveOut.task.status).toBe("merged");
     expect(row(t.id).status).toBe("merged");
     expect(g(["rev-parse", "HEAD"])).not.toBe(tipBefore);
     expect(existsSync(join(REPO_ROOT, "pipeline.txt"))).toBe(true);
 
-    // The transition timeline reflects the unified pipeline.
+    // The transition timeline reflects the unified pipeline — and never visits finalizing.
     const flow = dbMod.listTaskEvents(t.id).map((e) => e.to_status);
     expect(flow).toContain("idea");
     expect(flow).toContain("spec_review");
+    expect(flow).toContain("inactive");
     expect(flow).toContain("in_progress");
     expect(flow).toContain("in_review");
-    expect(flow).toContain("finalizing");
+    expect(flow).not.toContain("finalizing");
     expect(flow[flow.length - 1]).toBe("merged");
   });
 });

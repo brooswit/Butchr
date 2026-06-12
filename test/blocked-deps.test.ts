@@ -127,17 +127,17 @@ describe("createTask with blocked_by", () => {
     expect(taskmdMod.readTaskMd(REPO_ROOT, view.id).meta.status).toBe("blocked");
   });
 
-  test("create-with-all-merged-blockers -> in_progress", async () => {
+  test("create-with-all-merged-blockers -> inactive", async () => {
     const blocker = seed({ id: "c-blk-merged", status: "merged" });
     const view = await tasksMod.createTask(DIR_ID, "do the thing", [], [blocker]);
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(view.blocked_by).toEqual([blocker]);
-    expect(row(view.id).status).toBe("in_progress");
+    expect(row(view.id).status).toBe("inactive");
   });
 
-  test("empty blocked_by starts in_progress, as today", async () => {
+  test("empty blocked_by starts inactive, as today", async () => {
     const view = await tasksMod.createTask(DIR_ID, "plain task", [], []);
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(view.blocked_by).toEqual([]);
   });
 
@@ -154,7 +154,7 @@ describe("createTask with blocked_by", () => {
 });
 
 describe("auto-unblock", () => {
-  test("becomes in_progress exactly when the LAST blocker merges", () => {
+  test("becomes inactive exactly when the LAST blocker merges", () => {
     const b1 = seed({ id: "au-b1", status: "merged" });
     const b2 = seed({ id: "au-b2", status: "in_progress" });
     const t = seed({ id: "au-task", status: "blocked", blockedBy: [b1, b2] });
@@ -163,17 +163,17 @@ describe("auto-unblock", () => {
     expect(tasksMod.reevaluateBlockedTask(t)).toBe(false);
     expect(row(t).status).toBe("blocked");
 
-    // Last blocker merges → the post-merge hook promotes it to in_progress.
+    // Last blocker merges → the post-merge hook promotes it to inactive (ready).
     setStatus(b2, "merged");
     tasksMod.reevaluateAllBlocked();
-    expect(row(t).status).toBe("in_progress");
-    expect(taskmdMod.readTaskMd(REPO_ROOT, t).meta.status).toBe("in_progress");
+    expect(row(t).status).toBe("inactive");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, t).meta.status).toBe("inactive");
   });
 
   test("a blocked task with an EMPTY blocked_by set is immediately eligible", () => {
     const t = seed({ id: "au-empty", status: "blocked", blockedBy: [] });
     expect(tasksMod.reevaluateBlockedTask(t)).toBe(true);
-    expect(row(t).status).toBe("in_progress");
+    expect(row(t).status).toBe("inactive");
   });
 
   test("reevaluate is a no-op for a non-blocked task", () => {
@@ -199,9 +199,9 @@ describe("setBlockedBy re-evaluation", () => {
     const t = seed({ id: "sb-blocked", status: "blocked", blockedBy: [blocker] });
 
     const view = await tasksMod.setBlockedBy(t, []);
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(view.blocked_by).toEqual([]);
-    expect(row(t).status).toBe("in_progress");
+    expect(row(t).status).toBe("inactive");
   });
 
   test("unblocks a BLOCKED task when the replacement blocker is already merged", async () => {
@@ -210,7 +210,7 @@ describe("setBlockedBy re-evaluation", () => {
     const t = seed({ id: "sb-swap", status: "blocked", blockedBy: [dead] });
 
     const view = await tasksMod.setBlockedBy(t, [done]);
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(view.blocked_by).toEqual([done]);
   });
 
@@ -276,7 +276,7 @@ describe("kill-on-block", () => {
 });
 
 describe("dead blockers", () => {
-  for (const deadState of ["aborted"]) {
+  for (const deadState of ["aborted", "failed", "rolled_back"]) {
     test(`a ${deadState} blocker keeps the task blocked and is surfaced as a deadBlocker`, () => {
       const blocker = seed({ id: `dead-${deadState}-blk`, status: deadState });
       const t = seed({
@@ -298,7 +298,7 @@ describe("dead blockers", () => {
     const dead = seed({ id: "dead-escape-blk", status: "aborted" });
     const t = seed({ id: "dead-escape-task", status: "blocked", blockedBy: [dead] });
     const view = await tasksMod.setBlockedBy(t, []);
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
   });
 });
 
@@ -352,17 +352,16 @@ describe("cycle / self-block guard", () => {
 });
 
 describe("dispatcher never dispatches a blocked task", () => {
-  test("a `blocked` task is excluded from the tick's in_progress selection", () => {
+  test("a `blocked` task is excluded from the tick's inactive selection", () => {
     seed({ id: "disp-blocked", status: "blocked", blockedBy: ["disp-x"] });
-    seed({ id: "disp-ready", status: "in_progress" });
+    seed({ id: "disp-ready", status: "inactive" });
 
-    // Mirror the dispatcher tick's selection predicate exactly (status IN ('in_progress','finalizing') AND herdr_pane_id IS NULL).
+    // Mirror the dispatcher tick's selection predicate exactly (status='inactive').
     const now = new Date().toISOString();
     const eligible = dbMod.db
       .query<{ id: string }, [string]>(
         `SELECT id FROM tasks
-           WHERE status IN ('in_progress','finalizing')
-             AND herdr_pane_id IS NULL
+           WHERE status='inactive'
              AND (next_dispatch_at IS NULL OR next_dispatch_at <= ?)`,
       )
       .all(now)

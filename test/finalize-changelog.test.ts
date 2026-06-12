@@ -118,8 +118,7 @@ describe("merge-time CHANGELOG entry + version bump", () => {
     const before = version(); // 0.3.7
 
     const id = await seedReviewTask("feature.ts", "export const x = 1;\n", "Add a shiny feature");
-    await tasksMod.approveTask(id); // in_review → finalizing
-    const out = await tasksMod.finalizeMerge(id); // finalizing → merged
+    const out = await tasksMod.approveTask(id); // in_review → mechanical merge → merged
     expect(out.task.status).toBe("merged");
 
     // The entry landed under [Unreleased] on main — derived from summary + id, and
@@ -154,8 +153,7 @@ describe("merge-time CHANGELOG entry + version bump", () => {
     const files = g(["diff", "--name-only", `${base}...${id}`]).split("\n").filter(Boolean);
     expect(files).toEqual(["other.ts"]);
 
-    await tasksMod.approveTask(id); // in_review → finalizing
-    await tasksMod.finalizeMerge(id); // finalizing → merged
+    await tasksMod.approveTask(id); // in_review → mechanical merge → merged
     expect(changelog()).toContain(`(task ${id})`);
     expect(version()).toBe("0.3.9"); // bumped again
   });
@@ -165,8 +163,7 @@ describe("merge-time CHANGELOG entry + version bump", () => {
     const vBefore = version(); // 0.3.9
 
     const id = await seedReviewTask("NOTES.md", "# notes\n", "Document a thing");
-    await tasksMod.approveTask(id); // in_review → finalizing
-    await tasksMod.finalizeMerge(id); // finalizing → merged
+    await tasksMod.approveTask(id); // in_review → mechanical merge → merged
 
     expect(changelog()).toContain(`(task ${id})`);
     expect(changelog()).toContain("Document a thing");

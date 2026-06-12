@@ -195,15 +195,17 @@ test("the rollback template exposes {{task}}/{{sha}} and renders a correct rever
 
 test("the 'Roll back' button's create flow yields a real rollback task", async () => {
   // The button POSTs { template: "rollback", vars: { task, sha } } to the create
-  // route, which renders the template and creates the task. Exercise that exact
-  // server path (renderTemplate → createTask) end-to-end.
+  // route, which renders the template and creates a kind='rollback' task. Exercise that
+  // exact server path (renderTemplate → createTask with kind='rollback') end-to-end.
   const prompt = templatesMod.renderTemplate("rollback", {
     task: "crimson-magpie-563b",
     sha: "deadbeefcafe",
   });
-  const v = await tasksMod.createTask(DIR_ID, prompt, []);
+  const v = await tasksMod.createTask(DIR_ID, prompt, [], [], "rollback");
 
-  expect(v.status === "in_progress" || v.status === "blocked").toBe(true);
+  // A rollback task is an ordinary build task that lands via rolling_back→rolled_back.
+  expect((v as any).kind).toBe("rollback");
+  expect(v.status === "inactive" || v.status === "blocked").toBe(true);
   expect(v.prompt).toContain("Revert the changes introduced by task crimson-magpie-563b (commit deadbeefcafe).");
   // The prompt round-trips through task.md on disk for the agent to read.
   const doc = taskmdMod.readTaskMd(REPO_ROOT, v.id);

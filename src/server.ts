@@ -305,9 +305,9 @@ async function healthResponse(): Promise<Response> {
 
   // Activity snapshot: an "active" task is any non-terminal one (an AGENT phase or a
   // FEEDBACK state awaiting the operator) — derived from the same status counts above
-  // so we issue no extra queries. Tasks dispatch uncapped. (Ready vs. running is not
-  // distinguishable from a GROUP-BY-status count — both are `in_progress` — so we
-  // report `blocked` as the queued-analog "waiting" bucket.)
+  // so we issue no extra queries. Tasks dispatch uncapped. Ready (`inactive`) and
+  // running (`in_progress`) are now distinct statuses, so we report `inactive` + the
+  // pre-dispatch `blocked` as the "waiting" bucket.
   const concurrency = {
     active:
       (tasks.idea ?? 0) +
@@ -315,22 +315,23 @@ async function healthResponse(): Promise<Response> {
       (tasks.needs_info ?? 0) +
       (tasks.in_progress ?? 0) +
       (tasks.in_review ?? 0) +
-      (tasks.finalizing ?? 0),
-    queued: tasks.blocked ?? 0,
+      (tasks.rolling_back ?? 0),
+    queued: (tasks.blocked ?? 0) + (tasks.inactive ?? 0),
   };
 
-  // Operator pull-signal: tasks in a FEEDBACK state that need a human's eyes right now
-  // — a generated spec awaiting approval (`spec_review`), a diff awaiting review
-  // (`in_review`), or an agent question awaiting an answer (`needs_info`). The webapp
-  // turns this into a tab-title badge + header indicator. Derived from the status
-  // counts; no extra query. (`failed` is retained as 0 — the canonical model has no
-  // such state; a dispatch/finalize give-up lands in the terminal `aborted`.)
+  // Operator pull-signal: tasks needing a human's eyes right now — a generated spec
+  // awaiting approval (`spec_review`), a diff awaiting review (`in_review`), an agent
+  // question awaiting an answer (`needs_info`), or an execution `failed` task to inspect.
+  // The webapp turns this into a tab-title badge + header indicator. Derived from the
+  // status counts; no extra query.
   const needsAttention = {
     spec_review: tasks.spec_review ?? 0,
     in_review: tasks.in_review ?? 0,
     needs_info: tasks.needs_info ?? 0,
-    failed: 0,
-    total: (tasks.spec_review ?? 0) + (tasks.in_review ?? 0) + (tasks.needs_info ?? 0),
+    failed: tasks.failed ?? 0,
+    total:
+      (tasks.spec_review ?? 0) + (tasks.in_review ?? 0) + (tasks.needs_info ?? 0) +
+      (tasks.failed ?? 0),
   };
 
   // Tick-loop liveness: stale if we've ticked at least once but not within
@@ -394,9 +395,9 @@ async function healthResponse(): Promise<Response> {
       staleAfterMs: tickStaleAfterMs,
     },
     tasks,
-    // Retained for API compatibility; always 0 (the canonical model has no `failed`
-    // state — a dispatch/finalize give-up lands in the terminal idle state `aborted`).
-    failedTasks: 0,
+    // Count of tasks in the terminal `failed` state (a dispatch/spec-gen give-up or a
+    // post-merge verify revert) — execution failures, distinct from operator `aborted`.
+    failedTasks: tasks.failed ?? 0,
     concurrency,
     needsAttention,
     // Self-heal visibility: last startup reap of orphaned worktrees + herdr husks.
@@ -600,7 +601,15 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
   // listed blocker has merged (validated + cycle-checked inside createTask).
   // Optional kind: "plan" creates an AUTO-DECOMPOSE task that breaks the request
   // into sub-tasks via the propose_subtasks MCP tool instead of writing code.
-  const kind = body.kind === "plan" ? "plan" : "task";
+  // The built-in `rollback` template (the webapp's "Roll back" button) creates a
+  // 'rollback'-kind task — it builds a revert like any task but lands via its own
+  // `rolling_back`→`rolled_back` lifecycle tail (see tasks.finalizeMerge).
+  const kind =
+    body.kind === "plan"
+      ? "plan"
+      : body.kind === "rollback" || body.template === "rollback"
+        ? "rollback"
+        : "task";
   // Optional model: an alias (opus/sonnet/haiku/fable) or full id, threaded into the
   // agent launch. Unset → claude's current default. Validated inside createTask.
   // Optional tags: an array of free-form organizational labels (validated +

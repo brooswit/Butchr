@@ -77,8 +77,8 @@ function counts(workspaceId: string): Record<string, number> {
   // One bucket per canonical status (see db.STATE_META), plus the orthogonal `idle`
   // pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
   const out: Record<string, number> = {
-    idea: 0, spec_review: 0, blocked: 0, needs_info: 0, in_progress: 0, idle: 0,
-    in_review: 0, finalizing: 0, merged: 0, aborted: 0,
+    idea: 0, spec_review: 0, blocked: 0, needs_info: 0, inactive: 0, in_progress: 0, idle: 0,
+    in_review: 0, rolling_back: 0, rolled_back: 0, merged: 0, failed: 0, aborted: 0,
   };
   for (const r of rows) out[r.status] = r.n;
   // `idle` is a flag on a LIVE build agent (in_progress with a pane), not a status —
@@ -260,12 +260,12 @@ export function setWorkspaceCtoEnabled(id: string, value: unknown): WorkspaceVie
  * buckets (a task can fall in more than one — `needsAttention` is the operator
  * pull-signal, deliberately overlapping `review`/`failed`, matching /health):
  *  - `active`         — in-flight work needing no human (idle/agent, non-feedback):
- *                       idea + blocked + in_progress + idle + finalizing.
+ *                       idea + blocked + inactive + in_progress + idle + rolling_back.
  *  - `review`         — FEEDBACK states awaiting a human: spec_review + in_review +
  *                       needs_info (kept under the `review` field name for the API).
- *  - `failed`         — retained field; always 0 (the canonical model has no `failed`
- *                       state — a dispatch/finalize give-up or revert lands in `aborted`).
- *  - `needsAttention` — what to look at right now (= review).
+ *  - `failed`         — the terminal `failed` state (a dispatch/spec-gen give-up or a
+ *                       post-merge verify revert) — execution failures a human should see.
+ *  - `needsAttention` — what to look at right now (= review + failed).
  */
 export type DashboardWorkspace = {
   id: string;
@@ -300,10 +300,11 @@ export function dashboard(): Dashboard {
   const workspaces = rows.map((d) => {
     const c = counts(d.id);
     const active =
-      (c.idea ?? 0) + (c.blocked ?? 0) + (c.in_progress ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
+      (c.idea ?? 0) + (c.blocked ?? 0) + (c.inactive ?? 0) + (c.in_progress ?? 0) +
+      (c.idle ?? 0) + (c.rolling_back ?? 0);
     // FEEDBACK states awaiting a human (kept under the `review` field name).
     const review = (c.spec_review ?? 0) + (c.in_review ?? 0) + (c.needs_info ?? 0);
-    const failed = 0; // no `failed` state in the canonical model — see comment above
+    const failed = c.failed ?? 0; // the terminal `failed` state — see comment above
     const needsAttention = review + failed;
     totals.active += active;
     totals.review += review;

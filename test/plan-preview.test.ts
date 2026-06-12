@@ -194,7 +194,7 @@ describe("plan -> needs_info -> approve -> resume (mock the agent)", () => {
 
     // The operator approves with a 'proceed' decision.
     const answered = await tasksMod.answerTask(pp.id, "proceed");
-    expect(answered.status).toBe("in_progress");
+    expect(answered.status).toBe("inactive");
     const requeued = row(pp.id);
     expect(requeued.answer).toBe("proceed");
     expect(requeued.question).toBeNull();

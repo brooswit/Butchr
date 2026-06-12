@@ -76,7 +76,7 @@ describe("createTask with kind='plan'", () => {
   test("a plan task is recorded as kind='plan' in the DB and task.md", async () => {
     const view = await tasksMod.createTask(DIR_ID, "decompose me", [], [], "plan");
     expect((view as any).kind).toBe("plan");
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(view.spawned_subtasks).toEqual([]);
     expect(row(view.id).kind).toBe("plan");
     // task.md carries the kind so the dispatcher renders the plan protocol.
@@ -139,6 +139,8 @@ describe("planCreationOrder (pure graph validation / topo sort)", () => {
 describe("proposeSubtasks", () => {
   test("creates the sub-tasks and wires blocked_by correctly", async () => {
     const plan = await tasksMod.createTask(DIR_ID, "build a feature", [], [], "plan");
+    // The plan AGENT is live (in_progress) when it calls propose_subtasks.
+    tasksMod.markRunning(plan.id, `pane-${plan.id}`, `sess-${plan.id}`, `tab-${plan.id}`);
     // 3 sub-tasks: B depends on A, C depends on both A and B.
     const { created, plan: completed } = await tasksMod.proposeSubtasks(plan.id, [
       { prompt: "sub A" },
@@ -157,8 +159,8 @@ describe("proposeSubtasks", () => {
     expect(tasksMod.parseBlockedBy(row(b).blocked_by)).toEqual([a]);
     expect(tasksMod.parseBlockedBy(row(c).blocked_by).sort()).toEqual([a, b].sort());
 
-    // A has no blockers → in_progress; B and C have unmerged blockers → blocked.
-    expect(row(a).status).toBe("in_progress");
+    // A has no blockers → inactive (ready); B and C have unmerged blockers → blocked.
+    expect(row(a).status).toBe("inactive");
     expect(row(b).status).toBe("blocked");
     expect(row(c).status).toBe("blocked");
 
@@ -187,8 +189,8 @@ describe("proposeSubtasks", () => {
     expect(err.status).toBe(400);
     // No sub-tasks were created.
     expect(allRows().length).toBe(before);
-    // The plan task is untouched (still in_progress, not merged).
-    expect(row(plan.id).status).toBe("in_progress");
+    // The plan task is untouched (still inactive, not merged).
+    expect(row(plan.id).status).toBe("inactive");
     expect(tasksMod.parseBlockedBy(row(plan.id).spawned_subtasks)).toEqual([]);
   });
 
@@ -203,7 +205,7 @@ describe("proposeSubtasks", () => {
       }
       expect(err?.status).toBe(400);
     }
-    expect(row(plan.id).status).toBe("in_progress");
+    expect(row(plan.id).status).toBe("inactive");
   });
 
   test("proposing on a NON-plan task is rejected (409)", async () => {
@@ -219,6 +221,7 @@ describe("proposeSubtasks", () => {
 
   test("happy path mirrors task.md → 'merged' when the guarded UPDATE changes a row", async () => {
     const plan = await tasksMod.createTask(DIR_ID, "mirror plan", [], [], "plan");
+    tasksMod.markRunning(plan.id, `pane-${plan.id}`, `sess-${plan.id}`, `tab-${plan.id}`);
     await tasksMod.proposeSubtasks(plan.id, [{ prompt: "only one" }]);
     // DB and disk both reflect the merge.
     expect(row(plan.id).status).toBe("merged");
@@ -245,6 +248,7 @@ describe("proposeSubtasks", () => {
 
   test("is idempotent — a second call returns the same spawned ids without re-creating", async () => {
     const plan = await tasksMod.createTask(DIR_ID, "idempotent plan", [], [], "plan");
+    tasksMod.markRunning(plan.id, `pane-${plan.id}`, `sess-${plan.id}`, `tab-${plan.id}`);
     const first = await tasksMod.proposeSubtasks(plan.id, [{ prompt: "only one" }]);
     const countAfterFirst = allRows().length;
     const second = await tasksMod.proposeSubtasks(plan.id, [{ prompt: "ignored" }]);

@@ -102,7 +102,7 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min: generous room for a real a
 const DEFAULT_POLL_MS = 2000;
 
 /** Statuses a probe may pass THROUGH on its way to review (non-terminal, expected). */
-const TRANSIENT = new Set(["in_progress", "blocked", "needs_info"]);
+const TRANSIENT = new Set(["inactive", "in_progress", "blocked", "needs_info"]);
 
 /**
  * Build the throwaway probe's agent prompt. It asks for the SMALLEST possible
@@ -247,12 +247,11 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     }
     mark("review", true, `ci=${reachedReview.ci_status ?? "-"}`);
 
-    // (4) Optionally approve, then confirm the FINALIZE → MERGE. Approving an
-    // in_review task forwards it to `finalizing` (the workspace agent does post-approval
-    // 'final thoughts'), after which butchr finalizes the merge → `merged`. So we
-    // approve and then POLL for the terminal merged state (a conflict bounces back to
-    // in_progress, and a post-merge-verify revert lands the probe in `aborted` — both
-    // are failures for the probe).
+    // (4) Optionally approve, then confirm the MECHANICAL MERGE → `merged`. Approving an
+    // in_review task runs the mechanical merge directly (no finalize agent): rebase →
+    // gate → merge. So we approve and then POLL for the terminal merged state (a conflict
+    // bounces the probe back to `inactive`, and a post-merge-verify revert lands it in
+    // `failed` — both are failures for the probe).
     if (options.merge) {
       const r = await api("POST", `/api/tasks/${encodeURIComponent(task.id)}/approve`, {});
       if (r && r.conflictSentBack) {
@@ -266,14 +265,14 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
           mergedTask = t;
           break;
         }
-        if (t.status === "aborted") {
+        if (t.status === "failed" || t.status === "aborted") {
           const why = t.revert_reason || t.last_dispatch_error || "(no detail)";
-          throw new Error(`probe aborted during finalize (post-merge verify or give-up): ${why}`);
+          throw new Error(`probe ${t.status} during merge (post-merge verify or give-up): ${why}`);
         }
-        // in_progress (a finalize conflict bounced back), finalizing, needs_info are
-        // expected on the way; anything else is unexpected.
-        if (!["finalizing", "in_progress", "needs_info"].includes(t.status)) {
-          throw new Error(`probe reached '${t.status}' during finalize`);
+        // inactive/in_progress (a merge conflict bounced back), needs_info are expected
+        // on the way; anything else is unexpected.
+        if (!["inactive", "in_progress", "needs_info"].includes(t.status)) {
+          throw new Error(`probe reached '${t.status}' during merge`);
         }
         await sleep(pollMs);
       }

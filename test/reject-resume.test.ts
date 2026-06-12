@@ -101,17 +101,17 @@ function dbRow(id: string) {
 }
 
 describe("rejectTask", () => {
-  test("in_review -> in_progress, persists note, PRESERVES session_id", async () => {
+  test("in_review -> inactive, persists note, PRESERVES session_id", async () => {
     const SESSION = "sess-preserve-1111-2222-3333";
     const id = seedTask({ id: "rej-ok", status: "in_review", sessionId: SESSION });
     const note = "Please fix the off-by-one in the loop bound.";
 
     const view = await tasksMod.rejectTask(id, note);
 
-    // Returned view + DB row both flipped to in_progress (re-queued for --resume).
-    expect(view.status).toBe("in_progress");
+    // Returned view + DB row both flipped to inactive (re-queued for --resume).
+    expect(view.status).toBe("inactive");
     const row = dbRow(id);
-    expect(row.status).toBe("in_progress");
+    expect(row.status).toBe("inactive");
 
     // The note is persisted on the row for the resumed agent / UI.
     expect(row.review_note).toBe(note);
@@ -120,10 +120,10 @@ describe("rejectTask", () => {
     // dispatcher will `--resume` the same Claude session (not start fresh).
     expect(row.session_id).toBe(SESSION);
 
-    // task.md records the rejection note and the in_progress status.
+    // task.md records the rejection note and the inactive status.
     const md = readFileSync(taskmdMod.taskMdPath(REPO_ROOT, id), "utf8");
     expect(md).toContain(note);
-    expect(md).toContain("status: in_progress");
+    expect(md).toContain("status: inactive");
     expect(md).toContain("### Rejection");
   });
 

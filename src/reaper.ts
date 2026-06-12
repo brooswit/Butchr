@@ -1,10 +1,10 @@
 // Startup reaper: self-heal git worktrees and herdr panes/agents leaked by tasks
-// that reached a TERMINAL state (merged / aborted / rejected) or that no longer
-// have a DB row at all. Observed bug: an aborted task's worktree + branch (and
+// that reached a TERMINAL state (merged / failed / rolled_back / aborted) or that no
+// longer have a DB row at all. Observed bug: an aborted task's worktree + branch (and
 // occasionally a husk herdr pane) could survive a server restart and had to be
 // removed by hand. This runs ONCE on boot (see index.ts) and is deliberately
 // conservative — it NEVER touches the main worktree or a worktree whose task is
-// still queued/running/review/finalizing.
+// still live (inactive/in_progress/in_review/rolling_back/blocked/...).
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config } from "./config.ts";
@@ -19,10 +19,10 @@ const git = config.gitBin;
 
 // A task in one of these terminal idle states is DONE — its worktree/branch/herdr
 // pane are safe to reap. Everything else (idea/spec_review/blocked/needs_info/
-// in_progress/in_review/finalizing) is still live and must be left alone. In
-// particular `blocked` is a pre-dispatch WAITING state, not terminal: its worktree
-// (and the session it will resume into) must survive until its blockers merge.
-const TERMINAL = new Set(["merged", "aborted"]);
+// inactive/in_progress/in_review/rolling_back) is still live and must be left alone. In
+// particular `blocked` and `inactive` are pre-dispatch WAITING states, not terminal:
+// their worktree (and the session they will resume into) must survive until they run.
+const TERMINAL = new Set(["merged", "failed", "rolled_back", "aborted"]);
 
 // Most recent reapOrphans outcome, retained so /health can surface self-heal
 // activity at a glance (see server.healthResponse). `at` is null until the first
@@ -110,7 +110,7 @@ export async function reapOrphans(
   if (herdrUp) {
     const terminal = db
       .query<TaskRow, []>(
-        `SELECT * FROM tasks WHERE status IN ('merged','aborted')`,
+        `SELECT * FROM tasks WHERE status IN ('merged','failed','rolled_back','aborted')`,
       )
       .all();
     for (const t of terminal) {

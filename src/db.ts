@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- CANONICAL 9-state model: idea | spec_review | blocked | needs_info | in_progress | in_review | finalizing | merged | aborted (see TaskStatus / STATE_META)
+  status          TEXT NOT NULL,            -- CANONICAL 12-state model: idea | spec_review | blocked | needs_info | inactive | in_progress | in_review | rolling_back | rolled_back | merged | failed | aborted (see TaskStatus / STATE_META)
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -325,7 +325,12 @@ ensureColumn("tasks", "revert_reason", "TEXT");
 // plan task in `spawned_subtasks` (a JSON-array TEXT column), and completes the plan
 // task (terminal `merged`, since nothing is merged to a branch). The webapp keys on
 // `kind`/`spawned_subtasks` to badge a plan task and link the sub-tasks it spawned.
-// See tasks.proposeSubtasks / mcp.ts (propose_subtasks) / taskmd.renderAgentPrompt.
+// A third kind, 'rollback' (created from the built-in `rollback` template — see the
+// webapp's "Roll back" button + src/templates.ts), is an ordinary build task whose
+// revert lands through its OWN lifecycle tail: it shows `rolling_back` while the
+// mechanical merge runs and lands `rolled_back` (terminal) instead of `merged`. See
+// tasks.finalizeMerge. See tasks.proposeSubtasks / mcp.ts (propose_subtasks) /
+// taskmd.renderAgentPrompt.
 ensureColumn("tasks", "kind", "TEXT NOT NULL DEFAULT 'task'");
 ensureColumn("tasks", "spawned_subtasks", "TEXT");
 
@@ -511,6 +516,34 @@ export function migrateStatusModel(): void {
 }
 migrateStatusModel();
 
+// READY/RUNNING SPLIT MIGRATION (one-time, forward-only — the critical correctness
+// point on the restart that activates the 12-state model). The old model overloaded
+// `in_progress`: a row with a NULL `herdr_pane_id` meant READY (the dispatcher should
+// (re-)launch it) and a row WITH a pane meant a LIVE agent. The new model carries that
+// distinction in the STATUS itself: `inactive` = ready/queued (dispatcher keys on it),
+// `in_progress` = a live workspace agent. So on this boot we MUST re-bucket every
+// existing row or a ready task would be stranded (the dispatcher no longer looks at
+// `in_progress`+null-pane):
+//   in_progress + NULL pane → inactive       (ready — the dispatcher will pick it up)
+//   in_progress + a pane    → in_progress     (running — reconcileRunningTasks re-adopts)
+// Lingering `finalizing` rows (a removed state — the post-approval merge is now
+// MECHANICAL, no finalize agent): route to `in_review` and clear the pane so the
+// operator re-approves into the new mechanical-merge-on-approve path rather than us
+// auto-merging stale work at boot without a fresh gate. Any orphaned finalize pane is
+// reaped (reapOrphans). Idempotent: in the new model a running `in_progress` ALWAYS
+// has a pane (markRunning sets status+pane atomically; a dispatch failure clears the
+// pane AND moves to `inactive`), so no steady-state `in_progress`+null-pane exists and
+// re-running this is a no-op once converged.
+export function migrateReadyRunningSplit(): void {
+  db.exec(
+    `UPDATE tasks SET status='inactive' WHERE status='in_progress' AND herdr_pane_id IS NULL`,
+  );
+  db.exec(
+    `UPDATE tasks SET status='in_review', herdr_pane_id=NULL, herdr_tab_id=NULL WHERE status='finalizing'`,
+  );
+}
+migrateReadyRunningSplit();
+
 export type WorkspaceRow = {
   id: string;
   path: string;
@@ -528,14 +561,18 @@ export type WorkspaceRow = {
   created_at: string;
 };
 
-// A task's KIND: an ordinary work task, or a PLAN task whose job is to decompose a
-// request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks).
-export type TaskKind = "task" | "plan";
+// A task's KIND: an ordinary work task, a PLAN task whose job is to decompose a
+// request into sub-tasks (see the `kind` column comment above + tasks.proposeSubtasks),
+// or a ROLLBACK task (built from the `rollback` template) whose job is to revert a
+// merged change — it runs the normal build/review pipeline but lands as `rolled_back`
+// (terminal) via its own `rolling_back` merge state instead of `merged` (see
+// tasks.finalizeMerge).
+export type TaskKind = "task" | "plan" | "rollback";
 
 // ===========================================================================
 // THE CANONICAL TASK STATE MACHINE (the CEO's exact model).
 // ===========================================================================
-// Every task is in exactly one of NINE states. Each state has a KIND — one of three
+// Every task is in exactly one of TWELVE states. Each state has a KIND — one of three
 // kinds — and an AGENT state additionally has a TYPE (which agent runs it):
 //
 //   KIND      meaning
@@ -550,40 +587,56 @@ export type TaskKind = "task" | "plan";
 //   ceo-agent      the headless, read-only CTO-fork (src/cto.ts) that writes specs.
 //   workspace-agent the interactive agent that builds the code in the worktree.
 //
-// THE 9 STATES (happy path: idea → spec_review → in_progress → in_review →
-// finalizing → merged; needs_info is an ad-hoc feedback stage ANY agent state can
-// enter and then resume):
+// THE 12 STATES (happy path: idea → spec_review → inactive → in_progress → in_review →
+// (approve) merged; needs_info is an ad-hoc feedback stage ANY agent state can enter
+// and then resume):
 //
 //   idea         agent/ceo-agent     — the CEO agent writes the SPEC from the brief.
-//   spec_review  feedback (spec)      — operator approves → in_progress, or requests
+//   spec_review  feedback (spec)      — operator approves → inactive, or requests
 //                                       changes → revise the spec (back to idea).
 //   blocked      idle                 — waiting on blocked_by dependencies.
 //   needs_info   feedback (question)  — an agent asked the operator a question; on
-//                                       /answer the agent resumes.
-//   in_progress  agent/workspace-agent— the workspace agent builds the code.
-//   in_review    feedback (diff)      — operator approves → finalizing, or requests
-//                                       changes → resume the workspace agent.
-//   finalizing   agent/workspace-agent— the workspace agent does post-approval
-//                                       'final thoughts'; then the system finalizes
-//                                       (rebase + post-merge-verify) → merged.
+//                                       /answer the agent resumes (→ inactive → dispatch).
+//   inactive     agent/workspace-agent— READY: a build task queued for the dispatcher,
+//                                       no live agent yet. The dispatcher launches its
+//                                       workspace agent and flips it to in_progress.
+//   in_progress  agent/workspace-agent— a LIVE workspace agent is building the code.
+//   in_review    feedback (diff)      — operator approves → MECHANICAL MERGE (no agent:
+//                                       rebase → gate → merge → merged; a conflict
+//                                       bounces back to inactive for the same agent to
+//                                       resolve in-context), or requests changes →
+//                                       resume the workspace agent (→ inactive).
+//   rolling_back idle (mechanical)     — a ROLLBACK task (built from the `rollback`
+//                                       template) whose revert is being mechanically
+//                                       merged (no agent runs); lands as rolled_back.
+//   rolled_back  idle (terminal)      — a rollback task's revert landed on the default
+//                                       branch (the rollback equivalent of `merged`).
 //   merged       idle (terminal)      — landed on the default branch.
-//   aborted      idle (terminal)      — discarded (operator abort, or a dispatch /
-//                                       finalize give-up, or a post-merge revert).
+//   failed       idle (terminal)      — an EXECUTION/dispatch failure: a dispatch or
+//                                       spec-gen give-up, or a post-merge verify revert.
+//                                       (NOT operator-initiated — see `aborted`.)
+//   aborted      idle (terminal)      — DELIBERATELY cancelled by the operator. Reserved
+//                                       strictly for operator cancel; failures use `failed`.
 //
-// NOTE on the ready-vs-running distinction: there is NO separate `queued`/`running`
-// status. A task in `in_progress` (or `finalizing`) whose `herdr_pane_id` is NULL is
-// READY — the dispatcher will (re-)launch its agent; one whose `herdr_pane_id` is set
-// has a LIVE agent. This is restart-safe (the pane field is persisted) and is the
-// single internal signal the dispatcher/reconcile/watcher key off.
+// NOTE on the ready-vs-running distinction: it is carried by the STATUS itself —
+// `inactive` is READY (the dispatcher (re-)launches its agent) and `in_progress` is a
+// LIVE agent. markRunning flips inactive→in_progress atomically with recording the
+// pane; a dispatch failure / resume clears the pane AND moves back to `inactive`. So a
+// running `in_progress` ALWAYS has a pane and a ready `inactive` never does. This is
+// restart-safe (status + pane are persisted) and is the single signal the
+// dispatcher/reconcile/watcher key off.
 export type TaskStatus =
   | "idea"
   | "spec_review"
   | "blocked"
   | "needs_info"
+  | "inactive"
   | "in_progress"
   | "in_review"
-  | "finalizing"
+  | "rolling_back"
+  | "rolled_back"
   | "merged"
+  | "failed"
   | "aborted";
 
 /** The three kinds of state. */
@@ -604,10 +657,13 @@ export const STATE_META: Record<TaskStatus, StateMeta> = {
   spec_review: { kind: "feedback" },
   blocked: { kind: "idle" },
   needs_info: { kind: "feedback" },
+  inactive: { kind: "agent", agentType: "workspace-agent" },
   in_progress: { kind: "agent", agentType: "workspace-agent" },
   in_review: { kind: "feedback" },
-  finalizing: { kind: "agent", agentType: "workspace-agent" },
+  rolling_back: { kind: "idle" },
+  rolled_back: { kind: "idle" },
   merged: { kind: "idle" },
+  failed: { kind: "idle" },
   aborted: { kind: "idle" },
 };
 
@@ -617,16 +673,24 @@ export const ALL_STATUSES: TaskStatus[] = [
   "spec_review",
   "blocked",
   "needs_info",
+  "inactive",
   "in_progress",
   "in_review",
-  "finalizing",
+  "rolling_back",
+  "rolled_back",
   "merged",
+  "failed",
   "aborted",
 ];
 
-/** The two terminal states. */
+/** The four terminal states. */
 export function isTerminal(status: TaskStatus): boolean {
-  return status === "merged" || status === "aborted";
+  return (
+    status === "merged" ||
+    status === "aborted" ||
+    status === "failed" ||
+    status === "rolled_back"
+  );
 }
 
 export type TaskRow = {

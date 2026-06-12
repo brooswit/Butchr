@@ -1,12 +1,13 @@
-// Tests for the CANONICAL 9-STATE TASK STATE MACHINE (the CEO's exact model) and the
+// Tests for the CANONICAL 12-STATE TASK STATE MACHINE (the CEO's exact model) and the
 // UNIFIED FEEDBACK MECHANISM. Covers:
 //   1. STATE METADATA — every state's kind (idle|agent|feedback) and, for agent states,
 //      its agentType (ceo-agent|workspace-agent), via db.STATE_META, plus db.isTerminal.
-//   2. THE spec_review GATE — idea → spec_review (NOT auto-build); approve → in_progress;
-//      request-changes → idea (revise the spec, re-running the CEO/CTO-fork generator).
-//   3. in_review APPROVE → finalizing → merged (the workspace agent's 'final thoughts'
-//      then the system finalize).
-//   4. needs_info ROUND-TRIP — an agent asks (markNeedsInfoFromAgent) → answer → resume.
+//   2. THE spec_review GATE — idea → spec_review (NOT auto-build); approve → inactive
+//      (ready); request-changes → idea (revise the spec, re-running the CTO-fork generator).
+//   3. in_review APPROVE → MECHANICAL MERGE → merged (no finalize agent — butchr rebases,
+//      gates, and merges directly on approve).
+//   4. needs_info ROUND-TRIP — an agent asks (markNeedsInfoFromAgent) → answer → resume
+//      (→ inactive).
 //   5. THE UNIFIED FEEDBACK MECHANISM — feedbackInfo + respondToFeedback drive all three
 //      feedback states through one code path (artifact → response → forward/resume).
 //
@@ -78,10 +79,11 @@ afterAll(() => {
 // Drive a task all the way to a committed in_progress build awaiting markReviewFromAgent.
 async function buildReadyTask(prompt: string, file: string, content: string): Promise<string> {
   const v = await tasksMod.createTask(DIR_ID, prompt);
-  // A 'New task' (with a spec) starts READY in in_progress (no live agent yet).
-  expect(v.status).toBe("in_progress");
-  // Simulate the dispatcher launching the build agent (records the pane → running).
+  // A 'New task' (with a spec) starts READY in `inactive` (no live agent yet).
+  expect(v.status).toBe("inactive");
+  // Simulate the dispatcher launching the build agent (records the pane → in_progress).
   tasksMod.markRunning(v.id, `pane-${v.id}`, `sess-${v.id}`, `tab-${v.id}`);
+  expect(row(v.id).status).toBe("in_progress");
   const wt = join(REPO_ROOT, v.id);
   writeFileSync(join(wt, file), content);
   g(["add", "-A"], wt);
@@ -96,19 +98,27 @@ describe("1. state metadata (kind + agentType per state)", () => {
     expect(M.spec_review).toEqual({ kind: "feedback" });
     expect(M.blocked).toEqual({ kind: "idle" });
     expect(M.needs_info).toEqual({ kind: "feedback" });
+    expect(M.inactive).toEqual({ kind: "agent", agentType: "workspace-agent" });
     expect(M.in_progress).toEqual({ kind: "agent", agentType: "workspace-agent" });
     expect(M.in_review).toEqual({ kind: "feedback" });
-    expect(M.finalizing).toEqual({ kind: "agent", agentType: "workspace-agent" });
+    expect(M.rolling_back).toEqual({ kind: "idle" });
+    expect(M.rolled_back).toEqual({ kind: "idle" });
     expect(M.merged).toEqual({ kind: "idle" });
+    expect(M.failed).toEqual({ kind: "idle" });
     expect(M.aborted).toEqual({ kind: "idle" });
-    // Exactly the nine canonical states, no more.
-    expect(dbMod.ALL_STATUSES.length).toBe(9);
+    // Exactly the twelve canonical states, no more (finalizing was removed).
+    expect(dbMod.ALL_STATUSES.length).toBe(12);
+    expect(M.finalizing).toBeUndefined();
     expect(Object.keys(M).sort()).toEqual([...dbMod.ALL_STATUSES].sort());
   });
 
-  test("isTerminal identifies exactly the two terminal states", () => {
+  test("isTerminal identifies exactly the four terminal states", () => {
     expect(dbMod.isTerminal("merged")).toBe(true);
+    expect(dbMod.isTerminal("failed")).toBe(true);
+    expect(dbMod.isTerminal("rolled_back")).toBe(true);
     expect(dbMod.isTerminal("aborted")).toBe(true);
+    expect(dbMod.isTerminal("rolling_back")).toBe(false);
+    expect(dbMod.isTerminal("inactive")).toBe(false);
     expect(dbMod.isTerminal("in_progress")).toBe(false);
   });
 
@@ -126,6 +136,7 @@ describe("1. state metadata (kind + agentType per state)", () => {
       accepts: ["answer"],
     });
     // Non-feedback states have no feedback info.
+    expect(tasksMod.feedbackInfo("inactive")).toBeNull();
     expect(tasksMod.feedbackInfo("in_progress")).toBeNull();
     expect(tasksMod.feedbackInfo("idea")).toBeNull();
     expect(tasksMod.feedbackInfo("merged")).toBeNull();
@@ -142,7 +153,7 @@ describe("2. the spec_review gate (idea → spec_review, NOT auto-build)", () =>
     await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
 
     // It parks in spec_review carrying the spec as its prompt — it did NOT advance to
-    // in_progress on its own.
+    // inactive on its own.
     const after = tasksMod.taskView(idea.id)!;
     expect(after.status).toBe("spec_review");
     expect(after.prompt).toBe(SPEC);
@@ -150,14 +161,14 @@ describe("2. the spec_review gate (idea → spec_review, NOT auto-build)", () =>
     expect(md).toContain("status: spec_review");
   });
 
-  test("approving the spec FORWARDS to in_progress (ready to build)", async () => {
+  test("approving the spec FORWARDS to inactive (ready to build)", async () => {
     ctoMod.setSpecWriter(async () => "Add approved_spec.txt with the word ok.");
     const idea = await tasksMod.createTask(DIR_ID, "approve me", [], [], "task", null, [], 0, false, true);
     await dispatcherMod.generateSpecForIdea(dirRow(), row(idea.id));
     expect(row(idea.id).status).toBe("spec_review");
 
     const out = await tasksMod.approveTask(idea.id);
-    expect(out.task.status).toBe("in_progress");
+    expect(out.task.status).toBe("inactive");
     // Ready — no live agent yet (the dispatcher will launch it).
     expect(row(idea.id).herdr_pane_id).toBeNull();
   });
@@ -203,54 +214,39 @@ describe("2. the spec_review gate (idea → spec_review, NOT auto-build)", () =>
   });
 });
 
-describe("3. in_review approve → finalizing → merged", () => {
-  test("approve forwards in_review to finalizing; the finalize agent's request_review then merges", async () => {
+describe("3. in_review approve → MECHANICAL MERGE → merged", () => {
+  test("approve merges the in_review task MECHANICALLY (no finalize agent)", async () => {
     const id = await buildReadyTask("build a thing", "thing.txt", "thing\n");
     // Build agent submits → in_review.
     expect(tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
     expect(row(id).status).toBe("in_review");
 
-    // Approve → finalizing (NOT merged yet — the workspace agent does final thoughts first).
-    const out = await tasksMod.approveTask(id);
-    expect(out.task.status).toBe("finalizing");
-    expect(out.task.merged_sha == null).toBe(true);
-
-    // The dispatcher launches the finalize agent (records the pane).
-    tasksMod.markRunning(id, `pane-fin-${id}`, `sess-${id}`, `tab-fin-${id}`);
-    expect(row(id).status).toBe("finalizing");
-
-    // The finalize ('final thoughts') agent calls request_review → markReviewFromAgent
-    // kicks finalizeMerge off (fire-and-forget). Poll briefly for the merge to land.
+    // Approve → the mechanical merge runs synchronously inside approveTask (no finalize
+    // agent, no extra dispatch): rebase → gate → merge → merged.
     const tipBefore = g(["rev-parse", "HEAD"]);
-    const state = tasksMod.markReviewFromAgent(id, "wrapped up");
-    expect(state).toBe("ok");
-    for (let i = 0; i < 100 && row(id).status !== "merged"; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    const out = await tasksMod.approveTask(id);
+    expect(out.task.status).toBe("merged");
     expect(row(id).status).toBe("merged");
     expect(g(["rev-parse", "HEAD"])).not.toBe(tipBefore);
     expect(existsSync(join(REPO_ROOT, "thing.txt"))).toBe(true);
 
-    // The transition timeline reflects the happy path.
+    // The transition timeline reflects the happy path — and never visits finalizing.
     const flow = dbMod.listTaskEvents(id).map((e) => e.to_status);
     expect(flow).toContain("in_review");
-    expect(flow).toContain("finalizing");
+    expect(flow).not.toContain("finalizing");
     expect(flow[flow.length - 1]).toBe("merged");
   });
 
-  test("a finalize agent that just ends (no request_review) still finalizes via finalizeMerge", async () => {
-    const id = await buildReadyTask("auto-finalize", "auto.txt", "auto\n");
-    tasksMod.markReviewFromAgent(id, "done");
-    await tasksMod.approveTask(id);
-    expect(row(id).status).toBe("finalizing");
-    // Simulate the watcher/recovery path: finalize directly.
+  test("finalizeMerge is a no-op on a task that is not in_review/rolling_back", async () => {
+    const id = await buildReadyTask("noop", "noop.txt", "noop\n");
+    // Still in_progress (never reviewed) → finalizeMerge does nothing.
     const out = await tasksMod.finalizeMerge(id);
-    expect(out.task.status).toBe("merged");
+    expect(out.task.status).toBe("in_progress");
   });
 });
 
 describe("4. needs_info round-trip (any agent stage → ask → answer → resume)", () => {
-  test("an in_progress agent asks → needs_info; answering resumes it to in_progress", async () => {
+  test("an in_progress agent asks → needs_info; answering resumes it to inactive", async () => {
     const id = await buildReadyTask("ask me", "q.txt", "q\n");
     expect(row(id).status).toBe("in_progress");
 
@@ -261,10 +257,10 @@ describe("4. needs_info round-trip (any agent stage → ask → answer → resum
     expect(row(id).question).toBe("Per-user or global cache?");
     expect(row(id).herdr_pane_id).toBeNull();
 
-    // Answering resumes the SAME session: back to in_progress (ready), answer stored,
+    // Answering resumes the SAME session: back to inactive (ready), answer stored,
     // question cleared, session_id preserved.
     const view = await tasksMod.answerTask(id, "Per-user.");
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     expect(row(id).answer).toBe("Per-user.");
     expect(row(id).question).toBeNull();
     expect(row(id).session_id).toBe(`sess-${id}`);
@@ -282,20 +278,20 @@ describe("5. the unified feedback mechanism (one code path)", () => {
     const a = await tasksMod.createTask(DIR_ID, "unified spec", [], [], "task", null, [], 0, false, true);
     await dispatcherMod.generateSpecForIdea(dirRow(), row(a.id));
     const r1 = await tasksMod.respondToFeedback(a.id, { type: "approve" });
-    expect(r1.task.status).toBe("in_progress");
+    expect(r1.task.status).toBe("inactive");
 
-    // in_review request_changes via respondToFeedback → resume the agent (in_progress).
+    // in_review request_changes via respondToFeedback → resume the agent (→ inactive).
     const b = await buildReadyTask("unified review", "u2.txt", "u2\n");
     tasksMod.markReviewFromAgent(b, "done");
     const r2 = await tasksMod.respondToFeedback(b, { type: "request_changes", note: "tweak it" });
-    expect(r2.task.status).toBe("in_progress");
+    expect(r2.task.status).toBe("inactive");
     expect(row(b).review_note).toContain("tweak it");
 
-    // needs_info answer via respondToFeedback → resume.
+    // needs_info answer via respondToFeedback → resume (→ inactive).
     const c = await buildReadyTask("unified ask", "u3.txt", "u3\n");
     tasksMod.markNeedsInfoFromAgent(c, "which?");
     const r3 = await tasksMod.respondToFeedback(c, { type: "answer", answer: "this one" });
-    expect(r3.task.status).toBe("in_progress");
+    expect(r3.task.status).toBe("inactive");
   });
 
   test("respondToFeedback rejects a non-feedback task and a wrong response type", async () => {

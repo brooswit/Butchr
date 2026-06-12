@@ -197,10 +197,10 @@ describe("dispatcher against a fake AgentRunner backend", () => {
     const { runner, calls } = makeFake({ resolvedPane: "pane-final" });
     harnessMod.setRunner(runner);
 
-    // A 'New task' (idea=false, no blockers) starts in_progress with NO pane — the
+    // A 'New task' (idea=false, no blockers) starts `inactive` with NO pane — the
     // exact ready-to-launch state selectQueuedForDispatch picks up.
     const view = await tasksMod.createTask(DIR_ID, "do the thing");
-    expect(dbRow(view.id).status).toBe("in_progress");
+    expect(dbRow(view.id).status).toBe("inactive");
     expect(dbRow(view.id).herdr_pane_id).toBeNull();
 
     await dispatchMod.dispatch(dirRow(), dbRow(view.id));
@@ -251,7 +251,7 @@ describe("dispatcher against a fake AgentRunner backend", () => {
     expect(calls.agentDeregister).toContain(view.id); // cleanup freed the name
 
     const row = dbRow(view.id);
-    expect(row.status).toBe("in_progress"); // re-queued (under the attempt cap)
+    expect(row.status).toBe("inactive"); // re-armed READY (under the attempt cap)
     expect(row.herdr_pane_id).toBeNull(); // NO phantom pane recorded
     expect(row.dispatch_attempts).toBe(1); // a bounded retry was counted
     expect(row.next_dispatch_at).not.toBeNull(); // backoff scheduled

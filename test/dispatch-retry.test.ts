@@ -6,16 +6,17 @@
 //
 // What this exercises:
 //   1. markDispatchFailure — increments dispatch_attempts, records the error, and
-//      schedules a FUTURE next_dispatch_at backoff while under the cap (status
-//      stays `in_progress` with herdr_pane_id NULL), then GIVES UP to `aborted`
+//      schedules a FUTURE next_dispatch_at backoff while under the cap (re-armed as
+//      READY `inactive` with herdr_pane_id NULL), then GIVES UP to `failed`
 //      (clearing next_dispatch_at) at the cap. The dispatcher then stops retrying.
 //   2. dispatchBackoffMs — exponential growth capped at the configured cap.
-//   3. markRunning — a successful launch RESETS the retry state.
+//   3. markRunning — flips inactive→in_progress and RESETS the retry state.
 //   4. rejectTask / backToQueued — the reject (rework) and clean re-queue paths do
-//      NOT count as dispatch failures: they reset dispatch_attempts + next_dispatch_at.
-//   5. requeueTask — the operator escape hatch revives a backoff'd `in_progress`
-//      task with a clean retry state. An `aborted` give-up task is TERMINAL and
-//      cannot be requeued (409).
+//      NOT count as dispatch failures: they reset dispatch_attempts + next_dispatch_at
+//      and re-arm the task as READY `inactive`.
+//   5. requeueTask — the operator escape hatch revives a backoff'd task as `inactive`
+//      with a clean retry state. A `failed`/`aborted` terminal task cannot be
+//      requeued (409).
 //
 // Env is set before a dynamic import so config/db read our temp paths. We force a
 // small MAX so the give-up boundary is cheap to reach.
@@ -125,15 +126,15 @@ describe("dispatchBackoffMs", () => {
 });
 
 describe("markDispatchFailure", () => {
-  test("under the cap: increments attempts, records error, schedules a FUTURE backoff, stays in_progress", async () => {
-    // A READY `in_progress` task (herdr_pane_id NULL) — this is the new dispatchable state.
-    const id = seedTask({ id: "fail-backoff", status: "in_progress" });
+  test("under the cap: increments attempts, records error, schedules a FUTURE backoff, re-arms inactive", async () => {
+    // A READY `inactive` task — this is the dispatchable state.
+    const id = seedTask({ id: "fail-backoff", status: "inactive" });
     const before = Date.now();
 
     await tasksMod.markDispatchFailure(id, "worktree create failed");
 
     const row = dbRow(id);
-    expect(row.status).toBe("in_progress"); // still retryable (agent-phase, pane cleared)
+    expect(row.status).toBe("inactive"); // still retryable (re-armed READY, pane cleared)
     expect(row.dispatch_attempts).toBe(1);
     expect(row.last_dispatch_error).toBe("worktree create failed");
     expect(row.next_dispatch_at).toBeTruthy();
@@ -147,17 +148,17 @@ describe("markDispatchFailure", () => {
     // Second failure grows the backoff and the count.
     await tasksMod.markDispatchFailure(id, "herdr pane setup failed");
     const row2 = dbRow(id);
-    expect(row2.status).toBe("in_progress");
+    expect(row2.status).toBe("inactive");
     expect(row2.dispatch_attempts).toBe(2);
     expect(row2.last_dispatch_error).toBe("herdr pane setup failed");
   });
 
-  test("at the cap: gives up to `aborted`, clears next_dispatch_at, keeps the error", async () => {
+  test("at the cap: gives up to `failed`, clears next_dispatch_at, keeps the error", async () => {
     // Seed already at MAX-1 attempts so one more failure tips it over.
-    // A READY `in_progress` task (herdr_pane_id NULL) with a past backoff.
+    // A READY `inactive` task with a past backoff.
     const id = seedTask({
       id: "fail-giveup",
-      status: "in_progress",
+      status: "inactive",
       attempts: cfg.maxDispatchAttempts - 1,
       nextAt: new Date(Date.now() - 1000).toISOString(),
     });
@@ -165,23 +166,23 @@ describe("markDispatchFailure", () => {
     await tasksMod.markDispatchFailure(id, "persistent boom");
 
     const row = dbRow(id);
-    expect(row.status).toBe("aborted"); // terminal give-up (no `failed` state in canonical model)
+    expect(row.status).toBe("failed"); // terminal give-up — an execution failure, not an operator abort
     expect(row.dispatch_attempts).toBe(cfg.maxDispatchAttempts);
     expect(row.last_dispatch_error).toBe("persistent boom");
     expect(row.next_dispatch_at).toBeNull(); // no further retry scheduled
 
     // task.md reflects the give-up too.
     const md = taskmdMod.readTaskMd(REPO_ROOT, id);
-    expect(md.meta.status).toBe("aborted");
+    expect(md.meta.status).toBe("failed");
   });
 
-  test("an `aborted` give-up task is excluded from the dispatcher's READY selection", () => {
-    // The give-up task from above is status='aborted', so the tick query
-    // (status IN ('in_progress','finalizing') AND herdr_pane_id IS NULL) will never pick it up.
+  test("a `failed` give-up task is excluded from the dispatcher's READY selection", () => {
+    // The give-up task from above is status='failed', so the tick query
+    // (status='inactive') will never pick it up.
     const row = dbRow("fail-giveup");
     const ready = dbMod.db
       .query<any, [string]>(
-        `SELECT id FROM tasks WHERE status IN ('in_progress','finalizing') AND herdr_pane_id IS NULL AND id=?`,
+        `SELECT id FROM tasks WHERE status='inactive' AND id=?`,
       )
       .get(row.id);
     expect(ready).toBeNull();
@@ -189,19 +190,19 @@ describe("markDispatchFailure", () => {
 });
 
 describe("tick gating by next_dispatch_at", () => {
-  test("an in_progress task in backoff is NOT selected; an elapsed one IS", () => {
+  test("an inactive task in backoff is NOT selected; an elapsed one IS", () => {
     const future = new Date(Date.now() + 60_000).toISOString();
     const past = new Date(Date.now() - 60_000).toISOString();
-    seedTask({ id: "gate-future", status: "in_progress", attempts: 1, nextAt: future });
-    seedTask({ id: "gate-past", status: "in_progress", attempts: 1, nextAt: past });
-    seedTask({ id: "gate-null", status: "in_progress" });
+    seedTask({ id: "gate-future", status: "inactive", attempts: 1, nextAt: future });
+    seedTask({ id: "gate-past", status: "inactive", attempts: 1, nextAt: past });
+    seedTask({ id: "gate-null", status: "inactive" });
 
     // Mirror the dispatcher's tick selection predicate exactly.
     const now = new Date().toISOString();
     const eligible = dbMod.db
       .query<{ id: string }, [string]>(
         `SELECT id FROM tasks
-           WHERE status IN ('in_progress','finalizing') AND herdr_pane_id IS NULL
+           WHERE status='inactive'
            AND (next_dispatch_at IS NULL OR next_dispatch_at <= ?)`,
       )
       .all(now)
@@ -215,10 +216,10 @@ describe("tick gating by next_dispatch_at", () => {
 
 describe("markRunning resets retry state", () => {
   test("a successful launch clears attempts / error / backoff", () => {
-    // Seed as a READY `in_progress` task (herdr_pane_id NULL) — markRunning sets the pane.
+    // Seed as a READY `inactive` task — markRunning flips it to in_progress + sets the pane.
     const id = seedTask({
       id: "run-reset",
-      status: "in_progress",
+      status: "inactive",
       attempts: 2,
       nextAt: new Date(Date.now() + 5000).toISOString(),
     });
@@ -230,7 +231,7 @@ describe("markRunning resets retry state", () => {
     tasksMod.markRunning(id, "pane-1", "11111111-2222-3333-4444-555555555555", "tab-1");
 
     const row = dbRow(id);
-    // Status stays `in_progress` — it's now LIVE (pane is set), not "running" in the old sense.
+    // Flipped inactive→in_progress — it's now LIVE (pane is set).
     expect(row.status).toBe("in_progress");
     expect(row.herdr_pane_id).toBe("pane-1"); // pane now set → LIVE agent
     expect(row.dispatch_attempts).toBe(0);
@@ -256,7 +257,7 @@ describe("reject / re-queue do NOT count as dispatch failures", () => {
     await tasksMod.rejectTask(id, "please tweak the naming");
 
     const row = dbRow(id);
-    expect(row.status).toBe("in_progress"); // re-queued for --resume (READY: pane NULL)
+    expect(row.status).toBe("inactive"); // re-queued for --resume (READY: pane NULL)
     // Critically: NOT incremented — a reject is fresh intent, not a dispatch failure.
     expect(row.dispatch_attempts).toBe(0);
     expect(row.next_dispatch_at).toBeNull();
@@ -281,7 +282,7 @@ describe("reject / re-queue do NOT count as dispatch failures", () => {
     await tasksMod.backToQueued(id);
 
     const row = dbRow(id);
-    expect(row.status).toBe("in_progress"); // READY again (pane cleared)
+    expect(row.status).toBe("inactive"); // READY again (pane cleared)
     expect(row.herdr_pane_id).toBeNull();
     expect(row.dispatch_attempts).toBe(0);
     expect(row.next_dispatch_at).toBeNull();
@@ -290,11 +291,11 @@ describe("reject / re-queue do NOT count as dispatch failures", () => {
 });
 
 describe("requeueTask (operator escape hatch)", () => {
-  test("revives a backoff'd in_progress task to in_progress with a clean retry state", async () => {
-    // Seed an `in_progress` task stuck in backoff (herdr_pane_id NULL, future next_dispatch_at).
+  test("revives a backoff'd inactive task to inactive with a clean retry state", async () => {
+    // Seed an `inactive` task stuck in backoff (herdr_pane_id NULL, future next_dispatch_at).
     const id = seedTask({
       id: "requeue-backoff",
-      status: "in_progress",
+      status: "inactive",
       attempts: cfg.maxDispatchAttempts - 1,
       nextAt: new Date(Date.now() + 60_000).toISOString(),
     });
@@ -304,17 +305,17 @@ describe("requeueTask (operator escape hatch)", () => {
 
     const view = await tasksMod.requeueTask(id);
 
-    expect(view.status).toBe("in_progress");
+    expect(view.status).toBe("inactive");
     const row = dbRow(id);
-    expect(row.status).toBe("in_progress");
+    expect(row.status).toBe("inactive");
     expect(row.dispatch_attempts).toBe(0);
     expect(row.last_dispatch_error).toBeNull();
     expect(row.next_dispatch_at).toBeNull();
-    expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("in_progress");
+    expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("inactive");
   });
 
-  test("refuses a terminal (merged/aborted) task with 409", async () => {
-    for (const status of ["merged", "aborted"]) {
+  test("refuses a terminal (merged/failed/aborted) task with 409", async () => {
+    for (const status of ["merged", "failed", "aborted"]) {
       const id = seedTask({ id: `requeue-bad-${status}`, status });
       let err: any;
       try {
