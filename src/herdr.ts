@@ -3,7 +3,7 @@
 // which speaks to the running herdr server over its unix socket and replies with
 // a JSON envelope: {"id": "...", "result": { ... }}.
 import { config } from "./config.ts";
-import { run, stripAnsi } from "./exec.ts";
+import { run, sleep, stripAnsi } from "./exec.ts";
 // The runtime-handle types + the backend interface live in harness.ts (which owns
 // the abstraction's contract). We import them TYPE-ONLY (erased at runtime, so no
 // import cycle: harness.ts imports `herdrRunner` from here as a value) and re-export
@@ -75,6 +75,18 @@ export async function isUp(): Promise<boolean> {
   return res.ok && /status:\s*running/.test(res.stdout);
 }
 
+/**
+ * Shared existence probe: run a `<noun> get <id>` and report whether the entity is
+ * present. herdr exits non-zero (or prints an `"error"` envelope) when the entity is
+ * gone, so existence is `res.ok && !res.stdout.includes('"error"')`. The `res.ok`
+ * guard matters: a non-zero exit with empty stdout must read as ABSENT (without it a
+ * crashed/unreachable herdr would falsely report the entity present).
+ */
+async function existsByGet(args: string[]): Promise<boolean> {
+  const res = await run([config.herdrBin, ...args]);
+  return res.ok && !res.stdout.includes('"error"');
+}
+
 /** Provision a herdr workspace for a registered workspace. Returns it + root pane id. */
 export async function workspaceCreate(
   cwd: string,
@@ -92,9 +104,7 @@ export async function workspaceCreate(
 /** Does a workspace still exist? (herdr may have been restarted/closed.) */
 export async function workspaceExists(workspaceId: string): Promise<boolean> {
   if (!workspaceId) return false;
-  const res = await run([config.herdrBin, "workspace", "get", workspaceId]);
-  if (!res.ok) return false;
-  return !res.stdout.includes('"error"');
+  return existsByGet(["workspace", "get", workspaceId]);
 }
 
 /** Tear a workspace down. */
@@ -137,16 +147,44 @@ export async function tabClose(tabId: string | null | undefined): Promise<void> 
   await run([config.herdrBin, "tab", "close", tabId]).catch(() => {});
 }
 
+// Field-probes over a single `agent get` envelope. herdr response shapes vary
+// slightly by version, so each handle is probed across the common field paths. Kept
+// as standalone helpers so `agentInfo` derives all three from ONE payload.
+function pickTabId(r: any): string | undefined {
+  return r.agent?.tab_id ?? r.pane?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id ?? undefined;
+}
+function pickPaneId(r: any): string | undefined {
+  return (
+    r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ?? r.terminal_id ??
+    r.terminal?.terminal_id ?? undefined
+  );
+}
+function pickTerminalId(r: any): string | undefined {
+  return r.agent?.terminal_id ?? r.terminal_id ?? r.pane?.terminal_id ?? undefined;
+}
+
+/**
+ * One `agent get <name>` round-trip, returning the agent's tab/pane/terminal handles
+ * probed from the SAME envelope — so callers that need more than one handle (or the
+ * three single-handle readers below) don't each re-fetch the identical payload.
+ * Returns null when there is no such agent / herdr can't read it.
+ */
+async function agentInfo(
+  name: string,
+): Promise<{ tabId?: string; paneId?: string; terminalId?: string } | null> {
+  if (!name) return null;
+  const r = await herdrSoft(["agent", "get", name]);
+  if (!r) return null;
+  return { tabId: pickTabId(r), paneId: pickPaneId(r), terminalId: pickTerminalId(r) };
+}
+
 /**
  * The tab id backing the agent terminal named `name`, or undefined if there is no
  * such agent / we can't determine it. Used to derive a task's tab for teardown
  * when it wasn't persisted (e.g. a re-adopted agent, or reclaiming a stale name).
  */
 export async function agentTabId(name: string): Promise<string | undefined> {
-  if (!name) return undefined;
-  const r = await herdrSoft(["agent", "get", name]);
-  if (!r) return undefined;
-  return r.agent?.tab_id ?? r.pane?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id ?? undefined;
+  return (await agentInfo(name))?.tabId;
 }
 
 /**
@@ -208,8 +246,7 @@ export async function agentStart(
  */
 export async function agentExists(name: string): Promise<boolean> {
   if (!name) return false;
-  const res = await run([config.herdrBin, "agent", "get", name]);
-  return res.ok && !res.stdout.includes('"error"');
+  return existsByGet(["agent", "get", name]);
 }
 
 /**
@@ -219,13 +256,7 @@ export async function agentExists(name: string): Promise<boolean> {
  * `agent_name_taken` collision.
  */
 export async function agentPaneId(name: string): Promise<string | undefined> {
-  if (!name) return undefined;
-  const r = await herdrSoft(["agent", "get", name]);
-  if (!r) return undefined;
-  return (
-    r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ?? r.terminal_id ??
-    r.terminal?.terminal_id ?? undefined
-  );
+  return (await agentInfo(name))?.paneId;
 }
 
 /**
@@ -237,10 +268,7 @@ export async function agentPaneId(name: string): Promise<string | undefined> {
  * after we close a sibling (see `resolveAgentPane`).
  */
 export async function agentTerminalId(name: string): Promise<string | undefined> {
-  if (!name) return undefined;
-  const r = await herdrSoft(["agent", "get", name]);
-  if (!r) return undefined;
-  return r.agent?.terminal_id ?? r.terminal_id ?? r.pane?.terminal_id ?? undefined;
+  return (await agentInfo(name))?.terminalId;
 }
 
 /**
@@ -270,10 +298,6 @@ export async function paneList(workspaceId?: string): Promise<PaneInfo[]> {
       workspaceId: p.workspace_id,
     }))
     .filter((p): p is PaneInfo => !!p.paneId);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
@@ -469,8 +493,11 @@ export async function teardownTask(
  */
 export async function agentDeregister(name: string): Promise<void> {
   if (!name) return;
-  const tab = await agentTabId(name);
-  const pane = await agentPaneId(name);
+  // Resolve the tab + pane from ONE `agent get` (both come from the same envelope)
+  // BEFORE clearing — the name stops resolving once cleared.
+  const info = await agentInfo(name);
+  const tab = info?.tabId;
+  const pane = info?.paneId;
   await run([config.herdrBin, "agent", "rename", name, "--clear"]).catch(() => {});
   if (pane) await run([config.herdrBin, "pane", "close", pane]).catch(() => {});
   if (tab) await run([config.herdrBin, "tab", "close", tab]).catch(() => {});

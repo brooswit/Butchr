@@ -3,7 +3,18 @@
 // (the optional `--model <m>` flag). Both are pure string builders with no module
 // side effects, so the tests import and call them directly.
 import { describe, expect, test } from "bun:test";
-import { buildScriptArgv, modelFlag } from "../src/exec.ts";
+import { buildScriptArgv, modelFlag, sleep } from "../src/exec.ts";
+
+// `sleep` is now the SINGLE shared delay (formerly re-defined identically in
+// herdr.ts + dispatcher.ts). It just resolves a promise after `ms`.
+describe("sleep (shared poll/backoff delay)", () => {
+  test("resolves to undefined after the delay elapses", async () => {
+    const start = Date.now();
+    const result = await sleep(20);
+    expect(result).toBeUndefined();
+    expect(Date.now() - start).toBeGreaterThanOrEqual(15);
+  });
+});
 
 describe("buildScriptArgv", () => {
   test("always returns a `bash -lc <wrapped>` argv", () => {

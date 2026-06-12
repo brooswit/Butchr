@@ -20,7 +20,7 @@ import { config } from "./config.ts";
 import { db, getSetting, setSetting } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
-import { buildScriptArgv, modelFlag, stripAnsi } from "./exec.ts";
+import { buildScriptArgv, modelFlag, sleep, stripAnsi } from "./exec.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
@@ -707,10 +707,6 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
     await harness.agentDeregister(task.id).catch(() => {});
     await markDispatchFailure(task.id, msg);
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 // Toggle a running task's `idle` flag from its log file's last-write time. The

@@ -51,6 +51,12 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
 }
 
+/** Resolve after `ms` milliseconds. The shared poll/backoff delay used across the
+ *  herdr resolver and the dispatcher watcher loop (formerly re-defined in each). */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export type ExecResult = {
   code: number;
   stdout: string;
