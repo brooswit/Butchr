@@ -44,6 +44,24 @@ chmod +x "$PROJECT_DIR/scripts/health-watchdog.sh"
 systemctl --user daemon-reload
 echo "daemon-reload complete"
 
+# Make the "open terminal" feature work out of the box. A systemd --user service
+# does NOT inherit DISPLAY/XAUTHORITY/WAYLAND_DISPLAY from the graphical session,
+# so import the current (graphical) shell's copies into the user manager — then a
+# (re)started butchr.service inherits them and can spawn a GUI terminal. Best-effort
+# and harmless from a non-graphical session (butchr also self-discovers the display
+# at runtime — see src/terminal.ts). Re-run this one-liner after a fresh login if
+# the display changes (also documented in CONTRIBUTING.md §3).
+if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+  if systemctl --user import-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY 2>/dev/null; then
+    echo "imported DISPLAY/XAUTHORITY/WAYLAND_DISPLAY into the user manager"
+  else
+    echo "note: could not import graphical env (open-terminal still self-discovers at runtime)"
+  fi
+else
+  echo "note: no DISPLAY/WAYLAND_DISPLAY in this shell; skipped graphical-env import"
+  echo "      (open-terminal self-discovers the display at runtime — see CONTRIBUTING.md §3)"
+fi
+
 # Best-effort validation of the generated units. Warnings (e.g. about specifiers)
 # are harmless; a hard parse error would be worth investigating.
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -80,4 +98,10 @@ Check status / logs:
 
   systemctl --user status butchr.service
   journalctl --user -u butchr.service -f
+
+"Open terminal" needs the graphical env. This installer already imported it; after
+a fresh login (or if the display changes) re-import + restart butchr:
+
+  systemctl --user import-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY
+  systemctl --user restart butchr.service
 EOF

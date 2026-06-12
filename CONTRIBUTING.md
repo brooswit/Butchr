@@ -326,6 +326,38 @@ unregister); one tab + one pane per task; **the herdr agent name IS the task id*
 restart / manual close) butchr recreates it on the next dispatch — no manual
 re-registration.
 
+### Open terminal (DISPLAY)
+
+The dashboard's **Open terminal** button (and the CTO terminal button) spawns a
+**GUI terminal emulator** attached to a task's live agent pane — a flagship "work
+with the agent in a real terminal" feature. Spawning a window needs the graphical
+session's env (`DISPLAY` + `XAUTHORITY` for X11, or `WAYLAND_DISPLAY` for Wayland).
+**A systemd `--user` service does NOT inherit these** from the graphical session, so
+butchr handles it at two levels:
+
+- **Runtime self-discovery (primary).** When butchr has no `DISPLAY`/`WAYLAND_DISPLAY`,
+  `openTerminal` (`src/terminal.ts`) discovers the active session's display itself —
+  via `loginctl` (the user's graphical session → its `Type`/`Display`), falling back
+  to an X socket under `/tmp/.X11-unix` (`:0`) and a default `XAUTHORITY`
+  (`~/.Xauthority`) — and injects it into the spawned emulator's env. Discovery is
+  best-effort and bounded (it never throws or hangs); only if **no** display is
+  discoverable does the UI fall back to showing the manual `herdr agent attach <id>`
+  command to run yourself.
+- **Imported env (defense-in-depth).** `scripts/install-service.sh` runs
+  `systemctl --user import-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY` so a
+  (re)started `butchr.service` inherits the graphical env directly. These are
+  **not** persisted across logins — after a fresh login (or if the display changes)
+  re-import and restart:
+
+  ```sh
+  systemctl --user import-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY
+  systemctl --user restart butchr.service
+  ```
+
+You can also bypass detection entirely with **`BUTCHR_TERMINAL_CMD`** (a template
+where `{{CMD}}` is the shell-quoted attach command) to use a specific emulator,
+`ssh -X`, a tmux popup, etc.
+
 ---
 
 ## 4. The zero-dependency rule

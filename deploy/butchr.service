@@ -30,6 +30,12 @@ Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Optional BUTCHR_* overrides (BUTCHR_PORT, BUTCHR_DATA_DIR, …). The leading '-'
 # makes the file optional — absent is fine.
 EnvironmentFile=-%h/.config/butchr/butchr.env
+# The "open terminal" feature spawns a GUI emulator, which needs the graphical
+# session's DISPLAY/XAUTHORITY/WAYLAND_DISPLAY. A --user service does NOT inherit
+# these automatically; the installer imports them into the user manager
+# (`systemctl --user import-environment …`) and butchr ALSO self-discovers the
+# display at runtime (src/terminal.ts), so this works without hardcoding a display
+# here. See CONTRIBUTING.md §3 to re-import after a fresh login.
 ExecStart=@BUN@ run src/index.ts
 # Relaunch on ANY exit (crash, OOM, the post-power-loss restart). A deliberate
 # `systemctl --user stop` is a manual stop, which Restart=always does NOT
