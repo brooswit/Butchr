@@ -24,6 +24,7 @@ import { config } from "./config.ts";
 import { ATTENTION_STATES } from "./db.ts";
 import {
   isNotificationOrIdless,
+  type JsonRpcMessage,
   jsonRpcError,
   jsonRpcResult,
   PROTOCOL_VERSION,
@@ -384,13 +385,6 @@ export async function runSseLoop(opts: SseLoopOpts): Promise<void> {
 }
 
 // --- MCP stdio request handling ----------------------------------------------
-
-type JsonRpcMessage = {
-  jsonrpc?: string;
-  id?: string | number | null;
-  method?: string;
-  params?: any;
-};
 
 /**
  * Handle one inbound JSON-RPC message from the client. Returns a JSON-RPC response

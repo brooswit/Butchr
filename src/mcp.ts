@@ -19,6 +19,7 @@
 import type { TaskRow } from "./db.ts";
 import {
   isNotificationOrIdless,
+  type JsonRpcMessage,
   jsonRpcError,
   jsonRpcResult,
   PROTOCOL_VERSION,
@@ -116,13 +117,6 @@ const PROPOSE_PLAN_TOOL = {
     additionalProperties: false,
   },
 } as const;
-
-type JsonRpcMessage = {
-  jsonrpc?: string;
-  id?: string | number | null;
-  method?: string;
-  params?: any;
-};
 
 // HTTP transport: wrap a shared JSON-RPC body (see ./jsonrpc.ts) in a JSON Response.
 function rpcResult(id: unknown, result: unknown): Response {

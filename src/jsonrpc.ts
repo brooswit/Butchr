@@ -8,6 +8,14 @@
 /** MCP protocol version butchr speaks (echoed back on `initialize`). */
 export const PROTOCOL_VERSION = "2025-06-18";
 
+/** A parsed inbound JSON-RPC 2.0 message, as seen by both MCP transports. */
+export type JsonRpcMessage = {
+  jsonrpc?: string;
+  id?: string | number | null;
+  method?: string;
+  params?: any;
+};
+
 /** A JSON-RPC 2.0 success envelope (id defaults to null when absent). */
 export function jsonRpcResult(id: unknown, result: unknown): Record<string, unknown> {
   return { jsonrpc: "2.0", id: id ?? null, result };
