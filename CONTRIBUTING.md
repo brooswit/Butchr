@@ -323,7 +323,9 @@ re-adopting running agents (`reconcileRunningTasks`) so live/just-merged work is
 never mistaken for garbage. Watch the log for: re-adopted running agents;
 **auto-resumed** agents killed by a host/herdr restart (see "Restart resilience"
 below); rescued tasks whose agent ended while butchr was offline; finalized tasks
-left mid-wrap-up (`recoverFinalizingTasks`); and `reapOrphans` (`src/reaper.ts`), a
+left mid-wrap-up (`recoverFinalizingTasks`); **re-triggered CI/conformance gates** left
+stuck mid-flight by a restart (`recoverStuckGates` — see "Gate recovery" below); and
+`reapOrphans` (`src/reaper.ts`), a
 conservative once-on-boot sweep that removes **leaked git worktrees + branches** and
 **herdr husks** for tasks in a terminal state (`merged` / `aborted` / `rejected`) or
 with no DB row — it never touches the main worktree or a worktree whose task is still
@@ -368,6 +370,41 @@ action:
   (3) a boot-time backstop sweep `reaper.reapDeadRunningAgents`. Net behavior: power dies
   mid-work → on next boot, agents resume from their sessions with no lost work and no
   operator action.
+
+### Gate recovery (re-trigger stuck CI/conformance gates on restart)
+
+The **sibling of auto-resume, for the review GATES.** The CI build/test gate
+(`tasks.triggerCi`) and the spec-conformance reviewer (`conformance.triggerConformance`)
+run **fire-and-forget in butchr's own process**: each flips the task's badge to in-flight
+(`ci_status='running'` / `conformance_status='checking'`), `await`s a subprocess, then
+writes back the result. A power loss / restart kills butchr mid-run, so the **settle write
+never happens** and the task is left stuck on the in-flight value **forever** — it can
+never become mergeable (auto-merge needs `ci_status='pass'`) until an operator requeues it
+by hand. That was a real incident.
+
+- **Detection — in-process liveness.** Because the gate runs *in* butchr, a restart that
+  kills the gate also empties the in-process in-flight sets (`ciGateInFlight` /
+  `conformanceGateInFlight`). So a DB status of `running`/`checking` with **no** matching
+  in-flight entry is **provably stale**. On a fresh boot the sets are empty, so *every*
+  in-flight gate is stale (the restart-case rule) and gets re-triggered; while butchr is
+  up the sets track genuinely-running gates, so the same sweep is safe to re-run without
+  clobbering a gate that is legitimately still running (the rarer mid-run-death case).
+- **Recovery — re-trigger.** `tasks.recoverStuckGates` sweeps every `in_review` task with a
+  stale in-flight gate and re-runs `triggerCi` / `triggerConformance` so the status settles
+  to a real result instead of hanging.
+- **Bounded** by `BUTCHR_MAX_GATE_RECOVERY_ATTEMPTS` (default 5): the
+  `gate_recovery_attempts` column counts consecutive recovery re-triggers that didn't
+  settle; past the cap (or when the worktree the gate needs is gone, or recovery is
+  disabled `<=0`) the stuck gate is **force-settled** instead of re-triggered (CI →
+  `'fail'` with an explanatory summary; conformance → `NULL`, its "couldn't run" value) so
+  the task is **never** left stuck and a gate that dies the instant it starts can't loop.
+  The counter resets to 0 the moment any gate settles a real result.
+- **Two triggers, same path:** (1) startup `recoverStuckGates` (in `index.ts`, before the
+  dispatcher starts) — the primary recovery; and (2) a boot-time backstop sweep
+  `reaper.reapStuckGates` (a no-op on a clean boot, since the primary already re-triggered
+  them and they're now live-in-process — mirroring `reapDeadRunningAgents`). Net behavior:
+  power dies mid-gate → on next boot, the gate re-runs and the task settles to a real
+  pass/fail with no operator action.
 
 ### herdr model
 

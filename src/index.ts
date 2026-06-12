@@ -4,9 +4,9 @@ import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts
 import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import { initFileLogging } from "./log.ts";
-import { reapDeadRunningAgents, reapOrphans } from "./reaper.ts";
+import { reapDeadRunningAgents, reapOrphans, reapStuckGates } from "./reaper.ts";
 import { startServer } from "./server.ts";
-import { recoverFinalizingTasks } from "./tasks.ts";
+import { recoverFinalizingTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
 
 async function main(): Promise<void> {
@@ -45,6 +45,21 @@ async function main(): Promise<void> {
     console.log(`[butchr] finalized ${finalized} task(s) left finalizing from a prior run`);
   }
 
+  // GATE RECOVERY (sibling of the agent auto-resume above): the CI build/test gate and
+  // the conformance reviewer run fire-and-forget in butchr's OWN process, so a restart
+  // killed any in-flight gate and left its task stuck `ci_status='running'` /
+  // `conformance_status='checking'` forever — unmergeable until requeued by hand. On a
+  // fresh boot every in-flight gate is provably stale (the subprocess can't survive a
+  // restart), so re-trigger them all. Runs BEFORE the dispatcher starts; bounded +
+  // force-settled past the cap so it can't loop. See tasks.recoverStuckGates.
+  const gates = await recoverStuckGates();
+  if (gates.ci > 0 || gates.conformance > 0 || gates.settled > 0) {
+    console.log(
+      `[butchr] recovered stuck gates from a prior run: re-triggered ${gates.ci} CI + ` +
+        `${gates.conformance} conformance, force-settled ${gates.settled}`,
+    );
+  }
+
   // Reap leaked worktrees/branches + herdr husks from tasks that reached a
   // terminal state (or vanished) but whose filesystem/herdr artifacts survived a
   // restart. Runs AFTER reconcile + finalize so re-adopted running tasks and
@@ -61,6 +76,12 @@ async function main(): Promise<void> {
   // leaves nothing here — reconcile already auto-resumed the dead ones). See
   // reaper.reapDeadRunningAgents.
   await reapDeadRunningAgents(herdrUp);
+
+  // GATE-RECOVERY BACKSTOP: a safety-net re-run of the stuck-gate sweep for any in-flight
+  // gate the primary recovery above somehow didn't re-trigger. On a clean boot the primary
+  // already re-triggered them (they're now live in-process), so this finds nothing —
+  // mirroring reapDeadRunningAgents. See reaper.reapStuckGates.
+  await reapStuckGates();
 
   // Managed CTO agents — ONE PER REGISTERED WORKSPACE (each default OFF unless that
   // workspace opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).

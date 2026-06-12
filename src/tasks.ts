@@ -1,7 +1,7 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { config } from "./config.ts";
-import { triggerConformance } from "./conformance.ts";
+import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
 import type { TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import {
@@ -2133,6 +2133,19 @@ export type CiRunner = (dirPath: string, taskId: string, gateCmd: string) => Pro
 // the persistence + trigger wiring without spawning a real `bun` build/test.
 let ciRunner: CiRunner = defaultCiRunner;
 
+// Task ids whose CI gate is RUNNING in THIS butchr process right now. The gate runs
+// in-process (triggerCi awaits runGate), so a butchr restart kills it AND empties this
+// set — which is exactly what makes a DB ci_status='running' with no entry here PROVABLY
+// stale (its build/test subprocess died with the process). recoverStuckGates keys off
+// this to re-trigger only genuinely-dead gates, never one still legitimately running.
+// Added synchronously before the 'running' write; cleared in a finally.
+const ciInFlight = new Set<string>();
+
+/** Is this task's CI gate running in THIS process right now? */
+export function ciGateInFlight(id: string): boolean {
+  return ciInFlight.has(id);
+}
+
 /** Replace the CI runner (tests inject a fake to avoid spawning bun). */
 export function setCiRunner(r: CiRunner): void {
   ciRunner = r;
@@ -2205,46 +2218,55 @@ export async function triggerCi(id: string): Promise<void> {
   // a real build).
   if (!existsSync(git.worktreePath(dir.path, id))) return;
 
-  db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
-  emitUpdated(id);
+  // Mark the gate IN FLIGHT in this process (synchronously, before the 'running' write)
+  // so a concurrent recovery sweep sees it's genuinely running here and won't re-trigger
+  // it; cleared in the finally below once this process is done with it.
+  ciInFlight.add(id);
+  try {
+    db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
+    emitUpdated(id);
 
-  // Resolve the workspace's effective gate command ONCE for this CI run (own
-  // gate_cmd or the default) and thread it through every (re)run.
-  const gateCmd = workspaceGateCmd(dir.id);
-  let result = await runCiOnce(dir.path, id, gateCmd);
-  // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
-  const retries = Math.max(0, config.ciRetries);
-  for (let attempt = 1; attempt <= retries && result.status === "fail"; attempt++) {
-    console.log(
-      `[butchr] CI gate FAILED for ${id} (${result.label}); ` +
-        `retrying (attempt ${attempt}/${retries})`,
-    );
-    result = await runCiOnce(dir.path, id, gateCmd);
-    if (result.status === "pass") {
-      console.log(`[butchr] CI gate PASSED for ${id} on retry ${attempt}/${retries}`);
+    // Resolve the workspace's effective gate command ONCE for this CI run (own
+    // gate_cmd or the default) and thread it through every (re)run.
+    const gateCmd = workspaceGateCmd(dir.id);
+    let result = await runCiOnce(dir.path, id, gateCmd);
+    // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
+    const retries = Math.max(0, config.ciRetries);
+    for (let attempt = 1; attempt <= retries && result.status === "fail"; attempt++) {
+      console.log(
+        `[butchr] CI gate FAILED for ${id} (${result.label}); ` +
+          `retrying (attempt ${attempt}/${retries})`,
+      );
+      result = await runCiOnce(dir.path, id, gateCmd);
+      if (result.status === "pass") {
+        console.log(`[butchr] CI gate PASSED for ${id} on retry ${attempt}/${retries}`);
+      }
     }
-  }
-  if (result.status === "fail" && retries > 0) {
-    console.log(
-      `[butchr] CI gate settled FAIL for ${id} after ${retries} ` +
-        `retr${retries === 1 ? "y" : "ies"} (${result.label})`,
-    );
-  }
-  // First line is the badge label; the rest (if any) is the output tail.
-  const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
-  // Only write back while the task is still in review — if it merged/aborted while
-  // CI ran, don't resurrect stale CI state onto it.
-  const res = db
-    .query(`UPDATE tasks SET ci_status=?, ci_summary=? WHERE id=? AND status='in_review'`)
-    .run(result.status, summary, id);
-  if (res.changes === 0) return;
-  emitUpdated(id);
+    if (result.status === "fail" && retries > 0) {
+      console.log(
+        `[butchr] CI gate settled FAIL for ${id} after ${retries} ` +
+          `retr${retries === 1 ? "y" : "ies"} (${result.label})`,
+      );
+    }
+    // First line is the badge label; the rest (if any) is the output tail.
+    const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
+    // Only write back while the task is still in review — if it merged/aborted while
+    // CI ran, don't resurrect stale CI state onto it. A real settle also resets
+    // gate_recovery_attempts (the restart-recovery streak) to 0 — see recoverStuckGates.
+    const res = db
+      .query(`UPDATE tasks SET ci_status=?, ci_summary=?, gate_recovery_attempts=0 WHERE id=? AND status='in_review'`)
+      .run(result.status, summary, id);
+    if (res.changes === 0) return;
+    emitUpdated(id);
 
-  // AUTO-MERGE HOOK: CI just settled to 'pass' on a still-in-review task. If
-  // auto-merge is enabled and the task is low-risk, run the same approve+merge a
-  // human would (post-merge verify still gates main). Fire-and-forget so CI never
-  // blocks on the merge; the dispatcher tick re-checks as a backstop.
-  if (result.status === "pass") void maybeAutoMerge(id);
+    // AUTO-MERGE HOOK: CI just settled to 'pass' on a still-in-review task. If
+    // auto-merge is enabled and the task is low-risk, run the same approve+merge a
+    // human would (post-merge verify still gates main). Fire-and-forget so CI never
+    // blocks on the merge; the dispatcher tick re-checks as a backstop.
+    if (result.status === "pass") void maybeAutoMerge(id);
+  } finally {
+    ciInFlight.delete(id);
+  }
 }
 
 // --- AUTO-MERGE: land green, low-risk tasks without a human -----------------
@@ -2658,4 +2680,153 @@ export async function recoverFinalizingTasks(): Promise<number> {
     .all();
   for (const r of rows) await finalizeMerge(r.id).catch(() => {});
   return rows.length;
+}
+
+/** What recoverStuckGates did across all tasks (for logging / the health surface). */
+export type GateRecoveryResult = { ci: number; conformance: number; settled: number };
+
+/**
+ * GATE RECOVERY — the sibling of requeueForResume for CI/conformance GATES. Both gates
+ * run FIRE-AND-FORGET in butchr's OWN process: triggerCi awaits the build/test subprocess
+ * and triggerConformance awaits the headless reviewer. A power loss / restart kills butchr
+ * mid-run, so the gate's settle write never happens and the task is left stuck
+ * `ci_status='running'` / `conformance_status='checking'` FOREVER — it can never become
+ * mergeable (auto-merge needs ci_status='pass') until an operator manually requeues it.
+ * This is the EXACT incident this function fixes.
+ *
+ * It sweeps every `in_review` task with a mid-flight gate and re-triggers the gate that
+ * is NOT actually live in THIS process:
+ *  - `ci_status='running'` with no `ciGateInFlight(id)` → the CI subprocess is gone → re-run
+ *    triggerCi.
+ *  - `conformance_status='checking'` with no `conformanceGateInFlight(id)` → the reviewer is
+ *    gone → re-run triggerConformance.
+ *
+ * The in-process liveness sets are the cheap reuse of rosy-owl's liveness idea: on a fresh
+ * boot they're EMPTY, so every in-flight gate status is provably stale (the restart-case
+ * rule "any in-flight gate is stale") and gets re-triggered; while butchr is up they track
+ * genuinely-running gates, so this is also safe to call as a periodic/backstop sweep without
+ * clobbering a gate that is legitimately still running (the mid-run-death-without-restart
+ * case degrades to "leave the live one alone").
+ *
+ * BOUNDED by config.maxGateRecoveryAttempts via the `gate_recovery_attempts` column (reset
+ * to 0 whenever a gate settles a real result — see triggerCi / triggerConformance): past the
+ * cap (or when recovery is disabled, `<=0`), or when the worktree the gate needs is gone, the
+ * stuck gate is FORCE-SETTLED instead of re-triggered (ci_status → 'fail' with an explanatory
+ * summary; conformance_status → NULL, its "couldn't run" value) so the task is NEVER left
+ * stuck — a gate that dies the instant it starts can't loop forever across crash-restarts.
+ *
+ * Re-triggers are fire-and-forget (the in-flight marker is set synchronously inside each
+ * trigger, so liveness is correct immediately and startup never blocks on a full CI run).
+ * Never throws. Returns counts of CI re-triggers, conformance re-triggers, and force-settles.
+ */
+export async function recoverStuckGates(): Promise<GateRecoveryResult> {
+  const rows = db
+    .query<TaskRow, []>(
+      `SELECT * FROM tasks
+         WHERE status='in_review'
+           AND (ci_status='running' OR conformance_status='checking')`,
+    )
+    .all();
+  let ci = 0;
+  let conformance = 0;
+  let settled = 0;
+  for (const row of rows) {
+    const id = row.id;
+    // Which gates are STALE: mid-flight in the DB but not actually running in this process.
+    const ciStale = row.ci_status === "running" && !ciGateInFlight(id);
+    const confStale = row.conformance_status === "checking" && !conformanceGateInFlight(id);
+    if (!ciStale && !confStale) continue; // every in-flight gate is genuinely live — leave it
+
+    // The gate needs the task's worktree to run in. If it's gone (or the workspace is),
+    // re-triggering would just no-op (triggerCi/triggerConformance bail on a missing
+    // worktree, leaving the status stuck), so force-settle instead.
+    const dir = getWorkspace(row.workspace_id);
+    const worktreeMissing = !dir || !existsSync(git.worktreePath(dir.path, id));
+
+    const attempts = (row.gate_recovery_attempts ?? 0) + 1;
+    const capped = config.maxGateRecoveryAttempts <= 0 || attempts > config.maxGateRecoveryAttempts;
+
+    if (capped || worktreeMissing) {
+      // FORCE-SETTLE the stuck gate(s) so the task is never left stuck. Guarded on the
+      // task STILL being in_review with the SAME stuck value (it may have moved/settled
+      // under us). CI → 'fail' (visible, keeps it out of auto-merge); conformance → NULL
+      // (its best-effort "couldn't run" value). gate_recovery_attempts reset to 0.
+      const reason = worktreeMissing
+        ? "its worktree is gone, so the gate cannot be re-run"
+        : `butchr re-triggered it ${row.gate_recovery_attempts ?? 0} time(s) without it ` +
+          `settling (cap ${config.maxGateRecoveryAttempts})`;
+      if (ciStale) {
+        const r = db
+          .query(
+            `UPDATE tasks SET ci_status='fail', ci_summary=?, gate_recovery_attempts=0
+               WHERE id=? AND status='in_review' AND ci_status='running'`,
+          )
+          .run(
+            `gate did not complete after a butchr restart — ${reason}; ` +
+              `settled 'fail' so the task isn't stuck. Re-queue or re-run the gate to retry.`,
+            id,
+          );
+        if (r.changes > 0) {
+          settled++;
+          emitUpdated(id);
+          console.warn(
+            `[butchr] task ${id} CI gate force-settled 'fail' (stuck 'running' after restart; ${reason})`,
+          );
+        }
+      }
+      if (confStale) {
+        const r = db
+          .query(
+            `UPDATE tasks SET conformance_status=NULL, conformance_summary=NULL, gate_recovery_attempts=0
+               WHERE id=? AND status='in_review' AND conformance_status='checking'`,
+          )
+          .run(id);
+        if (r.changes > 0) {
+          settled++;
+          emitUpdated(id);
+          console.warn(
+            `[butchr] task ${id} conformance gate force-cleared (stuck 'checking' after restart; ${reason})`,
+          );
+        }
+      }
+      continue;
+    }
+
+    // Under the cap and the worktree exists → RE-TRIGGER. Record the bumped streak first
+    // (triggerCi/triggerConformance reset it to 0 when they settle a real result), then
+    // fire-and-forget the stale gate(s). The in-flight marker is set synchronously inside
+    // each trigger, so a later backstop sweep this same boot sees them live and skips them.
+    db.query(`UPDATE tasks SET gate_recovery_attempts=? WHERE id=?`).run(attempts, id);
+    if (ciStale) {
+      recordTaskEvent(
+        id,
+        "in_review",
+        "in_review",
+        `CI gate re-triggered after a butchr restart (was stuck 'running'); ` +
+          `attempt ${attempts}/${config.maxGateRecoveryAttempts}`,
+      );
+      void triggerCi(id);
+      ci++;
+      console.log(
+        `[butchr] task ${id} CI gate re-triggered (stuck 'running' after restart; ` +
+          `attempt ${attempts}/${config.maxGateRecoveryAttempts})`,
+      );
+    }
+    if (confStale) {
+      recordTaskEvent(
+        id,
+        "in_review",
+        "in_review",
+        `conformance gate re-triggered after a butchr restart (was stuck 'checking'); ` +
+          `attempt ${attempts}/${config.maxGateRecoveryAttempts}`,
+      );
+      void triggerConformance(id);
+      conformance++;
+      console.log(
+        `[butchr] task ${id} conformance gate re-triggered (stuck 'checking' after restart; ` +
+          `attempt ${attempts}/${config.maxGateRecoveryAttempts})`,
+      );
+    }
+  }
+  return { ci, conformance, settled };
 }

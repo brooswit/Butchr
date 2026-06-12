@@ -248,6 +248,20 @@ ensureColumn("tasks", "next_dispatch_at", "TEXT");
 // review) and on any operator re-queue. See tasks.requeueForResume.
 ensureColumn("tasks", "resume_attempts", "INTEGER NOT NULL DEFAULT 0");
 
+// `gate_recovery_attempts` is the GATE sibling of `resume_attempts`: it counts
+// CONSECUTIVE host/herdr-restart RECOVERY re-triggers of this task's CI / conformance
+// gate that did NOT settle a real result. The CI gate (tasks.triggerCi) and the
+// spec-conformance reviewer (conformance.triggerConformance) run fire-and-forget in
+// butchr's OWN process, so a power loss / restart kills a gate mid-run and leaves the
+// task stuck `ci_status='running'` / `conformance_status='checking'` forever. On startup
+// (and the reaper backstop) butchr re-triggers every such stale in-flight gate; this
+// counter bounds that (config.maxGateRecoveryAttempts) so a gate that dies the instant
+// it starts can't loop across crash-restarts — past the cap the stuck gate is
+// force-settled (CI → 'fail', conformance → cleared) instead. Reset to 0 the moment ANY
+// gate settles a real result (the triggerCi / triggerConformance write-back). See
+// tasks.recoverStuckGates.
+ensureColumn("tasks", "gate_recovery_attempts", "INTEGER NOT NULL DEFAULT 0");
+
 // `blocked_by` is a JSON-array TEXT column holding the ids of the tasks this task
 // is BLOCKED ON (its dependency set). A task with any not-yet-merged blocker sits
 // in status='blocked' (a pre-dispatch waiting state — no agent runs) until every
@@ -639,6 +653,10 @@ export type TaskRow = {
   // Consecutive host/herdr-restart auto-resumes of this task that didn't make
   // progress (bounded by config.maxResumeAttempts). See tasks.requeueForResume.
   resume_attempts: number;
+  // Consecutive host/herdr-restart RECOVERY re-triggers of this task's CI / conformance
+  // gate that didn't settle a real result (bounded by config.maxGateRecoveryAttempts).
+  // The GATE sibling of resume_attempts. See tasks.recoverStuckGates.
+  gate_recovery_attempts: number;
   // Build/test failure output when this task's merge was auto-reverted off the
   // default branch by the post-merge verify gate (null otherwise). See approveTask.
   revert_reason: string | null;

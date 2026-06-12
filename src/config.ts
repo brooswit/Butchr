@@ -221,6 +221,23 @@ export const config = {
   maxResumeAttempts: envInt("BUTCHR_MAX_RESUME_ATTEMPTS", 5),
 
   /**
+   * GATE-RECOVERY bound (host/herdr-restart resilience — the sibling of auto-resume
+   * for CI/conformance GATES). The CI build/test gate (tasks.triggerCi) and the
+   * spec-conformance reviewer (conformance.triggerConformance) run fire-and-forget IN
+   * butchr's OWN process, so a power loss / restart kills the gate mid-run and leaves
+   * the task stuck `ci_status='running'` / `conformance_status='checking'` FOREVER —
+   * it could never become mergeable until an operator requeued it. On startup (and the
+   * reaper backstop) butchr re-triggers every such stale in-flight gate. This caps how
+   * many CONSECUTIVE recovery re-triggers a gate gets WITHOUT settling a real result:
+   * past the cap the stuck gate is force-settled (CI → 'fail', conformance → cleared)
+   * so the task is never left stuck, rather than re-triggered again — a gate that dies
+   * the instant it starts can't loop across crash-restarts. The counter
+   * (`gate_recovery_attempts`) resets to 0 the moment ANY gate settles a real result.
+   * `<=0` disables gate recovery (a stuck gate is force-settled immediately instead).
+   */
+  maxGateRecoveryAttempts: envInt("BUTCHR_MAX_GATE_RECOVERY_ATTEMPTS", 5),
+
+  /**
    * Command template run inside a task's worktree to execute the agent for its
    * FIRST attempt. Placeholders, all replaced by the dispatcher:
    *  - `{{PROMPT_FILE}}` → absolute path to the rendered prompt file.

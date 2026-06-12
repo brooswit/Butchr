@@ -13,7 +13,7 @@ import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
-import { requeueForResume } from "./tasks.ts";
+import { recoverStuckGates, requeueForResume } from "./tasks.ts";
 
 const git = config.gitBin;
 
@@ -171,4 +171,33 @@ export async function reapDeadRunningAgents(herdrUp: boolean): Promise<number> {
     console.log(`[butchr] reaper backstop auto-resumed ${resumed} dead running agent(s)`);
   }
   return resumed;
+}
+
+/**
+ * GATE-RECOVERY BACKSTOP for host/herdr restarts — the sibling of reapDeadRunningAgents
+ * for CI/conformance GATES. The CI build/test gate and the conformance reviewer both run
+ * FIRE-AND-FORGET in butchr's OWN process, so a power loss / restart kills a gate mid-run
+ * and leaves the task stuck `ci_status='running'` / `conformance_status='checking'` forever
+ * (it can never become mergeable until requeued by hand — the real incident this fixes).
+ *
+ * This boot-time sweep delegates to tasks.recoverStuckGates, which re-triggers every
+ * in-flight gate that is NOT actually live in this process (on a fresh boot the in-process
+ * liveness sets are empty, so every in-flight status is provably stale and re-triggered;
+ * a gate that can't be re-run / keeps dying is force-settled, bounded by
+ * config.maxGateRecoveryAttempts). It is a SAFETY NET: the primary startup recovery
+ * (index.ts calls recoverStuckGates directly, before the dispatcher starts) already
+ * re-triggered them, so on a clean boot the re-triggered gates are now live-in-process and
+ * this finds nothing — exactly mirroring how reapDeadRunningAgents is a no-op after
+ * reconcileRunningTasks. Returns how many gates it re-triggered.
+ */
+export async function reapStuckGates(): Promise<number> {
+  const { ci, conformance, settled } = await recoverStuckGates();
+  const retriggered = ci + conformance;
+  if (retriggered > 0 || settled > 0) {
+    console.log(
+      `[butchr] reaper backstop recovered stuck gates: re-triggered ${ci} CI + ` +
+        `${conformance} conformance, force-settled ${settled}`,
+    );
+  }
+  return retriggered;
 }

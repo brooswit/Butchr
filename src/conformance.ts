@@ -63,6 +63,20 @@ export type ConformanceRunner = (input: ConformanceInput) => Promise<Conformance
 
 let conformanceRunner: ConformanceRunner = defaultConformanceRunner;
 
+// Task ids whose conformance reviewer is IN FLIGHT in THIS butchr process right now.
+// The reviewer runs in-process (triggerConformance awaits the runner), so a butchr
+// restart kills it AND empties this set — which is exactly what makes a DB
+// conformance_status='checking' with no entry here PROVABLY stale (its reviewer died
+// with the process). recoverStuckGates keys off this to re-trigger only genuinely-dead
+// gates, never one still legitimately running. Added synchronously before the 'checking'
+// write; cleared in a finally. See tasks.recoverStuckGates.
+const conformanceInFlight = new Set<string>();
+
+/** Is this task's conformance reviewer running in THIS process right now? */
+export function conformanceGateInFlight(id: string): boolean {
+  return conformanceInFlight.has(id);
+}
+
 /** Replace the conformance runner (tests inject a fake to avoid spawning claude). */
 export function setConformanceRunner(r: ConformanceRunner): void {
   conformanceRunner = r;
@@ -205,48 +219,58 @@ export async function triggerConformance(id: string): Promise<void> {
   // that isn't there (also keeps worktree-less seed rows from spawning a real claude).
   if (!existsSync(wt)) return;
 
-  // Flip to 'checking' SYNCHRONOUSLY — before any await — so a still-in-flight review
-  // is visible (spinner) the instant the fire-and-forget call's sync prefix runs, and
-  // so the gate has claimed the task before we gather the (async) diff.
-  db.query(
-    `UPDATE tasks SET conformance_status='checking', conformance_summary=NULL WHERE id=?`,
-  ).run(id);
-  emitUpdated(id);
-
-  // Read the task's prompt from its on-disk task.md (the authoritative source).
-  let prompt = "";
+  // Mark the reviewer IN FLIGHT in this process (synchronously, before the 'checking'
+  // write) so a concurrent recovery sweep sees it's genuinely running here and won't
+  // re-trigger it; cleared in the finally below when this process is done with it.
+  conformanceInFlight.add(id);
   try {
-    prompt = readTaskMd(dir.path, id).prompt;
-  } catch {
-    /* best-effort — an empty prompt still lets the reviewer judge against the diff */
-  }
-  // The diff (capped). On a git error, treat as empty — the reviewer can still inspect.
-  let rawDiff = "";
-  try {
-    rawDiff = await git.diff(dir.path, id);
-  } catch {
-    /* ignore — fall back to an empty diff */
-  }
-  const diff = capDiff(rawDiff, config.conformanceMaxDiffBytes);
+    // Flip to 'checking' SYNCHRONOUSLY — before any await — so a still-in-flight review
+    // is visible (spinner) the instant the fire-and-forget call's sync prefix runs, and
+    // so the gate has claimed the task before we gather the (async) diff.
+    db.query(
+      `UPDATE tasks SET conformance_status='checking', conformance_summary=NULL WHERE id=?`,
+    ).run(id);
+    emitUpdated(id);
 
-  const result = await runConformanceOnce({
-    taskId: id,
-    cwd: wt,
-    prompt,
-    diff,
-    summary: row.summary ?? "",
-  });
+    // Read the task's prompt from its on-disk task.md (the authoritative source).
+    let prompt = "";
+    try {
+      prompt = readTaskMd(dir.path, id).prompt;
+    } catch {
+      /* best-effort — an empty prompt still lets the reviewer judge against the diff */
+    }
+    // The diff (capped). On a git error, treat as empty — the reviewer can still inspect.
+    let rawDiff = "";
+    try {
+      rawDiff = await git.diff(dir.path, id);
+    } catch {
+      /* ignore — fall back to an empty diff */
+    }
+    const diff = capDiff(rawDiff, config.conformanceMaxDiffBytes);
 
-  // Map the verdict (or NULL) to the persisted badge. NULL → conformance back to NULL
-  // (couldn't run / parse). Only write back while the task is STILL in review — if it
-  // merged/aborted while the reviewer ran, don't resurrect stale conformance onto it.
-  const status = result ? statusFor(result.conforms) : null;
-  const summary = result ? (result.reason || (status === "pass" ? "conforms" : "")) : null;
-  const res = db
-    .query(
-      `UPDATE tasks SET conformance_status=?, conformance_summary=? WHERE id=? AND status='in_review'`,
-    )
-    .run(status, summary, id);
-  if (res.changes === 0) return;
-  emitUpdated(id);
+    const result = await runConformanceOnce({
+      taskId: id,
+      cwd: wt,
+      prompt,
+      diff,
+      summary: row.summary ?? "",
+    });
+
+    // Map the verdict (or NULL) to the persisted badge. NULL → conformance back to NULL
+    // (couldn't run / parse). Only write back while the task is STILL in review — if it
+    // merged/aborted while the reviewer ran, don't resurrect stale conformance onto it.
+    // A real settle also resets gate_recovery_attempts (the restart-recovery streak) to
+    // 0 — see tasks.recoverStuckGates / config.maxGateRecoveryAttempts.
+    const status = result ? statusFor(result.conforms) : null;
+    const summary = result ? (result.reason || (status === "pass" ? "conforms" : "")) : null;
+    const res = db
+      .query(
+        `UPDATE tasks SET conformance_status=?, conformance_summary=?, gate_recovery_attempts=0 WHERE id=? AND status='in_review'`,
+      )
+      .run(status, summary, id);
+    if (res.changes === 0) return;
+    emitUpdated(id);
+  } finally {
+    conformanceInFlight.delete(id);
+  }
 }
