@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { config } from "./config.ts";
 import { stopCtoAgent } from "./cto-agent.ts";
-import { db, nowIso } from "./db.ts";
+import { ALL_STATUSES, db, nowIso, REVIEW_STATES, sumStatuses } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
@@ -136,7 +136,7 @@ function parseStepResponders(raw: string | null): Partial<Record<ResponderStep, 
  * passed a step outside RESPONDER_STEPS). An unknown workspace id also defaults to `cto`.
  * Pure read of the workspace row.
  */
-export function responderFor(workspaceId: string, step: ResponderStep): Responder {
+export function responderFor(workspaceId: string, step: string): Responder {
   if (!isResponderStep(step)) {
     throw new Error(`unknown responder step: ${step}`);
   }
@@ -164,12 +164,10 @@ function counts(workspaceId: string): Record<string, number> {
       `SELECT status, COUNT(*) AS n FROM tasks WHERE workspace_id=? GROUP BY status`,
     )
     .all(workspaceId);
-  // One bucket per canonical status (see db.STATE_META), plus the orthogonal `idle`
-  // pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
-  const out: Record<string, number> = {
-    idea: 0, spec_review: 0, blocked: 0, needs_info: 0, inactive: 0, in_progress: 0, idle: 0,
-    in_review: 0, merged: 0, rolling_back: 0, rolled_back: 0, failed: 0, aborted: 0,
-  };
+  // One bucket per canonical status (from the exported ALL_STATUSES), plus the
+  // orthogonal `idle` pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
+  const out: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
+  out.idle = 0;
   for (const r of rows) out[r.status] = r.n;
   // `idle` is a flag on a LIVE build agent (in_progress with a pane), not a status —
   // peel it out of the in_progress count so the dashboard shows active vs. quiet agents.
@@ -284,9 +282,20 @@ export function listWorkspaces(): WorkspaceView[] {
  * them. An unknown id falls back to the default. Pure read of the workspace row + config.
  */
 export function workspaceGateCmd(id: string): string {
-  const dir = getWorkspace(id);
-  if (dir && dir.gate_cmd !== null) return dir.gate_cmd;
-  return config.verifyCmd;
+  return effectiveOverride(id, "gate_cmd", config.verifyCmd);
+}
+
+// The shared resolution for every per-workspace optional-string override (gate_cmd /
+// version_file / changelog_path): the workspace's own column value if it set one (a
+// non-null value, incl. "" = disabled), else the global `fallback`. Unknown id →
+// fallback. Pure read of the workspace row.
+function effectiveOverride(
+  id: string,
+  column: "gate_cmd" | "version_file" | "changelog_path",
+  fallback: string,
+): string {
+  const value = getWorkspace(id)?.[column] ?? null;
+  return value !== null ? value : fallback;
 }
 
 /**
@@ -297,9 +306,7 @@ export function workspaceGateCmd(id: string): string {
  * (the opt-in default). Pure read of the workspace row + config; unknown id → default.
  */
 export function workspaceVersionFile(id: string): string {
-  const dir = getWorkspace(id);
-  if (dir && dir.version_file !== null) return dir.version_file;
-  return config.versionFile;
+  return effectiveOverride(id, "version_file", config.versionFile);
 }
 
 /**
@@ -310,9 +317,7 @@ export function workspaceVersionFile(id: string): string {
  * workspace" (the opt-in default). Pure read; unknown id → default.
  */
 export function workspaceChangelogPath(id: string): string {
-  const dir = getWorkspace(id);
-  if (dir && dir.changelog_path !== null) return dir.changelog_path;
-  return config.changelogPath;
+  return effectiveOverride(id, "changelog_path", config.changelogPath);
 }
 
 /**
@@ -331,6 +336,24 @@ function normalizeOverride(field: string, value: unknown): string | null {
 }
 
 /**
+ * The shared persist tail for every per-field workspace updater: 404 if the workspace is
+ * gone, UPDATE the one `column`, rebuild the view, publish `workspace.updated`, and return
+ * it. `column` is a trusted internal literal (never user input) — callers do their own
+ * validation/normalization before delegating here.
+ */
+function updateWorkspaceColumn(
+  id: string,
+  column: "gate_cmd" | "version_file" | "changelog_path" | "cto_enabled" | "step_responders",
+  stored: string | number | null,
+): WorkspaceView {
+  if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
+  db.query(`UPDATE workspaces SET ${column}=? WHERE id=?`).run(stored, id);
+  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
+  publish({ type: "workspace.updated", workspace: view });
+  return view;
+}
+
+/**
  * Update (or clear) a workspace's per-workspace build/test gate command and return
  * the refreshed view. Pass `null`/`undefined` to clear the override (revert to the
  * default `config.verifyCmd`); a string (incl. "") sets it. 404 if the workspace is
@@ -338,13 +361,7 @@ function normalizeOverride(field: string, value: unknown): string | null {
  * review, and the next merge's post-merge verify) — nothing in flight is disturbed.
  */
 export function updateWorkspaceGateCmd(id: string, gateCmd: unknown): WorkspaceView {
-  const dir = getWorkspace(id);
-  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
-  const value = normalizeOverride("gate_cmd", gateCmd);
-  db.query(`UPDATE workspaces SET gate_cmd=? WHERE id=?`).run(value, id);
-  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
-  publish({ type: "workspace.updated", workspace: view });
-  return view;
+  return updateWorkspaceColumn(id, "gate_cmd", normalizeOverride("gate_cmd", gateCmd));
 }
 
 /**
@@ -355,13 +372,7 @@ export function updateWorkspaceGateCmd(id: string, gateCmd: unknown): WorkspaceV
  * is gone. Takes effect on the next merge for that workspace.
  */
 export function updateWorkspaceVersionFile(id: string, versionFile: unknown): WorkspaceView {
-  const dir = getWorkspace(id);
-  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
-  const value = normalizeOverride("version_file", versionFile);
-  db.query(`UPDATE workspaces SET version_file=? WHERE id=?`).run(value, id);
-  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
-  publish({ type: "workspace.updated", workspace: view });
-  return view;
+  return updateWorkspaceColumn(id, "version_file", normalizeOverride("version_file", versionFile));
 }
 
 /**
@@ -372,13 +383,9 @@ export function updateWorkspaceVersionFile(id: string, versionFile: unknown): Wo
  * the workspace is gone. Takes effect on the next task entering review.
  */
 export function updateWorkspaceChangelogPath(id: string, changelogPath: unknown): WorkspaceView {
-  const dir = getWorkspace(id);
-  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
-  const value = normalizeOverride("changelog_path", changelogPath);
-  db.query(`UPDATE workspaces SET changelog_path=? WHERE id=?`).run(value, id);
-  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
-  publish({ type: "workspace.updated", workspace: view });
-  return view;
+  return updateWorkspaceColumn(
+    id, "changelog_path", normalizeOverride("changelog_path", changelogPath),
+  );
 }
 
 /**
@@ -391,16 +398,12 @@ export function updateWorkspaceChangelogPath(id: string, changelogPath: unknown)
  * cto-agent.isCtoEnabled.
  */
 export function setWorkspaceCtoEnabled(id: string, value: unknown): WorkspaceView {
-  const dir = getWorkspace(id);
-  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
+  if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
   let stored: number | null;
   if (value === undefined || value === null) stored = null;
   else if (typeof value === "boolean") stored = value ? 1 : 0;
   else throw new HttpError(400, "cto_enabled must be a boolean (or null to use the default)");
-  db.query(`UPDATE workspaces SET cto_enabled=? WHERE id=?`).run(stored, id);
-  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
-  publish({ type: "workspace.updated", workspace: view });
-  return view;
+  return updateWorkspaceColumn(id, "cto_enabled", stored);
 }
 
 /** A WorkspaceView plus its FULLY-RESOLVED step-responder map (every step present). */
@@ -452,10 +455,7 @@ export function updateWorkspaceStepResponders(id: string, patch: unknown): Works
     if (merged[step] && merged[step] !== "cto") normalized[step] = merged[step];
   }
   const stored = Object.keys(normalized).length ? JSON.stringify(normalized) : null;
-  db.query(`UPDATE workspaces SET step_responders=? WHERE id=?`).run(stored, id);
-  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
-  publish({ type: "workspace.updated", workspace: view });
-  return view;
+  return updateWorkspaceColumn(id, "step_responders", stored);
 }
 
 /**
@@ -511,7 +511,8 @@ export function dashboard(): Dashboard {
     // FEEDBACK states awaiting a human (kept under the `review` field name).
     const review = (c.spec_review ?? 0) + (c.in_review ?? 0) + (c.needs_info ?? 0);
     const failed = c.failed ?? 0; // the terminal `failed` state — see comment above
-    const needsAttention = review + failed;
+    // = review + failed, expressed via the exported membership set (numerically identical).
+    const needsAttention = sumStatuses(c, REVIEW_STATES);
     totals.active += active;
     totals.review += review;
     totals.failed += failed;
@@ -521,7 +522,7 @@ export function dashboard(): Dashboard {
       path: d.path,
       label: d.label,
       gate_cmd: d.gate_cmd,
-      effective_gate_cmd: d.gate_cmd !== null ? d.gate_cmd : config.verifyCmd,
+      effective_gate_cmd: workspaceGateCmd(d.id),
       counts: c,
       active,
       review,
