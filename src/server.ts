@@ -26,6 +26,7 @@ import {
   listWorkspaces,
   registerWorkspace,
   setWorkspaceCtoEnabled,
+  setWorkspaceReleaseMode,
   unregisterWorkspace,
   updateWorkspaceChangelogPath,
   updateWorkspaceGateCmd,
@@ -51,6 +52,7 @@ import {
   abortTask,
   answerTask,
   approveTask,
+  confirmMajor,
   createTask,
   getTask,
   nudgeTask,
@@ -58,6 +60,7 @@ import {
   requeueTask,
   setBlockedBy,
   setPriority,
+  setVersionBump,
   submitSpec,
   taskChainEstimate,
   taskDiff,
@@ -618,6 +621,9 @@ route("POST", "/api/workspaces", async (req) => {
 //  - `step_responders`: a PARTIAL {step: 'cto'|'user'} update of the feedback-workflow
 //    step-responder config — merged onto the existing overrides (validated step names +
 //    values; CONFIG ONLY, nothing routes off it yet). See workspaces.updateWorkspaceStepResponders.
+//  - `release_mode`: the per-workspace VERSIONED-RELEASES mode (true/false; null = off) —
+//    when on, every merge bumps the version + stamps the changelog with a versioned heading
+//    and the changelog gate is strict. See workspaces.setWorkspaceReleaseMode.
 // A bare PATCH (no recognized key) clears the gate command, preserving the legacy
 // contract. 404 if the workspace is gone. Publishes `workspace.updated`.
 route("PATCH", "/api/workspaces/:id", async (req, p) => {
@@ -627,11 +633,12 @@ route("PATCH", "/api/workspaces/:id", async (req, p) => {
   if ("version_file" in body) view = updateWorkspaceVersionFile(p.id!, body.version_file);
   if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
   if ("step_responders" in body) view = updateWorkspaceStepResponders(p.id!, body.step_responders);
+  if ("release_mode" in body) view = setWorkspaceReleaseMode(p.id!, body.release_mode);
   // gate_cmd: set when its key is present, OR when NO other recognized key was sent
   // (a bare PATCH clears the gate override — the legacy contract).
   const touchedOther =
     "cto_enabled" in body || "version_file" in body || "changelog_path" in body ||
-    "step_responders" in body;
+    "step_responders" in body || "release_mode" in body;
   if ("gate_cmd" in body || !touchedOther) {
     view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
   }
@@ -690,6 +697,9 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
   // `stage: 'idea'` body (the retracted idea→spec→build axis) as `idea: true` so older
   // clients keep working. Validated inside createTask.
   const idea = body.idea === true || body.stage === "idea";
+  // Optional version_bump: 'patch' (default) | 'minor' | 'major' — the semver bump applied
+  // at merge when the workspace is in release_mode ('major' needs the human double-confirm
+  // ritual). Inert outside release_mode. Validated inside createTask.
   const view = await createTask(
     p.id!,
     prompt,
@@ -701,6 +711,7 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
     body.priority ?? 0,
     body.plan_preview ?? false,
     idea,
+    body.version_bump ?? "patch",
   );
   return json(view, 201);
 });
@@ -789,6 +800,31 @@ route("POST", "/api/tasks/:id/approve", async (_req, p) => {
   // Merge fast-forwarded but the post-merge verify gate failed → auto-reverted off
   // main and the task flagged. 200 with a flag so the UI explains the revert.
   if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
+  // release_mode + major bump: approve just PARKS the task (it does NOT merge). 200 with a
+  // flag so the UI shows the "awaiting major-version confirmation (n/2)" banner + button.
+  if (r.awaitingMajorConfirm) return json({ task: r.task, awaitingMajorConfirm: true });
+  return json(r.task);
+});
+
+// Update a task's declared semver version_bump level ('patch'|'minor'|'major'), applied
+// at merge when the workspace is in release_mode. Changing it resets the major-confirm
+// streak. 404 if gone; 409 if terminal; 400 on an invalid level. See tasks.setVersionBump.
+route("POST", "/api/tasks/:id/version_bump", async (req, p) => {
+  const body = await readJson(req);
+  return json(setVersionBump(p.id!, body.version_bump));
+});
+
+// MAJOR DOUBLE-CONFIRM: the human's confirmation of a major version bump. Must be called
+// TWICE CONSECUTIVELY on an in_review release_mode major task (count 0→1→2); the second
+// call lands the merge. Any other action in between resets the streak. Always the human —
+// never auto-issued. 409 unless the task is in_review + release_mode + version_bump major.
+// Mirrors /approve's response shape (conflict / revert / still-awaiting flags). See
+// tasks.confirmMajor.
+route("POST", "/api/tasks/:id/confirm-major", async (_req, p) => {
+  const r = await confirmMajor(p.id!);
+  if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
+  if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
+  if (r.awaitingMajorConfirm) return json({ task: r.task, awaitingMajorConfirm: true });
   return json(r.task);
 });
 

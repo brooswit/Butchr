@@ -321,6 +321,18 @@ export function workspaceChangelogPath(id: string): string {
 }
 
 /**
+ * Whether a workspace is in VERSIONED-RELEASES MODE (the `release_mode` column !== 0).
+ * When on, every merge bumps the version + stamps the changelog with a versioned heading
+ * and the changelog gate is strict (see git.bumpVersionFile / tasks.finalizeMerge /
+ * tasks.triggerCi). Default off (today's opt-in patch-bump behavior). Pure read of the
+ * workspace row; unknown id → false. EVERYTHING keys off this — no workspace id is ever
+ * hardcoded.
+ */
+export function workspaceReleaseMode(id: string): boolean {
+  return (getWorkspace(id)?.release_mode ?? 0) !== 0;
+}
+
+/**
  * Normalize an incoming optional-string override for storage. `undefined`/`null`
  * clears the override (→ NULL → falls back to the global default); a string is
  * stored verbatim (the empty string is a deliberate "disable for this workspace"
@@ -343,7 +355,13 @@ function normalizeOverride(field: string, value: unknown): string | null {
  */
 function updateWorkspaceColumn(
   id: string,
-  column: "gate_cmd" | "version_file" | "changelog_path" | "cto_enabled" | "step_responders",
+  column:
+    | "gate_cmd"
+    | "version_file"
+    | "changelog_path"
+    | "cto_enabled"
+    | "step_responders"
+    | "release_mode",
   stored: string | number | null,
 ): WorkspaceView {
   if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
@@ -404,6 +422,22 @@ export function setWorkspaceCtoEnabled(id: string, value: unknown): WorkspaceVie
   else if (typeof value === "boolean") stored = value ? 1 : 0;
   else throw new HttpError(400, "cto_enabled must be a boolean (or null to use the default)");
   return updateWorkspaceColumn(id, "cto_enabled", stored);
+}
+
+/**
+ * Set a workspace's VERSIONED-RELEASES MODE and return the refreshed view. `true`/`false`
+ * turns release_mode on/off; `null`/`undefined` is treated as OFF (the default — unlike the
+ * tri-state inherit columns, this is a plain on/off flag, not an inherit). 404 if the
+ * workspace is gone; 400 if the value is neither a boolean nor null. Takes effect on the
+ * next merge / changelog gate for that workspace. See workspaceReleaseMode.
+ */
+export function setWorkspaceReleaseMode(id: string, value: unknown): WorkspaceView {
+  if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
+  let stored: number;
+  if (value === undefined || value === null) stored = 0;
+  else if (typeof value === "boolean") stored = value ? 1 : 0;
+  else throw new HttpError(400, "release_mode must be a boolean (or null for off)");
+  return updateWorkspaceColumn(id, "release_mode", stored);
 }
 
 /** A WorkspaceView plus its FULLY-RESOLVED step-responder map (every step present). */

@@ -1,43 +1,134 @@
-// Pure, side-effect-free text helpers for butchr's TWO opt-in living-docs gates at
-// merge / review time:
+// Pure, side-effect-free text helpers for butchr's living-docs gates at merge /
+// review time:
 //
-//  1. VERSION BUMP (opt-in, per-workspace) — `bumpPatchVersion` patch-bumps a
-//     version file's `"version": "x.y.z"` field; `isDocsPath`/`isDocsOnlyDiff`
-//     classify a diff so a pure-docs change skips the bump. butchr only bumps when a
-//     workspace configures a version file (config.versionFile / the `version_file`
-//     column) — not every repo has one. src/git.ts reads the file, applies the bump,
-//     writes it back, and commits inside the merge lock — see git.bumpVersionFile.
+//  1. VERSION BUMP (opt-in, per-workspace) — `bumpVersion` bumps a version file's
+//     `"version": "x.y.z"` field by a declared LEVEL (patch/minor/major);
+//     `isDocsPath`/`isDocsOnlyDiff` classify a diff so a pure-docs change skips the
+//     bump (only OUTSIDE release_mode — see below). butchr only bumps when a workspace
+//     configures a version file (config.versionFile / the `version_file` column) — not
+//     every repo has one. src/git.ts reads the file, applies the bump, writes it back,
+//     and commits inside the merge lock — see git.bumpVersionFile.
 //
 //  2. CHANGELOG-UPDATE GATE (opt-in, per-workspace) — `checkChangelogUpdated` decides
 //     whether a task's diff satisfies the rule "a code change must update the
-//     changelog." butchr no longer WRITES the changelog at merge (it used to append a
-//     fixed `[Unreleased]` bullet, which collided across concurrent tasks); the
-//     task/agent now owns its entry and tasks.triggerCi enforces this check as an
+//     changelog." Outside release_mode butchr does NOT WRITE the changelog (it used to
+//     append a fixed `[Unreleased]` bullet, which collided across concurrent tasks);
+//     the task/agent owns its entry and tasks.triggerCi enforces this check as an
 //     advisory CI badge — see config.changelogPath / workspaces.workspaceChangelogPath.
+//
+//  3. RELEASE STAMP (per-workspace release_mode) — `promoteUnreleased` moves the
+//     current `## [Unreleased]` body into a versioned `## [X.Y.Z] - DATE` section and
+//     leaves a fresh empty `## [Unreleased]` above it. butchr applies this at merge in
+//     the SAME commit as the version bump (git.bumpVersionFile) so each merge OWNS its
+//     own heading — ending the `[Unreleased]` cascade conflicts concurrent tasks kept
+//     hitting. The task only authors prose under `[Unreleased]`; butchr relocates it.
 //
 // Keeping these as pure string functions (no fs, no git) makes them unit-testable on
 // synthetic input (test/changelog.test.ts) independently of the merge/gate wiring.
 
+/** A semantic-version bump level, declared per task. patch/minor allowed freely;
+ * major is gated behind the human double-confirm ritual (see tasks.confirmMajor). */
+export type VersionBumpLevel = "patch" | "minor" | "major";
+
 /**
- * Patch-bump the `"version": "x.y.z"` field of a version file's raw text via a
+ * Bump the `"version": "x.y.z"` field of a version file's raw text by `level`, via a
  * targeted replace (preserving all other formatting/whitespace), returning the new
  * text plus the from/to versions — or `null` if no semver version field is found.
- * Only the patch component is incremented (the simple, safe default for a single
- * landed task); release-time minor/major bumps stay a manual call.
+ *   - patch → x.y.(z+1)
+ *   - minor → x.(y+1).0      (zeroes the patch)
+ *   - major → (x+1).0.0      (zeroes minor + patch)
  */
-export function bumpPatchVersion(
+export function bumpVersion(
   text: string,
+  level: VersionBumpLevel = "patch",
 ): { text: string; from: string; to: string } | null {
   const m = text.match(/("version"\s*:\s*")(\d+)\.(\d+)\.(\d+)(")/);
   if (!m) return null;
-  const [whole, pre, maj, min, patch, post] = m;
+  const [whole, pre, majS, minS, patchS, post] = m;
+  const maj = parseInt(majS!, 10);
+  const min = parseInt(minS!, 10);
+  const patch = parseInt(patchS!, 10);
   const from = `${maj}.${min}.${patch}`;
-  const to = `${maj}.${min}.${parseInt(patch!, 10) + 1}`;
-  return {
-    text: text.replace(whole, `${pre}${maj}.${min}.${parseInt(patch!, 10) + 1}${post}`),
-    from,
-    to,
+  let to: string;
+  if (level === "major") to = `${maj + 1}.0.0`;
+  else if (level === "minor") to = `${maj}.${min + 1}.0`;
+  else to = `${maj}.${min}.${patch + 1}`;
+  return { text: text.replace(whole, `${pre}${to}${post}`), from, to };
+}
+
+/**
+ * RELEASE STAMP (pure). Move the current `## [Unreleased]` section's body into a new
+ * `## [version] - dateISO` section and leave a FRESH EMPTY `## [Unreleased]` heading
+ * above it — so the next merge starts a clean `[Unreleased]` and each merge owns its
+ * own versioned heading (the structural fix for the `[Unreleased]` cascade conflicts).
+ *
+ * Behavior:
+ *  - If an `## [Unreleased]` heading exists, its body (everything up to the next
+ *    `## ` heading, or EOF) is relocated verbatim under the new versioned heading; a
+ *    fresh empty `## [Unreleased]` is left in its place.
+ *  - If there is NO `## [Unreleased]` heading, the versioned section is inserted at the
+ *    top of the body — immediately ABOVE the first existing `## ` section heading, or
+ *    appended at the end if there are none — without inventing an `[Unreleased]`.
+ *  - The trailing `[Unreleased]: <url>` link-reference footer (if any) is left
+ *    untouched — it lives below the version sections and is editorial.
+ *
+ * Pure string transform (no fs/git); `dateISO` is passed in (callers stamp the date)
+ * so it stays deterministic and unit-testable.
+ */
+export function promoteUnreleased(
+  changelogText: string,
+  version: string,
+  dateISO: string,
+): string {
+  const versioned = `## [${version}] - ${dateISO}`;
+  const lines = changelogText.split("\n");
+
+  // Find the `## [Unreleased]` heading (case-insensitive on the word, exact bracket).
+  const unrelIdx = lines.findIndex((l) => /^##\s*\[Unreleased\]\s*$/i.test(l));
+
+  // The index of the FIRST `## ` section heading at/after `from` (a version section
+  // boundary), or -1 if none. Used to bound the section body.
+  const nextHeadingAfter = (from: number): number => {
+    for (let i = from; i < lines.length; i++) {
+      if (/^##\s+/.test(lines[i]!)) return i;
+    }
+    return -1;
   };
+
+  if (unrelIdx === -1) {
+    // No [Unreleased] heading — insert the versioned section above the first `## `
+    // section heading, or append it at the end.
+    const firstHeading = nextHeadingAfter(0);
+    const block = [versioned, ""];
+    if (firstHeading === -1) {
+      const out = changelogText.replace(/\n*$/, "\n");
+      return `${out}\n${versioned}\n`;
+    }
+    lines.splice(firstHeading, 0, ...block);
+    return lines.join("\n");
+  }
+
+  // Body = everything after the `## [Unreleased]` line up to (excluding) the next
+  // `## ` heading, or EOF.
+  const bodyStart = unrelIdx + 1;
+  const nextHeading = nextHeadingAfter(bodyStart);
+  const bodyEnd = nextHeading === -1 ? lines.length : nextHeading;
+  const body = lines.slice(bodyStart, bodyEnd);
+
+  // Rebuild: fresh empty [Unreleased] (heading + one blank line), then the versioned
+  // heading carrying the relocated body, then the remainder (the old version sections
+  // + footer) unchanged.
+  const before = lines.slice(0, unrelIdx);
+  const after = lines.slice(bodyEnd);
+  const rebuilt = [
+    ...before,
+    "## [Unreleased]",
+    "",
+    versioned,
+    ...body,
+    ...after,
+  ];
+  return rebuilt.join("\n");
 }
 
 /**
@@ -78,21 +169,31 @@ export type ChangelogCheck = {
  *
  *  - Blank `changelogPath` → the gate is disabled → ok (defensive; callers only invoke
  *    this when a path is configured).
- *  - A docs-only or empty diff → exempt → ok (a pure prose change, INCLUDING a
- *    changelog-only edit, needs no further entry — isDocsOnlyDiff treats `.md` as docs).
+ *  - An EMPTY diff → exempt → ok (nothing landed, so nothing to record).
+ *  - A docs-only diff → exempt → ok (a pure prose change, INCLUDING a changelog-only
+ *    edit, needs no further entry) — UNLESS `strict` is set (see below).
  *  - Otherwise (a code change) → ok IFF the changelog file is among the changed paths;
  *    a code change that didn't touch it FAILS, so the task adds its own entry.
+ *
+ * `strict` (release_mode): EVERY non-empty diff must touch the changelog — the
+ * docs-only exemption is dropped, because in release_mode every change bumps the
+ * version and stamps a versioned changelog entry, so even a docs-only change must
+ * author one. (An empty diff stays exempt — there is genuinely nothing to record.)
  */
 export function checkChangelogUpdated(
   paths: string[],
   changelogPath: string,
+  opts: { strict?: boolean } = {},
 ): ChangelogCheck {
   const target = normalizeRel(changelogPath);
   if (!target) {
     return { ok: true, reason: "changelog gate disabled (no path configured)" };
   }
-  if (paths.length === 0 || isDocsOnlyDiff(paths)) {
-    return { ok: true, reason: "docs-only or empty diff — no changelog entry required" };
+  if (paths.length === 0) {
+    return { ok: true, reason: "empty diff — no changelog entry required" };
+  }
+  if (!opts.strict && isDocsOnlyDiff(paths)) {
+    return { ok: true, reason: "docs-only diff — no changelog entry required" };
   }
   const updated = paths.some((p) => normalizeRel(p) === target);
   if (updated) return { ok: true, reason: `${target} was updated` };

@@ -242,6 +242,17 @@ ensureColumn("workspaces", "cto_enabled", "INTEGER");
 // "all steps cto".
 ensureColumn("workspaces", "step_responders", "TEXT");
 
+// PER-WORKSPACE VERSIONED-RELEASES MODE. When 1, butchr treats this workspace as a
+// versioned-release repo: EVERY merged change bumps the version file by the task's
+// declared level AND stamps that task's changelog entry with the assigned version +
+// date (promoteUnreleased), in the SAME merge-lock commit — so each merge owns its own
+// `## [X.Y.Z]` heading (ending the `[Unreleased]` cascade conflicts). It also makes the
+// changelog gate STRICT (every non-empty diff, incl. docs-only, must carry an entry) and
+// drops the docs-only bump-skip. Default 0 (off — today's opt-in patch-bump behavior).
+// Resolved by workspaces.workspaceReleaseMode; everything keys off THIS column (no
+// hardcoded workspace id). Settable via PATCH /api/workspaces/:id.
+ensureColumn("workspaces", "release_mode", "INTEGER NOT NULL DEFAULT 0");
+
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
 
@@ -492,6 +503,26 @@ ensureColumn("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
 // taskmd.renderAgentPrompt's plan-preview protocol.
 ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
 
+// VERSIONED-RELEASES (per-task) bookkeeping — only meaningful when the task's workspace
+// has release_mode=1 (see workspaces.release_mode):
+//   - `version_bump` is the TASK-DECLARED semver bump level applied at merge: 'patch'
+//     (default — every existing row backfills to it), 'minor' (allowed freely), or
+//     'major' (gated behind the human DOUBLE-CONFIRM ritual — see major_confirm_count
+//     and tasks.confirmMajor). The CHECK pins it to those three values. Outside
+//     release_mode it is recorded but inert (the opt-in patch bump ignores it).
+//   - `major_confirm_count` is the streak of CONSECUTIVE human `confirm-major` calls on
+//     this task (0/1/2). A major-bump task in `in_review` does NOT merge on approve; it
+//     parks until this reaches 2, then finalizeMerge lands it. ANY other action (reject,
+//     conflict kick-back, re-review, setBlockedBy, requeue, changing version_bump)
+//     resets it to 0, so it is literally "two confirm-major calls in a row". Default 0.
+//   - `released_version` is the version butchr ASSIGNED + stamped at merge (e.g.
+//     '0.9.74'), captured for display on the merged task. NULL until merged in
+//     release_mode (and for every non-release_mode merge). See git.bumpVersionFile /
+//     tasks.finalizeMerge.
+ensureColumn("tasks", "version_bump", "TEXT NOT NULL DEFAULT 'patch' CHECK (version_bump IN ('patch','minor','major'))");
+ensureColumn("tasks", "major_confirm_count", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("tasks", "released_version", "TEXT");
+
 // RESUME RE-GROUNDING FINGERPRINT. A sha256 over the task's PROMPT + CONTEXT-FILE LIST
 // (taskmd.groundingFingerprint), recorded by markRunning every time butchr GROUNDS an
 // agent — i.e. launches it carrying the full prompt+context: a fresh first launch, or a
@@ -653,6 +684,11 @@ export type WorkspaceRow = {
   // unset step / NULL / unparseable value falls back to `cto`. Parsed + resolved by
   // workspaces.responderFor / resolveStepResponders into a full per-step map.
   step_responders: string | null;
+  // Per-workspace VERSIONED-RELEASES MODE (see the release_mode ensureColumn above): 1 =
+  // every merge bumps + stamps the changelog with a versioned heading and the changelog
+  // gate is strict; 0 (default) = today's opt-in patch-bump behavior. Resolved by
+  // workspaces.workspaceReleaseMode.
+  release_mode: number;
   created_at: string;
 };
 
@@ -930,6 +966,15 @@ export type TaskRow = {
   // the plan-preview gate (the agent proposes a plan and pauses for operator approval
   // before writing code), else 0. Surfaced on TaskView via the `...row` spread.
   plan_preview: number;
+  // VERSIONED-RELEASES (per-task) bookkeeping (see the ensureColumn block above): only
+  // meaningful when the workspace has release_mode=1. `version_bump` is the task-declared
+  // bump level ('patch'|'minor'|'major'); `major_confirm_count` is the consecutive human
+  // confirm-major streak (0/1/2) gating a major merge; `released_version` is the version
+  // butchr assigned + stamped at merge (NULL until a release_mode merge). Surfaced on
+  // TaskView via the `...row` spread.
+  version_bump: "patch" | "minor" | "major";
+  major_confirm_count: number;
+  released_version: string | null;
   // RESUME RE-GROUNDING FINGERPRINT (see the ensureColumn block above): a sha256 of the
   // prompt + context-file list the agent was last grounded in. Compared on resume to
   // detect a prompt/context edit made while the task was paused (needs_info / in_review),

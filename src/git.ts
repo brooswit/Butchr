@@ -9,7 +9,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { bumpPatchVersion, isDocsOnlyDiff } from "./changelog.ts";
+import { bumpVersion, isDocsOnlyDiff, promoteUnreleased } from "./changelog.ts";
+import type { VersionBumpLevel } from "./changelog.ts";
 import { config } from "./config.ts";
 import { run, runOrThrow, type ExecResult } from "./exec.ts";
 
@@ -360,6 +361,11 @@ export type MergeResult = {
   // to revert (see src/templates.ts + the webapp's "Roll back" button).
   baseSha?: string;
   mergedSha?: string;
+  // In release_mode (see MergeOptions.releaseMode), the version butchr ASSIGNED and
+  // stamped at this merge (e.g. "0.9.74") — bumped by the task's declared level and
+  // written into both the version file and the changelog's new versioned heading. Unset
+  // for a non-release merge, or when no version file/field could be bumped.
+  version?: string;
 };
 
 /**
@@ -459,12 +465,21 @@ async function taskDiffIsDocsOnly(
 }
 
 /**
- * MERGE-TIME VERSION BUMP (OPT-IN, per-workspace): when a workspace configures a
- * version file (`versionFile`, relative to the repo root — e.g. `package.json`),
- * butchr patch-bumps its `"version": "x.y.z"` field on a successful merge so
- * concurrent tasks stop colliding on it (agents no longer hand-bump). butchr does
- * NOT write the changelog anymore — that's the task/agent's job, enforced by the
- * separate CI changelog gate (see tasks.triggerCi).
+ * MERGE-TIME VERSION BUMP (+ release-mode changelog stamp): on a successful merge,
+ * butchr bumps the workspace's configured version file (`versionFile`, relative to the
+ * repo root — e.g. `package.json`) so concurrent tasks stop colliding on it (agents no
+ * longer hand-bump). Two modes, driven by `opts.releaseMode`:
+ *
+ *   NON-release_mode (the default, opt-in): PATCH-bump only, and SKIP a docs-only diff
+ *   (a pure prose change isn't a new release surface). butchr does NOT write the
+ *   changelog — that's the task/agent's job, enforced by the CI changelog gate
+ *   (tasks.triggerCi). This preserves today's exact behavior.
+ *
+ *   release_mode: bump by the task's DECLARED level (`opts.bumpLevel`) — and bump on
+ *   EVERY change, including docs-only — AND, in the SAME commit, stamp the changelog
+ *   (`opts.changelogPath`) via promoteUnreleased: the current `## [Unreleased]` body
+ *   moves into a fresh `## [X.Y.Z] - DATE` section with a clean `[Unreleased]` left
+ *   above. So each merge owns its own heading (the cascade-conflict fix).
  *
  * Called from merge() AFTER a clean rebase (so it edits the up-to-date base content
  * and can't conflict) and BEFORE the fast-forward, in the worktree where the task
@@ -473,8 +488,9 @@ async function taskDiffIsDocsOnly(
  *
  * GRACEFUL NO-OP when version bumping doesn't apply, so butchr works on ANY repo: an
  * empty `versionFile` (bump disabled / not configured), a missing file, an
- * unparseable one / one with no semver `version` field, or a docs-only diff all skip
- * the bump without failing the merge.
+ * unparseable one / one with no semver `version` field (and, outside release_mode, a
+ * docs-only diff) all skip the bump without failing the merge. Returns the ASSIGNED
+ * version on a real bump, else undefined.
  */
 async function bumpVersionFile(
   dir: string,
@@ -482,23 +498,48 @@ async function bumpVersionFile(
   taskId: string,
   base: string,
   versionFile: string,
-): Promise<void> {
+  opts: {
+    releaseMode?: boolean;
+    bumpLevel?: VersionBumpLevel;
+    changelogPath?: string;
+    dateISO?: string;
+  } = {},
+): Promise<string | undefined> {
   const rel = versionFile.trim();
-  if (!rel) return; // version bumping disabled for this workspace
-  // A docs-only diff isn't a new release surface → never bump.
-  if (await taskDiffIsDocsOnly(dir, taskId, base)) return;
+  if (!rel) return undefined; // version bumping disabled for this workspace
+  // Outside release_mode, a docs-only diff isn't a new release surface → never bump.
+  // In release_mode EVERY change bumps (incl. docs-only), so this skip does not apply.
+  if (!opts.releaseMode && (await taskDiffIsDocsOnly(dir, taskId, base))) return undefined;
 
   const pkgPath = join(wt, rel);
-  if (!existsSync(pkgPath)) return; // no version file in this repo → no-op
-  const bumped = bumpPatchVersion(readFileSync(pkgPath, "utf8"));
-  if (!bumped) return; // no semver version field → nothing to bump
+  if (!existsSync(pkgPath)) return undefined; // no version file in this repo → no-op
+  const level: VersionBumpLevel = opts.releaseMode ? (opts.bumpLevel ?? "patch") : "patch";
+  const bumped = bumpVersion(readFileSync(pkgPath, "utf8"), level);
+  if (!bumped) return undefined; // no semver version field → nothing to bump
 
   writeFileSync(pkgPath, bumped.text, "utf8");
   await run([git, "-C", wt, "add", rel]);
-  await run([
-    git, "-C", wt, "commit", "-m",
-    `butchr: bump version ${bumped.from} → ${bumped.to} (task ${taskId})`,
-  ]);
+
+  // release_mode: stamp the changelog in the SAME commit so the version file + the
+  // versioned `## [X.Y.Z]` heading land atomically. Best-effort on the changelog write
+  // (a missing/unconfigured changelog still bumps the version) — but when both apply we
+  // commit them together.
+  const relClog = (opts.changelogPath ?? "").trim();
+  if (opts.releaseMode && relClog) {
+    const clogPath = join(wt, relClog);
+    if (existsSync(clogPath)) {
+      const date = opts.dateISO ?? new Date().toISOString().slice(0, 10);
+      const stamped = promoteUnreleased(readFileSync(clogPath, "utf8"), bumped.to, date);
+      writeFileSync(clogPath, stamped, "utf8");
+      await run([git, "-C", wt, "add", relClog]);
+    }
+  }
+
+  const msg = opts.releaseMode
+    ? `butchr: release ${bumped.to} (${level} bump from ${bumped.from}, task ${taskId})`
+    : `butchr: bump version ${bumped.from} → ${bumped.to} (task ${taskId})`;
+  await run([git, "-C", wt, "commit", "-m", msg]);
+  return bumped.to;
 }
 
 /**
@@ -518,12 +559,22 @@ async function bumpVersionFile(
  */
 /**
  * Merge-time options resolved by the caller (tasks.finalizeMerge):
- *  - `versionFile` — the per-workspace version file to patch-bump, EMPTY to disable
- *    the bump (the default — version bumping is opt-in per workspace). See
- *    bumpVersionFile.
+ *  - `versionFile` — the per-workspace version file to bump, EMPTY to disable the bump
+ *    (the default — version bumping is opt-in per workspace). See bumpVersionFile.
+ *  - `releaseMode` — when true (the workspace's release_mode), bump by `bumpLevel` on
+ *    EVERY change AND stamp the changelog (`changelogPath`) with a versioned heading in
+ *    the same commit; when false, today's patch-only / docs-only-skip behavior.
+ *  - `bumpLevel` — the task's declared bump level (release_mode only; default patch).
+ *  - `changelogPath` — the changelog to stamp (release_mode only).
+ *  - `dateISO` — the date for the stamped heading (defaults to today; passed in so the
+ *    caller controls it).
  */
 export type MergeOptions = {
   versionFile?: string;
+  releaseMode?: boolean;
+  bumpLevel?: VersionBumpLevel;
+  changelogPath?: string;
+  dateISO?: string;
 };
 
 export async function merge(
@@ -574,9 +625,16 @@ export async function merge(
   // with a concurrent task — the whole reason the bump moved off the agents. butchr
   // does NOT write the changelog (the task owns it; the CI gate enforces it).
   // Best-effort no-op when disabled / no version file (see bumpVersionFile); only
-  // when the branch has a worktree.
+  // when the branch has a worktree. In release_mode this also stamps the changelog with
+  // the versioned heading in the same commit, and returns the assigned version.
+  let assignedVersion: string | undefined;
   if (existsSync(wt)) {
-    await bumpVersionFile(dir, wt, taskId, base, opts.versionFile ?? "");
+    assignedVersion = await bumpVersionFile(dir, wt, taskId, base, opts.versionFile ?? "", {
+      releaseMode: opts.releaseMode,
+      bumpLevel: opts.bumpLevel,
+      changelogPath: opts.changelogPath,
+      dateISO: opts.dateISO,
+    });
   }
 
   // Capture the base tip BEFORE the fast-forward: it's the exclusive lower bound of
@@ -596,6 +654,7 @@ export async function merge(
       conflictFiles: [],
       baseSha: baseBefore.ok ? baseBefore.stdout.trim() : undefined,
       mergedSha: after.ok ? after.stdout.trim() : undefined,
+      version: assignedVersion,
     };
   }
   return {

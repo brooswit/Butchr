@@ -1,6 +1,7 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { checkChangelogUpdated } from "./changelog.ts";
+import type { VersionBumpLevel } from "./changelog.ts";
 import { config } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
@@ -18,6 +19,7 @@ import {
   responderFor,
   workspaceChangelogPath,
   workspaceGateCmd,
+  workspaceReleaseMode,
   workspaceVersionFile,
 } from "./workspaces.ts";
 import type { Responder, ResponderStep } from "./workspaces.ts";
@@ -673,6 +675,19 @@ export function validatePlanPreview(planPreview: unknown): boolean {
 }
 
 /**
+ * Validate + normalize the optional `version_bump` level from an API/CLI body. Returns
+ * one of 'patch' (the default when unset/null/blank) | 'minor' | 'major'; rejects (400)
+ * anything else. Only meaningful when the task's workspace has release_mode on, where it
+ * sets the semver bump applied at merge; 'major' additionally requires the human
+ * double-confirm ritual (see confirmMajor). See the `version_bump` column in db.ts.
+ */
+export function validateVersionBump(bump: unknown): VersionBumpLevel {
+  if (bump === undefined || bump === null || bump === "") return "patch";
+  if (bump === "patch" || bump === "minor" || bump === "major") return bump;
+  throw new HttpError(400, "version_bump must be 'patch', 'minor', or 'major'");
+}
+
+/**
  * Validate the optional `idea` flag from an API/CLI body. Returns a boolean, defaulting
  * to false when unset/null. Rejects (400) any non-boolean value. When true, the task is
  * created in the unified pipeline's FRONT state `idea`: the `prompt` is treated as a
@@ -699,6 +714,7 @@ export async function createTask(
   priority: number | string | null = 0,
   planPreview: boolean = false,
   idea: boolean = false,
+  versionBump: unknown = "patch",
 ): Promise<TaskView> {
   const dir = getWorkspace(workspaceId);
   if (!dir) throw new HttpError(404, `workspace not found: ${workspaceId}`);
@@ -711,6 +727,8 @@ export async function createTask(
   const taskPriority = validatePriority(priority);
   const taskPlanPreview = validatePlanPreview(planPreview);
   const taskIdea = validateIdea(idea);
+  // Declared semver bump level applied at merge in release_mode (patch default).
+  const taskVersionBump = validateVersionBump(versionBump);
 
   // Normalize + validate the dependency set: every listed blocker must exist.
   const blockers = normalizeBlockedBy(blockedBy);
@@ -761,8 +779,8 @@ export async function createTask(
   );
 
   db.query(
-    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, priority, plan_preview, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, priority, plan_preview, version_bump, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     workspaceId,
@@ -773,6 +791,7 @@ export async function createTask(
     JSON.stringify(taskTags),
     taskPriority,
     taskPlanPreview ? 1 : 0,
+    taskVersionBump,
     created,
   );
   recordTaskEvent(
@@ -803,6 +822,26 @@ export function setPriority(id: string, priority: number | string | null): TaskV
   if (!row) throw new HttpError(404, `task not found: ${id}`);
   const p = validatePriority(priority);
   db.query(`UPDATE tasks SET priority=? WHERE id=?`).run(p, id);
+  emitUpdated(id);
+  return taskView(id)!;
+}
+
+/**
+ * Update a task's declared semver `version_bump` level ('patch'|'minor'|'major'),
+ * applied at merge when its workspace is in release_mode. Validated the same way as at
+ * creation. 404 if the task is gone; 409 if it is already terminal (a merged task's
+ * version is fixed). Changing the bump is an EDIT, so it RESETS the major-confirm streak
+ * to 0 (a parked major task must be re-confirmed twice from scratch). Emits a
+ * `task.updated`.
+ */
+export function setVersionBump(id: string, bump: unknown): TaskView {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (isTerminal(row.status)) {
+    throw new HttpError(409, `cannot change version_bump on a ${row.status} task`);
+  }
+  const level = validateVersionBump(bump);
+  db.query(`UPDATE tasks SET version_bump=?, major_confirm_count=0 WHERE id=?`).run(level, id);
   emitUpdated(id);
   return taskView(id)!;
 }
@@ -946,6 +985,8 @@ export async function setBlockedBy(
       output_snapshot: null,
       conflict: 0,
       idle: 0,
+      // Editing dependencies breaks the major double-confirm streak (must be consecutive).
+      major_confirm_count: 0,
     },
   });
   logDeadBlockers(id, blockers);
@@ -991,6 +1032,11 @@ export type ApproveOutcome = {
   task: TaskView;
   conflictSentBack?: boolean;
   revertedOnRed?: boolean;
+  // release_mode + version_bump='major': the task is PARKED awaiting the human
+  // double-confirm ritual and did NOT merge. `major_confirm_count` on the task view
+  // carries the streak (0/1/2); the merge only runs once two consecutive `confirm-major`
+  // calls land it. Approve alone parks (it just says "the diff is good"). See confirmMajor.
+  awaitingMajorConfirm?: boolean;
 };
 
 /**
@@ -1041,6 +1087,9 @@ async function requestChanges(
       next_dispatch_at: null,
       // A human-driven rework is a fresh start — clear the auto-resume streak too.
       resume_attempts: 0,
+      // Any rework / conflict kick-back BREAKS the major double-confirm streak: the two
+      // confirm-major calls must be consecutive, so a re-review starts again from 0.
+      major_confirm_count: 0,
     },
   });
 }
@@ -1406,6 +1455,19 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
 
+  // MAJOR DOUBLE-CONFIRM INTERLOCK (release_mode + version_bump='major'). A major-bump
+  // task does NOT merge until the HUMAN has issued two CONSECUTIVE `confirm-major` calls
+  // (major_confirm_count reaches 2). Approve alone parks it here ("the diff is good"); it
+  // does not merge and does not increment — only confirmMajor advances the streak, and
+  // any other action resets it to 0. This is the SINGLE merge entry (approve, auto-merge,
+  // boot recovery all route through finalizeMerge), so the gate can never be bypassed.
+  // The major gate is ALWAYS the human — maybeAutoMerge bails on a major task, so an
+  // auto-merge never auto-confirms. (Rollback tasks default to patch, so they don't park.)
+  const releaseMode = workspaceReleaseMode(dir.id);
+  if (releaseMode && row.version_bump === "major" && row.major_confirm_count < 2) {
+    return { task: taskView(id)!, awaitingMajorConfirm: true };
+  }
+
   // ROLLBACK tasks land as `rolled_back` (not `merged`) and show `rolling_back` while
   // the revert merges; ordinary tasks stay `in_review` until they land as `merged`.
   // `inflight` is the status the merge guards transition FROM; `landed` is the terminal.
@@ -1440,12 +1502,18 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   const gate: Gate = await runExclusiveMerge<Gate>(async () => {
     // Capture the default-branch tip BEFORE the ff so we can restore it on RED.
     const priorTip = await git.headSha(dir.path).catch(() => null);
-    // Pass the workspace's resolved version file so git.merge can patch-bump it
-    // itself (inside this merge lock, after the rebase) when the workspace opted in —
-    // EMPTY disables the bump (the default). butchr no longer writes the changelog;
-    // the task owns that entry and the CI gate enforces it. See git.bumpVersionFile.
+    // Pass the workspace's resolved version file so git.merge bumps it itself (inside
+    // this merge lock, after the rebase) when the workspace opted in — EMPTY disables the
+    // bump (the default). In release_mode, also pass the declared bump level + changelog
+    // path so git.merge bumps by that level AND stamps the changelog with a versioned
+    // heading in the SAME commit (promoteUnreleased); outside release_mode the task owns
+    // its `[Unreleased]` entry and the CI gate enforces it. See git.bumpVersionFile.
     const mr = await git.merge(dir.path, id, {
       versionFile: workspaceVersionFile(dir.id),
+      releaseMode,
+      bumpLevel: row.version_bump,
+      changelogPath: workspaceChangelogPath(dir.id),
+      dateISO: nowIso().slice(0, 10),
     });
     if (!mr.ok) return { mr };
     // Merge stuck (ff'd into main). Gate the new tip: the workspace's build/test
@@ -1569,6 +1637,9 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         output_snapshot: snapshot || null,
         merge_base_sha: result.baseSha ?? null,
         merged_sha: result.mergedSha ?? null,
+        // In release_mode, the version butchr assigned + stamped at this merge (NULL
+        // otherwise). Surfaced on the merged task so the UI can show the released version.
+        released_version: result.version ?? null,
         merged_at: keep(nowIso()),
       },
     })
@@ -1585,6 +1656,57 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // the next dispatcher tick to notice.
   reevaluateAllBlocked();
   return { task: taskView(id)! };
+}
+
+/**
+ * MAJOR DOUBLE-CONFIRM (release_mode + version_bump='major'). The ONLY thing that
+ * advances the major-confirm streak: a HUMAN confirming a major version bump. It must be
+ * called TWICE CONSECUTIVELY (major_confirm_count 0→1→2) with nothing else in between —
+ * any other action (reject, conflict kick-back, re-review, setBlockedBy, requeue,
+ * changing version_bump) resets the streak to 0. On the SECOND confirm (reaching 2),
+ * finalizeMerge lands the task; below 2 it stays parked in `in_review`.
+ *
+ * Guards (409 / no-op otherwise): the task must be `in_review`, its workspace in
+ * release_mode, and its declared bump 'major'. Approve does NOT route here — approve just
+ * parks a major task; this is the deliberate, separate ritual. Always the human: nothing
+ * auto-issues this (maybeAutoMerge bails on major, and the CTO diff-review responder only
+ * parks a major). Returns the post-action outcome (the merge result once it lands).
+ */
+export async function confirmMajor(id: string): Promise<ApproveOutcome> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+  if (row.status !== "in_review") {
+    throw new HttpError(409, `confirm-major requires an in_review task (status=${row.status})`);
+  }
+  if (!workspaceReleaseMode(dir.id)) {
+    throw new HttpError(409, "confirm-major requires the workspace to be in release_mode");
+  }
+  if (row.version_bump !== "major") {
+    throw new HttpError(409, "confirm-major requires the task's version_bump to be 'major'");
+  }
+
+  // Advance the streak by one (guarded on the row still being in_review so a race can't
+  // double-count). A no-op match means it moved under us — return the current view.
+  const next = row.major_confirm_count + 1;
+  const res = db
+    .query(
+      `UPDATE tasks SET major_confirm_count=? WHERE id=? AND status='in_review' AND major_confirm_count=?`,
+    )
+    .run(next, id, row.major_confirm_count);
+  if (res.changes === 0) {
+    emitUpdated(id);
+    return { task: taskView(id)! };
+  }
+  recordTaskEvent(id, row.status, row.status, `major-version confirmation ${next}/2`);
+  emitUpdated(id);
+  console.log(`[butchr] task ${id} major-version confirmation ${next}/2`);
+
+  // Two consecutive confirmations reached → land it (finalizeMerge re-checks the gate
+  // and, now that the streak is 2, proceeds through the mechanical merge).
+  if (next >= 2) return finalizeMerge(id);
+  return { task: taskView(id)!, awaitingMajorConfirm: true };
 }
 
 /**
@@ -1906,6 +2028,8 @@ export function markInReview(id: string, snapshot: string): void {
       herdr_tab_id: null,
       // Reaching review IS progress — clear the auto-resume streak.
       resume_attempts: 0,
+      // A fresh review cycle starts the major double-confirm streak at 0 (re-review reset).
+      major_confirm_count: 0,
     },
     { note: "agent finished — submitted for review", gates: true, snapshot, from: "in_progress" },
   );
@@ -1940,6 +2064,8 @@ export function markReviewFromAgent(
       summary: summary ?? null,
       // Reaching review IS progress — clear the auto-resume streak.
       resume_attempts: 0,
+      // A fresh review cycle starts the major double-confirm streak at 0 (re-review reset).
+      major_confirm_count: 0,
     },
     { note: "agent requested review", gates: true },
   );
@@ -2172,7 +2298,12 @@ export async function triggerCi(id: string): Promise<void> {
       const changelogPath = workspaceChangelogPath(dir.id);
       if (changelogPath.trim()) {
         const { files } = await git.diffStat(dir.path, id);
-        const check = checkChangelogUpdated(files, changelogPath);
+        // In release_mode the gate is STRICT: every non-empty diff (incl. docs-only)
+        // must carry a changelog entry, since every change bumps + stamps a versioned
+        // heading. Outside release_mode the docs-only exemption stands.
+        const check = checkChangelogUpdated(files, changelogPath, {
+          strict: workspaceReleaseMode(dir.id),
+        });
         if (!check.ok) {
           result = { status: "fail", label: "changelog not updated", detail: check.reason };
         }
@@ -2278,6 +2409,12 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
 
   const dir = getWorkspace(row.workspace_id);
   if (!dir) return false;
+
+  // The MAJOR version gate is ALWAYS the human: a release_mode major-bump task needs two
+  // consecutive `confirm-major` calls (see confirmMajor) and must NEVER be auto-confirmed.
+  // Bail before doing any merge work. (patch/minor in release_mode still auto-merge — the
+  // version is assigned/stamped inside finalizeMerge.)
+  if (row.version_bump === "major" && workspaceReleaseMode(dir.id)) return false;
 
   // Footprint check (a + b). On any git error, bail safely (leave for a human).
   let stat: git.DiffStat;
@@ -2556,6 +2693,8 @@ export async function requeueTask(id: string): Promise<TaskView> {
       idle: 0,
       // Operator re-queue is a fresh start — clear the auto-resume streak too.
       resume_attempts: 0,
+      // A re-queue breaks the major double-confirm streak (must be consecutive).
+      major_confirm_count: 0,
     },
   });
   return taskView(id)!;
