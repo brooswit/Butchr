@@ -27,6 +27,8 @@
 // overall pool); durations are wall-clock and include any queue/idle/rework time;
 // and the whole thing is a rough forecast, not an SLA.
 
+import { percentile, spanMs } from "./duration.ts";
+
 // --- tuning constants (the size/type heuristics live here, in this module) ---
 
 // Size-bucket thresholds on the final changed-line count (added + deleted):
@@ -90,21 +92,8 @@ export function classifyPathType(files: string[]): PathType {
 }
 
 // --- percentiles + durations -------------------------------------------------
-
-/** Nearest-rank percentile of an ASCENDING-sorted array; null when empty. */
-function percentile(sortedAsc: number[], p: number): number | null {
-  const n = sortedAsc.length;
-  if (n === 0) return null;
-  const rank = Math.min(n, Math.max(1, Math.ceil(p * n)));
-  return sortedAsc[rank - 1]!;
-}
-
-/** Positive ms span between two ISO timestamps; null if missing or non-positive. */
-function spanMs(a: string | null, b: string | null): number | null {
-  if (!a || !b) return null;
-  const ms = new Date(b).getTime() - new Date(a).getTime();
-  return Number.isFinite(ms) && ms > 0 ? ms : null;
-}
+// spanMs + the nearest-rank percentile are shared with the metrics module and
+// live in src/duration.ts (kept DB-free so this module stays pure + testable).
 
 // A duration distribution: P50, P90, and the number of samples behind them.
 export type DurStat = { p50Ms: number | null; p90Ms: number | null; n: number };

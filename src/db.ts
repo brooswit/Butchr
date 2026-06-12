@@ -5,6 +5,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "./config.ts";
+import { median, spanMs } from "./duration.ts";
+import type { EstimateRow } from "./estimate.ts";
 
 mkdirSync(dirname(config.dbPath), { recursive: true });
 
@@ -62,9 +64,12 @@ export function migrateDirectoriesToWorkspaces(database: Database): void {
   // baseline below can (re)create idx_tasks_ws. IF EXISTS keeps this idempotent.
   database.exec(`DROP INDEX IF EXISTS idx_tasks_dir`);
 }
-migrateDirectoriesToWorkspaces(db);
-
-db.exec(`
+// Baseline schema. Idempotent — every statement is CREATE TABLE/INDEX IF NOT
+// EXISTS — so it is a clean no-op on an already-created DB. Run (in MIGRATIONS
+// order) AFTER the directories→workspaces rename so an existing DB is renamed in
+// place rather than getting a fresh empty `workspaces` table here.
+function createBaselineSchema(): void {
+  db.exec(`
 CREATE TABLE IF NOT EXISTS workspaces (
   id              TEXT PRIMARY KEY,
   path            TEXT UNIQUE NOT NULL,
@@ -119,6 +124,7 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 `);
+}
 
 // MANAGED CTO AGENT (PER-WORKSPACE). butchr runs ONE CTO agent per registered
 // workspace (repo), in that repo's ROOT — a FIRST-CLASS, butchr-launched,
@@ -140,12 +146,10 @@ CREATE TABLE IF NOT EXISTS settings (
 // inherit the global default config.ctoAgentEnabled, 1 = on, 0 = off — see below),
 // not a column here, so a workspace can be enabled before its first launch.
 function migrateCtoAgentPerWorkspace(): void {
-  const cols = db
-    .query<{ name: string }, []>(`PRAGMA table_info(cto_agent)`)
-    .all();
   // An existing table with no `workspace_id` column is the OLD singleton shape — drop
   // it (pre-1.0: the priority is "works forward"; the old singleton row is discarded).
-  if (cols.length > 0 && !cols.some((c) => c.name === "workspace_id")) {
+  // (tableExists ≡ the old `cols.length > 0`: PRAGMA on a missing table returns [].)
+  if (tableExists(db, "cto_agent") && !columnExists(db, "cto_agent", "workspace_id")) {
     db.exec(`DROP TABLE cto_agent`);
   }
   db.exec(`
@@ -163,18 +167,19 @@ function migrateCtoAgentPerWorkspace(): void {
     );
   `);
 }
-migrateCtoAgentPerWorkspace();
 
 // Lightweight forward migrations: add columns introduced after the initial
 // schema. Guarded so existing databases upgrade in place without data loss.
 function ensureColumn(table: string, column: string, decl: string): void {
-  const cols = db
-    .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
-    .all();
-  if (!cols.some((c) => c.name === column)) {
+  if (!columnExists(db, table, column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
   }
 }
+
+// All the additive column migrations, in order. Wrapped so the boot MIGRATIONS
+// runner executes them as ONE ordered step (after the baseline schema, before the
+// status-fold migrations). Each ensureColumn is independently idempotent.
+function ensureForwardColumns(): void {
 
 // PER-WORKSPACE BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
 // worktree) and the post-merge verify gate (repo root) both need a build/test
@@ -502,6 +507,7 @@ ensureColumn("tasks", "plan_preview", "INTEGER NOT NULL DEFAULT 0");
 // never grounded (or paused before this column existed) — treated as a mismatch, so the
 // next resume re-grounds once, which is safe. Orthogonal to `status`.
 ensureColumn("tasks", "grounding_fp", "TEXT");
+}
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
 // design (task playful-rabbit-0405) carried a SECOND axis (`stage` = idea|spec|build)
@@ -521,15 +527,11 @@ ensureColumn("tasks", "grounding_fp", "TEXT");
 // an old DB keeps it orphaned (it defaults 'build' on inserts that omit it) rather than
 // risk a destructive ALTER on the core tasks table.
 export function migrateStageAxisToStatus(): void {
-  const cols = db
-    .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
-    .all();
-  if (!cols.some((c) => c.name === "stage")) return; // fresh DB — never had a stage axis
+  if (!columnExists(db, "tasks", "stage")) return; // fresh DB — never had a stage axis
   db.exec(
     `UPDATE tasks SET status='idea' WHERE stage='idea' AND status IN ('queued','blocked')`,
   );
 }
-migrateStageAxisToStatus();
 
 // CANONICAL STATE-MODEL MIGRATION (one-time, forward-only). The pre-canonical status
 // set folds into the canonical states (pre-1.0 — migrate/destroy freely; priority =
@@ -558,7 +560,6 @@ export function migrateStatusModel(): void {
     db.query(`UPDATE tasks SET status=? WHERE status=?`).run(to, from);
   }
 }
-migrateStatusModel();
 
 // READY/RUNNING SPLIT MIGRATION (one-time, forward-only — the critical correctness
 // point on the restart that activates the 12-state model). The old model overloaded
@@ -586,7 +587,43 @@ export function migrateReadyRunningSplit(): void {
     `UPDATE tasks SET status='in_review', herdr_pane_id=NULL, herdr_tab_id=NULL WHERE status='finalizing'`,
   );
 }
-migrateReadyRunningSplit();
+
+// ---- BOOT MIGRATION RUNNER -------------------------------------------------
+// The ONE ordered list of boot-time schema steps, run by the single loop below.
+// ORDER IS LOAD-BEARING and was previously only documented in the comments on each
+// step — here it is EXECUTABLE. The sequence reproduces the historical top-to-bottom
+// order exactly:
+//   1. rename directories→workspaces   (MUST precede the baseline so an existing DB
+//                                        is renamed in place, not recreated empty)
+//   2. baseline schema                  (CREATE TABLE/INDEX IF NOT EXISTS)
+//   3. per-workspace cto_agent table    (drop old singleton shape, then CREATE)
+//   4. additive forward columns         (ensureColumn ×N — must precede the folds,
+//                                        e.g. readyRunningSplit reads herdr_tab_id)
+//   5. fold out the retracted `stage` axis
+//   6. fold the pre-canonical status set into the 12-state model
+//   7. ready/running split + finalizing rescue
+// Every step is independently idempotent (presence-guarded ALTER/UPDATE or
+// IF NOT EXISTS), so the whole pass is a no-op once converged and safe to re-run on
+// every boot.
+const MIGRATIONS: Array<() => void> = [
+  () => migrateDirectoriesToWorkspaces(db),
+  createBaselineSchema,
+  migrateCtoAgentPerWorkspace,
+  ensureForwardColumns,
+  migrateStageAxisToStatus,
+  migrateStatusModel,
+  migrateReadyRunningSplit,
+];
+
+/**
+ * Run the ordered boot migrations once, in order, against the module DB. Invoked
+ * at module load; also exported so a test can re-run the full pass and assert it is
+ * a clean idempotent no-op (every step is presence-guarded / IF NOT EXISTS).
+ */
+export function runMigrations(): void {
+  for (const run of MIGRATIONS) run();
+}
+runMigrations();
 
 export type WorkspaceRow = {
   id: string;
@@ -1107,17 +1144,11 @@ export function metricRows(): MetricRow[] {
 }
 
 // ---- DURATION ESTIMATES (raw rows for the estimator) ----------------------
-// The columns the estimate model reads (see src/estimate.ts). `blocked_by` comes
-// back as the raw JSON-array TEXT; the caller (tasks.estimateInputRows) parses it
-// into a string[] before handing rows to the pure estimator.
-export type EstimateRowRaw = {
-  id: string;
-  status: string;
-  started_at: string | null;
-  completed_at: string | null;
-  merged_at: string | null;
-  diff_lines: number | null;
-  path_type: string | null;
+// The columns the estimate model reads (see src/estimate.ts). The shape is the
+// canonical `EstimateRow` (estimate.ts) EXCEPT `blocked_by`, which comes back as
+// the raw JSON-array TEXT here; the caller (tasks.estimateInputRows) parses it into
+// a string[] before handing rows to the pure estimator — the single JSON-parse seam.
+export type EstimateRowRaw = Omit<EstimateRow, "blocked_by"> & {
   blocked_by: string | null;
 };
 
@@ -1155,20 +1186,10 @@ export type Metrics = {
 
 const DAY_MS = 86_400_000;
 
-function median(xs: number[]): number | null {
-  if (xs.length === 0) return null;
-  const s = xs.slice().sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid]! : Math.round((s[mid - 1]! + s[mid]!) / 2);
-}
-
-// Positive ms span between two ISO timestamps; null if either is missing or the
-// span is non-positive (same instant / clock skew — not a meaningful duration).
-function spanMs(a: string | null, b: string | null): number | null {
-  if (!a || !b) return null;
-  const ms = new Date(b).getTime() - new Date(a).getTime();
-  return Number.isFinite(ms) && ms > 0 ? ms : null;
-}
+// `median` (averaging-for-even) + `spanMs` live in src/duration.ts, shared with the
+// estimator. NOTE: metrics medians AVERAGE the two middle values for an even count
+// (pinned by test/metrics.test.ts) — distinct from the estimator's nearest-rank
+// `percentile`; keep using `median` here, not `percentile(_, 0.5)`.
 
 function rate(num: number, of: number): Rate {
   return { rate: of > 0 ? num / of : null, num, of };

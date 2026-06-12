@@ -82,14 +82,11 @@ export type TaskView = Omit<TaskRow, "blocked_by" | "tags"> & {
  * DB-free and unit-testable against synthetic rows.
  */
 export function estimateInputRows(): EstimateRow[] {
+  // EstimateRowRaw is the canonical EstimateRow with a raw `blocked_by` TEXT column;
+  // spread the shared fields and parse that one JSON column into the id array — the
+  // single JSON-parse seam between the DB row and the pure estimator.
   return estimateRows().map((r) => ({
-    id: r.id,
-    status: r.status,
-    started_at: r.started_at,
-    completed_at: r.completed_at,
-    merged_at: r.merged_at,
-    diff_lines: r.diff_lines,
-    path_type: r.path_type,
+    ...r,
     blocked_by: parseBlockedBy(r.blocked_by),
   }));
 }
