@@ -1,5 +1,6 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
+import { checkChangelogUpdated } from "./changelog.ts";
 import { config } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import { db, estimateRows, isTerminal, matchesQuery, nowIso, recordTaskEvent } from "./db.ts";
@@ -11,7 +12,13 @@ import {
   estimateTask,
 } from "./estimate.ts";
 import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
-import { HttpError, workspaceGateCmd, getWorkspace } from "./workspaces.ts";
+import {
+  HttpError,
+  getWorkspace,
+  workspaceChangelogPath,
+  workspaceGateCmd,
+  workspaceVersionFile,
+} from "./workspaces.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
 import { runGate } from "./gate.ts";
@@ -1337,10 +1344,13 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   const gate: Gate = await runExclusiveMerge<Gate>(async () => {
     // Capture the default-branch tip BEFORE the ff so we can restore it on RED.
     const priorTip = await git.headSha(dir.path).catch(() => null);
-    // Pass the task summary so git.merge can record the CHANGELOG entry + version
-    // bump itself (inside this merge lock, after the rebase) — agents no longer
-    // edit CHANGELOG.md / package.json. See git.finalizeLivingDocs.
-    const mr = await git.merge(dir.path, id, row.summary ?? null);
+    // Pass the workspace's resolved version file so git.merge can patch-bump it
+    // itself (inside this merge lock, after the rebase) when the workspace opted in —
+    // EMPTY disables the bump (the default). butchr no longer writes the changelog;
+    // the task owns that entry and the CI gate enforces it. See git.bumpVersionFile.
+    const mr = await git.merge(dir.path, id, {
+      versionFile: workspaceVersionFile(dir.id),
+    });
     if (!mr.ok) return { mr };
     // Merge stuck (ff'd into main). Gate the new tip: the workspace's build/test
     // gate command must be GREEN (its own gate_cmd, or the default config.verifyCmd).
@@ -2045,6 +2055,25 @@ export async function triggerCi(id: string): Promise<void> {
           `retr${retries === 1 ? "y" : "ies"} (${result.label})`,
       );
     }
+
+    // CHANGELOG-UPDATE GATE: an additional, opt-in gate concern layered ON TOP of the
+    // build/test command (NOT part of it). When the workspace configures a changelog
+    // path, a code (non-docs) change whose diff didn't touch that file FAILS the gate —
+    // enforcing that the task owns its changelog entry now that butchr stops writing
+    // one. Only checked once the build/test gate is green (a build failure is the
+    // priority signal); a fail here downgrades the badge to red, which also blocks
+    // auto-merge below.
+    if (result.status === "pass") {
+      const changelogPath = workspaceChangelogPath(dir.id);
+      if (changelogPath.trim()) {
+        const { files } = await git.diffStat(dir.path, id);
+        const check = checkChangelogUpdated(files, changelogPath);
+        if (!check.ok) {
+          result = { status: "fail", label: "changelog not updated", detail: check.reason };
+        }
+      }
+    }
+
     // First line is the badge label; the rest (if any) is the output tail.
     const summary = result.detail ? `${result.label}\n\n${result.detail}` : result.label;
     // Only write back while the task is still in review — if it merged/aborted while

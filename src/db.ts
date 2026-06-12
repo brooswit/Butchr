@@ -188,6 +188,28 @@ function ensureColumn(table: string, column: string, decl: string): void {
 // cwd. Settable at register time and updatable via PATCH /api/workspaces/:id.
 ensureColumn("workspaces", "gate_cmd", "TEXT");
 
+// PER-WORKSPACE OPTIONAL VERSION FILE. butchr no longer ASSUMES every repo carries a
+// version file — auto-patch-bumping at merge is opt-in. This column is the relative
+// path of the version file butchr patch-bumps on a successful merge (e.g.
+// `package.json`). Semantics mirror gate_cmd: NULL means "use the GLOBAL default"
+// (`config.versionFile`, itself EMPTY by default — i.e. OFF — settable via
+// BUTCHR_VERSION_FILE); a non-null value (incl. the empty string, which DISABLES the
+// bump for that workspace) is used verbatim. Resolved by workspaces.workspaceVersionFile;
+// applied at merge by git.bumpVersionFile (a no-op when the file is absent / has no
+// semver version field). Settable at register time + via PATCH /api/workspaces/:id.
+ensureColumn("workspaces", "version_file", "TEXT");
+
+// PER-WORKSPACE OPTIONAL CHANGELOG-GATE PATH. butchr no longer WRITES the changelog at
+// merge — the task/agent owns its entry and the CI gate VERIFIES one was added. This
+// column is the relative path of the changelog file that gate checks (e.g.
+// `CHANGELOG.md`). Semantics mirror gate_cmd: NULL means "use the GLOBAL default"
+// (`config.changelogPath`, itself EMPTY by default — i.e. the gate is OFF — settable
+// via BUTCHR_CHANGELOG_PATH); a non-null value (incl. the empty string, which DISABLES
+// the gate for that workspace) is used verbatim. Resolved by
+// workspaces.workspaceChangelogPath; enforced in tasks.triggerCi via
+// changelog.checkChangelogUpdated. Settable at register time + via PATCH /api/workspaces/:id.
+ensureColumn("workspaces", "changelog_path", "TEXT");
+
 // PER-WORKSPACE CTO-AGENT ENABLE. The managed CTO agent is now ONE PER WORKSPACE (it
 // runs in the repo root and IS that project's principal/dev agent — see the cto_agent
 // table). This column is that workspace's master switch for boot auto-start +
@@ -551,6 +573,15 @@ export type WorkspaceRow = {
   // the default (config.verifyCmd); a non-null value (incl. "" to disable) is used
   // verbatim by both the CI gate and the post-merge verify gate for this workspace.
   gate_cmd: string | null;
+  // Per-workspace OPTIONAL version file (see the version_file ensureColumn above). NULL
+  // = inherit the global default (config.versionFile, EMPTY/off by default); "" disables
+  // the merge-time version bump for this workspace; a path is patch-bumped at merge.
+  version_file: string | null;
+  // Per-workspace OPTIONAL changelog-gate path (see the changelog_path ensureColumn
+  // above). NULL = inherit the global default (config.changelogPath, EMPTY/off by
+  // default); "" disables the changelog gate for this workspace; a path is the file the
+  // CI gate requires a code change to update.
+  changelog_path: string | null;
   // Per-workspace CTO-agent enable (see the cto_enabled ensureColumn above). NULL =
   // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by
   // cto-agent.isCtoEnabled (per-workspace WINS over the global default).

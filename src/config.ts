@@ -216,6 +216,38 @@ export const config = {
   verifyTimeoutMs: envInt("BUTCHR_VERIFY_TIMEOUT_MS", 1000 * 60 * 10),
 
   /**
+   * OPTIONAL MERGE-TIME VERSION BUMP (opt-in; DEFAULT OFF). Not every managed repo
+   * keeps a version file, so butchr no longer ASSUMES one — auto-patch-bumping is
+   * opt-in. This is the GLOBAL DEFAULT path (relative to the repo root) of the
+   * version file butchr patch-bumps on a successful merge (e.g. `package.json`):
+   *  - EMPTY (the default) → version bumping is OFF for every workspace.
+   *  - A path → on merge butchr patch-bumps the `"version": "x.y.z"` field of that
+   *    file (a docs-only diff is skipped), committed inside the merge lock so
+   *    concurrent tasks never collide on it.
+   * Override globally with BUTCHR_VERSION_FILE, or PER-WORKSPACE via the workspace's
+   * `version_file` column (NULL inherits this default; "" disables it for that
+   * workspace). Resolved by workspaces.workspaceVersionFile. A graceful no-op when
+   * the file is absent or has no semver `version` field — see git.bumpVersionFile.
+   */
+  versionFile: env("BUTCHR_VERSION_FILE", ""),
+
+  /**
+   * OPTIONAL CHANGELOG-UPDATE GATE (opt-in; DEFAULT OFF). butchr no longer WRITES the
+   * changelog at merge — the task/agent owns its changelog entry, and this gate
+   * VERIFIES one was added. This is the GLOBAL DEFAULT path (relative to the repo
+   * root) of the changelog file the CI gate checks (e.g. `CHANGELOG.md`):
+   *  - EMPTY (the default) → the changelog gate is OFF for every workspace.
+   *  - A path → a task whose diff makes a CODE (non-docs) change but does NOT touch
+   *    that file FAILS the CI gate (an additional gate concern layered ON TOP of the
+   *    build/test command, not part of it). A docs-only/empty diff is exempt.
+   * Override globally with BUTCHR_CHANGELOG_PATH, or PER-WORKSPACE via the workspace's
+   * `changelog_path` column (NULL inherits this default; "" disables it). Resolved by
+   * workspaces.workspaceChangelogPath; enforced in tasks.triggerCi via
+   * changelog.checkChangelogUpdated.
+   */
+  changelogPath: env("BUTCHR_CHANGELOG_PATH", ""),
+
+  /**
    * Bounded dispatch retry with exponential backoff. When dispatch() throws
    * (workspace heal / worktree / herdr pane setup failed), the task is re-queued
    * with a growing delay instead of hot-looping every tick. After

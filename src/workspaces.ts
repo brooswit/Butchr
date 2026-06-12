@@ -203,15 +203,42 @@ export function workspaceGateCmd(id: string): string {
 }
 
 /**
- * Normalize an incoming gate-command value for storage. `undefined`/`null` clears
- * the override (→ NULL → falls back to the default); a string is stored verbatim
- * (the empty string is a deliberate "disable the gate for this workspace" setting,
- * mirroring an empty BUTCHR_VERIFY_CMD). Anything else is a 400.
+ * The EFFECTIVE version-file path for a workspace: its own `version_file` if it set
+ * one (a non-null value, including "" which DISABLES the merge-time bump), else the
+ * global default `config.versionFile` (EMPTY by default — no bump — unless set via
+ * BUTCHR_VERSION_FILE). An EMPTY result means "no version bump for this workspace"
+ * (the opt-in default). Pure read of the workspace row + config; unknown id → default.
  */
-function normalizeGateCmd(value: unknown): string | null {
+export function workspaceVersionFile(id: string): string {
+  const dir = getWorkspace(id);
+  if (dir && dir.version_file !== null) return dir.version_file;
+  return config.versionFile;
+}
+
+/**
+ * The EFFECTIVE changelog-gate path for a workspace: its own `changelog_path` if it
+ * set one (a non-null value, including "" which DISABLES the gate), else the global
+ * default `config.changelogPath` (EMPTY by default — gate off — unless set via
+ * BUTCHR_CHANGELOG_PATH). An EMPTY result means "no changelog gate for this
+ * workspace" (the opt-in default). Pure read; unknown id → default.
+ */
+export function workspaceChangelogPath(id: string): string {
+  const dir = getWorkspace(id);
+  if (dir && dir.changelog_path !== null) return dir.changelog_path;
+  return config.changelogPath;
+}
+
+/**
+ * Normalize an incoming optional-string override for storage. `undefined`/`null`
+ * clears the override (→ NULL → falls back to the global default); a string is
+ * stored verbatim (the empty string is a deliberate "disable for this workspace"
+ * setting). Anything else is a 400. Shared by the gate_cmd / version_file /
+ * changelog_path setters (all three carry identical NULL=default / ""=off semantics).
+ */
+function normalizeOverride(field: string, value: unknown): string | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") {
-    throw new HttpError(400, "gate_cmd must be a string (or null to use the default)");
+    throw new HttpError(400, `${field} must be a string (or null to use the default)`);
   }
   return value;
 }
@@ -226,8 +253,42 @@ function normalizeGateCmd(value: unknown): string | null {
 export function updateWorkspaceGateCmd(id: string, gateCmd: unknown): WorkspaceView {
   const dir = getWorkspace(id);
   if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
-  const value = normalizeGateCmd(gateCmd);
+  const value = normalizeOverride("gate_cmd", gateCmd);
   db.query(`UPDATE workspaces SET gate_cmd=? WHERE id=?`).run(value, id);
+  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
+  publish({ type: "workspace.updated", workspace: view });
+  return view;
+}
+
+/**
+ * Update (or clear) a workspace's optional MERGE-TIME VERSION FILE and return the
+ * refreshed view. Pass `null`/`undefined` to clear the override (inherit
+ * `config.versionFile`); a string (incl. "" to disable the bump) sets it; a path
+ * (e.g. "package.json") opts the workspace into the patch-bump. 404 if the workspace
+ * is gone. Takes effect on the next merge for that workspace.
+ */
+export function updateWorkspaceVersionFile(id: string, versionFile: unknown): WorkspaceView {
+  const dir = getWorkspace(id);
+  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
+  const value = normalizeOverride("version_file", versionFile);
+  db.query(`UPDATE workspaces SET version_file=? WHERE id=?`).run(value, id);
+  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
+  publish({ type: "workspace.updated", workspace: view });
+  return view;
+}
+
+/**
+ * Update (or clear) a workspace's optional CHANGELOG-GATE PATH and return the
+ * refreshed view. Pass `null`/`undefined` to clear the override (inherit
+ * `config.changelogPath`); a string (incl. "" to disable the gate) sets it; a path
+ * (e.g. "CHANGELOG.md") opts the workspace into the changelog-update CI gate. 404 if
+ * the workspace is gone. Takes effect on the next task entering review.
+ */
+export function updateWorkspaceChangelogPath(id: string, changelogPath: unknown): WorkspaceView {
+  const dir = getWorkspace(id);
+  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
+  const value = normalizeOverride("changelog_path", changelogPath);
+  db.query(`UPDATE workspaces SET changelog_path=? WHERE id=?`).run(value, id);
   const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
   publish({ type: "workspace.updated", workspace: view });
   return view;
@@ -333,6 +394,8 @@ export async function registerWorkspace(
   rawPath: string,
   label?: string,
   gateCmd?: unknown,
+  versionFile?: unknown,
+  changelogPath?: unknown,
 ): Promise<WorkspaceView> {
   const path = resolve(rawPath);
 
@@ -346,7 +409,11 @@ export async function registerWorkspace(
   const finalLabel = label?.trim() || basename(path);
   // Optional per-workspace build/test gate command, set at register time (NULL =
   // use the default config.verifyCmd; "" = disable the gate for this workspace).
-  const finalGateCmd = normalizeGateCmd(gateCmd);
+  const finalGateCmd = normalizeOverride("gate_cmd", gateCmd);
+  // Optional per-workspace version-bump file + changelog-gate path (NULL = inherit
+  // the global default; "" = off; a path opts in). See the columns in db.ts.
+  const finalVersionFile = normalizeOverride("version_file", versionFile);
+  const finalChangelogPath = normalizeOverride("changelog_path", changelogPath);
 
   // Provision the herdr workspace (best effort — workspace still usable if the
   // herdr server is briefly down; dispatch will retry).
@@ -378,9 +445,12 @@ export async function registerWorkspace(
   const id = generateWorkspaceId();
   const created = nowIso();
   db.query(
-    `INSERT INTO workspaces (id, path, label, herdr_workspace, herdr_pane, gate_cmd, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, path, finalLabel, workspaceId, paneId, finalGateCmd, created);
+    `INSERT INTO workspaces (id, path, label, herdr_workspace, herdr_pane, gate_cmd, version_file, changelog_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id, path, finalLabel, workspaceId, paneId,
+    finalGateCmd, finalVersionFile, finalChangelogPath, created,
+  );
 
   const row = getWorkspace(id)!;
   const view: WorkspaceView = { ...row, counts: counts(id) };

@@ -7,9 +7,10 @@ when behavior changes, this file moves with it (see
 [§8](#8-living-docs-update-on-every-change)).
 
 The only other maintained artifact is the **[CHANGELOG.md](./CHANGELOG.md)**
-(Keep a Changelog). **butchr appends the `[Unreleased]` entry for you at merge**
-(and bumps the version) — you don't hand-edit it. Write a clear task summary
-instead; the full living-docs convention is
+(Keep a Changelog). **You — the task/agent — update it in your change**, and
+butchr's changelog gate verifies you did (a code change with no changelog entry
+fails the CI gate). butchr does **not** write it for you, and the version bump is
+an opt-in per-repo setting — see the full living-docs convention in
 [§8](#8-living-docs-update-on-every-change).
 
 Architecture is not re-documented in prose — **the code is the reference.** The
@@ -747,6 +748,17 @@ the workspace's `gate_cmd` (or a global `BUTCHR_VERIFY_CMD`). When butchr is poi
 at its own repo (a dev/dogfood setup), set that to
 `bun build src/index.ts --target bun --outfile /dev/null && bun test ./test`.
 
+Two more **per-workspace, opt-in** settings shape how butchr treats a repo's
+version/changelog conventions (both OFF by default, each `NULL`-inherits a global
+default; `""` disables it for that workspace). They're set the same way as
+`gate_cmd` — at register time or via `PATCH /api/workspaces/:id` — and documented
+inline where their columns are declared in `src/db.ts`:
+
+| Setting | Global default | What it does |
+|---------|----------------|--------------|
+| `version_file` | `BUTCHR_VERSION_FILE` (empty) | The version file butchr **patch-bumps at merge** (e.g. `package.json`). Empty/absent = no bump; a docs-only diff and a missing/parseless file are graceful no-ops. |
+| `changelog_path` | `BUTCHR_CHANGELOG_PATH` (empty) | The changelog file the **CI gate requires a code change to update** (e.g. `CHANGELOG.md`). Empty = gate off; docs-only/empty diffs are exempt. |
+
 ---
 
 ## 8. Living docs: update on every change
@@ -768,32 +780,44 @@ role, a config var's semantics, the exact route table) live in the code and its
 comments; this doc points at them rather than duplicating them, so keep those
 comments honest too.
 
-**(b) The [CHANGELOG.md](./CHANGELOG.md) entry is recorded by butchr at merge — do
-NOT hand-edit it.** Every task used to append its own `[Unreleased]` bullet, so
-under concurrency every task touched the same file and they all collided at merge.
-butchr now appends the entry itself, **inside the serialized merge lock, after the
-rebase**, derived from your **task summary** (the optional `summary` you pass to
-`request_review`) and the task id — filed under `### Changed` in `[Unreleased]`.
-So: **write a clear, user-facing summary** of what changed and why it matters (not
-which files you touched) and butchr turns it into the changelog line. It's
-idempotent (a re-merge won't double-add) and a docs-only diff skips the version
-bump. **Do not edit CHANGELOG.md in your task** — an edit there just reintroduces
-the collisions this removed.
+**(b) YOU update the [CHANGELOG.md](./CHANGELOG.md) in your change — butchr's gate
+verifies you did.** butchr is a general tool that manages *other* repos, each with
+its own changelog shape (or none), so it no longer ASSUMES one or writes a
+fixed-format entry. The rule is flipped from how it used to work: **the task/agent
+owns the changelog entry.** Add a clear, user-facing `[Unreleased]` bullet
+describing *what changed and why it matters* (not which files you touched) in the
+same change. The **changelog-update gate** then checks your task's diff at review
+time — a **code (non-docs) change that didn't touch the changelog file FAILS the CI
+gate** (a docs-only or empty diff is exempt). The gate is **opt-in per workspace**
+and the changelog path is configurable: it's OFF unless the workspace sets a
+`changelog_path` (or the global `BUTCHR_CHANGELOG_PATH` default), so repos without a
+changelog aren't forced to have one. For **this** repo, the gate is configured to
+require `CHANGELOG.md`. Concurrent tasks each editing `[Unreleased]` can collide at
+merge — that's resolved through the normal conflict kick-back (§9.4), the same as
+any other shared file.
 
-**(c) The `version` in [package.json](./package.json) is bumped by butchr at merge —
-do NOT hand-edit it.** On a successful merge butchr **patch-bumps** the version (the
-simple per-task default), skipping the bump for a **docs-only** diff. You don't
-touch `package.json`. `/health` reads it at import, so the bumped file is enough for
-the API to report the new version. **Release cuts stay manual and human-driven**:
-at release time someone (1) renames `[Unreleased]` to a new `[x.y.z] - YYYY-MM-DD`
-heading, (2) starts a fresh empty `[Unreleased]` above it, and (3) sets the version
-to the release `x.y.z` (a backwards-incompatible interface/config/data-model change
-makes it a **minor** while pre-1.0, otherwise the accumulated patch bumps stand) —
-the reserved `1.0.0` bump is the future "interfaces are now stable" promise.
+**(c) The `version` in [package.json](./package.json) is bumped by butchr at merge
+ONLY when the workspace opts in — and you never hand-edit it.** Not every repo keeps
+a version file, so the merge-time patch-bump is **opt-in per workspace**: it's OFF
+unless the workspace sets a `version_file` (the relative path of the file to bump,
+e.g. `package.json` — or the global `BUTCHR_VERSION_FILE` default). When enabled,
+butchr **patch-bumps** that file's `"version": "x.y.z"` field on a successful merge
+(inside the serialized merge lock, after the rebase, so concurrent tasks never
+collide on it), skipping the bump for a **docs-only** diff and gracefully no-op'ing
+when the file is absent or has no semver version field. For **this** repo, the bump
+is configured against `package.json`; `/health` reads it at import, so the bumped
+file is enough for the API to report the new version. **Release cuts stay manual and
+human-driven**: at release time someone (1) renames `[Unreleased]` to a new
+`[x.y.z] - YYYY-MM-DD` heading, (2) starts a fresh empty `[Unreleased]` above it,
+and (3) sets the version to the release `x.y.z` (a backwards-incompatible
+interface/config/data-model change makes it a **minor** while pre-1.0, otherwise the
+accumulated patch bumps stand) — the reserved `1.0.0` bump is the future "interfaces
+are now stable" promise.
 
 Keep this doc honest and the repo stays self-describing: CONTRIBUTING.md answers
-*how it works now*, while butchr keeps CHANGELOG.md (*what changed and when*) and
-the version (*which surface you're on*) current for you at merge.
+*how it works now*, **you** keep CHANGELOG.md (*what changed and when*) current in
+each change (the gate enforces it), and butchr keeps the opted-in version (*which
+surface you're on*) current for you at merge.
 
 ---
 
@@ -807,19 +831,21 @@ tool. However a change is authored, the gates are the same:
    /dev/null` **and** `bun test` (§7). The **CI gate** runs these in the task's
    worktree on submission and writes an advisory pass/fail badge; it does not
    hard-block, but a red badge is a signal to fix before merge.
-2. **Update CONTRIBUTING.md in the same change, and write a clear task summary** —
-   see [§8](#8-living-docs-update-on-every-change): reflect any new/changed public
+2. **Update CONTRIBUTING.md AND CHANGELOG.md in the same change** — see
+   [§8](#8-living-docs-update-on-every-change): reflect any new/changed public
    surface in this doc (a change that doesn't carry its docs edit gets sent back),
-   and pass a good `request_review` **summary** — butchr appends the
-   **CHANGELOG.md** `[Unreleased]` entry and **bumps the version** from it
-   automatically at merge, so you do **not** hand-edit those two files.
+   and add a clear `[Unreleased]` **CHANGELOG.md** entry — the **changelog gate**
+   verifies a code change touched the changelog (see §8b). A good `request_review`
+   **summary** still helps the reviewer, but butchr no longer derives the changelog
+   from it. The **version** is bumped by butchr at merge only when this workspace
+   opted in via `version_file` (§8c), so you do **not** hand-edit `package.json`.
 3. **Review → merge.** A reviewer approves or requests changes. On submission a
    read-only **conformance reviewer** (`src/conformance.ts`) also judges whether
    the diff actually satisfies the task prompt (and the conventions in this doc)
    and writes an advisory badge — like CI, it never hard-blocks. On **approve**,
-   butchr rebases the branch onto the current default tip, **records the CHANGELOG
-   `[Unreleased]` entry + patch-bumps the version** from your task summary
-   (committed onto the branch, after the rebase, inside the merge lock), and
+   butchr rebases the branch onto the current default tip, **patch-bumps the version
+   file if this workspace opted in** (committed onto the branch, after the rebase,
+   inside the merge lock — your own CHANGELOG entry is already on the branch), and
    **fast-forwards** (linear history), then runs the **post-merge verify gate**
    (`BUTCHR_VERIFY_CMD`) on the new tip in the repo root — a **RED result
    auto-reverts the merge off main** (the task goes `failed` with the failing

@@ -17,7 +17,9 @@ import {
   registerWorkspace,
   setWorkspaceCtoEnabled,
   unregisterWorkspace,
+  updateWorkspaceChangelogPath,
   updateWorkspaceGateCmd,
+  updateWorkspaceVersionFile,
 } from "./workspaces.ts";
 import {
   ctoAgentName,
@@ -552,29 +554,42 @@ route("POST", "/api/expand-brief", async (req) => {
 
 route("POST", "/api/workspaces", async (req) => {
   const body = await readJson(req);
-  // Optional gate_cmd: a per-workspace build/test gate command set at register time
-  // (omit/null → use the default config.verifyCmd; "" → disable the gate). Validated
-  // inside registerWorkspace.
-  const view = await registerWorkspace(body.path, body.label, body.gate_cmd);
+  // Optional per-workspace settings, all validated inside registerWorkspace (omit/null
+  // → inherit the global default; "" → disable for this workspace):
+  //  - gate_cmd: the build/test gate command both gates run.
+  //  - version_file: the version file the merge patch-bumps (e.g. package.json).
+  //  - changelog_path: the file the changelog CI gate requires a code change to update.
+  const view = await registerWorkspace(
+    body.path, body.label, body.gate_cmd, body.version_file, body.changelog_path,
+  );
   return json(view, 201);
 });
 
-// Update a workspace's per-workspace settings. Two independent fields, handled by
-// KEY PRESENCE so updating one never clobbers the other:
+// Update a workspace's per-workspace settings. Each field is handled by KEY PRESENCE
+// so updating one never clobbers another (a string sets it, "" disables it for this
+// workspace, null CLEARS the override → inherit the global default):
 //  - `gate_cmd`: the build/test gate command both the CI gate and the post-merge
-//    verify gate run for this workspace — a string sets it ("" disables the gate);
-//    null/omitted CLEARS the override so it falls back to the default config.verifyCmd.
+//    verify gate run for this workspace (default config.verifyCmd).
+//  - `version_file`: the version file butchr patch-bumps at merge (default
+//    config.versionFile — EMPTY/off; version bumping is opt-in per workspace).
+//  - `changelog_path`: the file the changelog CI gate requires a code change to update
+//    (default config.changelogPath — EMPTY/off; the gate is opt-in per workspace).
 //  - `cto_enabled`: the per-workspace CTO-agent enable (boot auto-start + supervision)
 //    — true/false forces it on/off; null CLEARS the override → inherit the global
 //    default config.ctoAgentEnabled.
-// 404 if the workspace is gone. Publishes `workspace.updated`.
+// A bare PATCH (no recognized key) clears the gate command, preserving the legacy
+// contract. 404 if the workspace is gone. Publishes `workspace.updated`.
 route("PATCH", "/api/workspaces/:id", async (req, p) => {
   const body = await readJson(req);
   let view;
   if ("cto_enabled" in body) view = setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
-  // Preserve the legacy contract that PATCH with no cto_enabled key sets/clears the
-  // gate command (an omitted gate_cmd clears the override).
-  if ("gate_cmd" in body || !("cto_enabled" in body)) {
+  if ("version_file" in body) view = updateWorkspaceVersionFile(p.id!, body.version_file);
+  if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
+  // gate_cmd: set when its key is present, OR when NO other recognized key was sent
+  // (a bare PATCH clears the gate override — the legacy contract).
+  const touchedOther =
+    "cto_enabled" in body || "version_file" in body || "changelog_path" in body;
+  if ("gate_cmd" in body || !touchedOther) {
     view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
   }
   return json(view!);

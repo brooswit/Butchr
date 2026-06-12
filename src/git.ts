@@ -9,11 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  bumpPatchVersion,
-  insertUnreleasedEntry,
-  isDocsOnlyDiff,
-} from "./changelog.ts";
+import { bumpPatchVersion, isDocsOnlyDiff } from "./changelog.ts";
 import { config } from "./config.ts";
 import { run, runOrThrow, type ExecResult } from "./exec.ts";
 
@@ -411,8 +407,8 @@ async function collectConflictAndAbort(
  * Whether the task branch's diff vs `base` touches ONLY docs files (so the
  * version bump is skipped). Resolved from the committed range `base...taskId`
  * AFTER the rebase, so it reflects exactly the task's own code changes (not the
- * CHANGELOG/version edits, which finalizeLivingDocs commits afterward). On any git
- * error we return false → a normal bump (the safe default — never silently skip).
+ * version edit, which bumpVersionFile commits afterward). On any git error we return
+ * false → a normal bump (the safe default — never silently skip).
  */
 async function taskDiffIsDocsOnly(
   dir: string,
@@ -428,63 +424,46 @@ async function taskDiffIsDocsOnly(
 }
 
 /**
- * MERGE-TIME LIVING-DOCS BOOKKEEPING: butchr OWNS the CHANGELOG entry + version
- * bump so concurrent tasks stop colliding on CHANGELOG.md / package.json (agents
- * no longer edit either). Called from merge() AFTER a clean rebase (so it edits the
- * up-to-date base content and can't conflict) and BEFORE the fast-forward, in the
- * worktree where the task branch is checked out — the edits are committed onto the
- * task branch so they fast-forward onto the base with the rest of the work.
+ * MERGE-TIME VERSION BUMP (OPT-IN, per-workspace): when a workspace configures a
+ * version file (`versionFile`, relative to the repo root — e.g. `package.json`),
+ * butchr patch-bumps its `"version": "x.y.z"` field on a successful merge so
+ * concurrent tasks stop colliding on it (agents no longer hand-bump). butchr does
+ * NOT write the changelog anymore — that's the task/agent's job, enforced by the
+ * separate CI changelog gate (see tasks.triggerCi).
  *
- *  - CHANGELOG.md: append an `[Unreleased]` entry derived from the task summary +
- *    id. The append is the IDEMPOTENCY key — insertUnreleasedEntry returns null
- *    when this task's marker is already present (a re-merge), in which case we skip
- *    EVERYTHING (incl. the version bump) so nothing is recorded twice.
- *  - package.json: patch-bump the version, UNLESS the task's diff is docs-only.
+ * Called from merge() AFTER a clean rebase (so it edits the up-to-date base content
+ * and can't conflict) and BEFORE the fast-forward, in the worktree where the task
+ * branch is checked out — the edit is committed onto the task branch so it
+ * fast-forwards onto the base with the rest of the work.
  *
- * Everything is best-effort: a repo with no CHANGELOG.md / package.json, or an
- * unparseable one, simply skips that piece — never failing the merge. The summary
- * is whatever the agent passed to request_review (may be empty → a generic line).
+ * GRACEFUL NO-OP when version bumping doesn't apply, so butchr works on ANY repo: an
+ * empty `versionFile` (bump disabled / not configured), a missing file, an
+ * unparseable one / one with no semver `version` field, or a docs-only diff all skip
+ * the bump without failing the merge.
  */
-async function finalizeLivingDocs(
+async function bumpVersionFile(
   dir: string,
   wt: string,
   taskId: string,
   base: string,
-  summary: string | null,
+  versionFile: string,
 ): Promise<void> {
-  let staged = false;
+  const rel = versionFile.trim();
+  if (!rel) return; // version bumping disabled for this workspace
+  // A docs-only diff isn't a new release surface → never bump.
+  if (await taskDiffIsDocsOnly(dir, taskId, base)) return;
 
-  // CHANGELOG first: it carries the idempotency marker. If the entry is already
-  // present (re-merge) we bail entirely so the version can't double-bump either.
-  const changelogPath = join(wt, "CHANGELOG.md");
-  if (existsSync(changelogPath)) {
-    const updated = insertUnreleasedEntry(
-      readFileSync(changelogPath, "utf8"),
-      summary,
-      taskId,
-    );
-    if (updated === null) return; // already recorded → idempotent no-op
-    writeFileSync(changelogPath, updated, "utf8");
-    await run([git, "-C", wt, "add", "CHANGELOG.md"]);
-    staged = true;
-  }
+  const pkgPath = join(wt, rel);
+  if (!existsSync(pkgPath)) return; // no version file in this repo → no-op
+  const bumped = bumpPatchVersion(readFileSync(pkgPath, "utf8"));
+  if (!bumped) return; // no semver version field → nothing to bump
 
-  // Version: patch-bump unless this task's diff is docs-only.
-  const pkgPath = join(wt, "package.json");
-  if (existsSync(pkgPath) && !(await taskDiffIsDocsOnly(dir, taskId, base))) {
-    const bumped = bumpPatchVersion(readFileSync(pkgPath, "utf8"));
-    if (bumped) {
-      writeFileSync(pkgPath, bumped.text, "utf8");
-      await run([git, "-C", wt, "add", "package.json"]);
-      staged = true;
-    }
-  }
-
-  if (staged) {
-    await run([
-      git, "-C", wt, "commit", "-m", `butchr: changelog + version bump (task ${taskId})`,
-    ]);
-  }
+  writeFileSync(pkgPath, bumped.text, "utf8");
+  await run([git, "-C", wt, "add", rel]);
+  await run([
+    git, "-C", wt, "commit", "-m",
+    `butchr: bump version ${bumped.from} → ${bumped.to} (task ${taskId})`,
+  ]);
 }
 
 /**
@@ -502,10 +481,20 @@ async function finalizeLivingDocs(
  * base UNTOUCHED) and return conflict=true with the conflicting file paths so the
  * caller can kick the task back to the agent to resolve and re-submit.
  */
+/**
+ * Merge-time options resolved by the caller (tasks.finalizeMerge):
+ *  - `versionFile` — the per-workspace version file to patch-bump, EMPTY to disable
+ *    the bump (the default — version bumping is opt-in per workspace). See
+ *    bumpVersionFile.
+ */
+export type MergeOptions = {
+  versionFile?: string;
+};
+
 export async function merge(
   dir: string,
   taskId: string,
-  summary: string | null = null,
+  opts: MergeOptions = {},
 ): Promise<MergeResult> {
   const base = await defaultBranch(dir);
   const wt = worktreePath(dir, taskId);
@@ -563,14 +552,16 @@ export async function merge(
     return { ok: false, conflict, message, conflictFiles };
   }
 
-  // Clean rebase — the task branch is now linear atop base. butchr OWNS the
-  // living-docs bookkeeping here (CHANGELOG entry + version bump), committed onto
-  // the task branch so it fast-forwards with the rest of the work. Done AFTER the
-  // rebase so it edits the up-to-date base content and can't collide with a
-  // concurrent task — the whole reason these edits moved off the agents. Idempotent
-  // and best-effort (see finalizeLivingDocs); only when the branch has a worktree.
+  // Clean rebase — the task branch is now linear atop base. If the workspace opted
+  // into a merge-time version bump, butchr patch-bumps the version file here,
+  // committed onto the task branch so it fast-forwards with the rest of the work.
+  // Done AFTER the rebase so it edits the up-to-date base content and can't collide
+  // with a concurrent task — the whole reason the bump moved off the agents. butchr
+  // does NOT write the changelog (the task owns it; the CI gate enforces it).
+  // Best-effort no-op when disabled / no version file (see bumpVersionFile); only
+  // when the branch has a worktree.
   if (existsSync(wt)) {
-    await finalizeLivingDocs(dir, wt, taskId, base, summary);
+    await bumpVersionFile(dir, wt, taskId, base, opts.versionFile ?? "");
   }
 
   // Capture the base tip BEFORE the fast-forward: it's the exclusive lower bound of

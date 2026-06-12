@@ -17,9 +17,9 @@
 //      written back onto a task that left `review` while CI was running.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 let DATA_DIR: string;
 let REPO_ROOT: string;
@@ -30,6 +30,7 @@ const DIR_ID = "ci-gate-dir";
 let tasksMod: typeof import("../src/tasks.ts");
 let dbMod: typeof import("../src/db.ts");
 let taskmdMod: typeof import("../src/taskmd.ts");
+let wsMod: typeof import("../src/workspaces.ts");
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-ci-data-"));
@@ -52,6 +53,7 @@ beforeAll(async () => {
   dbMod = await import("../src/db.ts");
   taskmdMod = await import("../src/taskmd.ts");
   tasksMod = await import("../src/tasks.ts");
+  wsMod = await import("../src/workspaces.ts");
 
   dbMod.db
     .query(
@@ -337,5 +339,77 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
 
     expect(calls.n).toBe(3); // initial + two retries
     expect(row(id).ci_status).toBe("pass");
+  });
+});
+
+// CHANGELOG-UPDATE GATE: an opt-in gate concern layered ON TOP of the build/test
+// command. When the workspace configures a changelog path, a code (non-docs) change
+// whose diff didn't touch that file FAILS the CI gate — enforcing that the task owns
+// its changelog entry now that butchr no longer writes one. These need REAL git
+// worktrees (the gate reads the task's diff via git.diffStat), so they create tasks
+// through tasksMod.createTask rather than the bare-row `seed` helper above. The
+// build/test runner is faked GREEN so the changelog gate is the only failing signal.
+describe("changelog-update gate (config-driven, opt-in)", () => {
+  /** Create a real task + worktree, commit the given files (path→content), and move
+   * it to in_review so triggerCi runs + writes back. */
+  async function seedRealTask(
+    id_label: string,
+    files: Record<string, string>,
+  ): Promise<string> {
+    const view = await tasksMod.createTask(DIR_ID, `Work ${id_label}`);
+    const id = view.id;
+    const wt = join(REPO_ROOT, id);
+    const wg = (args: string[]) =>
+      execFileSync("git", ["-C", wt, ...args], { stdio: "ignore" });
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = join(wt, rel);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content);
+    }
+    wg(["add", "-A"]);
+    wg(["commit", "-q", "-m", `work ${id_label}`]);
+    dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(id);
+    taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
+    return id;
+  }
+
+  beforeAll(() => {
+    // Build/test always green so only the changelog gate can fail.
+    tasksMod.setCiRunner(async () => ({ status: "pass", label: "gate passed", detail: "" }));
+    wsMod.updateWorkspaceChangelogPath(DIR_ID, "CHANGELOG.md");
+  });
+  afterAll(() => {
+    wsMod.updateWorkspaceChangelogPath(DIR_ID, null); // clear the override
+  });
+
+  test("a code change WITHOUT a changelog update FAILS the gate", async () => {
+    const id = await seedRealTask("no-changelog", { "src/feature.ts": "export const a = 1;\n" });
+    await tasksMod.triggerCi(id);
+    const r = row(id);
+    expect(r.ci_status).toBe("fail");
+    expect(r.ci_summary.split("\n")[0]).toBe("changelog not updated");
+  });
+
+  test("a code change WITH a changelog update PASSES the gate", async () => {
+    const id = await seedRealTask("with-changelog", {
+      "src/feature.ts": "export const b = 2;\n",
+      "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n- did a thing\n",
+    });
+    await tasksMod.triggerCi(id);
+    expect(row(id).ci_status).toBe("pass");
+  });
+
+  test("a docs-only change is exempt (passes without a changelog entry)", async () => {
+    const id = await seedRealTask("docs-only", { "README.md": "# updated docs\n" });
+    await tasksMod.triggerCi(id);
+    expect(row(id).ci_status).toBe("pass");
+  });
+
+  test("with the gate disabled (path cleared), a code-only change passes", async () => {
+    wsMod.updateWorkspaceChangelogPath(DIR_ID, ""); // disable for this workspace
+    const id = await seedRealTask("gate-off", { "src/feature.ts": "export const c = 3;\n" });
+    await tasksMod.triggerCi(id);
+    expect(row(id).ci_status).toBe("pass");
+    wsMod.updateWorkspaceChangelogPath(DIR_ID, "CHANGELOG.md"); // restore
   });
 });
