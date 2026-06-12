@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  status          TEXT NOT NULL,            -- CANONICAL 12-state model: idea | spec_review | blocked | needs_info | inactive | in_progress | in_review | rolling_back | rolled_back | merged | failed | aborted (see TaskStatus / STATE_META)
+  status          TEXT NOT NULL,            -- CANONICAL 12-state model: idea | spec_review | blocked | needs_info | inactive | in_progress | in_review | merged | rolling_back | rolled_back | failed | aborted (see TaskStatus / STATE_META)
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
@@ -666,12 +666,13 @@ export type TaskKind = "task" | "rollback";
 //                                       bounces back to inactive for the same agent to
 //                                       resolve in-context), or requests changes →
 //                                       resume the workspace agent (→ inactive).
+//   merged       idle (terminal)      — landed on the default branch.
 //   rolling_back idle (mechanical)     — a ROLLBACK task (built from the `rollback`
 //                                       template) whose revert is being mechanically
 //                                       merged (no agent runs); lands as rolled_back.
+//                                       Happens AFTER something is merged.
 //   rolled_back  idle (terminal)      — a rollback task's revert landed on the default
 //                                       branch (the rollback equivalent of `merged`).
-//   merged       idle (terminal)      — landed on the default branch.
 //   failed       idle (terminal)      — an EXECUTION/dispatch failure: a dispatch
 //                                       give-up, or a post-merge verify revert.
 //                                       (NOT operator-initiated — see `aborted`.)
@@ -693,9 +694,9 @@ export type TaskStatus =
   | "inactive"
   | "in_progress"
   | "in_review"
+  | "merged"
   | "rolling_back"
   | "rolled_back"
-  | "merged"
   | "failed"
   | "aborted";
 
@@ -721,9 +722,9 @@ export const STATE_META: Record<TaskStatus, StateMeta> = {
   inactive: { kind: "agent", agentType: "workspace-agent" },
   in_progress: { kind: "agent", agentType: "workspace-agent" },
   in_review: { kind: "feedback" },
+  merged: { kind: "idle" },
   rolling_back: { kind: "idle" },
   rolled_back: { kind: "idle" },
-  merged: { kind: "idle" },
   failed: { kind: "idle" },
   aborted: { kind: "idle" },
 };
@@ -737,9 +738,9 @@ export const ALL_STATUSES: TaskStatus[] = [
   "inactive",
   "in_progress",
   "in_review",
+  "merged",
   "rolling_back",
   "rolled_back",
-  "merged",
   "failed",
   "aborted",
 ];

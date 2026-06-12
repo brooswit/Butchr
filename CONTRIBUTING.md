@@ -87,9 +87,9 @@ something mechanical):
 | `inactive` | agent (workspace) | **READY** — queued for the dispatcher, no live agent yet |
 | `in_progress` | agent (workspace) | a **LIVE** workspace agent is building the code (the orthogonal `idle` flag marks one that has gone quiet → surfaced as the `idle-handling` feedback condition; see §7) |
 | `in_review` | feedback | a diff awaiting approval → mechanical merge, or request-changes → `inactive` |
-| `rolling_back` | idle | a rollback task's revert is being mechanically merged |
-| `rolled_back` | idle (terminal) | a rollback task's revert landed on the default branch |
 | `merged` | idle (terminal) | landed on the default branch |
+| `rolling_back` | idle | a rollback task's revert is being mechanically merged (a rollback happens **after** a merge) |
+| `rolled_back` | idle (terminal) | a rollback task's revert landed on the default branch |
 | `failed` | idle (terminal) | an **execution/dispatch failure** (give-up or post-merge revert) |
 | `aborted` | idle (terminal) | a **deliberate operator cancel** |
 

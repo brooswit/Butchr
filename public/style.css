@@ -20,7 +20,7 @@
 
   /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible.
      CANONICAL 12-STATE MODEL: idea | spec_review | blocked | needs_info | inactive |
-     in_progress | in_review | rolling_back | rolled_back | merged | failed | aborted
+     in_progress | in_review | merged | rolling_back | rolled_back | failed | aborted
      (+ pseudo-state `idle` for a quiet agent). Feedback states (spec_review / in_review /
      needs_info) use amber/orange — they need attention. Agent states (idea / inactive /
      in_progress) use blue/indigo — working. Terminal: merged = green, failed = red,
@@ -33,9 +33,9 @@
   --in_progress: #425eff;  /* blue-500 (agent building code) */
   --idle: #0e7490;         /* cyan-700 (in_progress but quiet) */
   --in_review: #a35901;    /* brand-orange-dark (feedback — operator reviews diff) */
-  --rolling_back: #9a3412; /* orange-800 (a rollback task's revert merging) */
-  --rolled_back: #7c5e3b;  /* brown (terminal — a rollback's revert landed) */
   --merged: #006933;       /* green-600 (success) */
+  --rolling_back: #9a3412; /* orange-800 (a rollback task's revert merging — after merge) */
+  --rolled_back: #7c5e3b;  /* brown (terminal — a rollback's revert landed) */
   --failed: #8a1322;       /* red-800 (terminal — execution/dispatch/verify failure) */
   --aborted: #545a62;      /* gray-600 (neutral — deliberate operator cancel) */
   /* Legacy aliases kept for backward-compat with any code paths still referencing them */
@@ -86,9 +86,9 @@ html[data-theme="dark"] {
   --in_progress: #425eff;  /* blue-500 */
   --idle: #22a7c2;         /* cyan, lifted for dark surfaces */
   --in_review: #c47a0a;    /* orange, lifted for dark */
-  --rolling_back: #c2410c; /* orange-700, lifted for dark (revert merging) */
-  --rolled_back: #a3814f;  /* brown, lifted for dark (terminal revert) */
   --merged: #006933;
+  --rolling_back: #c2410c; /* orange-700, lifted for dark (revert merging — after merge) */
+  --rolled_back: #a3814f;  /* brown, lifted for dark (terminal revert) */
   --failed: #c0263a;       /* red, lifted for dark surfaces */
   --aborted: #545a62;
   /* Legacy */
@@ -275,9 +275,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.in_progress { background: var(--in_progress); }
 .chip.idle { background: var(--idle); }
 .chip.in_review { background: var(--in_review); }
+.chip.merged { background: var(--merged); }
 .chip.rolling_back { background: var(--rolling_back); }
 .chip.rolled_back { background: var(--rolled_back); }
-.chip.merged { background: var(--merged); }
 .chip.failed { background: var(--failed); }
 .chip.aborted { background: var(--aborted); }
 /* Legacy status chips — kept for audit timeline backward-compat */
@@ -519,9 +519,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tl-dot.in_progress { background: var(--in_progress); }
 .tl-dot.idle        { background: var(--idle); }
 .tl-dot.in_review   { background: var(--in_review); }
+.tl-dot.merged      { background: var(--merged); }
 .tl-dot.rolling_back { background: var(--rolling_back); }
 .tl-dot.rolled_back { background: var(--rolled_back); }
-.tl-dot.merged      { background: var(--merged); }
 .tl-dot.failed      { background: var(--failed); }
 .tl-dot.aborted     { background: var(--aborted); }
 /* Legacy timeline dots — kept for audit-log backward-compat */
@@ -674,9 +674,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-node.in_progress .tg-rect { fill: var(--in_progress); }
 .tg-node.idle .tg-rect        { fill: var(--idle); }
 .tg-node.in_review .tg-rect   { fill: var(--in_review); }
+.tg-node.merged .tg-rect      { fill: var(--merged); }
 .tg-node.rolling_back .tg-rect { fill: var(--rolling_back); }
 .tg-node.rolled_back .tg-rect { fill: var(--rolled_back); }
-.tg-node.merged .tg-rect      { fill: var(--merged); }
 .tg-node.failed .tg-rect      { fill: var(--failed); }
 .tg-node.aborted .tg-rect     { fill: var(--aborted); }
 /* Legacy graph nodes — kept for backward-compat */
@@ -1130,9 +1130,9 @@ small.muted { font-size: 12px; }
 .sb-fill.in_progress { background: var(--in_progress); }
 .sb-fill.idle        { background: var(--idle); }
 .sb-fill.in_review   { background: var(--in_review); }
+.sb-fill.merged      { background: var(--merged); }
 .sb-fill.rolling_back { background: var(--rolling_back); }
 .sb-fill.rolled_back { background: var(--rolled_back); }
-.sb-fill.merged      { background: var(--merged); }
 .sb-fill.failed      { background: var(--failed); }
 .sb-fill.aborted     { background: var(--aborted); }
 /* Legacy sb-fill — kept for metrics view backward-compat with old status values */

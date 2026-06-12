@@ -84,9 +84,9 @@ const STATE_KIND = {
   inactive: "agent",
   in_progress: "agent",
   in_review: "feedback",
+  merged: "idle",
   rolling_back: "idle",
   rolled_back: "idle",
-  merged: "idle",
   failed: "idle",
   aborted: "idle",
 };
@@ -758,7 +758,7 @@ async function renderDashboard() {
 
 function dirCard(d) {
   const c = d.counts || {};
-  const pills = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "rolling_back", "rolled_back", "merged", "failed", "aborted"]
+  const pills = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted"]
     .map((s) => {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
         : s === "inactive" && c[s] ? "count-pill has-inactive"
@@ -1354,7 +1354,7 @@ function historyOpen() {
 // re-render render() performs on every SSE event without being torn down. The
 // statuses here are the *effective* statuses (effStatus), so `idle` and
 // `running` filter independently, as do all terminal states.
-const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "rolling_back", "rolled_back", "merged", "failed", "aborted"];
+const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress", "idle", "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted"];
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server

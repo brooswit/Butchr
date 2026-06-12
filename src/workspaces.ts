@@ -168,7 +168,7 @@ function counts(workspaceId: string): Record<string, number> {
   // pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
   const out: Record<string, number> = {
     idea: 0, spec_review: 0, blocked: 0, needs_info: 0, inactive: 0, in_progress: 0, idle: 0,
-    in_review: 0, rolling_back: 0, rolled_back: 0, merged: 0, failed: 0, aborted: 0,
+    in_review: 0, merged: 0, rolling_back: 0, rolled_back: 0, failed: 0, aborted: 0,
   };
   for (const r of rows) out[r.status] = r.n;
   // `idle` is a flag on a LIVE build agent (in_progress with a pane), not a status —
