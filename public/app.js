@@ -797,9 +797,16 @@ async function renderWorkspace(id) {
   const launch = el("div", { class: "row between", style: "margin-top:18px" });
   launch.appendChild(el("small", { class: "muted" },
     `Tasks run concurrently, each in its own worktree. ${queueLine(tasks)}`));
+  // The two creation entry points sit together on the right: the full New-task form,
+  // and the lightweight "Add idea" path (jot a brief; butchr specs it unattended).
+  const launchBtns = el("div", { class: "row", style: "gap:8px" });
+  const ideaBtn = el("button", { class: "btn ghost", id: "add-idea" }, "Add idea");
+  ideaBtn.addEventListener("click", () => openAddIdeaModal(id));
+  launchBtns.appendChild(ideaBtn);
   const newBtn = el("button", { class: "btn", id: "new-task" }, "New task");
   newBtn.addEventListener("click", () => openNewTaskModal(id));
-  launch.appendChild(newBtn);
+  launchBtns.appendChild(newBtn);
+  launch.appendChild(launchBtns);
   wrap.appendChild(launch);
 
   // List / Graph view toggle. The toggle bar sits outside the body region so it
@@ -1134,6 +1141,48 @@ function openNewTaskModal(workspaceId) {
       showErr(e.message || "could not create task");
       create.disabled = false; cancel.disabled = false;
     }
+  });
+}
+
+// ---------- add-idea modal ----------
+// The UNATTENDED idea path: jot a one-line brief and let butchr spec it. Deliberately
+// minimal — just a brief + Submit — in contrast to the full New-task modal. POSTs
+// { prompt: <brief>, idea: true } to the existing create endpoint; that task's first
+// dispatch runs the CTO-fork spec generator, which turns the brief into a full spec
+// and parks it at spec_review for approval. The workspace is already scoped here, so
+// no selector is needed; the new idea task surfaces via the SSE-driven re-render.
+function openAddIdeaModal(workspaceId) {
+  const body = el("div", { class: "m-body" });
+  body.innerHTML = `
+    <label class="field" style="margin-bottom:6px">
+      <span class="lbl">idea — a one-line brief; butchr drafts the full spec automatically and parks it for your approval</span>
+      <textarea id="ai-brief" placeholder="Describe the idea in a sentence or two…"></textarea>
+    </label>
+    <small class="hint muted">No prompt or expansion needed — record the idea and butchr's spec generator turns it into a reviewable spec.</small>`;
+  const briefEl = body.querySelector("#ai-brief");
+
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  const submit = el("button", { class: "btn" }, "Submit idea");
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(submit);
+
+  const { close } = openModal({ title: "Add idea", body, footer: foot });
+  cancel.addEventListener("click", close);
+  briefEl.focus();
+
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
+
+  submit.addEventListener("click", () => {
+    const prompt = briefEl.value.trim();
+    if (!prompt) { showErr("Describe the idea first."); briefEl.focus(); return; }
+    showErr("");
+    // Route through action(): it disables the button, toasts on success/failure, and
+    // re-enables on error so the operator can retry. On success we close + re-render.
+    action(submit, () => api("POST", "/workspaces/" + workspaceId + "/tasks", { prompt, idea: true }),
+      { success: "idea created", onDone: () => { close(); render(); } });
   });
 }
 
