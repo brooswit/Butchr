@@ -34,11 +34,18 @@ COMMANDS
       [--priority N]                Dispatch priority (higher = sooner; default 0).
       [--plan]                      Plan-preview gate: the agent proposes a plan and
                                     pauses for your approval before writing code.
+      [--bump patch|minor|major]    Declared semver bump applied at merge in a
+                                    release_mode workspace (default patch; inert
+                                    otherwise). A major bump needs confirm-major x2.
       [--template <name>]           Create from a template instead of -m; fill its
       [--var key=val ...]             {{placeholders}} with repeatable --var pairs.
   templates                       List the built-in task templates + placeholders.
   show <id>                       Task detail: status, ci, tags, summary, notes.
   approve <id>                    Approve a task in review (merges its branch).
+  confirm-major <id>              Confirm a release_mode major-bump task's merge. The
+                                    human DOUBLE-CONFIRM: run it TWICE consecutively
+                                    (streak 0→1→2) to land the merge; any other action
+                                    resets the streak. Approve alone only PARKS a major.
   reject <id> -m <note>           Send a reviewed task back for rework with a note.
   answer <id> -m <text>           Answer a task awaiting input (resumes the agent).
   spec <id> [-m <text>]           Submit the spec for an idea task (-m, or pipe stdin).
@@ -66,7 +73,7 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--workspace", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set"]);
+const VALUE_FLAGS = new Set(["--workspace", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set", "--bump"]);
 
 // Boolean flags: present → true, consume no following token.
 const BOOLEAN_FLAGS = new Set(["--merge", "--clear", "--plan"]);
@@ -367,6 +374,11 @@ async function cmdLs(flags) {
 async function cmdNew(positionals, flags) {
   const dir = positionals[0];
   if (!dir) fail("new: missing <workspace> (workspace id or path)");
+  // Validate the cheap flag args (the declared bump level) BEFORE any network call, so a
+  // typo'd --bump fails fast without a round-trip. Inert outside a release_mode workspace.
+  if (flags.bump !== undefined && !["patch", "minor", "major"].includes(flags.bump)) {
+    fail(`new: --bump must be 'patch', 'minor', or 'major' (got "${flags.bump}")`);
+  }
   const dirId = await resolveWorkspaceId(dir);
   const blockedBy = parseIdList(flags["blocked-by"]);
   const tags = parseIdList(flags.tag);
@@ -376,6 +388,10 @@ async function cmdNew(positionals, flags) {
   // Optional plan-preview gate — the agent proposes a plan and pauses for operator
   // approval before writing any code (see the propose_plan MCP tool).
   if (flags.plan) reqBody.plan_preview = true;
+  // Optional declared semver bump (validated above) — applied at merge in a release_mode
+  // workspace (inert otherwise). Omitted unless given so the server defaults it to 'patch'
+  // and a non-release_mode create is byte-identical. A major bump still needs confirm-major ×2.
+  if (flags.bump !== undefined) reqBody.version_bump = flags.bump;
   if (flags.template) {
     // Create FROM a built-in template: the server renders its body with the given
     // --var key=value pairs substituted into the {{placeholders}}. Any unset
@@ -447,6 +463,29 @@ async function cmdApprove(positionals, flags) {
   } else {
     const task = r.task ?? r;
     text = `approved ${id} (${task.status})\n`;
+  }
+  return emit(flags, r, text);
+}
+
+// Confirm a release_mode major-bump task's merge — the human DOUBLE-CONFIRM ritual. Must
+// be run TWICE CONSECUTIVELY (streak 0→1→2); the second lands the merge. Mirrors approve's
+// response shape: {task, awaitingMajorConfirm} while still parked, the bare merged task
+// view (carrying released_version) once it lands, or the conflict/revert flags.
+async function cmdConfirmMajor(positionals, flags) {
+  const id = requireId(positionals, "confirm-major");
+  const r = await api("POST", `/api/tasks/${encodeURIComponent(id)}/confirm-major`, {});
+  let text;
+  if (r.conflictSentBack) {
+    text = `${id}: merge conflict — sent back to the agent for resolution\n`;
+  } else if (r.revertedOnRed) {
+    text = `${id}: merged then AUTO-REVERTED (post-merge verify failed) — now flagged\n`;
+  } else if (r.awaitingMajorConfirm) {
+    const n = r.task?.major_confirm_count ?? 1;
+    text = `${id}: major-version confirmation ${n}/2 — run confirm-major once more (consecutively) to merge\n`;
+  } else {
+    const task = r.task ?? r;
+    const v = task.released_version ? ` (v${task.released_version})` : "";
+    text = `confirmed ${id} — merged${v} (${task.status})\n`;
   }
   return emit(flags, r, text);
 }
@@ -632,6 +671,8 @@ async function main() {
       return cmdShow(positionals, flags);
     case "approve":
       return cmdApprove(positionals, flags);
+    case "confirm-major":
+      return cmdConfirmMajor(positionals, flags);
     case "reject":
       return cmdReject(positionals, flags);
     case "answer":

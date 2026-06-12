@@ -198,7 +198,11 @@ function taskChips(t, { plan = false, kind = false, responder = false } = {}) {
     + (t.conflict ? ' <span class="chip aborted">conflict</span>' : "")
     // A non-zero dispatch priority jumps the queue — flag it so its order is visible
     // (priority 0 is the silent FIFO default, shown on no card).
-    + (Number(t.priority) ? ` <span class="chip priority" title="dispatch priority — higher runs sooner">prio ${esc(String(t.priority))}</span>` : "");
+    + (Number(t.priority) ? ` <span class="chip priority" title="dispatch priority — higher runs sooner">prio ${esc(String(t.priority))}</span>` : "")
+    // The version butchr stamped at merge in a release_mode workspace (released_version
+    // on the task view; NULL otherwise). Rendered once here so the merged version shows
+    // wherever the badge cluster does — detail header, table row, board card, history.
+    + (t.released_version ? ` <span class="chip released" title="version butchr stamped at merge">v${esc(t.released_version)}</span>` : "");
 }
 // Renders a task's organizational LABELS as a row of neutral chips (distinct from
 // the colored status chips), as an HTML string. Returns "" when the task has no
@@ -1089,6 +1093,14 @@ function openNewTaskModal(workspaceId) {
       <span class="lbl">prompt</span>
       <textarea id="nt-prompt" placeholder="Describe the work for the agent — or type an idea above and Expand it…"></textarea>
     </label>
+    <label class="field" id="nt-bump-field" style="display:none">
+      <span class="lbl">version bump — this workspace is in versioned-releases mode; the merge bumps the version by this level (a major needs a human double-confirm)</span>
+      <select id="nt-bump">
+        <option value="patch">patch (default) — backwards-compatible fix</option>
+        <option value="minor">minor — backwards-compatible feature</option>
+        <option value="major">major — breaking change (parks for a double-confirm)</option>
+      </select>
+    </label>
     <div class="adv" id="nt-adv">
       <button type="button" class="adv-head" id="nt-adv-head"><span class="caret">▸</span><span>Advanced</span></button>
       <div class="adv-body" id="nt-adv-body">
@@ -1151,8 +1163,21 @@ function openNewTaskModal(workspaceId) {
   const ideaEl = body.querySelector("#nt-idea");
   const tplEl = body.querySelector("#nt-template");
   const tplHintEl = body.querySelector("#nt-tpl-hint");
+  const bumpFieldEl = body.querySelector("#nt-bump-field");
+  const bumpEl = body.querySelector("#nt-bump");
   // The idea box is the primary low-effort entry point, so start focus there.
   briefEl.focus();
+
+  // VERSIONED-RELEASES: the bump-size selector is only relevant when the target
+  // workspace is in release_mode, so reveal it solely off the workspace view (no
+  // hardcoded id). Fetch the workspace after mount — like responderPanel does — and
+  // un-hide the field only when release_mode is on. While off it stays hidden and the
+  // create body never carries version_bump (see below), so non-release_mode creates are
+  // byte-identical. Best-effort: a fetch failure just leaves the field hidden.
+  let releaseMode = false;
+  api("GET", "/workspaces/" + workspaceId)
+    .then((w) => { releaseMode = !!(w && w.release_mode); if (releaseMode) bumpFieldEl.style.display = ""; })
+    .catch(() => { /* leave the bump field hidden on failure */ });
 
   function showBriefHint(msg, isErr) {
     briefHintEl.textContent = msg || "";
@@ -1249,9 +1274,15 @@ function openNewTaskModal(workspaceId) {
       if (!Number.isInteger(priority)) { showErr("Priority must be an integer."); priorityEl.focus(); return; }
     }
     showErr("");
+    const reqBody = { prompt, blocked_by, model, tags, priority, plan_preview, idea };
+    // VERSIONED-RELEASES: carry version_bump ONLY when the bump selector is shown
+    // (release_mode on) and this isn't an idea task — so a non-release_mode create
+    // request is byte-identical to before. The build task declares the bump; a major
+    // is later gated behind the human double-confirm at review.
+    if (releaseMode && !idea) reqBody.version_bump = bumpEl.value;
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/workspaces/" + workspaceId + "/tasks", { prompt, blocked_by, model, tags, priority, plan_preview, idea });
+      await api("POST", "/workspaces/" + workspaceId + "/tasks", reqBody);
       toast(idea ? "idea created" : plan_preview ? "plan-preview task created" : "task created");
       close();
       render();
@@ -2666,6 +2697,48 @@ async function renderTask(id) {
     const confBadge = conformanceBadge(t);
     if (confBadge) wrap.appendChild(confBadge);
 
+    // MAJOR-VERSION DOUBLE-CONFIRM banner. In a release_mode workspace a major-bump task
+    // does NOT merge on Approve — Approve PARKS it. Landing it is the HUMAN's deliberate
+    // double-confirm: two CONSECUTIVE Confirm clicks (streak 0→1→2); ANY other action
+    // (Approve, Request change, re-review, …) resets the streak to 0. Shown only off the
+    // workspace view's release_mode (no hardcoded id) + the task's declared major bump, so
+    // it's invisible everywhere else. The streak count comes straight off the task view.
+    if (dir && dir.release_mode && t.version_bump === "major") {
+      const n = t.major_confirm_count || 0;
+      const banner = el("div", { class: "panel major-confirm-panel" });
+      banner.innerHTML = `
+        <h2 style="margin-top:0">Awaiting major-version confirmation (${esc(String(n))}/2)</h2>
+        <p class="muted" style="margin:0 0 10px">This task declares a <strong>major</strong> version bump, so merging it is a deliberate human double-confirm — <strong>Approve does not merge it</strong>. Click <strong>Confirm major version</strong> <strong>twice in a row</strong> (streak ${esc(String(n))}/2); the second consecutive confirm lands the merge. <strong>Any other action</strong> (Approve, Request change, re-review, re-declaring the bump) <strong>resets the streak to 0</strong>.</p>
+        <div class="row">
+          <button class="btn danger" id="confirm-major">Confirm major version (${esc(String(n))}/2)</button>
+          <small class="muted">Two consecutive confirms required — this is the human gate on a breaking release.</small>
+        </div>`;
+      banner.querySelector("#confirm-major").addEventListener("click", (ev) => {
+        let merged = false;
+        action(ev.target, async () => {
+          const r = await api("POST", "/tasks/" + id + "/confirm-major");
+          if (r && r.conflictSentBack) {
+            toast("Merge conflict — sent back to the agent to resolve");
+            merged = true;
+          } else if (r && r.revertedOnRed) {
+            toast("Merged but verify FAILED — auto-reverted off main", true);
+            merged = true;
+          } else if (r && r.awaitingMajorConfirm) {
+            const c = (r.task && r.task.major_confirm_count) || 0;
+            toast(`Major-version confirmation ${c}/2 — one more consecutive confirm to merge`);
+          } else {
+            // Streak reached 2 → merged. The returned task view carries released_version.
+            merged = true;
+            const v = r && r.released_version;
+            toast(`Confirmed ✓ — merged${v ? ` (v${v})` : ""}`);
+          }
+          // On a still-awaiting confirm, re-render IN PLACE so the operator sees the
+          // streak tick up and can click the second confirm; otherwise leave for the list.
+        }, { onDone: () => (merged ? backToWorkspace(t.workspace_id) : render()) });
+      });
+      wrap.appendChild(banner);
+    }
+
     wrap.appendChild(el("h2", {}, "Diff vs main"));
     const diffBox = el("div", { class: "diffview" }, [el("div", { class: "meta" }, "loading diff…")]);
     wrap.appendChild(diffBox);
@@ -2701,6 +2774,7 @@ async function renderTask(id) {
         const why = (t.conformance_summary || "").trim();
         if (!confirm(`Conformance concern${why ? `: ${why}` : ""}. Approve and merge anyway?`)) return;
       }
+      let parked = false;
       action(ev.target, async () => {
         const r = await api("POST", "/tasks/" + id + "/approve");
         // A merge conflict isn't an error — it's sent back to the live agent to
@@ -2709,10 +2783,17 @@ async function renderTask(id) {
           toast("Merge conflict — sent back to the agent to resolve");
         } else if (r && r.revertedOnRed) {
           toast("Merged but verify FAILED — auto-reverted off main", true);
+        } else if (r && r.awaitingMajorConfirm) {
+          // release_mode major bump: Approve PARKS (it does NOT merge). Surface the streak
+          // and stay on the task so the operator runs the deliberate double-confirm above.
+          const n = (r.task && r.task.major_confirm_count) || 0;
+          parked = true;
+          toast(`Parked — awaiting major-version confirmation (${n}/2). Use “Confirm major version” above.`);
         } else {
           toast("approved ✓ — merged, agent wrapping up");
         }
-      }, { onDone: () => backToWorkspace(t.workspace_id) });
+        // Parked: re-render IN PLACE (the major-confirm banner is here). Otherwise leave.
+      }, { onDone: () => (parked ? render() : backToWorkspace(t.workspace_id)) });
     });
     controls.querySelector("#reject").addEventListener("click", (ev) => {
       // The note sent to the agent is the freeform text plus any inline comments,

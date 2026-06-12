@@ -34,6 +34,7 @@ function runCli(args: string[]): { stdout: string; stderr: string; code: number 
 const ID_COMMANDS = [
   "show",
   "approve",
+  "confirm-major",
   "reject",
   "answer",
   "spec",
@@ -55,6 +56,31 @@ test("--help renders usage and exits 0 (script parses + runs)", () => {
   const { stdout, code } = runCli(["--help"]);
   expect(code).toBe(0);
   expect(stdout).toContain("operator CLI for the butchr REST API");
+  // The release_mode surfaces are advertised in usage.
+  expect(stdout).toContain("--bump patch|minor|major");
+  expect(stdout).toContain("confirm-major <id>");
+});
+
+// `new --bump` is validated BEFORE any network call, so a bad level fails fast with the
+// standard message and exit 1 (no server needed). This also proves --bump is a recognized
+// value-flag rather than an "unknown flag" parse error.
+test("new --bump rejects an invalid level offline (validated pre-network)", () => {
+  const { stderr, code } = runCli(["new", "some-ws", "-m", "x", "--bump", "bananas"]);
+  expect(code).toBe(1);
+  expect(stderr.trim()).toBe(`butchr: new: --bump must be 'patch', 'minor', or 'major' (got "bananas")`);
+});
+
+// A VALID --bump level parses + validates fine, then the command proceeds PAST the flag
+// check to workspace resolution (the network). Whatever it fails on there — an unreachable
+// server, or an unknown workspace if one happens to be running — it is NOT the --bump
+// validation error, proving the valid flag was accepted (and recognized as a value-flag,
+// not an "unknown flag" parse error). Environment-robust: makes no assumption about whether
+// a butchr server is up.
+test("new --bump major is accepted by parsing (fails later, not on the flag)", () => {
+  const { stderr, code } = runCli(["new", "some-ws-that-does-not-exist", "-m", "x", "--bump", "major"]);
+  expect(code).toBe(1);
+  expect(stderr).not.toContain("--bump must be");
+  expect(stderr).not.toContain("unknown flag");
 });
 
 test("ciBadge is renamed to ciCell in bin/butchr (and app.js is untouched)", () => {

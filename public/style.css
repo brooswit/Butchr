@@ -334,6 +334,18 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* A non-zero dispatch priority — shown only when set (priority 0 is the silent FIFO
    default). Reuse the in_progress hue so it reads as an "acts sooner" signal. */
 .chip.priority { background: var(--in_progress); }
+/* The version butchr stamped at merge in a release_mode workspace (shown only when
+   released_version is set). A neutral outlined "vX.Y.Z" pill — like `tag`, it reads as
+   metadata, not a colored status. */
+.chip.released {
+  background: var(--panel-2);
+  color: var(--accent-2);
+  border: 1px solid var(--border);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-family: var(--mono);
+}
 /* FW-3 AWAITING-WHO emphasis (the resolved pending_responder for a feedback task's
    current step). `awaiting-you` (user) is a FILLED, attention-grabbing pill — this step
    needs a human; `awaiting-cto` is a muted outlined pill — the CTO agent handles it
@@ -816,6 +828,10 @@ label.field .hint { display: block; font-size: 12px; color: var(--muted); margin
 /* failed-dispatch panel on the task detail view — a red accent edge to flag it */
 .panel.failed-panel { border-left: 3px solid var(--failed); }
 .panel.failed-panel h2 { color: var(--failed); }
+/* major-version double-confirm banner (release_mode + major bump in_review) — a red
+   accent edge like failed-panel, flagging the deliberate human gate before a breaking merge */
+.panel.major-confirm-panel { border-left: 3px solid var(--aborted); }
+.panel.major-confirm-panel h2 { color: var(--aborted); }
 
 .meta-grid { display: grid; grid-template-columns: 120px 1fr; gap: 6px 16px; font-size: 13px; }
 .meta-grid .k { color: var(--muted); }

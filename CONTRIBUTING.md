@@ -761,6 +761,31 @@ inline where their columns are declared in `src/db.ts`:
 |---------|----------------|--------------|
 | `version_file` | `BUTCHR_VERSION_FILE` (empty) | The version file butchr **patch-bumps at merge** (e.g. `package.json`). Empty/absent = no bump; a docs-only diff and a missing/parseless file are graceful no-ops. |
 | `changelog_path` | `BUTCHR_CHANGELOG_PATH` (empty) | The changelog file the **CI gate requires a code change to update** (e.g. `CHANGELOG.md`). Empty = gate off; docs-only/empty diffs are exempt. |
+| `release_mode` | OFF | **Versioned-releases mode** (see ["Versioned releases"](#versioned-releases-per-workspace) below). When on, EVERY merge bumps `version_file` by the task's declared level and stamps that task's changelog entry with the assigned version + date; the changelog gate goes strict. Off = today's opt-in patch-bump behavior. |
+
+### Versioned releases (per-workspace)
+
+A workspace can opt into **versioned-releases mode** (`release_mode`, OFF by default —
+set like `gate_cmd`, at register time or via `PATCH /api/workspaces/:id`). It changes how
+butchr treats versions and the changelog for **that workspace only** (every surface keys
+off the `release_mode` column — no workspace id is ever hardcoded):
+
+- **Every change ships a version.** On each successful merge butchr bumps the workspace's
+  `version_file` *and* relocates the changelog's `[Unreleased]` body into a fresh
+  `[X.Y.Z] - YYYY-MM-DD` section — so each merge owns its heading (no more `[Unreleased]`
+  merge cascades). The changelog gate is **strict**: every non-empty diff, *including
+  docs-only*, must carry an entry, and the docs-only bump-skip is dropped.
+- **The bump size is task-declared** (`patch` default | `minor` | `major`): set at creation
+  (`butchr new … --bump <level>`, or the bump selector in the New-task modal) or any time
+  before merge (`POST /api/tasks/:id/version_bump`). The assigned version lands on the
+  task's `released_version` (shown as a `vX.Y.Z` chip on merged tasks in the webapp).
+- **A `major` bump needs a human double-confirm.** Approve does **not** merge a major task —
+  it **parks** it. Landing it takes **two consecutive** confirms (`butchr confirm-major <id>`
+  twice, or the "Confirm major version" button on the task; streak `0→1→2`); **any** other
+  action (approve, request-changes, re-review, re-declaring the bump) **resets the streak to
+  0**. Auto-merge never auto-confirms — the major gate is always the human.
+- **The version is butchr's, assigned at merge** (inside the serialized merge lock, after
+  the rebase) — you never hand-edit the version file or the version heading.
 
 ### Step responders (per-workspace)
 
