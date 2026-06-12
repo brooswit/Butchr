@@ -2141,8 +2141,8 @@ function ciTail(s: string): string {
 
 /**
  * The real CI runner: run the directory's EFFECTIVE gate command (`gateCmd` — its
- * own `gate_cmd` or the default `config.verifyCmd`, e.g. butchr's own
- * `bun build … && bun test`) as a single `bash -lc` invocation IN THE TASK'S
+ * own `gate_cmd` or the global default `config.verifyCmd`, which is EMPTY unless set
+ * via BUTCHR_VERIFY_CMD) as a single `bash -lc` invocation IN THE TASK'S
  * WORKTREE, through the shared gate runner (src/gate.ts) so the CI gate and the
  * post-merge verify gate share one bounded spawn — the CI gate inherits the same
  * `config.verifyTimeoutMs` kill-timer. A non-zero exit (or a timeout) is a FAIL with

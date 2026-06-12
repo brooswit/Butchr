@@ -187,8 +187,8 @@ export function listDirectories(): DirectoryView[] {
 /**
  * The EFFECTIVE build/test gate command for a directory: its own `gate_cmd` if it
  * set one (a non-null value, including the empty string which DISABLES the gate),
- * else the global default `config.verifyCmd` (still butchr's own command by
- * default). This is the single resolution point for BOTH gates — the in-worktree CI
+ * else the global default `config.verifyCmd` (EMPTY by default — no gate — unless
+ * set via BUTCHR_VERIFY_CMD). This is the single resolution point for BOTH gates — the in-worktree CI
  * gate (tasks.triggerCi) and the post-merge verify gate (verify.verifyDefaultBranch)
  * — so a directory's command can never diverge between them. An unknown id falls
  * back to the default. Pure read of the directory row + config.

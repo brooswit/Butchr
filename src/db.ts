@@ -126,15 +126,14 @@ function ensureColumn(table: string, column: string, decl: string): void {
 
 // PER-DIRECTORY BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
 // worktree) and the post-merge verify gate (repo root) both need a build/test
-// command to run. Historically both were hardcoded to butchr's OWN commands
-// (`bun build … && bun test`). This column lets each registered directory carry its
-// OWN gate command so other projects (e.g. a 'sandbox' repo) define their own
-// build/test, threaded into both gates. Semantics: NULL means "use the default"
-// (`config.verifyCmd`, which still defaults to butchr's own command — the
-// dogfooding setup); a non-null value (including the empty string, which DISABLES
-// the gate for that directory) is used verbatim. Resolved by
-// directories.directoryGateCmd and run via `bash -lc` in the relevant cwd. Settable
-// at register time and updatable via PATCH /api/directories/:id.
+// command to run. butchr manages OTHER projects with no universal build command, so
+// this column lets each registered directory carry its OWN gate command (e.g. a
+// 'sandbox' repo defines its own build/test), threaded into both gates. Semantics:
+// NULL means "use the default" (`config.verifyCmd`, which is EMPTY by default — i.e.
+// no gate — and is set globally via BUTCHR_VERIFY_CMD); a non-null value (including
+// the empty string, which DISABLES the gate for that directory) is used verbatim.
+// Resolved by directories.directoryGateCmd and run via `bash -lc` in the relevant
+// cwd. Settable at register time and updatable via PATCH /api/directories/:id.
 ensureColumn("directories", "gate_cmd", "TEXT");
 
 // PER-DIRECTORY CTO-AGENT ENABLE. The managed CTO agent is now ONE PER DIRECTORY (it
