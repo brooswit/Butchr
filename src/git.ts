@@ -1,6 +1,13 @@
 // Git operations butchr owns directly. All run against a workspace root that
 // is a git repository. Task branches/worktrees are named by task ID.
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import {
   bumpPatchVersion,
@@ -771,4 +778,236 @@ export function ensureGitignore(dir: string): void {
     text += ".butchr/\n";
     writeFileSync(p, text, "utf8");
   }
+}
+
+// ---- POWER-LOSS RESILIENCE ---------------------------------------------------
+// A power loss that interrupts a git write mid-fsync can leave TRUNCATED/0-byte
+// loose objects in .git/objects; git then refuses to merge/prune and the repo
+// wedges (the real incident this hardens against — an operator had to fsck + hand
+// remove the dangling corrupt objects). Two defenses, both applied to EVERY managed
+// repo: setGitDurability (fsync object writes so the truncation can't happen) and
+// healLooseObjects (auto-recover from any that already exist — but ONLY the ones
+// provably unreachable from a ref).
+
+/**
+ * DURABLE OBJECT WRITES: configure `dir`'s git so a power loss can't leave a
+ * truncated/empty loose object behind.
+ *  - core.fsyncObjectFiles=true — fsync each loose object (honored by git < 2.36).
+ *  - core.fsync=all             — fsync objects + refs + index (git >= 2.36; the
+ *                                 older knob is ignored there). Harmless on older git.
+ * Idempotent (`git config` just overwrites) and best-effort (never throws): a config
+ * failure must not break registration or boot. Gated by config.gitFsync (a no-op
+ * when off, so an operator who manages these settings themselves can opt out).
+ */
+export async function setGitDurability(dir: string): Promise<void> {
+  if (!config.gitFsync) return;
+  await run([git, "-C", dir, "config", "core.fsyncObjectFiles", "true"]);
+  await run([git, "-C", dir, "config", "core.fsync", "all"]);
+}
+
+export type HealReport = {
+  /** SHAs of corrupt loose objects PROVABLY-unreachable from any ref and removed. */
+  removed: string[];
+  /** SHAs of corrupt objects left in place because reachable corruption was
+   *  detected — surfaced for manual repair, NEVER auto-deleted. */
+  reachableCorrupt: string[];
+  /** True iff we bailed without deleting anything (reachable corruption present). */
+  skipped: boolean;
+  /** Human-readable note (fsck status after removal, or the bail reason). */
+  note: string;
+};
+
+/** Scan `<objectsDir>/<xx>/<38hex>` for 0-byte (truncated) loose objects → sha→path. */
+function scanEmptyLooseObjects(objectsDir: string): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!existsSync(objectsDir)) return out;
+  let subs: string[];
+  try {
+    subs = readdirSync(objectsDir);
+  } catch {
+    return out;
+  }
+  for (const sub of subs) {
+    if (!/^[0-9a-f]{2}$/.test(sub)) continue;
+    const subdir = join(objectsDir, sub);
+    let files: string[];
+    try {
+      files = readdirSync(subdir);
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!/^[0-9a-f]{38}$/.test(f)) continue;
+      const p = join(subdir, f);
+      try {
+        if (statSync(p).size === 0) out.set(sub + f, p);
+      } catch {
+        /* vanished between readdir and stat — ignore */
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * SHAs `git fsck` names as empty/corrupt/missing (best-effort; empty on a clean repo).
+ * Handles BOTH forms git emits: a bare 40-hex sha ("loose object <sha> is corrupt",
+ * "<sha>: object corrupt or missing") and an object-file PATH
+ * (".git/objects/ab/cdef… is empty"), reassembling the latter into a sha.
+ */
+async function fsckCorruptShas(dir: string): Promise<string[]> {
+  const r = await run([git, "-C", dir, "fsck", "--no-dangling", "--no-progress"]);
+  const shas = new Set<string>();
+  for (const line of (r.stdout + "\n" + r.stderr).split("\n")) {
+    if (!/empty|corrupt|missing/i.test(line)) continue;
+    const bare = line.match(/[0-9a-f]{40}/);
+    if (bare) {
+      shas.add(bare[0]);
+      continue;
+    }
+    const pathForm = line.match(/objects[/\\]([0-9a-f]{2})[/\\]([0-9a-f]{38})/);
+    if (pathForm) shas.add(pathForm[1] + pathForm[2]);
+  }
+  return [...shas];
+}
+
+/** The object shas each resolvable ref (branches/tags + HEAD) points at, deduped. */
+async function resolvableRefShas(dir: string): Promise<string[]> {
+  const shas = new Set<string>();
+  const fer = await run([git, "-C", dir, "for-each-ref", "--format=%(objectname)"]);
+  if (fer.ok) {
+    for (const l of fer.stdout.split("\n")) {
+      const s = l.trim();
+      if (/^[0-9a-f]{40}$/.test(s)) shas.add(s);
+    }
+  }
+  const head = await run([git, "-C", dir, "rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (head.ok && /^[0-9a-f]{40}$/.test(head.stdout.trim())) shas.add(head.stdout.trim());
+  return [...shas];
+}
+
+/**
+ * Walk every resolvable ref's object closure. `ok` is false iff ANY ref's
+ * `git rev-list --objects <ref>` failed — rev-list inflates every commit/tree it
+ * reaches and exits non-zero the instant it hits a corrupt/missing one, so a failure
+ * means there is REACHABLE corruption. `reachable` is the union of all object shas
+ * enumerated across the SUCCESSFUL walks — the same closure `rev-list --objects
+ * --all` produces — used for the blob-safe cross-check (rev-list enumerates blobs by
+ * name WITHOUT inflating them, so a corrupt blob wouldn't fail the walk but its sha
+ * still appears here). A repo with no resolvable refs yields ok=true + an empty set
+ * (nothing is reachable, so every candidate is trivially safe to remove).
+ */
+async function refClosure(dir: string): Promise<{ ok: boolean; reachable: Set<string> }> {
+  const reachable = new Set<string>();
+  let ok = true;
+  for (const ref of await resolvableRefShas(dir)) {
+    const r = await run([git, "-C", dir, "rev-list", "--objects", ref]);
+    if (!r.ok) {
+      ok = false;
+      continue;
+    }
+    for (const line of r.stdout.split("\n")) {
+      const tok = line.trim().split(" ")[0];
+      if (tok) reachable.add(tok);
+    }
+  }
+  return { ok, reachable };
+}
+
+/**
+ * POWER-LOSS SELF-HEAL of dangling/corrupt LOOSE OBJECTS in `dir`. Removes the
+ * truncated/empty (and fsck-corrupt) loose objects a power loss can leave behind —
+ * but ONLY the ones PROVABLY unreachable from any ref. The proof runs in order and
+ * deletes nothing unless BOTH guards pass:
+ *
+ *  1. DETECT (candidate set = UNION): (a) a cheap filesystem scan for 0-byte loose
+ *     object files PLUS (b) the SHAs `git fsck` flags as empty/corrupt that still
+ *     exist as loose objects — so a NON-empty-but-corrupt object is detected too, not
+ *     only 0-byte truncations. fsck runs unconditionally and only WIDENS the set (it
+ *     is never a delete trigger on its own). No candidates from EITHER → cheap no-op
+ *     return, WITHOUT the expensive ref walk (a clean boot stays cheap).
+ *  3. ALL-REFS-INTACT: walk EVERY resolvable ref with `git rev-list --objects`. If
+ *     ANY ref's walk fails there is REACHABLE corruption (a corrupt commit/tree) →
+ *     BAIL: delete nothing, return skipped=true with the corrupt shas surfaced.
+ *  4. BELT-AND-SUSPENDERS: from the successful walks we have the full reachable
+ *     closure. If ANY candidate sha is in it (e.g. a corrupt BLOB, which step 3
+ *     enumerates by name without inflating, so wouldn't have failed) → BAIL the same
+ *     way. Only candidates PROVABLY ABSENT from the reachable closure are removed.
+ *
+ * Removal is surgical + load-bearing: `rmSync` each provably-unreachable corrupt
+ * loose object. The follow-on `git prune` is OPTIONAL hygiene — best-effort, its
+ * failure never fails the heal (the rmSync above already fixed the corruption).
+ * Finally re-run fsck for the report note. Best-effort throughout: a git error
+ * yields a benign empty report rather than throwing into boot.
+ */
+export async function healLooseObjects(dir: string): Promise<HealReport> {
+  const report = (over: Partial<HealReport> = {}): HealReport => ({
+    removed: [],
+    reachableCorrupt: [],
+    skipped: false,
+    note: "",
+    ...over,
+  });
+
+  const gp = await run([git, "-C", dir, "rev-parse", "--git-path", "objects"]);
+  if (!gp.ok) return report({ note: "not a git repository" });
+  const objectsDir = resolve(dir, gp.stdout.trim());
+
+  // (1) DETECT: the candidate set is the UNION of two detectors —
+  //   (a) 0-byte loose object FILES (the classic power-loss truncation), found by a
+  //       cheap filesystem scan; and
+  //   (b) SHAs `git fsck` flags as empty/corrupt that still exist on disk as loose
+  //       objects — this catches a NON-empty-but-corrupt object (a truncation that
+  //       left a partial, non-zero file), which the size scan alone would miss.
+  // fsck runs UNCONDITIONALLY so that class is never missed; it only WIDENS the set
+  // (it is never a delete trigger on its own — deletion still requires the
+  // unreachable proof below). We no-op only when BOTH detectors come back empty.
+  const candidates = scanEmptyLooseObjects(objectsDir); // (a)
+  for (const sha of await fsckCorruptShas(dir)) {        // (b)
+    if (candidates.has(sha)) continue;
+    const p = join(objectsDir, sha.slice(0, 2), sha.slice(2));
+    if (existsSync(p)) candidates.set(sha, p);
+  }
+  if (candidates.size === 0) return report({ note: "no corrupt loose objects" });
+
+  // (3)+(4) Prove every candidate is unreachable BEFORE deleting anything.
+  const { ok, reachable } = await refClosure(dir);
+  const candidateShas = [...candidates.keys()];
+  if (!ok) {
+    return report({
+      skipped: true,
+      reachableCorrupt: candidateShas,
+      note: "a ref's rev-list failed — reachable corruption present; removed nothing",
+    });
+  }
+  const reachableHit = candidateShas.filter((s) => reachable.has(s));
+  if (reachableHit.length > 0) {
+    return report({
+      skipped: true,
+      reachableCorrupt: reachableHit,
+      note: "corrupt object(s) reachable from a ref; removed nothing",
+    });
+  }
+
+  // All candidates proven unreachable → surgical removal (load-bearing).
+  const removed: string[] = [];
+  for (const [sha, p] of candidates) {
+    try {
+      rmSync(p, { force: true });
+      removed.push(sha);
+    } catch {
+      /* leave it; surfaced via the fsck note below */
+    }
+  }
+
+  // Optional hygiene: sweep any remaining danglers. Best-effort — a prune failure
+  // must NOT fail the heal (the rmSync above already removed the corruption, and
+  // plain prune respects reflogs + the default grace, so it can't drop live work).
+  await run([git, "-C", dir, "prune"]);
+
+  const after = await run([git, "-C", dir, "fsck", "--no-progress"]);
+  return report({
+    removed,
+    note: after.ok ? "fsck clean after removal" : "fsck still reports issues after removal",
+  });
 }

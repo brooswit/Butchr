@@ -451,6 +451,55 @@ by hand. That was a real incident.
   power dies mid-gate → on next boot, the gate re-runs and the task settles to a real
   pass/fail with no operator action.
 
+### Power-loss resilience (durable writes + loose-object self-heal)
+
+A power loss that interrupts a git write **mid-fsync** can leave **truncated/0-byte
+loose objects** in a managed repo's `.git/objects`; git then refuses to merge/prune
+and the repo wedges (a real incident — an operator had to `git fsck` and hand-remove
+the dangling corrupt objects). butchr hardens **every managed repo** against this on
+two fronts, both best-effort (never block registration or boot):
+
+- **Durable object writes (prevention).** On register **and** on every boot butchr
+  sets, idempotently, on each repo: `core.fsyncObjectFiles=true` (honored by git
+  < 2.36) and `core.fsync=all` (git ≥ 2.36; the older knob is ignored there, the new
+  one is harmless on older git). So an interrupted write can't leave a truncated
+  object in the first place. See `git.setGitDurability`; disable with
+  **`BUTCHR_GIT_FSYNC=0`**. (Boot re-applies it, so repos registered before this
+  existed get hardened with no re-registration.)
+- **Loose-object self-heal (recovery).** On boot, for each managed repo, butchr
+  scans for dangling/corrupt loose objects and **auto-removes only the ones it can
+  PROVE are unreachable from any ref** — recovering from the power-loss corruption
+  class instead of wedging. See `git.healLooseObjects`; disable the boot sweep with
+  **`BUTCHR_GIT_HEAL=0`**.
+
+  **Safety — how an object is proven safe to remove (a bug here would corrupt a
+  repo, so the bar is "provably unreachable"):**
+  1. **Detect (union of two detectors).** The candidate set is (a) a cheap filesystem
+     scan for **0-byte** loose object files **plus** (b) the SHAs **`git fsck`** flags
+     as empty/corrupt that still exist as loose objects — so a **non-empty-but-corrupt**
+     object (a partial, non-zero truncation) is caught too, not only 0-byte ones. fsck
+     runs unconditionally and only *widens* the set (never a delete trigger on its
+     own). If **both** detectors come back empty → cheap no-op return, *without* the
+     expensive ref walk (a clean boot stays cheap).
+  2. **All-refs-intact.** Walk **every** resolvable ref (branches/tags + HEAD) with
+     `git rev-list --objects`. rev-list inflates every commit/tree it reaches and
+     exits non-zero the instant it hits a corrupt/missing one, so if **any** ref's
+     walk fails there is **reachable** corruption → **bail: delete nothing**, surface
+     the shas, log loud.
+  3. **Belt-and-suspenders.** From the successful walks butchr has the full reachable
+     object closure. If **any** candidate sha appears in it (e.g. a corrupt *blob*,
+     which step 2 enumerates by name without inflating, so wouldn't have failed the
+     walk) → **bail the same way**. Only candidates **provably absent** from the
+     reachable closure are removed.
+
+  Removal is **surgical and load-bearing** (`rmSync` each provably-unreachable corrupt
+  object); the follow-on `git prune` is **optional hygiene** (best-effort, its failure
+  never fails the heal). **Reachable corruption is never auto-deleted** — it is logged
+  at error level (`git-heal … REACHABLE corruption — left UNTOUCHED …`) with the repo
+  to `git fsck` by hand. Watch the boot log for `git-heal …` lines: how many
+  unreachable objects were removed per repo, and any repo with reachable corruption
+  surfaced for manual repair.
+
 ### herdr model
 
 butchr delegates all PTY/session management to herdr, mapped by **task id**: one

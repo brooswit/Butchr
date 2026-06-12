@@ -1,13 +1,16 @@
 // butchr entry point. Starts the dispatcher loop and the HTTP server, and wires
 // up clean shutdown. Run with `bun run src/index.ts` (see package.json scripts).
 import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts";
+import { config } from "./config.ts";
 import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
+import * as git from "./git.ts";
 import { initFileLogging } from "./log.ts";
 import { reapDeadRunningAgents, reapOrphans, reapStuckGates } from "./reaper.ts";
 import { startServer } from "./server.ts";
 import { recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
+import { listWorkspaces } from "./workspaces.ts";
 
 async function main(): Promise<void> {
   // Install the persistent log sink before anything else so all startup output
@@ -85,6 +88,14 @@ async function main(): Promise<void> {
   // mirroring reapDeadRunningAgents. See reaper.reapStuckGates.
   await reapStuckGates();
 
+  // POWER-LOSS RESILIENCE across EVERY managed repo: (re)apply durable-write config
+  // (so a future crash can't leave a truncated loose object — also covers repos
+  // registered before this existed) and self-heal any dangling/corrupt loose objects
+  // a prior power loss already left. The heal removes ONLY objects PROVABLY
+  // unreachable from a ref; reachable corruption is surfaced (logged loud) but never
+  // auto-deleted. Best-effort per repo — a heal failure never blocks boot.
+  await hardenManagedRepos();
+
   // Managed CTO agents — ONE PER REGISTERED WORKSPACE (each default OFF unless that
   // workspace opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).
   // Reconcile every enabled workspace's desired state ONCE (adopt a live pane that
@@ -135,6 +146,51 @@ async function main(): Promise<void> {
     console.error("[butchr] unhandled rejection:", reason);
     process.exit(1);
   });
+}
+
+/**
+ * Boot-time power-loss hardening for every registered repo: set durable-write config
+ * (config.gitFsync) and, when config.gitHealOnBoot is on, self-heal dangling/corrupt
+ * loose objects. Iterates here (index owns workspace iteration) so git.ts stays
+ * DB-free. Each repo is independent and wrapped so one failure can't abort boot; the
+ * heal NEVER deletes a reachable object — reachable corruption is logged at error
+ * level for an operator to repair by hand.
+ */
+async function hardenManagedRepos(): Promise<void> {
+  let removedTotal = 0;
+  let reposCleaned = 0;
+  let reposSurfaced = 0;
+  for (const ws of listWorkspaces()) {
+    try {
+      await git.setGitDurability(ws.path); // self-gated by config.gitFsync
+      if (!config.gitHealOnBoot) continue;
+      const rep = await git.healLooseObjects(ws.path);
+      if (rep.removed.length > 0) {
+        removedTotal += rep.removed.length;
+        reposCleaned++;
+        console.log(
+          `[butchr] git-heal ${ws.path}: removed ${rep.removed.length} unreachable ` +
+            `corrupt loose object(s) [${rep.removed.join(", ")}] (${rep.note})`,
+        );
+      }
+      if (rep.skipped || rep.reachableCorrupt.length > 0) {
+        reposSurfaced++;
+        console.error(
+          `[butchr] git-heal ${ws.path}: REACHABLE corruption — left UNTOUCHED for ` +
+            `manual repair (run \`git -C ${ws.path} fsck\`): ` +
+            `[${rep.reachableCorrupt.join(", ")}] (${rep.note})`,
+        );
+      }
+    } catch (e) {
+      console.error(`[butchr] git-heal ${ws.path} failed:`, (e as Error).message);
+    }
+  }
+  if (removedTotal > 0 || reposSurfaced > 0) {
+    console.log(
+      `[butchr] git-heal: removed ${removedTotal} corrupt loose object(s) across ` +
+        `${reposCleaned} repo(s); ${reposSurfaced} repo(s) with reachable corruption surfaced`,
+    );
+  }
 }
 
 main().catch((e) => {

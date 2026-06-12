@@ -362,6 +362,12 @@ export async function registerWorkspace(
 
   git.ensureGitignore(path);
 
+  // Harden the repo against power-loss object corruption from the moment it's
+  // managed: fsync loose-object writes so a crash can't leave a truncated object
+  // (the boot self-heal also re-applies this to already-registered repos).
+  // Best-effort + idempotent — never blocks registration.
+  await git.setGitDurability(path);
+
   // Seed the CTO context into the (now-gitignored) `.butchr/` folder so every
   // task agent launched here starts with it.
   seedCtoContext(path);

@@ -159,6 +159,29 @@ export const config = {
   /** Path to the git binary. */
   gitBin: env("BUTCHR_GIT_BIN", "git"),
 
+  /**
+   * DURABLE GIT OBJECT WRITES. When on (default), butchr hardens every managed repo
+   * so a power loss can't leave a truncated/empty loose object behind (the failure
+   * that once wedged butchr: a mid-fsync interrupt left 0-byte objects in
+   * .git/objects and merge/prune then broke). On register AND on every boot butchr
+   * sets, idempotently, on each repo: `core.fsyncObjectFiles=true` (honored by git
+   * < 2.36) and `core.fsync=all` (git >= 2.36; the older knob is ignored there, and
+   * the new one is harmless on older git). Set BUTCHR_GIT_FSYNC=0 to skip writing
+   * the config (e.g. if you manage these settings yourself). See git.setGitDurability.
+   */
+  gitFsync: envBool("BUTCHR_GIT_FSYNC", true),
+
+  /**
+   * STARTUP LOOSE-OBJECT SELF-HEAL. When on (default), on boot butchr scans every
+   * managed repo for dangling/corrupt loose objects (0-byte truncations from a
+   * power loss, plus anything `git fsck` flags) and removes ONLY those it can PROVE
+   * are unreachable from any ref — reachable corruption is surfaced + logged but
+   * NEVER auto-deleted (that would corrupt the repo). This auto-recovers from the
+   * power-loss corruption class instead of wedging. Set BUTCHR_GIT_HEAL=0 to
+   * disable the boot sweep. See git.healLooseObjects + the §3 runbook.
+   */
+  gitHealOnBoot: envBool("BUTCHR_GIT_HEAL", true),
+
   /** Dispatcher poll interval (ms). */
   tickMs: envInt("BUTCHR_TICK_MS", 1500),
 
