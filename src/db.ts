@@ -221,6 +221,19 @@ ensureColumn("workspaces", "changelog_path", "TEXT");
 // one even when boot-auto-start is off.)
 ensureColumn("workspaces", "cto_enabled", "INTEGER");
 
+// PER-WORKSPACE STEP RESPONDERS. The feedback-workflow redesign makes every pipeline
+// step that needs a response carry a configurable RESPONDER — `cto` (the persistent
+// CTO agent handles it automatically) or `user` (butchr waits for a human in the
+// webapp). This column is a JSON object {step: 'cto'|'user'} holding the per-workspace
+// overrides; an unset step (or NULL/empty/garbage value) defaults to `cto` — today's
+// full-auto behavior. The step set + read helper (responderFor / resolveStepResponders)
+// + validation live in src/workspaces.ts; the config is settable via PATCH
+// /api/workspaces/:id and the webapp's step-responder panel. THIS IS CONFIG STORAGE
+// ONLY — nothing routes off it yet; later tasks (kill the CTO-fork, route
+// approval/review/answer, idle-as-feedback) consume it. Settable per workspace; NULL
+// (the default every existing row backfills to) means "all steps cto".
+ensureColumn("workspaces", "step_responders", "TEXT");
+
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
 
@@ -586,6 +599,11 @@ export type WorkspaceRow = {
   // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by
   // cto-agent.isCtoEnabled (per-workspace WINS over the global default).
   cto_enabled: number | null;
+  // Per-workspace STEP RESPONDERS (see the step_responders ensureColumn above): raw
+  // JSON-object TEXT of {step: 'cto'|'user'} overrides, or NULL (= all steps cto). An
+  // unset step / NULL / unparseable value falls back to `cto`. Parsed + resolved by
+  // workspaces.responderFor / resolveStepResponders into a full per-step map.
+  step_responders: string | null;
   created_at: string;
 };
 

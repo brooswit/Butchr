@@ -391,6 +391,19 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   white-space: pre-wrap; word-break: break-word;
 }
 .gate-cmd.disabled { color: var(--muted); font-style: italic; }
+
+/* per-workspace step-responder panel: one row per pipeline step (label + a CTO|User
+   select). Reuses the .panel shell; these just lay out the rows. */
+.responder-rows { display: flex; flex-direction: column; gap: 8px; }
+.responder-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 0; border-top: 1px solid var(--border);
+}
+.responder-row:first-child { border-top: 0; }
+.responder-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.responder-label { font-size: 13px; font-weight: 600; }
+.responder-desc { font-size: 12px; }
+.responder-select { flex: 0 0 auto; min-width: 90px; }
 .gate-textarea {
   width: 100%; min-height: 70px; resize: vertical;
   font-family: var(--mono); font-size: 12px;

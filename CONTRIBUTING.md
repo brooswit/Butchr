@@ -759,6 +759,30 @@ inline where their columns are declared in `src/db.ts`:
 | `version_file` | `BUTCHR_VERSION_FILE` (empty) | The version file butchr **patch-bumps at merge** (e.g. `package.json`). Empty/absent = no bump; a docs-only diff and a missing/parseless file are graceful no-ops. |
 | `changelog_path` | `BUTCHR_CHANGELOG_PATH` (empty) | The changelog file the **CI gate requires a code change to update** (e.g. `CHANGELOG.md`). Empty = gate off; docs-only/empty diffs are exempt. |
 
+### Step responders (per-workspace)
+
+Every pipeline step that needs a **response** has a configurable **responder** — either
+`cto` (the workspace's persistent CTO agent handles it automatically) or `user` (butchr
+waits for a human to act in the webapp). The config is **per-workspace** (an operator
+decision that applies to **all** of that workspace's tasks) and **defaults every step to
+`cto`** — today's full-auto behavior. The six steps:
+
+| Step | Responds to |
+|------|-------------|
+| `spec-generation` | Turning an idea/brief into a spec. |
+| `spec-approval` | Approving a generated spec before it builds (the `spec_review` state). |
+| `plan-approval` | Approving a plan-preview plan before code is written (the plan-preview gate). |
+| `diff-review` | Reviewing the finished diff before it merges (the `in_review` state). |
+| `answer-question` | Answering a question an agent raised (the `needs_info` state). |
+| `idle-handling` | Handling an agent that stalled / went idle (surfaced as a feedback step in later work). |
+
+It is stored per workspace as a single JSON column (`workspaces.step_responders`, `NULL`
+= all `cto`), read through `workspaces.responderFor(workspaceId, step)` /
+`resolveStepResponders(workspaceId)`, and set via **`GET`/`PATCH /api/workspaces/:id`**
+(the `GET` returns the **fully-resolved** map — every step present with its effective
+value) or the webapp's **Step responders** panel. **This is configuration only for now —
+nothing routes off it yet; the routing that consumes it lands in follow-up work.**
+
 ---
 
 ## 8. Living docs: update on every change

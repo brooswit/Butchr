@@ -19,7 +19,9 @@ import {
   unregisterWorkspace,
   updateWorkspaceChangelogPath,
   updateWorkspaceGateCmd,
+  updateWorkspaceStepResponders,
   updateWorkspaceVersionFile,
+  workspaceDetail,
 } from "./workspaces.ts";
 import {
   ctoAgentName,
@@ -529,6 +531,13 @@ route("GET", "/api/dashboard", async () => json(dashboard()));
 // Workspaces
 route("GET", "/api/workspaces", async () => json(listWorkspaces()));
 
+// A single workspace's DETAIL view: the WorkspaceView (counts + columns) with the
+// FULLY-RESOLVED step-responder map attached (every step present with its effective
+// `cto`/`user` value — see workspaces.resolveStepResponders). This resolved shape is the
+// single source the webapp's step-responder panel and the later feedback-routing tasks
+// read. 404 if the workspace is gone.
+route("GET", "/api/workspaces/:id", async (_req, p) => json(workspaceDetail(p.id!)));
+
 // Built-in TASK TEMPLATES (recipes): the named, parameterized prompt skeletons the
 // CLI `templates` command and the webapp new-task picker list. Each entry carries
 // its `{{placeholder}}` names so a caller knows what to fill. See src/templates.ts.
@@ -577,6 +586,9 @@ route("POST", "/api/workspaces", async (req) => {
 //  - `cto_enabled`: the per-workspace CTO-agent enable (boot auto-start + supervision)
 //    — true/false forces it on/off; null CLEARS the override → inherit the global
 //    default config.ctoAgentEnabled.
+//  - `step_responders`: a PARTIAL {step: 'cto'|'user'} update of the feedback-workflow
+//    step-responder config — merged onto the existing overrides (validated step names +
+//    values; CONFIG ONLY, nothing routes off it yet). See workspaces.updateWorkspaceStepResponders.
 // A bare PATCH (no recognized key) clears the gate command, preserving the legacy
 // contract. 404 if the workspace is gone. Publishes `workspace.updated`.
 route("PATCH", "/api/workspaces/:id", async (req, p) => {
@@ -585,10 +597,12 @@ route("PATCH", "/api/workspaces/:id", async (req, p) => {
   if ("cto_enabled" in body) view = setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
   if ("version_file" in body) view = updateWorkspaceVersionFile(p.id!, body.version_file);
   if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
+  if ("step_responders" in body) view = updateWorkspaceStepResponders(p.id!, body.step_responders);
   // gate_cmd: set when its key is present, OR when NO other recognized key was sent
   // (a bare PATCH clears the gate override — the legacy contract).
   const touchedOther =
-    "cto_enabled" in body || "version_file" in body || "changelog_path" in body;
+    "cto_enabled" in body || "version_file" in body || "changelog_path" in body ||
+    "step_responders" in body;
   if ("gate_cmd" in body || !touchedOther) {
     view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
   }

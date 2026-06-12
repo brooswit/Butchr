@@ -860,6 +860,13 @@ async function renderWorkspace(id) {
   // whether it's a per-workspace override or the default, with an inline editor.
   wrap.appendChild(gatePanel(dir));
 
+  // step-responder config panel — who responds at each pipeline step (CTO agent vs a
+  // human). Rendered async (its own fetch of the resolved map) so a probe hiccup never
+  // blocks the page; mounted in place once it resolves.
+  const responderSlot = el("div");
+  wrap.appendChild(responderSlot);
+  responderPanel(id).then((panel) => responderSlot.replaceWith(panel)).catch(() => {});
+
   // danger zone
   const dz = el("div", { class: "row", style: "margin-top:32px" });
   const del = el("button", { class: "btn ghost" }, "Unregister workspace");
@@ -936,6 +943,57 @@ function openGateModal(dir) {
       { success: msg, onDone: () => { close(); render(); } });
   save.addEventListener("click", () => patch(save, ta.value, "gate command updated"));
   useDefault.addEventListener("click", () => patch(useDefault, null, "reverted to the default gate"));
+}
+
+// ---------- per-workspace step-responder panel ----------
+// The feedback-workflow config: every pipeline step that needs a response has a
+// configurable RESPONDER — `cto` (the persistent CTO agent handles it automatically) or
+// `user` (butchr waits for a human here in the webapp). Per-workspace (applies to all the
+// workspace's tasks), default CTO. THIS IS CONFIG ONLY — nothing routes off it yet;
+// later work wires up the routing. Reads the RESOLVED map from GET /api/workspaces/:id
+// and PATCHes a single {step: value} on each change. Mirrors gatePanel's shape; rendered
+// async (its own fetch) so a hiccup never blocks the page.
+const RESPONDER_STEP_LABELS = [
+  ["spec-generation", "Spec generation", "Turn an idea/brief into a spec."],
+  ["spec-approval", "Spec approval", "Approve a generated spec before it builds."],
+  ["plan-approval", "Plan approval", "Approve a plan-preview plan before it writes code."],
+  ["diff-review", "Diff review", "Review the finished diff before it merges."],
+  ["answer-question", "Answer question", "Answer a question an agent raised."],
+  ["idle-handling", "Idle handling", "Handle an agent that stalled / went idle."],
+];
+
+async function responderPanel(id) {
+  const detail = await api("GET", "/workspaces/" + id);
+  const resolved = detail.step_responders || {};
+  const panel = el("div", { class: "panel", style: "margin-top:28px" });
+  panel.appendChild(el("h2", { style: "margin:0" }, "Step responders"));
+  panel.appendChild(el("small", { class: "muted", style: "display:block;margin:6px 0 12px" },
+    "Who responds at each pipeline step — the CTO agent (automatic) or you (a human, here in the webapp). Per-workspace; applies to every task. Default CTO. (Config only for now — routing is added in follow-up work.)"));
+
+  const rows = el("div", { class: "responder-rows" });
+  for (const [step, label, desc] of RESPONDER_STEP_LABELS) {
+    const row = el("div", { class: "responder-row" });
+    const text = el("div", { class: "responder-text" });
+    text.appendChild(el("span", { class: "responder-label" }, label));
+    text.appendChild(el("span", { class: "responder-desc muted" }, desc));
+    row.appendChild(text);
+
+    const sel = el("select", { class: "responder-select" });
+    for (const [val, optLabel] of [["cto", "CTO"], ["user", "User"]]) {
+      const opt = el("option", { value: val }, optLabel);
+      if ((resolved[step] || "cto") === val) opt.setAttribute("selected", "selected");
+      sel.appendChild(opt);
+    }
+    sel.addEventListener("change", () => {
+      const value = sel.value;
+      action(null, () => api("PATCH", "/workspaces/" + id, { step_responders: { [step]: value } }),
+        { success: label + " → " + (value === "cto" ? "CTO" : "User"), onDone: () => {} });
+    });
+    row.appendChild(sel);
+    rows.appendChild(row);
+  }
+  panel.appendChild(rows);
+  return panel;
 }
 
 // ---------- new-task modal ----------
