@@ -52,7 +52,7 @@ beforeAll(async () => {
 
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });

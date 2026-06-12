@@ -1,12 +1,12 @@
-// Tests for the PER-DIRECTORY BUILD/TEST GATE COMMAND and the CROSS-PROJECT
-// DASHBOARD aggregation (see db.ts `directories.gate_cmd`, directories.{
-// directoryGateCmd, updateDirectoryGateCmd, dashboard}, and how triggerCi threads
+// Tests for the PER-WORKSPACE BUILD/TEST GATE COMMAND and the CROSS-PROJECT
+// DASHBOARD aggregation (see db.ts `workspaces.gate_cmd`, workspaces.{
+// workspaceGateCmd, updateWorkspaceGateCmd, dashboard}, and how triggerCi threads
 // the resolved command into the CI runner).
 //
 // Pure / in-process: no real claude/herdr/bun is spawned. BUTCHR_HERDR_BIN points at
 // `true` so herdr probes are no-ops, and the CI runner is faked (setCiRunner) so we
-// capture the gate command threaded in without shelling out. Directory + task rows
-// are inserted directly (no registerDirectory, which would need a live herdr).
+// capture the gate command threaded in without shelling out. Workspace + task rows
+// are inserted directly (no registerWorkspace, which would need a live herdr).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +18,7 @@ let REPO_ROOT: string;
 const DIR_A = "gate-dir-a";
 const DIR_B = "gate-dir-b";
 
-let dirsMod: typeof import("../src/directories.ts");
+let dirsMod: typeof import("../src/workspaces.ts");
 let tasksMod: typeof import("../src/tasks.ts");
 let dbMod: typeof import("../src/db.ts");
 let configMod: typeof import("../src/config.ts");
@@ -34,12 +34,12 @@ beforeAll(async () => {
 
   dbMod = await import("../src/db.ts");
   configMod = await import("../src/config.ts");
-  dirsMod = await import("../src/directories.ts");
+  dirsMod = await import("../src/workspaces.ts");
   tasksMod = await import("../src/tasks.ts");
 
   const ins = (id: string) =>
     dbMod.db
-      .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+      .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(id, join(REPO_ROOT, id), id, dbMod.nowIso());
   ins(DIR_A);
   ins(DIR_B);
@@ -50,63 +50,63 @@ afterAll(() => {
   rmSync(REPO_ROOT, { recursive: true, force: true });
 });
 
-/** Seed a bare task row in a directory with a given status (+ optional idle flag + optional pane id). */
+/** Seed a bare task row in a workspace with a given status (+ optional idle flag + optional pane id). */
 function seedTask(id: string, dir: string, status: string, idle = 0, paneId: string | null = null) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, idle, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(id, dir, status, idle, paneId, dbMod.nowIso());
 }
 
-describe("directoryGateCmd resolution", () => {
+describe("workspaceGateCmd resolution", () => {
   test("falls back to the default (config.verifyCmd) when gate_cmd is NULL", () => {
     // No override set on DIR_A → the global default command.
-    expect(dirsMod.directoryGateCmd(DIR_A)).toBe(configMod.config.verifyCmd);
+    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe(configMod.config.verifyCmd);
   });
 
-  test("an unknown directory id falls back to the default", () => {
-    expect(dirsMod.directoryGateCmd("does-not-exist")).toBe(configMod.config.verifyCmd);
+  test("an unknown workspace id falls back to the default", () => {
+    expect(dirsMod.workspaceGateCmd("does-not-exist")).toBe(configMod.config.verifyCmd);
   });
 
-  test("returns the directory's own command once set", () => {
-    dirsMod.updateDirectoryGateCmd(DIR_A, "make build && make test");
-    expect(dirsMod.directoryGateCmd(DIR_A)).toBe("make build && make test");
+  test("returns the workspace's own command once set", () => {
+    dirsMod.updateWorkspaceGateCmd(DIR_A, "make build && make test");
+    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe("make build && make test");
     // Persisted on the row.
     const row = dbMod.db
-      .query<{ gate_cmd: string | null }, [string]>(`SELECT gate_cmd FROM directories WHERE id=?`)
+      .query<{ gate_cmd: string | null }, [string]>(`SELECT gate_cmd FROM workspaces WHERE id=?`)
       .get(DIR_A)!;
     expect(row.gate_cmd).toBe("make build && make test");
   });
 
   test("an empty-string override DISABLES the gate (used verbatim, not defaulted)", () => {
-    dirsMod.updateDirectoryGateCmd(DIR_A, "");
-    expect(dirsMod.directoryGateCmd(DIR_A)).toBe("");
+    dirsMod.updateWorkspaceGateCmd(DIR_A, "");
+    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe("");
   });
 
   test("clearing the override (null) reverts to the default", () => {
-    dirsMod.updateDirectoryGateCmd(DIR_A, "x");
-    expect(dirsMod.directoryGateCmd(DIR_A)).toBe("x");
-    dirsMod.updateDirectoryGateCmd(DIR_A, null);
-    expect(dirsMod.directoryGateCmd(DIR_A)).toBe(configMod.config.verifyCmd);
+    dirsMod.updateWorkspaceGateCmd(DIR_A, "x");
+    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe("x");
+    dirsMod.updateWorkspaceGateCmd(DIR_A, null);
+    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe(configMod.config.verifyCmd);
     const row = dbMod.db
-      .query<{ gate_cmd: string | null }, [string]>(`SELECT gate_cmd FROM directories WHERE id=?`)
+      .query<{ gate_cmd: string | null }, [string]>(`SELECT gate_cmd FROM workspaces WHERE id=?`)
       .get(DIR_A)!;
     expect(row.gate_cmd).toBeNull();
   });
 
-  test("updateDirectoryGateCmd 404s on an unknown directory", () => {
-    expect(() => dirsMod.updateDirectoryGateCmd("nope", "cmd")).toThrow(/directory not found/);
+  test("updateWorkspaceGateCmd 404s on an unknown workspace", () => {
+    expect(() => dirsMod.updateWorkspaceGateCmd("nope", "cmd")).toThrow(/workspace not found/);
   });
 
   test("a non-string gate_cmd is rejected (400)", () => {
-    expect(() => dirsMod.updateDirectoryGateCmd(DIR_A, 42)).toThrow(/must be a string/);
+    expect(() => dirsMod.updateWorkspaceGateCmd(DIR_A, 42)).toThrow(/must be a string/);
   });
 });
 
 describe("triggerCi threads the resolved gate command into the runner", () => {
-  test("passes the directory's own gate command to the CI runner", async () => {
-    dirsMod.updateDirectoryGateCmd(DIR_B, "npm run ci");
+  test("passes the workspace's own gate command to the CI runner", async () => {
+    dirsMod.updateWorkspaceGateCmd(DIR_B, "npm run ci");
     const id = "gate-ci-own";
     seedTask(id, DIR_B, "in_review");
     mkdirSync(join(REPO_ROOT, DIR_B, id), { recursive: true }); // worktree so CI runs
@@ -121,7 +121,7 @@ describe("triggerCi threads the resolved gate command into the runner", () => {
   });
 
   test("with no override, passes the default command to the CI runner", async () => {
-    dirsMod.updateDirectoryGateCmd(DIR_B, null); // clear → default
+    dirsMod.updateWorkspaceGateCmd(DIR_B, null); // clear → default
     const id = "gate-ci-default";
     seedTask(id, DIR_B, "in_review");
     mkdirSync(join(REPO_ROOT, DIR_B, id), { recursive: true });
@@ -137,11 +137,11 @@ describe("triggerCi threads the resolved gate command into the runner", () => {
 });
 
 describe("dashboard aggregation", () => {
-  // A fresh directory so the bucket math is isolated from rows seeded above.
+  // A fresh workspace so the bucket math is isolated from rows seeded above.
   const DIR_C = "gate-dash-c";
   beforeAll(() => {
     dbMod.db
-      .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+      .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(DIR_C, join(REPO_ROOT, DIR_C), "Dash C", dbMod.nowIso());
     seedTask("dc-q", DIR_C, "in_progress");          // ready (no pane) → in_progress bucket
     seedTask("dc-b", DIR_C, "blocked");              // blocked bucket
@@ -155,7 +155,7 @@ describe("dashboard aggregation", () => {
 
   test("folds per-status counts into active / review / failed / needs-attention", () => {
     const d = dirsMod.dashboard();
-    const c = d.directories.find((x) => x.id === DIR_C)!;
+    const c = d.workspaces.find((x) => x.id === DIR_C)!;
     expect(c).toBeTruthy();
     // active = in_progress(dc-q, dc-r) + idle(dc-i) + blocked(dc-b) + finalizing(dc-f) = 5
     expect(c.active).toBe(5);
@@ -173,12 +173,12 @@ describe("dashboard aggregation", () => {
     expect(c.gate_cmd).toBeNull();
   });
 
-  test("totals roll up across every registered directory", () => {
+  test("totals roll up across every registered workspace", () => {
     const d = dirsMod.dashboard();
-    expect(d.totals.directories).toBe(d.directories.length);
-    // Totals are the sum of each directory's bucket.
+    expect(d.totals.workspaces).toBe(d.workspaces.length);
+    // Totals are the sum of each workspace's bucket.
     const sum = (k: "active" | "review" | "failed" | "needsAttention") =>
-      d.directories.reduce((acc, x) => acc + (x as any)[k], 0);
+      d.workspaces.reduce((acc, x) => acc + (x as any)[k], 0);
     expect(d.totals.active).toBe(sum("active"));
     expect(d.totals.review).toBe(sum("review"));
     expect(d.totals.failed).toBe(sum("failed"));

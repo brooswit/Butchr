@@ -54,10 +54,10 @@ beforeAll(async () => {
   tasksMod = await import("../src/tasks.ts");
   dispatchMod = await import("../src/dispatcher.ts");
 
-  // One registered directory; every task lives under it.
+  // One registered workspace; every task lives under it.
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
@@ -79,7 +79,7 @@ function seedTask(opts: {
   const created = dbMod.nowIso();
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, session_id, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, session_id, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     )
     .run(opts.id, DIR_ID, opts.status, opts.sessionId ?? null, created);

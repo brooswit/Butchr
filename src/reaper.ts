@@ -8,7 +8,7 @@
 import { dirname, join } from "node:path";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
-import type { DirectoryRow, TaskRow } from "./db.ts";
+import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
 import { harness } from "./harness.ts";
 
@@ -44,7 +44,7 @@ function parseWorktreePaths(porcelain: string): string[] {
 }
 
 /**
- * Reap orphaned worktrees + herdr husks across every registered directory.
+ * Reap orphaned worktrees + herdr husks across every registered workspace.
  *
  * Worktrees: for each registered repo, `git worktree list --porcelain` enumerates
  * its worktrees. We only consider DIRECT children of the repo root (that's where
@@ -66,7 +66,7 @@ export async function reapOrphans(
   let worktrees = 0;
   let husks = 0;
 
-  const dirs = db.query<DirectoryRow, []>(`SELECT * FROM directories`).all();
+  const dirs = db.query<WorkspaceRow, []>(`SELECT * FROM workspaces`).all();
   for (const dir of dirs) {
     const list = await run([git, "-C", dir.path, "worktree", "list", "--porcelain"]);
     if (!list.ok) continue; // repo gone / not a git repo right now — skip
@@ -100,8 +100,8 @@ export async function reapOrphans(
   }
 
   // herdr husks: a terminal-state task whose agent name is still registered. This is
-  // keyed strictly by TASK id, so the per-directory managed CTO agents (each tracked
-  // in its own `cto_agent` row under the name `<config.ctoAgentName>-<directoryId>` —
+  // keyed strictly by TASK id, so the per-workspace managed CTO agents (each tracked
+  // in its own `cto_agent` row under the name `<config.ctoAgentName>-<workspaceId>` —
   // never a task id) are never matched here and their panes are never orphaned/reaped.
   // See src/cto-agent.ts.
   if (herdrUp) {

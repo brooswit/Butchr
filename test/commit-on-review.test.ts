@@ -66,7 +66,7 @@ beforeAll(async () => {
   conformanceMod = await import("../src/conformance.ts");
 
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, gate_cmd, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, gate_cmd, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(DIR_ID, REPO_ROOT, "test", "", dbMod.nowIso());
   conformanceMod.setConformanceRunner(async () => null);
 });

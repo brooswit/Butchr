@@ -1,4 +1,4 @@
-// LAUNCH AUTO-CONFIRM for the managed CTO agent. Every per-directory CTO (re)launch
+// LAUNCH AUTO-CONFIRM for the managed CTO agent. Every per-workspace CTO (re)launch
 // must come up READY unattended — but Claude Code (especially under the research-
 // preview `--dangerously-load-development-channels` flag) can stop on a BLOCKING
 // interactive startup prompt the first time a session touches a workspace:

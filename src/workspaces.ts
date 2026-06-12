@@ -1,4 +1,4 @@
-// Directory service: register/list/unregister directories. Each directory is a
+// Workspace service: register/list/unregister workspaces. Each workspace is a
 // git repo that maps 1:1 to a herdr workspace.
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -12,15 +12,15 @@ import {
 import { config } from "./config.ts";
 import { stopCtoAgent } from "./cto-agent.ts";
 import { db, nowIso } from "./db.ts";
-import type { DirectoryRow, TaskRow } from "./db.ts";
+import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import * as herdr from "./herdr.ts";
-import { generateDirectoryId } from "./ids.ts";
+import { generateWorkspaceId } from "./ids.ts";
 import { ctoMdPath } from "./taskmd.ts";
 
-// Default CTO context seeded into a freshly registered directory's
+// Default CTO context seeded into a freshly registered workspace's
 // `.butchr/CTO.md`. Kept short and editable; surfaced to every agent by
 // renderAgentPrompt (which adds the `# CTO context` heading above it).
 const DEFAULT_CTO_CONTEXT = `A CTO — the human's principal engineer (the Claude running in the project
@@ -64,16 +64,16 @@ function seedCtoContext(path: string): void {
   }
 }
 
-export type DirectoryView = DirectoryRow & {
+export type WorkspaceView = WorkspaceRow & {
   counts: Record<string, number>;
 };
 
-function counts(directoryId: string): Record<string, number> {
+function counts(workspaceId: string): Record<string, number> {
   const rows = db
     .query<{ status: string; n: number }, [string]>(
-      `SELECT status, COUNT(*) AS n FROM tasks WHERE directory_id=? GROUP BY status`,
+      `SELECT status, COUNT(*) AS n FROM tasks WHERE workspace_id=? GROUP BY status`,
     )
-    .all(directoryId);
+    .all(workspaceId);
   // One bucket per canonical status (see db.STATE_META), plus the orthogonal `idle`
   // pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
   const out: Record<string, number> = {
@@ -85,36 +85,36 @@ function counts(directoryId: string): Record<string, number> {
   // peel it out of the in_progress count so the dashboard shows active vs. quiet agents.
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE directory_id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1`,
     )
-    .get(directoryId)!.n;
+    .get(workspaceId)!.n;
   out.idle = idle;
   out.in_progress -= idle;
   return out;
 }
 
-/** Look up a registered directory by its id, or null if none matches. */
-export function getDirectory(id: string): DirectoryRow | null {
+/** Look up a registered workspace by its id, or null if none matches. */
+export function getWorkspace(id: string): WorkspaceRow | null {
   return (
-    db.query<DirectoryRow, [string]>(`SELECT * FROM directories WHERE id=?`).get(id) ??
+    db.query<WorkspaceRow, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(id) ??
     null
   );
 }
 
-/** Look up a registered directory by its absolute filesystem path, or null if none matches. */
-export function getDirectoryByPath(path: string): DirectoryRow | null {
+/** Look up a registered workspace by its absolute filesystem path, or null if none matches. */
+export function getWorkspaceByPath(path: string): WorkspaceRow | null {
   return (
-    db.query<DirectoryRow, [string]>(`SELECT * FROM directories WHERE path=?`).get(path) ??
+    db.query<WorkspaceRow, [string]>(`SELECT * FROM workspaces WHERE path=?`).get(path) ??
     null
   );
 }
 
 export type WorkspaceHeal = { workspaceId: string | undefined; created: boolean };
 
-// In-flight workspace create/heal keyed by directory id. BOTH callers that heal a
-// directory's workspace — the dispatcher (task agents) and the managed CTO agent —
+// In-flight herdr-workspace create/heal keyed by workspace id. BOTH callers that heal a
+// workspace's herdr workspace — the dispatcher (task agents) and the managed CTO agent —
 // funnel through this ONE map, so a CTO (re)launch and a task dispatch both racing the
-// SAME directory's closed/restarted herdr workspace can no longer each see
+// SAME workspace's closed/restarted herdr workspace can no longer each see
 // workspaceExists=false and double-create (the second persist UPDATE would clobber the
 // first, orphaning a workspace). The FIRST caller runs the heal; concurrent callers
 // await its result. The entry is cleared once the heal settles, so a LATER heal (a
@@ -122,79 +122,79 @@ export type WorkspaceHeal = { workspaceId: string | undefined; created: boolean 
 const workspaceInFlight = new Map<string, Promise<WorkspaceHeal>>();
 
 /**
- * Ensure the directory's herdr workspace exists, recreating it (and persisting the
- * new ids on the directory row) when herdr was restarted or the workspace was closed
+ * Ensure the workspace's herdr workspace exists, recreating it (and persisting the
+ * new ids on the workspace row) when herdr was restarted or the workspace was closed
  * out from under us. The single existence-check + create + row UPDATE both the
- * dispatcher (task agents) and the managed CTO agent funnel through — one workspace
- * per directory backs both — and the in-flight dedupe lives HERE (not in any one
- * caller) so EVERY path collapses to exactly one create per directory under
+ * dispatcher (task agents) and the managed CTO agent funnel through — one herdr
+ * workspace per workspace backs both — and the in-flight dedupe lives HERE (not in any one
+ * caller) so EVERY path collapses to exactly one create per workspace under
  * concurrency. Goes through the swappable `harness` runner so a test-injected fake
  * backend is honored.
  *
  * Returns the workspace id and whether a fresh one was `created` (vs the existing one
  * being reused) so the caller can do its own create-only bookkeeping (the dispatcher
- * logs + mutates its in-memory DirectoryRow; the CTO agent does neither). The single
+ * logs + mutates its in-memory WorkspaceRow; the CTO agent does neither). The single
  * underlying create is owned by — and reported `created: true` to — the FIRST caller;
  * concurrent callers that merely await that in-flight heal get the same workspace id
  * with `created: false`, so the create-only bookkeeping runs exactly once no matter how
  * many race.
  */
-export async function ensureDirectoryWorkspace(
-  directoryId: string,
+export async function ensureHerdrWorkspace(
+  workspaceId: string,
   cwd: string,
   label: string,
 ): Promise<WorkspaceHeal> {
-  const existing = workspaceInFlight.get(directoryId);
+  const existing = workspaceInFlight.get(workspaceId);
   if (existing) {
     // An awaiter: share the in-flight heal's workspace id, but never re-claim the
     // create — the initiator owns it (and its create-only bookkeeping).
     const { workspaceId } = await existing;
     return { workspaceId, created: false };
   }
-  const p = healDirectoryWorkspace(directoryId, cwd, label).finally(() =>
-    workspaceInFlight.delete(directoryId),
+  const p = healHerdrWorkspace(workspaceId, cwd, label).finally(() =>
+    workspaceInFlight.delete(workspaceId),
   );
-  workspaceInFlight.set(directoryId, p);
+  workspaceInFlight.set(workspaceId, p);
   return p;
 }
 
 // The actual existence-check + create + row UPDATE, run once per in-flight heal (see
-// ensureDirectoryWorkspace's dedupe). Reuses the recorded workspace when it still
-// exists; otherwise creates a fresh one and persists its ids on the directory row.
-async function healDirectoryWorkspace(
-  directoryId: string,
+// ensureHerdrWorkspace's dedupe). Reuses the recorded workspace when it still
+// exists; otherwise creates a fresh one and persists its ids on the workspace row.
+async function healHerdrWorkspace(
+  workspaceId: string,
   cwd: string,
   label: string,
 ): Promise<WorkspaceHeal> {
-  const existing = getDirectory(directoryId)?.herdr_workspace ?? null;
+  const existing = getWorkspace(workspaceId)?.herdr_workspace ?? null;
   if (existing && (await harness.workspaceExists(existing))) {
     return { workspaceId: existing, created: false };
   }
   const ws = await harness.workspaceCreate(cwd, label);
   db.query(
-    `UPDATE directories SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
-  ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, directoryId);
+    `UPDATE workspaces SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
+  ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, workspaceId);
   return { workspaceId: ws.workspaceId, created: true };
 }
 
-export function listDirectories(): DirectoryView[] {
+export function listWorkspaces(): WorkspaceView[] {
   const rows = db
-    .query<DirectoryRow, []>(`SELECT * FROM directories ORDER BY created_at ASC`)
+    .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
     .all();
   return rows.map((d) => ({ ...d, counts: counts(d.id) }));
 }
 
 /**
- * The EFFECTIVE build/test gate command for a directory: its own `gate_cmd` if it
+ * The EFFECTIVE build/test gate command for a workspace: its own `gate_cmd` if it
  * set one (a non-null value, including the empty string which DISABLES the gate),
  * else the global default `config.verifyCmd` (EMPTY by default — no gate — unless
  * set via BUTCHR_VERIFY_CMD). This is the single resolution point for BOTH gates —
  * the in-worktree CI gate (tasks.triggerCi) and the post-merge verify gate
- * (verify.verifyDefaultBranch) — so a directory's command can never diverge between
- * them. An unknown id falls back to the default. Pure read of the directory row + config.
+ * (verify.verifyDefaultBranch) — so a workspace's command can never diverge between
+ * them. An unknown id falls back to the default. Pure read of the workspace row + config.
  */
-export function directoryGateCmd(id: string): string {
-  const dir = getDirectory(id);
+export function workspaceGateCmd(id: string): string {
+  const dir = getWorkspace(id);
   if (dir && dir.gate_cmd !== null) return dir.gate_cmd;
   return config.verifyCmd;
 }
@@ -202,7 +202,7 @@ export function directoryGateCmd(id: string): string {
 /**
  * Normalize an incoming gate-command value for storage. `undefined`/`null` clears
  * the override (→ NULL → falls back to the default); a string is stored verbatim
- * (the empty string is a deliberate "disable the gate for this directory" setting,
+ * (the empty string is a deliberate "disable the gate for this workspace" setting,
  * mirroring an empty BUTCHR_VERIFY_CMD). Anything else is a 400.
  */
 function normalizeGateCmd(value: unknown): string | null {
@@ -214,49 +214,49 @@ function normalizeGateCmd(value: unknown): string | null {
 }
 
 /**
- * Update (or clear) a directory's per-directory build/test gate command and return
+ * Update (or clear) a workspace's per-workspace build/test gate command and return
  * the refreshed view. Pass `null`/`undefined` to clear the override (revert to the
- * default `config.verifyCmd`); a string (incl. "") sets it. 404 if the directory is
- * gone. Takes effect on the NEXT gate run for that directory (the next task entering
+ * default `config.verifyCmd`); a string (incl. "") sets it. 404 if the workspace is
+ * gone. Takes effect on the NEXT gate run for that workspace (the next task entering
  * review, and the next merge's post-merge verify) — nothing in flight is disturbed.
  */
-export function updateDirectoryGateCmd(id: string, gateCmd: unknown): DirectoryView {
-  const dir = getDirectory(id);
-  if (!dir) throw new HttpError(404, `directory not found: ${id}`);
+export function updateWorkspaceGateCmd(id: string, gateCmd: unknown): WorkspaceView {
+  const dir = getWorkspace(id);
+  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
   const value = normalizeGateCmd(gateCmd);
-  db.query(`UPDATE directories SET gate_cmd=? WHERE id=?`).run(value, id);
-  const view: DirectoryView = { ...getDirectory(id)!, counts: counts(id) };
-  publish({ type: "directory.updated", directory: view });
+  db.query(`UPDATE workspaces SET gate_cmd=? WHERE id=?`).run(value, id);
+  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
+  publish({ type: "workspace.updated", workspace: view });
   return view;
 }
 
 /**
- * Set (or clear) a directory's per-directory CTO-agent enable and return the refreshed
- * view. `true`/`false` forces the directory's CTO agent on/off (boot auto-start +
+ * Set (or clear) a workspace's per-workspace CTO-agent enable and return the refreshed
+ * view. `true`/`false` forces the workspace's CTO agent on/off (boot auto-start +
  * supervision); `null`/`undefined` CLEARS the override so it inherits the global
- * default config.ctoAgentEnabled. 404 if the directory is gone; 400 if the value is
+ * default config.ctoAgentEnabled. 404 if the workspace is gone; 400 if the value is
  * neither a boolean nor null. Takes effect on the next boot reconcile / supervision
- * tick (and is reflected immediately in the directory's CTO status). See
+ * tick (and is reflected immediately in the workspace's CTO status). See
  * cto-agent.isCtoEnabled.
  */
-export function setDirectoryCtoEnabled(id: string, value: unknown): DirectoryView {
-  const dir = getDirectory(id);
-  if (!dir) throw new HttpError(404, `directory not found: ${id}`);
+export function setWorkspaceCtoEnabled(id: string, value: unknown): WorkspaceView {
+  const dir = getWorkspace(id);
+  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
   let stored: number | null;
   if (value === undefined || value === null) stored = null;
   else if (typeof value === "boolean") stored = value ? 1 : 0;
   else throw new HttpError(400, "cto_enabled must be a boolean (or null to use the default)");
-  db.query(`UPDATE directories SET cto_enabled=? WHERE id=?`).run(stored, id);
-  const view: DirectoryView = { ...getDirectory(id)!, counts: counts(id) };
-  publish({ type: "directory.updated", directory: view });
+  db.query(`UPDATE workspaces SET cto_enabled=? WHERE id=?`).run(stored, id);
+  const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
+  publish({ type: "workspace.updated", workspace: view });
   return view;
 }
 
 /**
- * Per-directory needs-attention rollup, the projection behind the cross-project
- * DASHBOARD (GET /api/dashboard). For every registered directory it folds the
+ * Per-workspace needs-attention rollup, the projection behind the cross-project
+ * DASHBOARD (GET /api/dashboard). For every registered workspace it folds the
  * per-status `counts` into the four operator-facing buckets the dashboard surfaces,
- * plus the directory's effective gate command, and accumulates a `totals` row. The
+ * plus the workspace's effective gate command, and accumulates a `totals` row. The
  * buckets (a task can fall in more than one — `needsAttention` is the operator
  * pull-signal, deliberately overlapping `review`/`failed`, matching /health):
  *  - `active`         — in-flight work needing no human (idle/agent, non-feedback):
@@ -267,7 +267,7 @@ export function setDirectoryCtoEnabled(id: string, value: unknown): DirectoryVie
  *                       state — a dispatch/finalize give-up or revert lands in `aborted`).
  *  - `needsAttention` — what to look at right now (= review).
  */
-export type DashboardDirectory = {
+export type DashboardWorkspace = {
   id: string;
   path: string;
   label: string | null;
@@ -282,9 +282,9 @@ export type DashboardDirectory = {
 };
 
 export type Dashboard = {
-  directories: DashboardDirectory[];
+  workspaces: DashboardWorkspace[];
   totals: {
-    directories: number;
+    workspaces: number;
     active: number;
     review: number;
     failed: number;
@@ -294,10 +294,10 @@ export type Dashboard = {
 
 export function dashboard(): Dashboard {
   const rows = db
-    .query<DirectoryRow, []>(`SELECT * FROM directories ORDER BY created_at ASC`)
+    .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
     .all();
-  const totals = { directories: rows.length, active: 0, review: 0, failed: 0, needsAttention: 0 };
-  const directories = rows.map((d) => {
+  const totals = { workspaces: rows.length, active: 0, review: 0, failed: 0, needsAttention: 0 };
+  const workspaces = rows.map((d) => {
     const c = counts(d.id);
     const active =
       (c.idea ?? 0) + (c.blocked ?? 0) + (c.in_progress ?? 0) + (c.idle ?? 0) + (c.finalizing ?? 0);
@@ -322,29 +322,29 @@ export function dashboard(): Dashboard {
       needsAttention,
     };
   });
-  return { directories, totals };
+  return { workspaces, totals };
 }
 
-export async function registerDirectory(
+export async function registerWorkspace(
   rawPath: string,
   label?: string,
   gateCmd?: unknown,
-): Promise<DirectoryView> {
+): Promise<WorkspaceView> {
   const path = resolve(rawPath);
 
   if (!(await git.isGitRepo(path))) {
     throw new HttpError(400, `not a git repository: ${path}`);
   }
-  if (getDirectoryByPath(path)) {
-    throw new HttpError(409, `directory already registered: ${path}`);
+  if (getWorkspaceByPath(path)) {
+    throw new HttpError(409, `workspace already registered: ${path}`);
   }
 
   const finalLabel = label?.trim() || basename(path);
-  // Optional per-directory build/test gate command, set at register time (NULL =
-  // use the default config.verifyCmd; "" = disable the gate for this directory).
+  // Optional per-workspace build/test gate command, set at register time (NULL =
+  // use the default config.verifyCmd; "" = disable the gate for this workspace).
   const finalGateCmd = normalizeGateCmd(gateCmd);
 
-  // Provision the herdr workspace (best effort — directory still usable if the
+  // Provision the herdr workspace (best effort — workspace still usable if the
   // herdr server is briefly down; dispatch will retry).
   let workspaceId: string | null = null;
   let paneId: string | null = null;
@@ -365,36 +365,36 @@ export async function registerDirectory(
   // task agent launched here starts with it.
   seedCtoContext(path);
 
-  const id = generateDirectoryId();
+  const id = generateWorkspaceId();
   const created = nowIso();
   db.query(
-    `INSERT INTO directories (id, path, label, herdr_workspace, herdr_pane, gate_cmd, created_at)
+    `INSERT INTO workspaces (id, path, label, herdr_workspace, herdr_pane, gate_cmd, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, path, finalLabel, workspaceId, paneId, finalGateCmd, created);
 
-  const row = getDirectory(id)!;
-  const view: DirectoryView = { ...row, counts: counts(id) };
-  publish({ type: "directory.created", directory: view });
+  const row = getWorkspace(id)!;
+  const view: WorkspaceView = { ...row, counts: counts(id) };
+  publish({ type: "workspace.created", workspace: view });
   return view;
 }
 
-export async function unregisterDirectory(id: string): Promise<void> {
-  const dir = getDirectory(id);
-  if (!dir) throw new HttpError(404, `directory not found: ${id}`);
+export async function unregisterWorkspace(id: string): Promise<void> {
+  const dir = getWorkspace(id);
+  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
 
-  // Tear down this directory's managed CTO agent FIRST (close its tab/pane + free its
+  // Tear down this workspace's managed CTO agent FIRST (close its tab/pane + free its
   // name) so the DELETE below — which cascade-removes its cto_agent row — can't strand
   // an orphaned CTO pane. Best-effort; never block unregister.
   await stopCtoAgent(id).catch(() => {});
 
   // Best effort: clean up any worktrees for non-terminal tasks.
   const tasks = db
-    .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE directory_id=?`)
+    .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE workspace_id=?`)
     .all(id);
   for (const t of tasks) {
     // Close the task's dedicated tab (kills its agent + removes the tab); the
     // workspace close below is a backstop, but per-tab teardown keeps things tidy
-    // even if the workspace outlives this directory.
+    // even if the workspace outlives this workspace.
     await herdr.teardownTask(t.herdr_tab_id, t.id, t.herdr_pane_id);
     if (t.status !== "merged") {
       await git.cleanup(dir.path, t.id).catch(() => {});
@@ -418,8 +418,8 @@ export async function unregisterDirectory(id: string): Promise<void> {
     // ignore cleanup failures
   }
 
-  db.query(`DELETE FROM directories WHERE id=?`).run(id); // cascades to tasks
-  publish({ type: "directory.deleted", id });
+  db.query(`DELETE FROM workspaces WHERE id=?`).run(id); // cascades to tasks
+  publish({ type: "workspace.deleted", id });
 }
 
 // Small typed error carrying an HTTP status, surfaced by the server layer.

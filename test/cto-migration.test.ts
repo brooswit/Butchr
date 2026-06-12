@@ -1,7 +1,7 @@
-// Test the SINGLETON → PER-DIRECTORY migration for the managed CTO agent (db.ts
-// migrateCtoAgentPerDirectory). An existing DB whose `cto_agent` table is the OLD
+// Test the SINGLETON → PER-WORKSPACE migration for the managed CTO agent (db.ts
+// migrateCtoAgentPerWorkspace). An existing DB whose `cto_agent` table is the OLD
 // singleton shape (PK `id`, one row keyed 'singleton') must be migrated forward to a
-// table keyed by directory_id with a FK cascade — pre-1.0, the old singleton row is
+// table keyed by workspace_id with a FK cascade — pre-1.0, the old singleton row is
 // destroyed freely. We build an old-shape DB by hand, then import db.ts pointed at it
 // so its module-load migration runs, and assert the new shape + behavior.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -51,16 +51,16 @@ afterAll(() => {
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-describe("cto_agent singleton → per-directory migration", () => {
-  test("the table is re-keyed by directory_id (the old singleton shape is dropped)", () => {
+describe("cto_agent singleton → per-workspace migration", () => {
+  test("the table is re-keyed by workspace_id (the old singleton shape is dropped)", () => {
     const cols = dbMod.db
       .query<{ name: string; pk: number }, []>(`PRAGMA table_info(cto_agent)`)
       .all();
     const names = cols.map((c) => c.name);
-    expect(names).toContain("directory_id");
+    expect(names).toContain("workspace_id");
     expect(names).not.toContain("id"); // the singleton PK column is gone
-    // directory_id is the new primary key.
-    expect(cols.find((c) => c.name === "directory_id")!.pk).toBe(1);
+    // workspace_id is the new primary key.
+    expect(cols.find((c) => c.name === "workspace_id")!.pk).toBe(1);
   });
 
   test("the old 'singleton' row is destroyed (no rows survive the drop)", () => {
@@ -68,23 +68,23 @@ describe("cto_agent singleton → per-directory migration", () => {
     expect(dbMod.getCtoAgentRow("singleton")).toBeNull();
   });
 
-  test("per-directory rows now work (keyed by directory_id, FK to directories)", () => {
-    // A directory is required (FK cascade keys the row to it).
+  test("per-workspace rows now work (keyed by workspace_id, FK to workspaces)", () => {
+    // A workspace is required (FK cascade keys the row to it).
     dbMod.db
       .query(
-        `INSERT INTO directories (id, path, label, herdr_workspace, herdr_pane, gate_cmd, cto_enabled, created_at)
+        `INSERT INTO workspaces (id, path, label, herdr_workspace, herdr_pane, gate_cmd, cto_enabled, created_at)
          VALUES ('dir-mig1', ?, 'mig', NULL, NULL, NULL, NULL, ?)`,
       )
       .run(join(DATA_DIR, "repo"), dbMod.nowIso());
 
     dbMod.saveCtoAgentRow("dir-mig1", { session_id: "s1", desired: 1 });
     const r = dbMod.getCtoAgentRow("dir-mig1");
-    expect(r?.directory_id).toBe("dir-mig1");
+    expect(r?.workspace_id).toBe("dir-mig1");
     expect(r?.session_id).toBe("s1");
     expect(r?.desired).toBe(1);
 
-    // Deleting the directory cascade-removes its CTO row (the path-change/move hazard).
-    dbMod.db.query(`DELETE FROM directories WHERE id='dir-mig1'`).run();
+    // Deleting the workspace cascade-removes its CTO row (the path-change/move hazard).
+    dbMod.db.query(`DELETE FROM workspaces WHERE id='dir-mig1'`).run();
     expect(dbMod.getCtoAgentRow("dir-mig1")).toBeNull();
   });
 });

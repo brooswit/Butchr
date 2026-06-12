@@ -71,7 +71,7 @@ const STATE_PHRASE: Record<AttentionState, string> = {
 export type ChannelNotification = {
   content: string;
   // Identifier-keyed metadata (keys are bare identifiers: letters/digits/underscore).
-  meta: { task_id: string; dir: string; state: string };
+  meta: { task_id: string; workspace: string; state: string };
 };
 
 // --- initialize result -------------------------------------------------------
@@ -153,14 +153,14 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
  */
 export class AttentionBridge {
   private lastStatus = new Map<string, string>();
-  // directory_id -> human label, populated from directory.* events on the same
+  // workspace_id -> human label, populated from workspace.* events on the same
   // stream (and optionally seeded once at startup). Used only for the content line;
-  // meta.dir is always the stable directory_id.
+  // meta.workspace is always the stable workspace_id.
   private dirLabels = new Map<string, string>();
-  // PER-DIRECTORY SCOPE. When set (the directory_id passed at construction — from
-  // BUTCHR_CHANNEL_DIR), the bridge emits notifications ONLY for tasks in THAT
-  // directory, so each per-repo CTO agent receives only its OWN directory's attention
-  // events. Unset (empty/undefined) → unscoped: every directory's events flow (the
+  // PER-WORKSPACE SCOPE. When set (the workspace_id passed at construction — from
+  // BUTCHR_CHANNEL_WORKSPACE), the bridge emits notifications ONLY for tasks in THAT
+  // workspace, so each per-repo CTO agent receives only its OWN workspace's attention
+  // events. Unset (empty/undefined) → unscoped: every workspace's events flow (the
   // legacy global feed).
   private readonly scopeDir: string;
 
@@ -168,8 +168,8 @@ export class AttentionBridge {
     this.scopeDir = (scopeDir ?? "").trim();
   }
 
-  /** Seed the directory-label cache (best-effort, e.g. from GET /api/directories). */
-  seedDirectoryLabels(dirs: Array<{ id?: unknown; label?: unknown }>): void {
+  /** Seed the workspace-label cache (best-effort, e.g. from GET /api/workspaces). */
+  seedWorkspaceLabels(dirs: Array<{ id?: unknown; label?: unknown }>): void {
     for (const d of dirs) {
       if (d && typeof d.id === "string" && typeof d.label === "string" && d.label) {
         this.dirLabels.set(d.id, d.label);
@@ -185,15 +185,15 @@ export class AttentionBridge {
     if (!event || typeof event !== "object") return null;
     const e = event as Record<string, unknown>;
 
-    // Keep the directory-label cache fresh off the same stream.
-    if (e.type === "directory.created" || e.type === "directory.updated") {
-      const dir = e.directory as Record<string, unknown> | undefined;
+    // Keep the workspace-label cache fresh off the same stream.
+    if (e.type === "workspace.created" || e.type === "workspace.updated") {
+      const dir = e.workspace as Record<string, unknown> | undefined;
       if (dir && typeof dir.id === "string" && typeof dir.label === "string") {
         this.dirLabels.set(dir.id, dir.label);
       }
       return null;
     }
-    if (e.type === "directory.deleted" && typeof e.id === "string") {
+    if (e.type === "workspace.deleted" && typeof e.id === "string") {
       this.dirLabels.delete(e.id);
       return null;
     }
@@ -216,17 +216,17 @@ export class AttentionBridge {
     if (!isAttentionState(status)) return null;
     if (prev === status) return null; // already in this state — not a fresh transition
 
-    const dirId = typeof t.directory_id === "string" ? t.directory_id : "";
-    // PER-DIRECTORY SCOPE: drop transitions for OTHER directories (a directory's CTO
-    // agent only ever sees its own directory's attention events). We still update
+    const dirId = typeof t.workspace_id === "string" ? t.workspace_id : "";
+    // PER-WORKSPACE SCOPE: drop transitions for OTHER workspaces (a workspace's CTO
+    // agent only ever sees its own workspace's attention events). We still update
     // lastStatus above so an unscoped re-fire is suppressed identically.
     if (this.scopeDir && dirId !== this.scopeDir) return null;
-    const label = this.dirLabels.get(dirId) || dirId || "(unknown dir)";
+    const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
     const text = attentionText(t, status);
     const content =
       `[${id}] ${label} — ${STATE_PHRASE[status]}` + (text ? `: ${text}` : "");
 
-    return { content, meta: { task_id: id, dir: dirId, state: status } };
+    return { content, meta: { task_id: id, workspace: dirId, state: status } };
   }
 }
 
@@ -407,23 +407,23 @@ function elog(msg: string): void {
  */
 export async function main(): Promise<void> {
   const url = defaultSseUrl();
-  // PER-DIRECTORY SCOPE: butchr launches one bridge per registered directory's CTO
-  // agent and passes that directory_id via BUTCHR_CHANNEL_DIR, so the bridge pushes
-  // only that directory's attention events. Unset → an unscoped (all-directories) feed.
-  const scopeDir = (process.env.BUTCHR_CHANNEL_DIR ?? "").trim();
+  // PER-WORKSPACE SCOPE: butchr launches one bridge per registered workspace's CTO
+  // agent and passes that workspace_id via BUTCHR_CHANNEL_WORKSPACE, so the bridge pushes
+  // only that workspace's attention events. Unset → an unscoped (all-workspaces) feed.
+  const scopeDir = (process.env.BUTCHR_CHANNEL_WORKSPACE ?? "").trim();
   const bridge = new AttentionBridge(scopeDir);
-  if (scopeDir) elog(`scoped to directory ${scopeDir}`);
+  if (scopeDir) elog(`scoped to workspace ${scopeDir}`);
   let stopped = false;
 
-  // Best-effort seed of directory labels so the very first notifications carry a
-  // human label rather than a bare directory id (the cache then self-updates off the
-  // directory.* events on the stream).
+  // Best-effort seed of workspace labels so the very first notifications carry a
+  // human label rather than a bare workspace id (the cache then self-updates off the
+  // workspace.* events on the stream).
   try {
     const base = url.replace(/\/api\/events.*$/, "");
-    const res = await fetch(`${base}/api/directories`);
+    const res = await fetch(`${base}/api/workspaces`);
     if (res.ok) {
       const dirs = await res.json();
-      if (Array.isArray(dirs)) bridge.seedDirectoryLabels(dirs);
+      if (Array.isArray(dirs)) bridge.seedWorkspaceLabels(dirs);
     }
   } catch {
     /* seeding is optional */

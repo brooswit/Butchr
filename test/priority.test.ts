@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 let DATA_DIR: string;
 let REPO_ROOT: string;
-// Unique per-file directory id — the db/config singletons are shared across test
+// Unique per-file workspace id — the db/config singletons are shared across test
 // files in one run, so a distinct id keeps this file's rows from colliding.
 const DIR_ID = "priority-dir";
 
@@ -25,7 +25,7 @@ let tasksMod: typeof import("../src/tasks.ts");
 function insertQueued(id: string, createdAt: string, priority: number): void {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, priority, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, priority, created_at)
        VALUES (?, ?, 'in_progress', ?, ?)`,
     )
     .run(id, DIR_ID, priority, createdAt);
@@ -49,7 +49,7 @@ beforeAll(async () => {
 
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });

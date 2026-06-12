@@ -140,7 +140,7 @@ a:hover { text-decoration: underline; }
 
 .topbar-right { display: flex; align-items: center; gap: 14px; }
 
-/* topbar nav — Directories / Metrics. Sits to the right of the brand; the active
+/* topbar nav — Workspaces / Metrics. Sits to the right of the brand; the active
    route's link is highlighted. margin-right:auto pushes topbar-right to the end. */
 .topnav { display: flex; align-items: center; gap: 4px; margin-left: 22px; margin-right: auto; }
 .topnav-link {
@@ -277,7 +277,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.awaiting_input { background: var(--awaiting); }
 .chip.rejected { background: var(--rejected); }
 .chip.failed { background: var(--failed); }
-/* `unknown` blocker — a dependency that isn't among the current directory's tasks
+/* `unknown` blocker — a dependency that isn't among the current workspace's tasks
    (so its status can't be resolved). Neutral muted fill. */
 .chip.unknown { background: var(--muted); }
 /* STATE-KIND chips — small secondary badge on the task detail header showing the
@@ -340,7 +340,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .count-pill.has-finalizing { border-color: var(--finalizing); color: var(--finalizing); }
 
 /* cross-project dashboard summary — the four operator buckets aggregated across all
-   registered directories. */
+   registered workspaces. */
 .dash-summary {
   display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 20px;
 }
@@ -359,19 +359,19 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .dash-stat.failed.nonzero { border-color: var(--failed); }
 .dash-stat.failed.nonzero .ds-num { color: var(--failed); }
 
-/* per-directory aggregate buckets on a dashboard card. */
-.dir-buckets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.dir-bucket {
+/* per-workspace aggregate buckets on a dashboard card. */
+.ws-buckets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.ws-bucket {
   font-size: 11px; color: var(--muted);
   border: 1px solid var(--border); border-radius: var(--radius-md);
   padding: 2px 7px;
 }
-.dir-bucket b { color: var(--text); }
-.dir-bucket.review { border-color: var(--review); color: var(--review); }
-.dir-bucket.attn { border-color: var(--review); color: var(--review); }
-.dir-bucket.failed { border-color: var(--failed); color: var(--failed); }
+.ws-bucket b { color: var(--text); }
+.ws-bucket.review { border-color: var(--review); color: var(--review); }
+.ws-bucket.attn { border-color: var(--review); color: var(--review); }
+.ws-bucket.failed { border-color: var(--failed); color: var(--failed); }
 
-/* per-directory build/test gate command panel + editor (directory view). */
+/* per-workspace build/test gate command panel + editor (workspace view). */
 .gate-cmd {
   font-family: var(--mono); font-size: 12px;
   background: var(--panel-2); border: 1px solid var(--border);
@@ -491,7 +491,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap;
 }
 
-/* search + status filter bar (directory task views) */
+/* search + status filter bar (workspace task views) */
 .filter-bar { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 6px; }
 /* full-text search box (server-side ?q=); wide enough for its placeholder hint */
 .task-search { max-width: 420px; width: 100%; }
@@ -542,7 +542,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .finished-row .fr-id { font-family: var(--mono); font-size: 13px; flex: 1; word-break: break-all; }
 .finished-row .fr-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
-/* List / Graph view toggle (directory page) — a small segmented control */
+/* List / Graph view toggle (workspace page) — a small segmented control */
 .view-toggle {
   display: inline-flex; gap: 0; margin: 16px 0 6px;
   border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden;
@@ -616,7 +616,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-node.rejected .tg-rect     { fill: var(--rejected); }
 .tg-node.failed .tg-rect       { fill: var(--failed); }
 
-/* pipeline / merge-train board (directory view) — active tasks grouped into
+/* pipeline / merge-train board (workspace view) — active tasks grouped into
    pipeline-order lanes, each with a status-colored left accent. */
 .board { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
 .board-summary { font-size: 13px; margin-bottom: 2px; }
@@ -889,7 +889,7 @@ pre.block {
 
 .empty { color: var(--muted); padding: 28px; text-align: center; border: 1px dashed var(--border); border-radius: 8px; }
 
-/* directory picker modal */
+/* workspace picker modal */
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55);
   display: flex; align-items: center; justify-content: center; z-index: 200;
@@ -1066,7 +1066,7 @@ small.muted { font-size: 12px; }
 .sb-fill.rejected    { background: var(--rejected); }
 .sb-fill.failed      { background: var(--failed); }
 
-/* ---- managed CTO agent (per-directory: panel on the directory view, mini-badge
+/* ---- managed CTO agent (per-workspace: panel on the workspace view, mini-badge
        on each dashboard card) ---- */
 .cto-card { margin-bottom: 18px; }
 .cto-mini { margin-top: 8px; }

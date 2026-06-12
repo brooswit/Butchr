@@ -79,7 +79,7 @@ beforeAll(async () => {
   }
 
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
 
@@ -190,7 +190,7 @@ function makeFake(opts: { resolvedPane: string | undefined }): {
 const dbRow = (id: string) =>
   dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;
 const dirRow = () =>
-  dbMod.db.query<any, [string]>(`SELECT * FROM directories WHERE id=?`).get(DIR_ID)!;
+  dbMod.db.query<any, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(DIR_ID)!;
 
 describe("dispatcher against a fake AgentRunner backend", () => {
   test("a successful dispatch drives the backend and markRunning against the resolved pane", async () => {

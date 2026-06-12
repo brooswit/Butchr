@@ -34,7 +34,7 @@ function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
 describe("channel: attention transitions → notifications", () => {
   test("emits a correctly-shaped notification for each attention transition", () => {
     const bridge = new AttentionBridge();
-    bridge.seedDirectoryLabels([{ id: "dir-1", label: "webapp" }]);
+    bridge.seedWorkspaceLabels([{ id: "dir-1", label: "webapp" }]);
 
     const cases: Array<{
       state: string;
@@ -45,7 +45,7 @@ describe("channel: attention transitions → notifications", () => {
         state: "spec_review",
         task: {
           id: "t-spec",
-          directory_id: "dir-1",
+          workspace_id: "dir-1",
           status: "spec_review",
           summary: "Spec: add a widget",
         },
@@ -55,7 +55,7 @@ describe("channel: attention transitions → notifications", () => {
         state: "in_review",
         task: {
           id: "t-review",
-          directory_id: "dir-1",
+          workspace_id: "dir-1",
           status: "in_review",
           summary: "Implemented the widget",
         },
@@ -65,7 +65,7 @@ describe("channel: attention transitions → notifications", () => {
         state: "needs_info",
         task: {
           id: "t-ask",
-          directory_id: "dir-1",
+          workspace_id: "dir-1",
           status: "needs_info",
           question: "Which color should the widget be?",
         },
@@ -76,7 +76,7 @@ describe("channel: attention transitions → notifications", () => {
         state: "aborted",
         task: {
           id: "t-fail",
-          directory_id: "dir-1",
+          workspace_id: "dir-1",
           status: "aborted",
           last_dispatch_error: "spawn failed after 5 attempts",
         },
@@ -90,7 +90,7 @@ describe("channel: attention transitions → notifications", () => {
       // meta carries the identifier-keyed routing data.
       expect(note!.meta).toEqual({
         task_id: c.task.id as string,
-        dir: "dir-1",
+        workspace: "dir-1",
         state: c.state,
       });
       // content is a single human line carrying id, label, state phrase, and text.
@@ -111,7 +111,7 @@ describe("channel: attention transitions → notifications", () => {
     const bridge = new AttentionBridge();
     const task = {
       id: "t1",
-      directory_id: "dir-1",
+      workspace_id: "dir-1",
       status: "in_review",
       summary: "done",
     };
@@ -122,7 +122,7 @@ describe("channel: attention transitions → notifications", () => {
 
   test("entering an attention state from a non-attention one fires once", () => {
     const bridge = new AttentionBridge();
-    const base = { id: "t2", directory_id: "dir-1" };
+    const base = { id: "t2", workspace_id: "dir-1" };
     expect(bridge.consume(taskUpdated({ ...base, status: "in_progress" }))).toBeNull();
     const note = bridge.consume(
       taskUpdated({ ...base, status: "needs_info", question: "q?" }),
@@ -131,69 +131,69 @@ describe("channel: attention transitions → notifications", () => {
     expect(note!.meta.state).toBe("needs_info");
   });
 
-  test("falls back to directory_id when no label is known", () => {
+  test("falls back to workspace_id when no label is known", () => {
     const bridge = new AttentionBridge();
     const note = bridge.consume(
-      taskUpdated({ id: "t3", directory_id: "dir-x", status: "spec_review" }),
+      taskUpdated({ id: "t3", workspace_id: "dir-x", status: "spec_review" }),
     );
-    expect(note!.meta.dir).toBe("dir-x");
+    expect(note!.meta.workspace).toBe("dir-x");
     expect(note!.content).toContain("dir-x");
   });
 
-  test("directory.updated events refresh the label cache mid-stream", () => {
+  test("workspace.updated events refresh the label cache mid-stream", () => {
     const bridge = new AttentionBridge();
     expect(
       bridge.consume({
-        type: "directory.updated",
-        directory: { id: "dir-2", label: "api-server" },
+        type: "workspace.updated",
+        workspace: { id: "dir-2", label: "api-server" },
       }),
     ).toBeNull();
     const note = bridge.consume(
-      taskUpdated({ id: "t4", directory_id: "dir-2", status: "in_review", summary: "x" }),
+      taskUpdated({ id: "t4", workspace_id: "dir-2", status: "in_review", summary: "x" }),
     );
     expect(note!.content).toContain("api-server");
   });
 });
 
-describe("channel: per-directory scope", () => {
-  test("a scoped bridge emits ONLY its directory's transitions", () => {
-    // butchr launches one bridge per directory's CTO agent, passing BUTCHR_CHANNEL_DIR.
+describe("channel: per-workspace scope", () => {
+  test("a scoped bridge emits ONLY its workspace's transitions", () => {
+    // butchr launches one bridge per workspace's CTO agent, passing BUTCHR_CHANNEL_WORKSPACE.
     const bridge = new AttentionBridge("dir-1");
 
-    // A task in the SCOPED directory → a notification.
+    // A task in the SCOPED workspace → a notification.
     const inScope = bridge.consume(
-      taskUpdated({ id: "t-in", directory_id: "dir-1", status: "in_review", summary: "mine" }),
+      taskUpdated({ id: "t-in", workspace_id: "dir-1", status: "in_review", summary: "mine" }),
     );
     expect(inScope).not.toBeNull();
-    expect(inScope!.meta.dir).toBe("dir-1");
+    expect(inScope!.meta.workspace).toBe("dir-1");
 
-    // A task in ANOTHER directory → dropped (only this directory's CTO sees it).
+    // A task in ANOTHER workspace → dropped (only this workspace's CTO sees it).
     const outScope = bridge.consume(
-      taskUpdated({ id: "t-out", directory_id: "dir-2", status: "in_review", summary: "theirs" }),
+      taskUpdated({ id: "t-out", workspace_id: "dir-2", status: "in_review", summary: "theirs" }),
     );
     expect(outScope).toBeNull();
 
-    // A task with no directory_id is also out of any non-empty scope.
+    // A task with no workspace_id is also out of any non-empty scope.
     const noDir = bridge.consume(
       taskUpdated({ id: "t-none", status: "spec_review", summary: "x" }),
     );
     expect(noDir).toBeNull();
   });
 
-  test("an unscoped bridge (no scope) still emits every directory's transitions", () => {
+  test("an unscoped bridge (no scope) still emits every workspace's transitions", () => {
     const bridge = new AttentionBridge(); // legacy global feed
     expect(
-      bridge.consume(taskUpdated({ id: "a", directory_id: "dir-1", status: "in_review", summary: "x" })),
+      bridge.consume(taskUpdated({ id: "a", workspace_id: "dir-1", status: "in_review", summary: "x" })),
     ).not.toBeNull();
     expect(
-      bridge.consume(taskUpdated({ id: "b", directory_id: "dir-2", status: "in_review", summary: "y" })),
+      bridge.consume(taskUpdated({ id: "b", workspace_id: "dir-2", status: "in_review", summary: "y" })),
     ).not.toBeNull();
   });
 
   test("an empty/whitespace scope is treated as unscoped", () => {
     const bridge = new AttentionBridge("   ");
     expect(
-      bridge.consume(taskUpdated({ id: "c", directory_id: "dir-9", status: "in_review", summary: "z" })),
+      bridge.consume(taskUpdated({ id: "c", workspace_id: "dir-9", status: "in_review", summary: "z" })),
     ).not.toBeNull();
   });
 });
@@ -240,7 +240,7 @@ describe("channel: one-way capability (no tools)", () => {
     const msg = JSON.parse(
       channelNotificationMessage({
         content: "hello",
-        meta: { task_id: "t", dir: "d", state: "in_review" },
+        meta: { task_id: "t", workspace: "d", state: "in_review" },
       }),
     );
     expect(msg.jsonrpc).toBe("2.0");
@@ -248,7 +248,7 @@ describe("channel: one-way capability (no tools)", () => {
     expect(msg.id).toBeUndefined(); // a notification has no id
     expect(msg.params).toEqual({
       content: "hello",
-      meta: { task_id: "t", dir: "d", state: "in_review" },
+      meta: { task_id: "t", workspace: "d", state: "in_review" },
     });
   });
 });

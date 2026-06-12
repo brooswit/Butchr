@@ -1,23 +1,23 @@
-// MANAGED CTO AGENT (PER-DIRECTORY). butchr LAUNCHES and SUPERVISES one long-lived
-// CTO agent PER REGISTERED DIRECTORY (repo). Each runs in that repo's ROOT and IS the
+// MANAGED CTO AGENT (PER-WORKSPACE). butchr LAUNCHES and SUPERVISES one long-lived
+// CTO agent PER REGISTERED WORKSPACE (repo). Each runs in that repo's ROOT and IS the
 // principal/dev agent for that project — a first-class, channel-connected Claude Code
 // session, just like the per-task workspace agents, but with NO worktree/branch/
 // review/merge. It is the operator's hands FOR THAT REPO: on each
-// <butchr-cto-channel> push (a spec/diff/question/failure for ONE of that directory's
+// <butchr-cto-channel> push (a spec/diff/question/failure for ONE of that workspace's
 // tasks) it acts via the butchr API (127.0.0.1:47800) or `bin/butchr`
 // (approve/reject/answer/requeue); it does NOT edit that repo's code directly (all
 // code changes go through tasks). There is NO global/top-level CTO — butchr manages
-// one CTO agent per directory, keyed by directory_id.
+// one CTO agent per workspace, keyed by workspace_id.
 //
-// This module owns each per-directory agent's LIFECYCLE, the same way the dispatcher
+// This module owns each per-workspace agent's LIFECYCLE, the same way the dispatcher
 // owns a task agent's:
 //   - LAUNCH through the EXISTING AgentRunner/harness seam (src/harness.ts) into a
-//     dedicated herdr tab IN THAT DIRECTORY'S WORKSPACE, with cwd = the directory's
-//     repo root (directory.path), wired to the one-way CTO notification channel
-//     (src/channel.ts) SCOPED to the directory (BUTCHR_CHANNEL_DIR) via a generated
+//     dedicated herdr tab IN THAT WORKSPACE'S HERDR WORKSPACE, with cwd = the workspace's
+//     repo root (workspace.path), wired to the one-way CTO notification channel
+//     (src/channel.ts) SCOPED to the workspace (BUTCHR_CHANNEL_WORKSPACE) via a generated
 //     MCP config + the research-preview `--dangerously-load-development-channels
-//     server:butchr-cto-channel` flag — so it receives only THAT directory's events.
-//   - SINGLE INSTANCE PER DIRECTORY: at most one CTO agent is alive per directory. A
+//     server:butchr-cto-channel` flag — so it receives only THAT workspace's events.
+//   - SINGLE INSTANCE PER WORKSPACE: at most one CTO agent is alive per workspace. A
 //     start when one is already registered ADOPTS it instead of double-launching.
 //   - LAUNCH SELF-COMPLETE: every (re)launch AUTO-CLEARS any blocking interactive
 //     startup prompt (dev-channels consent / folder-trust / any yes-no or numbered
@@ -26,11 +26,11 @@
 //   - SESSION CONTINUITY: every supervised relaunch — after a crash, on boot-adopt,
 //     across a butchr restart — RESUMES the SAME Claude session via `--resume <id>`
 //     (never `--continue`), so the CTO keeps full context and never cold-starts. The
-//     FIRST launch resumes a per-directory operator-seeded session
-//     (config.ctoAgentSessionSeeds[directoryId]) when set, else starts fresh and
+//     FIRST launch resumes a per-workspace operator-seeded session
+//     (config.ctoAgentSessionSeeds[workspaceId]) when set, else starts fresh and
 //     captures the new id. A brand-new session happens ONLY via restart(fresh).
 //   - SUPERVISION: a single poll loop relaunches each desired-up-but-dead agent with
-//     bounded per-directory exponential backoff, giving up after a cap until the
+//     bounded per-workspace exponential backoff, giving up after a cap until the
 //     operator intervenes.
 //
 // Context hygiene (a CTO session is INDEFINITE): prefer sending `/compact` to the
@@ -48,7 +48,7 @@ import {
   nowIso,
   saveCtoAgentRow,
 } from "./db.ts";
-import { ensureDirectoryWorkspace } from "./directories.ts";
+import { ensureHerdrWorkspace } from "./workspaces.ts";
 import { publish } from "./events.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
@@ -56,57 +56,57 @@ import { startAgentInFreshTab } from "./herdr.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
 
 // butchr's own state dir for the CTO agents' generated artifacts (never the repo).
-// One subdirectory per directory so per-directory MCP configs + logs never collide.
-function ctoDir(directoryId: string): string {
-  return join(config.dataDir, "cto", directoryId);
+// One subdirectory per workspace so per-workspace MCP configs + logs never collide.
+function ctoDir(workspaceId: string): string {
+  return join(config.dataDir, "cto", workspaceId);
 }
-function mcpConfigFile(directoryId: string): string {
-  return join(ctoDir(directoryId), "mcp.json");
+function mcpConfigFile(workspaceId: string): string {
+  return join(ctoDir(workspaceId), "mcp.json");
 }
-function logFile(directoryId: string): string {
-  return join(ctoDir(directoryId), "agent.log");
-}
-
-/** The herdr agent name for a directory's CTO agent: `<prefix>-<directoryId>`. */
-export function ctoAgentName(directoryId: string): string {
-  return `${config.ctoAgentName}-${directoryId}`;
+function logFile(workspaceId: string): string {
+  return join(ctoDir(workspaceId), "agent.log");
 }
 
-/** A registered directory's repo-root path (the CTO agent's cwd), or null if gone. */
-function directoryPath(directoryId: string): string | null {
+/** The herdr agent name for a workspace's CTO agent: `<prefix>-<workspaceId>`. */
+export function ctoAgentName(workspaceId: string): string {
+  return `${config.ctoAgentName}-${workspaceId}`;
+}
+
+/** A registered workspace's repo-root path (the CTO agent's cwd), or null if gone. */
+function workspacePath(workspaceId: string): string | null {
   const row = db
-    .query<{ path: string }, [string]>(`SELECT path FROM directories WHERE id=?`)
-    .get(directoryId);
+    .query<{ path: string }, [string]>(`SELECT path FROM workspaces WHERE id=?`)
+    .get(workspaceId);
   return row?.path ?? null;
 }
 
 /**
- * Is a directory's CTO agent ENABLED for boot auto-start + supervision? The
- * directory's own `cto_enabled` column WINS (1 → on, 0 → off); NULL inherits the
- * GLOBAL default config.ctoAgentEnabled (itself default OFF). An unknown directory →
+ * Is a workspace's CTO agent ENABLED for boot auto-start + supervision? The
+ * workspace's own `cto_enabled` column WINS (1 → on, 0 → off); NULL inherits the
+ * GLOBAL default config.ctoAgentEnabled (itself default OFF). An unknown workspace →
  * not enabled. Exported for testing.
  */
-export function isCtoEnabled(directoryId: string): boolean {
+export function isCtoEnabled(workspaceId: string): boolean {
   const row = db
     .query<{ cto_enabled: number | null }, [string]>(
-      `SELECT cto_enabled FROM directories WHERE id=?`,
+      `SELECT cto_enabled FROM workspaces WHERE id=?`,
     )
-    .get(directoryId);
+    .get(workspaceId);
   if (!row) return false;
   if (row.cto_enabled !== null) return row.cto_enabled === 1;
   return config.ctoAgentEnabled;
 }
 
-/** The dashboard/API view of a directory's managed CTO agent state. */
+/** The dashboard/API view of a workspace's managed CTO agent state. */
 export type CtoStatus = {
-  /** The directory this CTO agent belongs to. */
-  directoryId: string;
-  /** Per-directory enable (cto_enabled, or the global default) — boot auto-start +
+  /** The workspace this CTO agent belongs to. */
+  workspaceId: string;
+  /** Per-workspace enable (cto_enabled, or the global default) — boot auto-start +
    *  supervision are active when true. */
   enabled: boolean;
   /** The operator/boot WANTS it up (supervisor relaunches on death). */
   desired: boolean;
-  /** A live herdr agent is registered under this directory's CTO name (async-probed). */
+  /** A live herdr agent is registered under this workspace's CTO name (async-probed). */
   running: boolean;
   /** The current herdr pane backing it (for the 'Open CTO terminal' attach). */
   paneId: string | null;
@@ -121,22 +121,22 @@ export type CtoStatus = {
   lastError: string | null;
 };
 
-// ---- supervision state (in-memory, PER DIRECTORY) -------------------------
-// A start/stop/restart in flight per directory, plus that directory's backoff
-// counters. Keyed by directory_id so lifecycle ops on different directories never
-// block each other, while ops on the SAME directory serialize (the single-instance
+// ---- supervision state (in-memory, PER WORKSPACE) -------------------------
+// A start/stop/restart in flight per workspace, plus that workspace's backoff
+// counters. Keyed by workspace_id so lifecycle ops on different workspaces never
+// block each other, while ops on the SAME workspace serialize (the single-instance
 // guard). `consecutiveFailures` drives exponential backoff; `nextRetryAt` gates it.
-type DirState = {
+type WsState = {
   launchInFlight: Promise<CtoStatus> | null;
   consecutiveFailures: number;
   nextRetryAt: number;
 };
-const dirStates = new Map<string, DirState>();
-function dirState(directoryId: string): DirState {
-  let s = dirStates.get(directoryId);
+const wsStates = new Map<string, WsState>();
+function wsState(workspaceId: string): WsState {
+  let s = wsStates.get(workspaceId);
   if (!s) {
     s = { launchInFlight: null, consecutiveFailures: 0, nextRetryAt: 0 };
-    dirStates.set(directoryId, s);
+    wsStates.set(workspaceId, s);
   }
   return s;
 }
@@ -154,7 +154,7 @@ itself, and you keep full context across relaunches (butchr \`--resume\`s your s
 ## How you receive work
 
 You are wired to the **one-way CTO notification channel** (\`<${CHANNEL_SERVER_NAME}>\`),
-SCOPED to this repository. Each event is one of THIS directory's tasks that just
+SCOPED to this repository. Each event is one of THIS workspace's tasks that just
 ENTERED a state needing your attention:
 
 - **spec_review** — a generated spec is awaiting approval.
@@ -187,7 +187,7 @@ approve / reject / answer / requeue, e.g.:
  * Resolve the editable CTO brief file. Uses config.ctoBriefPath when it points at a
  * readable file; otherwise writes the documented default to <dataDir>/cto-brief.md
  * (once) and returns that, so an operator can edit the brief in place. Shared across
- * directories (each per-repo CTO is primed by the same brief).
+ * workspaces (each per-repo CTO is primed by the same brief).
  */
 export function resolveBriefFile(): string {
   const configured = config.ctoBriefPath.trim();
@@ -201,15 +201,15 @@ export function resolveBriefFile(): string {
 }
 
 /**
- * Write a directory's CTO agent MCP config: a single STDIO server named
+ * Write a workspace's CTO agent MCP config: a single STDIO server named
  * `butchr-cto-channel` that runs the one-way channel bridge (config.ctoChannelCmd)
- * via `bash -lc`, with the SSE URL pointed at this butchr and SCOPED to the directory
- * via BUTCHR_CHANNEL_DIR (so it pushes only that directory's events). The agent loads
+ * via `bash -lc`, with the SSE URL pointed at this butchr and SCOPED to the workspace
+ * via BUTCHR_CHANNEL_WORKSPACE (so it pushes only that workspace's events). The agent loads
  * it as a development channel through `server:butchr-cto-channel` in config.ctoAgentCmd.
  * Returns the config path.
  */
-export function writeChannelMcpConfig(directoryId: string): string {
-  mkdirSync(ctoDir(directoryId), { recursive: true });
+export function writeChannelMcpConfig(workspaceId: string): string {
+  mkdirSync(ctoDir(workspaceId), { recursive: true });
   const cfg = {
     mcpServers: {
       [CHANNEL_SERVER_NAME]: {
@@ -217,84 +217,84 @@ export function writeChannelMcpConfig(directoryId: string): string {
         args: ["-lc", config.ctoChannelCmd],
         env: {
           BUTCHR_CHANNEL_SSE_URL: `http://${config.loopbackHost}:${config.port}/api/events`,
-          BUTCHR_CHANNEL_DIR: directoryId,
+          BUTCHR_CHANNEL_WORKSPACE: workspaceId,
         },
       },
     },
   };
-  const file = mcpConfigFile(directoryId);
+  const file = mcpConfigFile(workspaceId);
   writeFileSync(file, JSON.stringify(cfg), "utf8");
   return file;
 }
 
 /**
- * Decide the session id + flag for a directory's launch. FRESH → a brand-new
+ * Decide the session id + flag for a workspace's launch. FRESH → a brand-new
  * `--session-id`. Otherwise RESUME, preferring (in order) the persisted active
- * session, then the per-directory operator-seeded session
- * (config.ctoAgentSessionSeeds[directoryId], first-launch continuity), else a fresh
+ * session, then the per-workspace operator-seeded session
+ * (config.ctoAgentSessionSeeds[workspaceId], first-launch continuity), else a fresh
  * id. Pure + exported for testing.
  */
 export function resolveCtoSession(
-  directoryId: string,
+  workspaceId: string,
   row: CtoAgentRow | null,
   fresh: boolean,
 ): { sessionId: string; isResume: boolean } {
   if (fresh) return { sessionId: crypto.randomUUID(), isResume: false };
   const persisted = row?.session_id?.trim();
   if (persisted) return { sessionId: persisted, isResume: true };
-  const seed = config.ctoAgentSessionSeeds.get(directoryId)?.trim();
+  const seed = config.ctoAgentSessionSeeds.get(workspaceId)?.trim();
   if (seed) return { sessionId: seed, isResume: true };
   return { sessionId: crypto.randomUUID(), isResume: false };
 }
 
 /** Build the fully-substituted, `script`-wrapped launch argv. Exported for testing. */
-export function buildCtoArgv(sessionFlag: string, directoryId: string): string[] {
+export function buildCtoArgv(sessionFlag: string, workspaceId: string): string[] {
   const agentCmd = config.ctoAgentCmd
     .replaceAll("{{MODEL_FLAG}}", modelFlag(config.ctoAgentModel))
     .replaceAll("{{SESSION_FLAG}}", sessionFlag)
-    .replaceAll("{{MCP_CONFIG}}", mcpConfigFile(directoryId))
+    .replaceAll("{{MCP_CONFIG}}", mcpConfigFile(workspaceId))
     .replaceAll("{{PROMPT_FILE}}", resolveBriefFile());
   // Run under `script` (PTY → the interactive UI renders + input works in the herdr
   // pane) while logging to a file — exactly how the dispatcher launches task agents.
-  return buildScriptArgv({ agentCmd, logFile: logFile(directoryId) });
+  return buildScriptArgv({ agentCmd, logFile: logFile(workspaceId) });
 }
 
 /**
- * Heal/use the directory's herdr workspace (the CTO tab lives in the SAME workspace
- * as the directory's task agents — one workspace per directory). Reuses the
- * directory's recorded workspace when it still exists; otherwise recreates one at the
- * repo root and persists it on the directory row. Returns the workspace id.
+ * Heal/use the workspace's herdr workspace (the CTO tab lives in the SAME herdr
+ * workspace as the workspace's task agents — one herdr workspace per workspace).
+ * Reuses the recorded herdr workspace when it still exists; otherwise recreates one
+ * at the repo root and persists it on the workspace row. Returns the herdr workspace id.
  */
-async function ensureCtoWorkspace(directoryId: string, cwd: string): Promise<string | undefined> {
-  const { workspaceId } = await ensureDirectoryWorkspace(
-    directoryId,
+async function ensureCtoWorkspace(workspaceId: string, cwd: string): Promise<string | undefined> {
+  const { workspaceId: herdrWorkspaceId } = await ensureHerdrWorkspace(
+    workspaceId,
     cwd,
-    `butchr-cto-${directoryId}`,
+    `butchr-cto-${workspaceId}`,
   );
-  return workspaceId;
+  return herdrWorkspaceId;
 }
 
 /**
- * The actual launch for a directory: write the scoped channel MCP config + brief,
+ * The actual launch for a workspace: write the scoped channel MCP config + brief,
  * build the argv (resuming the right session), create a dedicated tab in the
- * directory's workspace, start the agent with cwd = the repo root, close the husk root
+ * workspace's herdr workspace, start the agent with cwd = the repo root, close the husk root
  * pane, re-resolve the real pane (surviving herdr's positional renumber), persist the
  * session/pane/tab, and AUTO-CONFIRM any blocking startup prompt. Throws if the agent
- * never registers a live pane, or the directory is gone. NOT guarded — callers go
- * through startCtoAgent / superviseTick (which hold the per-directory launchInFlight).
+ * never registers a live pane, or the workspace is gone. NOT guarded — callers go
+ * through startCtoAgent / superviseTick (which hold the per-workspace launchInFlight).
  */
-async function performLaunch(directoryId: string, fresh: boolean): Promise<void> {
-  const cwd = directoryPath(directoryId);
-  if (!cwd) throw new Error(`directory ${directoryId} is no longer registered`);
+async function performLaunch(workspaceId: string, fresh: boolean): Promise<void> {
+  const cwd = workspacePath(workspaceId);
+  if (!cwd) throw new Error(`workspace ${workspaceId} is no longer registered`);
 
-  const name = ctoAgentName(directoryId);
-  const { sessionId, isResume } = resolveCtoSession(directoryId, getCtoAgentRow(directoryId), fresh);
+  const name = ctoAgentName(workspaceId);
+  const { sessionId, isResume } = resolveCtoSession(workspaceId, getCtoAgentRow(workspaceId), fresh);
   const sessionFlag = isResume ? `--resume ${sessionId}` : `--session-id ${sessionId}`;
-  writeChannelMcpConfig(directoryId);
-  const argv = buildCtoArgv(sessionFlag, directoryId);
+  writeChannelMcpConfig(workspaceId);
+  const argv = buildCtoArgv(sessionFlag, workspaceId);
 
-  const workspaceId = await ensureCtoWorkspace(directoryId, cwd);
-  rmSync(logFile(directoryId), { force: true });
+  const herdrWorkspaceId = await ensureCtoWorkspace(workspaceId, cwd);
+  rmSync(logFile(workspaceId), { force: true });
 
   // Create a dedicated tab, start the agent in it (self-healing a name collision),
   // close the husk root pane, and re-resolve the agent's real pane surviving herdr's
@@ -304,22 +304,22 @@ async function performLaunch(directoryId: string, fresh: boolean): Promise<void>
     name,
     cwd,
     argv,
-    workspaceId: workspaceId ?? undefined,
-    label: `butchr-cto-${directoryId}`,
+    workspaceId: herdrWorkspaceId ?? undefined,
+    label: `butchr-cto-${workspaceId}`,
     paneError: "CTO agent did not register a live pane after start",
   });
 
-  saveCtoAgentRow(directoryId, {
+  saveCtoAgentRow(workspaceId, {
     session_id: sessionId,
     herdr_pane_id: paneId,
     herdr_tab_id: tabId ?? null,
-    herdr_workspace: workspaceId ?? null,
+    herdr_workspace: herdrWorkspaceId ?? null,
     desired: 1,
     started_at: nowIso(),
     last_error: null,
   });
   console.log(
-    `[butchr] launched CTO agent for ${directoryId} (${isResume ? `--resume ${sessionId}` : `fresh session ${sessionId}`}, pane ${paneId})`,
+    `[butchr] launched CTO agent for ${workspaceId} (${isResume ? `--resume ${sessionId}` : `fresh session ${sessionId}`}, pane ${paneId})`,
   );
 
   // LAUNCH SELF-COMPLETE: clear any blocking interactive startup prompt so the agent
@@ -331,29 +331,29 @@ async function performLaunch(directoryId: string, fresh: boolean): Promise<void>
     pollMs: config.ctoPromptPollMs,
     maxPolls: config.ctoPromptMaxPolls,
     quietPolls: config.ctoPromptQuietPolls,
-    log: (m) => console.log(`[butchr] CTO ${directoryId}: ${m}`),
+    log: (m) => console.log(`[butchr] CTO ${workspaceId}: ${m}`),
   }).catch(() => {});
 }
 
-/** Adopt an already-live CTO agent for a directory (re-record its pane/tab; no relaunch). */
-async function adoptCtoAgent(directoryId: string): Promise<void> {
-  const name = ctoAgentName(directoryId);
-  const row = getCtoAgentRow(directoryId);
+/** Adopt an already-live CTO agent for a workspace (re-record its pane/tab; no relaunch). */
+async function adoptCtoAgent(workspaceId: string): Promise<void> {
+  const name = ctoAgentName(workspaceId);
+  const row = getCtoAgentRow(workspaceId);
   const paneId = (await harness.agentPaneId(name)) ?? row?.herdr_pane_id ?? null;
   const tabId = (await harness.agentTabId(name)) ?? row?.herdr_tab_id ?? null;
-  saveCtoAgentRow(directoryId, {
+  saveCtoAgentRow(workspaceId, {
     herdr_pane_id: paneId,
     herdr_tab_id: tabId,
     desired: 1,
     started_at: row?.started_at ?? nowIso(),
     last_error: null,
   });
-  console.log(`[butchr] adopted live CTO agent for ${directoryId} (pane ${paneId})`);
+  console.log(`[butchr] adopted live CTO agent for ${workspaceId} (pane ${paneId})`);
 }
 
-/** Serialize a lifecycle op for a directory behind its launchInFlight (single-instance). */
-function guarded(directoryId: string, fn: () => Promise<CtoStatus>): Promise<CtoStatus> {
-  const st = dirState(directoryId);
+/** Serialize a lifecycle op for a workspace behind its launchInFlight (single-instance). */
+function guarded(workspaceId: string, fn: () => Promise<CtoStatus>): Promise<CtoStatus> {
+  const st = wsState(workspaceId);
   if (st.launchInFlight) return st.launchInFlight;
   const p = fn().finally(() => {
     if (st.launchInFlight === p) st.launchInFlight = null;
@@ -362,79 +362,79 @@ function guarded(directoryId: string, fn: () => Promise<CtoStatus>): Promise<Cto
   return p;
 }
 
-/** Compute a directory's status and publish a `cto.updated` event; returns the status. */
-async function publishStatus(directoryId: string): Promise<CtoStatus> {
-  const s = await ctoAgentStatus(directoryId);
+/** Compute a workspace's status and publish a `cto.updated` event; returns the status. */
+async function publishStatus(workspaceId: string): Promise<CtoStatus> {
+  const s = await ctoAgentStatus(workspaceId);
   publish({ type: "cto.updated", cto: s });
   return s;
 }
 
 /**
- * START (or adopt) a directory's CTO agent. Marks it DESIRED-up (so the supervisor
+ * START (or adopt) a workspace's CTO agent. Marks it DESIRED-up (so the supervisor
  * keeps it alive), then: if a live agent is already registered (and not a fresh start)
- * it ADOPTS rather than double-launching (single-instance per directory); otherwise it
+ * it ADOPTS rather than double-launching (single-instance per workspace); otherwise it
  * launches — RESUMING the persisted/seeded session unless `fresh`, which forces a
- * brand-new one. A manual start resets that directory's supervised-restart counter.
+ * brand-new one. A manual start resets that workspace's supervised-restart counter.
  */
-export function startCtoAgent(directoryId: string, opts: { fresh?: boolean } = {}): Promise<CtoStatus> {
-  return guarded(directoryId, async () => {
-    saveCtoAgentRow(directoryId, { desired: 1 });
-    const st = dirState(directoryId);
+export function startCtoAgent(workspaceId: string, opts: { fresh?: boolean } = {}): Promise<CtoStatus> {
+  return guarded(workspaceId, async () => {
+    saveCtoAgentRow(workspaceId, { desired: 1 });
+    const st = wsState(workspaceId);
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
-    if (!opts.fresh && (await harness.agentExists(ctoAgentName(directoryId)))) {
-      await adoptCtoAgent(directoryId);
+    if (!opts.fresh && (await harness.agentExists(ctoAgentName(workspaceId)))) {
+      await adoptCtoAgent(workspaceId);
     } else {
-      await performLaunch(directoryId, !!opts.fresh);
-      saveCtoAgentRow(directoryId, { restarts: 0 }); // a manual (re)launch resets the counter
+      await performLaunch(workspaceId, !!opts.fresh);
+      saveCtoAgentRow(workspaceId, { restarts: 0 }); // a manual (re)launch resets the counter
     }
-    return publishStatus(directoryId);
+    return publishStatus(workspaceId);
   });
 }
 
 /**
- * STOP a directory's CTO agent: mark it DESIRED-down (the supervisor leaves it down,
+ * STOP a workspace's CTO agent: mark it DESIRED-down (the supervisor leaves it down,
  * and this survives a restart) and tear down its tab/pane + free its agent name.
  * Idempotent.
  */
-export function stopCtoAgent(directoryId: string): Promise<CtoStatus> {
-  return guarded(directoryId, async () => {
-    saveCtoAgentRow(directoryId, { desired: 0 });
-    const st = dirState(directoryId);
+export function stopCtoAgent(workspaceId: string): Promise<CtoStatus> {
+  return guarded(workspaceId, async () => {
+    saveCtoAgentRow(workspaceId, { desired: 0 });
+    const st = wsState(workspaceId);
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
-    const name = ctoAgentName(directoryId);
-    const row = getCtoAgentRow(directoryId);
+    const name = ctoAgentName(workspaceId);
+    const row = getCtoAgentRow(workspaceId);
     await harness
       .teardownTask(row?.herdr_tab_id, name, row?.herdr_pane_id)
       .catch(() => {});
     await harness.agentDeregister(name).catch(() => {});
-    saveCtoAgentRow(directoryId, { herdr_pane_id: null, herdr_tab_id: null, started_at: null });
-    console.log(`[butchr] stopped CTO agent for ${directoryId}`);
-    return publishStatus(directoryId);
+    saveCtoAgentRow(workspaceId, { herdr_pane_id: null, herdr_tab_id: null, started_at: null });
+    console.log(`[butchr] stopped CTO agent for ${workspaceId}`);
+    return publishStatus(workspaceId);
   });
 }
 
 /**
- * RESTART a directory's CTO agent. By default it RESUMES the same session (a clean
+ * RESTART a workspace's CTO agent. By default it RESUMES the same session (a clean
  * bounce); `fresh` forces a brand-new session — the ONLY way to cold-start (e.g.
  * last-resort context hygiene when the session has grown unmanageable).
  */
 export async function restartCtoAgent(
-  directoryId: string,
+  workspaceId: string,
   opts: { fresh?: boolean } = {},
 ): Promise<CtoStatus> {
-  await stopCtoAgent(directoryId);
-  return startCtoAgent(directoryId, { fresh: opts.fresh });
+  await stopCtoAgent(workspaceId);
+  return startCtoAgent(workspaceId, { fresh: opts.fresh });
 }
 
-/** A directory's current managed-CTO-agent status (probes herdr for live registration). */
-export async function ctoAgentStatus(directoryId: string): Promise<CtoStatus> {
-  const row = getCtoAgentRow(directoryId);
-  const running = await harness.agentExists(ctoAgentName(directoryId)).catch(() => false);
+/** A workspace's current managed-CTO-agent status (probes herdr for live registration). */
+export async function ctoAgentStatus(workspaceId: string): Promise<CtoStatus> {
+  const row = getCtoAgentRow(workspaceId);
+  const running = await harness.agentExists(ctoAgentName(workspaceId)).catch(() => false);
   return {
-    directoryId,
-    enabled: isCtoEnabled(directoryId),
+    workspaceId,
+    enabled: isCtoEnabled(workspaceId),
     desired: !!(row && row.desired === 1),
     running,
     paneId: row?.herdr_pane_id ?? null,
@@ -446,30 +446,30 @@ export async function ctoAgentStatus(directoryId: string): Promise<CtoStatus> {
   };
 }
 
-/** Reconcile ONE directory's CTO agent toward its desired state (see reconcileCtoAgents). */
+/** Reconcile ONE workspace's CTO agent toward its desired state (see reconcileCtoAgents). */
 export async function reconcileCtoAgent(
-  directoryId: string,
+  workspaceId: string,
   herdrUp: boolean,
 ): Promise<{ action: "disabled" | "skipped" | "stopped" | "adopted" | "launched" }> {
-  if (!isCtoEnabled(directoryId)) return { action: "disabled" };
+  if (!isCtoEnabled(workspaceId)) return { action: "disabled" };
   if (!herdrUp) return { action: "skipped" };
-  const name = ctoAgentName(directoryId);
-  const row = getCtoAgentRow(directoryId);
+  const name = ctoAgentName(workspaceId);
+  const row = getCtoAgentRow(workspaceId);
   if (row && row.desired === 0 && row.updated_at) {
     // The operator stopped it before this restart — honor that.
     return { action: "stopped" };
   }
   if (await harness.agentExists(name)) {
-    await adoptCtoAgent(directoryId);
-    await publishStatus(directoryId);
+    await adoptCtoAgent(workspaceId);
+    await publishStatus(workspaceId);
     return { action: "adopted" };
   }
-  await startCtoAgent(directoryId);
+  await startCtoAgent(workspaceId);
   return { action: "launched" };
 }
 
 /**
- * BOOT RECONCILE: bring EVERY enabled directory's CTO agent into its desired state
+ * BOOT RECONCILE: bring EVERY enabled workspace's CTO agent into its desired state
  * once, before the supervisor starts (see index.ts). With herdr down we cannot probe
  * liveness, so we defer to the supervisor. Returns aggregate counts.
  */
@@ -479,9 +479,9 @@ export async function reconcileCtoAgents(
   let adopted = 0;
   let launched = 0;
   let skipped = 0;
-  // Every registered directory is a candidate (enable is resolved per-directory inside
-  // reconcileCtoAgent — honoring the global default for directories with no override).
-  const dirs = db.query<{ id: string }, []>(`SELECT id FROM directories`).all();
+  // Every registered workspace is a candidate (enable is resolved per-workspace inside
+  // reconcileCtoAgent — honoring the global default for workspaces with no override).
+  const dirs = db.query<{ id: string }, []>(`SELECT id FROM workspaces`).all();
   for (const d of dirs) {
     try {
       const res = await reconcileCtoAgent(d.id, herdrUp);
@@ -496,24 +496,24 @@ export async function reconcileCtoAgents(
   return { adopted, launched, skipped };
 }
 
-// One supervision tick over ALL directories: for each CTO agent that is DESIRED-up but
+// One supervision tick over ALL workspaces: for each CTO agent that is DESIRED-up but
 // whose herdr agent has died, relaunch it (RESUMING the same session) with bounded
-// per-directory exponential backoff, giving up after config.ctoMaxRestarts consecutive
+// per-workspace exponential backoff, giving up after config.ctoMaxRestarts consecutive
 // failures until the operator intervenes.
 async function superviseTick(): Promise<void> {
   for (const row of listCtoAgentRows()) {
-    await superviseDirectory(row.directory_id);
+    await superviseWorkspace(row.workspace_id);
   }
 }
 
-async function superviseDirectory(directoryId: string): Promise<void> {
-  if (!isCtoEnabled(directoryId)) return;
-  const st = dirState(directoryId);
+async function superviseWorkspace(workspaceId: string): Promise<void> {
+  if (!isCtoEnabled(workspaceId)) return;
+  const st = wsState(workspaceId);
   if (st.launchInFlight) return; // a start/stop/restart is mid-flight — don't race it
-  const row = getCtoAgentRow(directoryId);
+  const row = getCtoAgentRow(workspaceId);
   if (!row || row.desired !== 1) return; // operator wants it down (or never started)
 
-  const name = ctoAgentName(directoryId);
+  const name = ctoAgentName(workspaceId);
   if (await harness.agentExists(name).catch(() => false)) {
     if (st.consecutiveFailures !== 0) {
       st.consecutiveFailures = 0; // healthy → reset backoff
@@ -533,23 +533,23 @@ async function superviseDirectory(directoryId: string): Promise<void> {
   );
   st.nextRetryAt = now + delay;
   console.warn(
-    `[butchr] CTO agent for ${directoryId} died — relaunching (attempt ${st.consecutiveFailures}/${config.ctoMaxRestarts}, resuming session)`,
+    `[butchr] CTO agent for ${workspaceId} died — relaunching (attempt ${st.consecutiveFailures}/${config.ctoMaxRestarts}, resuming session)`,
   );
-  await guarded(directoryId, async () => {
-    const before = getCtoAgentRow(directoryId)?.restarts ?? 0;
-    await performLaunch(directoryId, false); // resume the SAME session — never cold-start
-    saveCtoAgentRow(directoryId, { restarts: before + 1 });
-    return publishStatus(directoryId);
+  await guarded(workspaceId, async () => {
+    const before = getCtoAgentRow(workspaceId)?.restarts ?? 0;
+    await performLaunch(workspaceId, false); // resume the SAME session — never cold-start
+    saveCtoAgentRow(workspaceId, { restarts: before + 1 });
+    return publishStatus(workspaceId);
   }).catch(async (e) => {
     const msg = (e as Error).message;
-    saveCtoAgentRow(directoryId, { last_error: msg });
-    console.error(`[butchr] CTO agent relaunch failed for ${directoryId}: ${msg}`);
+    saveCtoAgentRow(workspaceId, { last_error: msg });
+    console.error(`[butchr] CTO agent relaunch failed for ${workspaceId}: ${msg}`);
     if (st.consecutiveFailures >= config.ctoMaxRestarts) {
       console.error(
-        `[butchr] CTO agent for ${directoryId} gave up after ${config.ctoMaxRestarts} relaunch attempts — start/restart it from the dashboard`,
+        `[butchr] CTO agent for ${workspaceId} gave up after ${config.ctoMaxRestarts} relaunch attempts — start/restart it from the dashboard`,
       );
     }
-    await publishStatus(directoryId).catch(() => {});
+    await publishStatus(workspaceId).catch(() => {});
   });
 }
 
@@ -566,16 +566,16 @@ export function stopCtoSupervisor(): void {
   superviseTimer = null;
 }
 
-/** Test-only: run a single supervision tick (one directory) synchronously. */
-export async function _superviseTickForTest(directoryId: string): Promise<void> {
-  await superviseDirectory(directoryId);
+/** Test-only: run a single supervision tick (one workspace) synchronously. */
+export async function _superviseTickForTest(workspaceId: string): Promise<void> {
+  await superviseWorkspace(workspaceId);
 }
 
-/** Test-only: reset the in-memory backoff state for a directory between cases. */
-export function _resetSupervisionStateForTest(directoryId?: string): void {
-  if (directoryId) {
-    dirStates.delete(directoryId);
+/** Test-only: reset the in-memory backoff state for a workspace between cases. */
+export function _resetSupervisionStateForTest(workspaceId?: string): void {
+  if (workspaceId) {
+    wsStates.delete(workspaceId);
   } else {
-    dirStates.clear();
+    wsStates.clear();
   }
 }

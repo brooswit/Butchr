@@ -1,4 +1,4 @@
-// Tests for LAUNCH AUTO-CONFIRM (src/startup-confirm.ts): every per-directory CTO
+// Tests for LAUNCH AUTO-CONFIRM (src/startup-confirm.ts): every per-workspace CTO
 // (re)launch must come up READY unattended by detecting a blocking interactive startup
 // prompt in the live pane and sending the safe confirming response. Pure / in-process:
 // the detector is pure, and the poll loop's read/send/sleep seams are injected.

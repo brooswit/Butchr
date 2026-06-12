@@ -75,7 +75,7 @@ export async function isUp(): Promise<boolean> {
   return res.ok && /status:\s*running/.test(res.stdout);
 }
 
-/** Provision a workspace for a directory. Returns the workspace + root pane id. */
+/** Provision a herdr workspace for a registered workspace. Returns it + root pane id. */
 export async function workspaceCreate(
   cwd: string,
   label: string,
@@ -616,7 +616,7 @@ export async function runHeadless(spec: HeadlessSpec): Promise<HeadlessResult> {
  * The herdr-backed implementation of the AgentRunner interface (src/harness.ts).
  * This is the DEFAULT backend butchr runs with: each method delegates to the
  * herdr CLI wrapper above. Assembled as an object literal of the existing
- * standalone exports so herdr.ts's other importers (server/directories/tasks) keep
+ * standalone exports so herdr.ts's other importers (server/workspaces/tasks) keep
  * calling them directly, while the dispatcher/reaper/headless callers go through
  * the `harness` proxy that points here.
  */

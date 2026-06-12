@@ -1,4 +1,4 @@
-// Task / directory ID generation.
+// Task / workspace ID generation.
 // Task IDs: adjective-noun-4digithex, e.g. swift-falcon-3a2f.
 // Doubles as git branch name and worktree directory name, so the wordlists
 // stay lowercase a-z only (safe as branch/path segments).
@@ -78,7 +78,11 @@ export function uniqueTaskId(exists: (id: string) => boolean): string {
   return `${generateTaskId()}-${hex4()}`;
 }
 
-/** Directory IDs: a stable short slug. */
-export function generateDirectoryId(): string {
-  return `dir-${hex4()}${hex4()}`;
+/**
+ * Workspace IDs: a stable short slug. Newly minted ids carry the `ws-` prefix;
+ * legacy `dir-…` ids (minted before the directory→workspace rename) remain valid
+ * opaque keys — we never rewrite existing id VALUES, only stop minting new `dir-` ones.
+ */
+export function generateWorkspaceId(): string {
+  return `ws-${hex4()}${hex4()}`;
 }

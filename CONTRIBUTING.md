@@ -23,7 +23,7 @@ defined in `src/config.ts`; the REST/SSE/MCP surface is the route table in
 ## 1. What butchr is
 
 butchr is a lightweight service + webapp that organizes agent work around git
-repositories: **directories are workspaces, tasks are git worktrees.** It handles
+repositories: **workspaces are git repositories, tasks are git worktrees.** It handles
 the full lifecycle from task creation through review and merge, delegating all
 terminal/agent session management to **[herdr](https://github.com/)**.
 
@@ -32,7 +32,7 @@ terminal/agent session management to **[herdr](https://github.com/)**.
 
 **Core concepts:**
 
-- **Directory** — a git repository registered with butchr. Maps 1:1 to a herdr
+- **Workspace** — a git repository registered with butchr. Maps 1:1 to a herdr
   workspace. Adding it provisions the workspace; removing it tears it down.
 - **Task** — the atomic unit of work, and a *filesystem artifact*, not just a DB
   row: a directory at `<repo>/.butchr/tasks/<task-id>/`, a `task.md` inside it
@@ -64,15 +64,15 @@ message byte-for-byte as before. (Review notes are excluded from the fingerprint
 they already flow into the rework prompt.)
 
 **Concurrency — fully concurrent.** Every queued task is dispatched immediately
-and runs in parallel; there is no per-directory "one at a time" limit. Each task
+and runs in parallel; there is no per-workspace "one at a time" limit. Each task
 gets its own git worktree on its own branch, so tasks are isolated at the
-filesystem level. **The catch:** concurrent tasks in one directory each branch
-off the directory's current HEAD and don't see each other's changes until merged,
+filesystem level. **The catch:** concurrent tasks in one workspace each branch
+off the workspace's current HEAD and don't see each other's changes until merged,
 so two editing the same lines can conflict at merge time (resolved during
 approve/merge). This is accepted by design — isolation over coordination; if you
 need tasks to build on each other, merge the first before queueing the second, or
 express the ordering with `blocked_by`. `BUTCHR_MAX_CONCURRENT` caps the total
-simultaneously running tasks across all directories (`0` = unlimited, default).
+simultaneously running tasks across all workspaces (`0` = unlimited, default).
 
 ---
 
@@ -283,8 +283,8 @@ in-repo with `bun bin/butchr …`. It targets `http://127.0.0.1:47800` by defaul
 
 ```sh
 butchr health                          # server health snapshot (exit 1 if degraded)
-butchr ls [--dir <id>] [--status <s>]  # compact id/status/ci table (idle shows status*)
-butchr new <dir> -m "<prompt>"         # create a task; <dir> is a directory id OR path
+butchr ls [--workspace <id>] [--status <s>]  # compact id/status/ci table (idle shows status*)
+butchr new <workspace> -m "<prompt>"   # create a task; <workspace> is a workspace id OR path
         [--blocked-by id,id]           #   start it blocked on those task ids
 butchr show <id>                       # status, ci, summary, review notes, blockers
 butchr approve <id>                    # approve a task in review (merges its branch)
@@ -333,11 +333,11 @@ herdr is down (worktree reaping still runs). This is the automated fix for the o
 ### herdr model
 
 butchr delegates all PTY/session management to herdr, mapped by **task id**: one
-herdr workspace per registered directory (created on registration, torn down on
+herdr workspace per registered workspace (created on registration, torn down on
 unregister); one tab + one pane per task; **the herdr agent name IS the task id**
 (`agentStart(task.id, …)`, `agentExists(id)`, `agentRead(id)`,
 `agentDeregister(id)` all key off it). To inspect a running task by hand:
-`herdr agent attach <task-id>`. If a directory's workspace vanishes (herdr
+`herdr agent attach <task-id>`. If a workspace's herdr workspace vanishes (herdr
 restart / manual close) butchr recreates it on the next dispatch — no manual
 re-registration.
 
@@ -411,14 +411,14 @@ src/
   index.ts        entry: recover state, start dispatcher + server
   config.ts       env-driven config (every BUTCHR_* var documented inline)
   db.ts           SQLite schema + helpers
-  ids.ts          task / directory id generation
+  ids.ts          task / workspace id generation
   taskmd.ts       task.md read/write/append + prompt rendering
   exec.ts         spawn helpers (run / runOrThrow)
   git.ts          worktree / merge / diff / cleanup
   herdr.ts        herdr CLI wrapper
   events.ts       SSE pub/sub
   terminal.ts     open a GUI terminal attached to a running task
-  directories.ts  directory service + HttpError
+  workspaces.ts   workspace service + HttpError
   tasks.ts        task service + state transitions (taskView projection)
   dispatcher.ts   dispatcher loop + per-task fallback watcher + workspace self-heal
   conformance.ts  read-only review gate (judge diff vs prompt)
@@ -451,7 +451,7 @@ exposes typed functions (`isUp`, `workspaceCreate`, `agentStart`, `agentRead`,
 invariant. Add new herdr interactions as functions here so the rest of the code
 stays herdr-agnostic.
 
-**Errors — `HttpError` for anything user-facing.** `src/directories.ts` defines
+**Errors — `HttpError` for anything user-facing.** `src/workspaces.ts` defines
 `class HttpError extends Error { status }`. Throw `new HttpError(<status>,
 <message>)` from service code for expected failures (404 not found, 400 bad
 input, 409 conflict, 502/503 upstream). The server's `handleError`
@@ -470,13 +470,23 @@ column, never write a destructive migration, never drop/rename a column.** New
 columns must be nullable or carry a `DEFAULT` (existing rows get backfilled to
 it).
 
+The one sanctioned exception is a **pre-1.0 conceptual rename done in place**:
+`migrateDirectoriesToWorkspaces` (run once at the top of `src/db.ts`, before the
+baseline `CREATE TABLE`s) renamed the `directories` table → `workspaces` and the
+`directory_id` columns → `workspace_id` via guarded `ALTER … RENAME` so every
+existing row — and its opaque `dir-…` id VALUE — survived untouched (no
+drop/recreate). Each statement is presence-guarded, so it is a clean no-op on an
+already-migrated or fresh DB. This is a rename, not the routine additive path
+above; reach for it only for a deliberate model rename, never for ordinary schema
+evolution.
+
 **Serialization — `taskView`.** `taskView(id)` in `src/tasks.ts` is the
 canonical task projection returned by the API and emitted over SSE: it merges the
 DB row with the on-disk `task.md` (prompt, context, review notes) and computes
 `blocked_by` / `blockerStates` / `deadBlockers` / `spawned_subtasks`. Return
 `taskView(id)` from new endpoints and SSE events instead of raw rows so the shape
-the webapp and CLI consume stays consistent. The matching `DirectoryView`
-(`listDirectories`) is the directory equivalent.
+the webapp and CLI consume stays consistent. The matching `WorkspaceView`
+(`listWorkspaces`) is the workspace equivalent.
 
 ---
 
@@ -489,7 +499,7 @@ of **this doc** in the same change (see [§8](#8-living-docs-update-on-every-cha
 `src/server.ts` (path params like `:id` are parsed into the handler's second
 arg `p`, so `p.id`). The handler returns a `json(data, status?)` `Response` and
 throws `HttpError` on failure. Keep the handler thin — validate input, call the
-service function in `tasks.ts`/`directories.ts`, return `json(taskView(...))`.
+service function in `tasks.ts`/`workspaces.ts`, return `json(taskView(...))`.
 Add the operator CLI in `bin/butchr` too if it should be drivable from the shell
 (each CLI subcommand maps onto exactly one route and adds no server logic).
 
@@ -501,7 +511,7 @@ reference for the var). Reference it as `config.<field>` (never read
 it in [§3](#3-operations-runbook).
 
 **A DB column / migration.** Append an `ensureColumn("tasks", "<col>", "<decl>")`
-(or `directories`) line in `src/db.ts` next to the others, nullable or with a
+(or `workspaces`) line in `src/db.ts` next to the others, nullable or with a
 `DEFAULT` (see §5). Surface it through `taskView` if the API should expose it.
 
 **A webapp view.** Edit `public/app.js` / `index.html` / `style.css` — vanilla
@@ -529,7 +539,7 @@ test` subprocess. The seams that make that possible (set these up in
   **before importing `src/db.ts`/`src/tasks.ts`** — the db/config singletons read
   env at import time, so set env first, then `await import(...)`. Because those
   singletons are shared across test files in one run, give each file a **unique
-  directory id** to keep rows from colliding.
+  workspace id** to keep rows from colliding.
 - **`BUTCHR_HERDR_BIN=true`** — points the herdr binary at `/usr/bin/true`, so
   every herdr probe is a harmless no-op exit-0 (no herdr server needed).
 - **`setCiRunner(fn)`** (`src/tasks.ts`) — inject a fake CI runner so the
@@ -538,7 +548,7 @@ test` subprocess. The seams that make that possible (set these up in
   result so the revert-on-red decision is tested without a real gate run. Pass
   nothing to restore the default.
 - A real **temp git repo** (`git init` + one commit) stands in for a registered
-  directory so worktree/`task.md` paths resolve.
+  workspace so worktree/`task.md` paths resolve.
 
 Clean up temp dirs in `afterAll`. Add a test alongside the feature it covers, and
 treat the test suite as the behavioral source of truth.
@@ -554,7 +564,7 @@ Run **both** `bun test` and the build before proposing a change. These are the
 checks butchr's own CI / verify gate should run against **this** repo — but butchr
 is a general tool that manages *other* repos, so it does **not** hardcode them: the
 gate command defaults to **empty** (no gate) and is configured per managed repo via
-the directory's `gate_cmd` (or a global `BUTCHR_VERIFY_CMD`). When butchr is pointed
+the workspace's `gate_cmd` (or a global `BUTCHR_VERIFY_CMD`). When butchr is pointed
 at its own repo (a dev/dogfood setup), set that to
 `bun build src/index.ts --target bun --outfile /dev/null && bun test ./test`.
 

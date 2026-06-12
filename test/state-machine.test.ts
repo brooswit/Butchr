@@ -38,7 +38,7 @@ function row(id: string) {
   return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;
 }
 function dirRow() {
-  return dbMod.db.query<any, [string]>(`SELECT * FROM directories WHERE id=?`).get(DIR_ID)!;
+  return dbMod.db.query<any, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(DIR_ID)!;
 }
 
 beforeAll(async () => {
@@ -65,7 +65,7 @@ beforeAll(async () => {
   conformanceMod = await import("../src/conformance.ts");
 
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, gate_cmd, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, gate_cmd, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(DIR_ID, REPO_ROOT, "test", "", dbMod.nowIso());
   conformanceMod.setConformanceRunner(async () => null);
 });

@@ -278,9 +278,9 @@ async function openTaskTerminal(id, btn) {
   }, { onDone: () => { if (btn) btn.disabled = false; } });
 }
 
-// ---------- managed CTO agent (PER-DIRECTORY) ----------
+// ---------- managed CTO agent (PER-WORKSPACE) ----------
 // The CTO agent's tri-state status, mapped from running/desired to a display label
-// and the matching cto-badge CSS class. Shared by the directory panel and the
+// and the matching cto-badge CSS class. Shared by the workspace panel and the
 // dashboard mini-badge so the mapping can't drift between them.
 function ctoState(s) {
   return {
@@ -289,13 +289,13 @@ function ctoState(s) {
   };
 }
 
-// Each directory runs its OWN CTO agent (in that repo's root — its principal/dev
-// agent). This panel renders that directory's CTO agent: a status line (running/
+// Each workspace runs its OWN CTO agent (in that repo's root — its principal/dev
+// agent). This panel renders that workspace's CTO agent: a status line (running/
 // stopped, session, since, restarts) plus controls — Open CTO terminal (reuses the
 // workspace-agent attach), Enable/Start/Stop, Restart, and Restart fresh (a brand-new
-// session) — all scoped to `dirId` via /api/directories/:id/cto/*.
+// session) — all scoped to `dirId` via /api/workspaces/:id/cto/*.
 async function ctoPanel(dirId) {
-  const base = "/directories/" + dirId + "/cto";
+  const base = "/workspaces/" + dirId + "/cto";
   let s;
   try {
     s = await api("GET", base);
@@ -353,10 +353,10 @@ async function ctoPanel(dirId) {
       await api("POST", base + "/start");
       toast("CTO agent starting");
     }));
-    // Opt the directory into boot auto-start + supervision, and start it now.
+    // Opt the workspace into boot auto-start + supervision, and start it now.
     if (!s.enabled) {
       controls.appendChild(btn("Enable", "ghost", async () => {
-        await api("PATCH", "/directories/" + dirId, { cto_enabled: true });
+        await api("PATCH", "/workspaces/" + dirId, { cto_enabled: true });
         await api("POST", base + "/start");
         toast("CTO agent enabled + starting");
       }));
@@ -415,7 +415,7 @@ async function action(btn, fn, { success, onDone } = {}) {
   }
 }
 
-// ---------- directory picker modal ----------
+// ---------- workspace picker modal ----------
 // onSelect(path, register): register=false fills the field; true registers now.
 function openPicker(onSelect) {
   let cur = null;
@@ -501,7 +501,7 @@ function parseHash() {
   const parts = hash.split("/").filter(Boolean);
   if (parts.length === 0) return { name: "dashboard" };
   if (parts[0] === "metrics") return { name: "metrics" };
-  if (parts[0] === "dir") return { name: "directory", id: parts[1] };
+  if (parts[0] === "workspace") return { name: "workspace", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
   return { name: "dashboard" };
 }
@@ -521,11 +521,11 @@ function stopLiveOutput() {
 // ---------- live activity pulse ----------
 // A read-only one-line "what is the agent doing right now" on each running task's
 // card/row, polled from GET /api/tasks/:id/activity (which reads only the tail of
-// the session transcript). The directory view re-renders wholesale on every SSE
+// the session transcript). The workspace view re-renders wholesale on every SSE
 // event, which destroys+rebuilds the pulse nodes; this timer is module-scope and
 // re-discovers the live `.pulse[data-id]` nodes each tick, and `activityCache`
 // survives re-renders so a rebuild repaints the last-known action without flashing
-// empty. render() stops it up front; renderDirectory restarts it after mount.
+// empty. render() stops it up front; renderWorkspace restarts it after mount.
 let activityTimer = null;
 const activityCache = new Map(); // task id -> { lastAction, lastAt, elapsedMs }
 function stopActivity() {
@@ -609,7 +609,7 @@ async function render() {
   try {
     if (route.name === "dashboard") await renderDashboard();
     else if (route.name === "metrics") await renderMetrics();
-    else if (route.name === "directory") await renderDirectory(route.id);
+    else if (route.name === "workspace") await renderWorkspace(route.id);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
     app.innerHTML = "";
@@ -622,26 +622,26 @@ function mount(node) {
   app.appendChild(node);
 }
 
-// After acting on a task (merge / request changes), return to its directory's
+// After acting on a task (merge / request changes), return to its workspace's
 // task list — that's the next thing you want, not the now-stale task page.
-function backToDirectory(directoryId) {
-  location.hash = directoryId ? "#/dir/" + directoryId : "#/";
+function backToWorkspace(workspaceId) {
+  location.hash = workspaceId ? "#/workspace/" + workspaceId : "#/";
 }
 
 // ---------- dashboard ----------
 async function renderDashboard() {
-  // The cross-project dashboard rollup: per-directory active/review/needs-attention/
-  // failed counts + totals + each directory's effective gate command. `directories`
+  // The cross-project dashboard rollup: per-workspace active/review/needs-attention/
+  // failed counts + totals + each workspace's effective gate command. `workspaces`
   // entries carry the same `counts` map dirCard expects, plus the aggregate buckets.
   const data = await api("GET", "/dashboard");
-  const dirs = data.directories;
+  const dirs = data.workspaces;
   const totals = data.totals;
   const wrap = el("div");
-  wrap.appendChild(el("h1", {}, "Directories"));
+  wrap.appendChild(el("h1", {}, "Workspaces"));
   wrap.appendChild(el("div", { class: "crumbs" }, "registered workspaces · " + dirs.length));
 
   // Cross-project summary: the four operator-facing buckets aggregated across every
-  // registered directory, so "what needs my eyes anywhere" reads at a glance.
+  // registered workspace, so "what needs my eyes anywhere" reads at a glance.
   if (dirs.length) {
     const sum = el("div", { class: "dash-summary" });
     const stat = (label, n, cls) =>
@@ -656,10 +656,10 @@ async function renderDashboard() {
     wrap.appendChild(sum);
   }
 
-  // add-directory form
+  // add-workspace form
   const form = el("div", { class: "panel" });
   form.innerHTML = `
-    <h2 style="margin-top:0">Register a directory</h2>
+    <h2 style="margin-top:0">Register a workspace</h2>
     <div class="row" style="align-items:flex-end; gap:10px">
       <label class="field" style="flex:2; margin:0">
         <span class="lbl">path to a git repository</span>
@@ -681,7 +681,7 @@ async function renderDashboard() {
   wrap.appendChild(form);
 
   if (dirs.length === 0) {
-    wrap.appendChild(el("div", { class: "empty" }, "No directories yet. Register a git repo above to begin."));
+    wrap.appendChild(el("div", { class: "empty" }, "No workspaces yet. Register a git repo above to begin."));
   } else {
     const grid = el("div", { class: "grid dirs" });
     for (const d of dirs) grid.appendChild(dirCard(d));
@@ -694,8 +694,8 @@ async function renderDashboard() {
       document.getElementById("dpath").value = picked;
       if (register) {
         try {
-          await api("POST", "/directories", { path: picked });
-          toast("directory registered");
+          await api("POST", "/workspaces", { path: picked });
+          toast("workspace registered");
           render();
         } catch (e) { toast(e.message, true); }
       }
@@ -705,15 +705,15 @@ async function renderDashboard() {
   document.getElementById("add-dir").addEventListener("click", async () => {
     const path = document.getElementById("dpath").value.trim();
     const label = document.getElementById("dlabel").value.trim();
-    // Optional per-directory gate command — omit when blank so the backend keeps
+    // Optional per-workspace gate command — omit when blank so the backend keeps
     // the default (NULL) rather than disabling the gate with an empty string.
     const gate = document.getElementById("dgate").value.trim();
     if (!path) return toast("path is required", true);
     try {
-      await api("POST", "/directories", {
+      await api("POST", "/workspaces", {
         path, label: label || undefined, gate_cmd: gate || undefined,
       });
-      toast("directory registered");
+      toast("workspace registered");
       render();
     } catch (e) { toast(e.message, true); }
   });
@@ -735,14 +735,14 @@ function dirCard(d) {
     }).join("");
   // Aggregate bucket badges (active / review / needs-attention / failed) when the
   // card comes from the dashboard rollup (those fields are absent on a plain
-  // DirectoryView, so the row is simply omitted there). needs-attention/failed light
-  // up only when non-zero so a quiet directory stays visually calm.
+  // WorkspaceView, so the row is simply omitted there). needs-attention/failed light
+  // up only when non-zero so a quiet workspace stays visually calm.
   const buckets = typeof d.active === "number"
-    ? `<div class="dir-buckets">
-        <span class="dir-bucket">active <b>${d.active}</b></span>
-        <span class="dir-bucket${d.review ? " review" : ""}">review <b>${d.review}</b></span>
-        <span class="dir-bucket${d.needsAttention ? " attn" : ""}">attention <b>${d.needsAttention}</b></span>
-        <span class="dir-bucket${d.failed ? " failed" : ""}">failed <b>${d.failed}</b></span>
+    ? `<div class="ws-buckets">
+        <span class="ws-bucket">active <b>${d.active}</b></span>
+        <span class="ws-bucket${d.review ? " review" : ""}">review <b>${d.review}</b></span>
+        <span class="ws-bucket${d.needsAttention ? " attn" : ""}">attention <b>${d.needsAttention}</b></span>
+        <span class="ws-bucket${d.failed ? " failed" : ""}">failed <b>${d.failed}</b></span>
       </div>`
     : "";
   const card = el("div", { class: "card" });
@@ -753,19 +753,19 @@ function dirCard(d) {
     <div class="counts">${pills}</div>
     <div class="cto-mini" data-cto="${esc(d.id)}"><span class="cto-badge off">CTO …</span></div>`;
   card.style.cursor = "pointer";
-  card.addEventListener("click", () => (location.hash = "#/dir/" + d.id));
-  // Lazily fill in THIS directory's CTO-agent status badge (best-effort; a failed
-  // probe just leaves the placeholder). Scoped per-directory — one CTO per repo.
+  card.addEventListener("click", () => (location.hash = "#/workspace/" + d.id));
+  // Lazily fill in THIS workspace's CTO-agent status badge (best-effort; a failed
+  // probe just leaves the placeholder). Scoped per-workspace — one CTO per repo.
   ctoMiniBadge(d.id, card.querySelector(".cto-mini"));
   return card;
 }
 
-// Fill a dashboard card's compact CTO badge from /api/directories/:id/cto. Pure
-// status — the card's own click navigates into the directory view (with full controls).
+// Fill a dashboard card's compact CTO badge from /api/workspaces/:id/cto. Pure
+// status — the card's own click navigates into the workspace view (with full controls).
 async function ctoMiniBadge(dirId, slot) {
   if (!slot) return;
   try {
-    const s = await api("GET", "/directories/" + dirId + "/cto");
+    const s = await api("GET", "/workspaces/" + dirId + "/cto");
     const { state, cls } = ctoState(s);
     slot.innerHTML = `<span class="cto-badge ${cls}">CTO ${esc(state)}</span>`;
   } catch {
@@ -773,21 +773,21 @@ async function ctoMiniBadge(dirId, slot) {
   }
 }
 
-// ---------- directory view ----------
-async function renderDirectory(id) {
-  // Pull the directory from the dashboard rollup (it carries the effective gate
+// ---------- workspace view ----------
+async function renderWorkspace(id) {
+  // Pull the workspace from the dashboard rollup (it carries the effective gate
   // command + override state the gate panel needs) alongside its task list.
   const [dash, tasks] = await Promise.all([
     api("GET", "/dashboard"),
     // Carry the active full-text search so it survives SSE-driven re-renders; the
     // server filters by `?q=` (see searchParam / buildFilterBar).
-    api("GET", "/directories/" + id + "/tasks" + searchParam()),
+    api("GET", "/workspaces/" + id + "/tasks" + searchParam()),
   ]);
-  const dir = dash.directories.find((x) => x.id === id);
-  if (!dir) return mount(el("div", { class: "empty" }, "directory not found"));
+  const dir = dash.workspaces.find((x) => x.id === id);
+  if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
 
   const wrap = el("div");
-  wrap.appendChild(el("div", { class: "crumbs", html: `<a href="#/">Directories</a> / ${esc(dir.label || dir.path)}` }));
+  wrap.appendChild(el("div", { class: "crumbs", html: `<a href="#/">Workspaces</a> / ${esc(dir.label || dir.path)}` }));
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path" }, dir.path));
 
@@ -805,7 +805,7 @@ async function renderDirectory(id) {
   // List / Graph view toggle. The toggle bar sits outside the body region so it
   // persists while the body is swapped; the chosen mode lives in dirView (module
   // scope + localStorage) so it survives SSE re-renders and reloads.
-  const body = el("div", { class: "dir-body" });
+  const body = el("div", { class: "ws-body" });
   const paintBody = () => {
     body.innerHTML = "";
     if (dirView === "graph") {
@@ -833,27 +833,27 @@ async function renderDirectory(id) {
   wrap.appendChild(body);
   paintBody();
 
-  // This directory's managed CTO agent (its principal/dev agent, running in the repo
+  // This workspace's managed CTO agent (its principal/dev agent, running in the repo
   // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
-  // directory. Best-effort: rendered async so a status-probe hiccup never blocks the
+  // workspace. Best-effort: rendered async so a status-probe hiccup never blocks the
   // page. Mounted in place once it resolves.
   const ctoSlot = el("div");
   wrap.appendChild(ctoSlot);
   ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
 
   // build/test gate command panel — the command both the CI gate (in-worktree) and
-  // the post-merge verify gate run for this directory. Shows the effective command +
-  // whether it's a per-directory override or the default, with an inline editor.
+  // the post-merge verify gate run for this workspace. Shows the effective command +
+  // whether it's a per-workspace override or the default, with an inline editor.
   wrap.appendChild(gatePanel(dir));
 
   // danger zone
   const dz = el("div", { class: "row", style: "margin-top:32px" });
-  const del = el("button", { class: "btn ghost" }, "Unregister directory");
+  const del = el("button", { class: "btn ghost" }, "Unregister workspace");
   del.addEventListener("click", async () => {
-    if (!confirm("Unregister this directory? Non-merged worktrees will be removed.")) return;
+    if (!confirm("Unregister this workspace? Non-merged worktrees will be removed.")) return;
     try {
-      await api("DELETE", "/directories/" + id);
-      toast("directory unregistered");
+      await api("DELETE", "/workspaces/" + id);
+      toast("workspace unregistered");
       location.hash = "#/";
     } catch (e) { toast(e.message, true); }
   });
@@ -865,9 +865,9 @@ async function renderDirectory(id) {
   startActivity();
 }
 
-// ---------- per-directory build/test gate panel ----------
-// `dir` is a dashboard directory entry (has gate_cmd + effective_gate_cmd). Renders
-// the effective command, flags whether it's a per-directory override or the default,
+// ---------- per-workspace build/test gate panel ----------
+// `dir` is a dashboard workspace entry (has gate_cmd + effective_gate_cmd). Renders
+// the effective command, flags whether it's a per-workspace override or the default,
 // and offers an Edit button that opens the gate editor modal.
 function gatePanel(dir) {
   const overridden = dir.gate_cmd !== null;
@@ -881,19 +881,19 @@ function gatePanel(dir) {
   panel.appendChild(head);
   panel.appendChild(el("small", { class: "muted", style: "display:block;margin:6px 0 10px" },
     "Run in CI (the task worktree, on review) and by the post-merge verify gate (the repo root, after a merge — RED auto-reverts)."));
-  const cmdText = disabled ? "(gate disabled for this directory)" : (dir.effective_gate_cmd || "(none)");
+  const cmdText = disabled ? "(gate disabled for this workspace)" : (dir.effective_gate_cmd || "(none)");
   panel.appendChild(el("pre", { class: "gate-cmd" + (disabled ? " disabled" : "") }, cmdText));
   panel.appendChild(el("small", { class: "muted" },
     overridden
-      ? (disabled ? "Per-directory override: the gate is disabled." : "Per-directory override.")
-      : "Using the default gate (no per-directory override)."));
+      ? (disabled ? "Per-workspace override: the gate is disabled." : "Per-workspace override.")
+      : "Using the default gate (no per-workspace override)."));
   return panel;
 }
 
-// Editor for a directory's gate command. A textarea (prefilled with the effective
+// Editor for a workspace's gate command. A textarea (prefilled with the effective
 // command) plus three actions: Save the typed command (an empty save DISABLES the
 // gate), or "Use default" to clear the override (revert to config.verifyCmd). Maps
-// to PATCH /api/directories/:id.
+// to PATCH /api/workspaces/:id.
 function openGateModal(dir) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
@@ -901,7 +901,7 @@ function openGateModal(dir) {
       <span class="lbl">build/test gate command — run via <code>bash -lc</code> in the repo</span>
       <textarea id="gate-cmd" class="gate-textarea" placeholder="e.g. npm run build && npm test"></textarea>
     </label>
-    <small class="hint muted">Save an empty command to DISABLE the gate for this directory. "Use default" reverts to the global default command.</small>`;
+    <small class="hint muted">Save an empty command to DISABLE the gate for this workspace. "Use default" reverts to the global default command.</small>`;
   const ta = body.querySelector("#gate-cmd");
   ta.value = dir.gate_cmd !== null ? dir.gate_cmd : (dir.effective_gate_cmd || "");
 
@@ -918,7 +918,7 @@ function openGateModal(dir) {
   ta.focus();
 
   const patch = (btn, gate_cmd, msg) =>
-    action(btn, () => api("PATCH", "/directories/" + dir.id, { gate_cmd }),
+    action(btn, () => api("PATCH", "/workspaces/" + dir.id, { gate_cmd }),
       { success: msg, onDone: () => { close(); render(); } });
   save.addEventListener("click", () => patch(save, ta.value, "gate command updated"));
   useDefault.addEventListener("click", () => patch(useDefault, null, "reverted to the default gate"));
@@ -936,7 +936,7 @@ function openGateModal(dir) {
 // are collapsed behind an "Advanced" disclosure (closed by default). Context is
 // intentionally left empty (the agent reads files itself). Submits to the existing
 // create endpoint; the new task surfaces via the SSE-driven re-render.
-function openNewTaskModal(directoryId) {
+function openNewTaskModal(workspaceId) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
     <label class="field" style="margin-bottom:8px">
@@ -1044,7 +1044,7 @@ function openNewTaskModal(directoryId) {
     expandBtn.textContent = "Expanding…";
     showBriefHint("Reading the repo and drafting a prompt…");
     try {
-      const r = await api("POST", "/expand-brief", { brief, directory: directoryId });
+      const r = await api("POST", "/expand-brief", { brief, workspace: workspaceId });
       promptEl.value = r.prompt || "";
       showBriefHint("Expanded — review and edit the prompt below, then Create.");
       promptEl.focus();
@@ -1126,7 +1126,7 @@ function openNewTaskModal(directoryId) {
     showErr("");
     create.disabled = true; cancel.disabled = true;
     try {
-      await api("POST", "/directories/" + directoryId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview, idea });
+      await api("POST", "/workspaces/" + workspaceId + "/tasks", { prompt, blocked_by, kind, model, tags, priority, plan_preview, idea });
       toast(idea ? "idea created" : kind === "plan" ? "plan task created" : plan_preview ? "plan-preview task created" : "task created");
       close();
       render();
@@ -1158,7 +1158,7 @@ function queueLine(tasks) {
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
-// Lifecycle statuses still in flight — these stay in the main directory list.
+// Lifecycle statuses still in flight — these stay in the main workspace list.
 // Everything else (merged, aborted) is terminal and lives in History.
 // `blocked` is pre-dispatch waiting work, so it groups with the active tasks.
 const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_progress", "in_review", "finalizing"];
@@ -1173,7 +1173,7 @@ const ACTIVE_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_pro
 const TERMINAL_STATUSES = ["merged", "aborted"];
 const HISTORY_KEY = "butchr-history-open";
 
-// Directory page body mode: the task "List", the pipeline "Board", or the
+// Workspace page body mode: the task "List", the pipeline "Board", or the
 // dependency "Graph". Kept at module scope (and mirrored to localStorage) so it
 // survives the full re-render the app does on every SSE event and across reloads.
 const DIRVIEW_KEY = "butchr-dirview";
@@ -1216,14 +1216,14 @@ const FILTER_STATUSES = ["idea", "spec_review", "blocked", "needs_info", "in_pro
 // taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
 // endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
 // to the client), summary, review notes, and id. So the search runs on the server
-// and the directory list is re-fetched as you type (debounced); the status/tag
+// and the workspace list is re-fetched as you type (debounced); the status/tag
 // filters below still run client-side over whatever the server returned.
 let taskSearch = "";          // full-text query (server-side ?q=)
 let statusFilter = new Set(); // selected effStatus values; empty = all
 let tagFilter = new Set();    // selected tags; empty = all (ANY-match when non-empty)
 
 // The `?q=` query-string fragment for the current search (empty when not searching),
-// appended to every directory task-list fetch so the active search persists across
+// appended to every workspace task-list fetch so the active search persists across
 // SSE-driven re-renders.
 function searchParam() {
   const q = taskSearch.trim();
@@ -1247,7 +1247,7 @@ function taskMatchesFilter(t) {
   return true;
 }
 
-// The distinct set of tags across the directory's tasks, sorted, for the filter bar.
+// The distinct set of tags across the workspace's tasks, sorted, for the filter bar.
 function allTags(tasks) {
   const set = new Set();
   for (const t of tasks) for (const g of (Array.isArray(t.tags) ? t.tags : [])) set.add(g);
@@ -1256,7 +1256,7 @@ function allTags(tasks) {
 
 // The filter bar: a full-text search box plus a row of toggleable status chips
 // (reusing the existing .chip color styling, dimmed when inactive). The search box
-// drives the SERVER-SIDE `?q=` filter — typing re-fetches the directory's task list
+// drives the SERVER-SIDE `?q=` filter — typing re-fetches the workspace's task list
 // (debounced) and repaints ONLY the results region, so the bar (and the focused
 // search input) stay put and live-as-you-type works. The status/tag chip handlers
 // mutate the module-level filter state and re-filter the last-fetched set client-side.
@@ -1280,7 +1280,7 @@ function buildFilterBar(dirId, tasks, results) {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
       try {
-        currentTasks = await api("GET", "/directories/" + dirId + "/tasks" + searchParam());
+        currentTasks = await api("GET", "/workspaces/" + dirId + "/tasks" + searchParam());
       } catch (e) {
         toast(e.message, true);
         return;
@@ -1336,8 +1336,8 @@ function buildFilterBar(dirId, tasks, results) {
   chips.appendChild(clear);
   bar.appendChild(chips);
 
-  // Second chip row: one toggleable chip per distinct tag in this directory (ANY
-  // match). Only shown when the directory has any tagged tasks. A stale selection
+  // Second chip row: one toggleable chip per distinct tag in this workspace (ANY
+  // match). Only shown when the workspace has any tagged tasks. A stale selection
   // (a tag whose last task left the set) is harmlessly ignored — it just matches
   // nothing — and is dropped here so the bar reflects the live tag universe.
   const tags = allTags(tasks);
@@ -1492,10 +1492,10 @@ function tasksTable(tasks) {
   return table;
 }
 
-// List / Board / Graph segmented toggle for the directory body. Mutates dirView
+// List / Board / Graph segmented toggle for the workspace body. Mutates dirView
 // (module scope + localStorage) and calls repaint() to swap the body region — the
 // toggle node itself is left in place so the choice sticks across clicks. The
-// directory view re-renders wholesale on every SSE event and reads dirView, so the
+// workspace view re-renders wholesale on every SSE event and reads dirView, so the
 // chosen mode also survives live updates without re-wiring anything.
 function buildViewToggle(repaint) {
   const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Task view" });
@@ -1616,11 +1616,11 @@ function graphLevels(nodeIds, edges) {
   return level;
 }
 
-// Draw a DAG of the directory's non-terminal tasks and their blockers: nodes are
+// Draw a DAG of the workspace's non-terminal tasks and their blockers: nodes are
 // tasks (label = id, colored by effective status), edges are blocker→blocked
 // arrows pointing left→right across topological levels. Inline SVG, no library.
 // Clicking a node opens its task detail. Re-rendered wholesale on each SSE event
-// by the directory view, so it live-updates for free.
+// by the workspace view, so it live-updates for free.
 //
 // The active/in-flight tasks (the "tip") always render; how much of the FINISHED
 // dependency history behind them shows is controlled by a generations slider (see
@@ -1813,7 +1813,7 @@ function buildGraphGenSlider(maxGen, onChange) {
 }
 
 // ---------- pipeline / merge-train board ----------
-// The board view: the directory's active (in-flight) tasks grouped into lanes in
+// The board view: the workspace's active (in-flight) tasks grouped into lanes in
 // pipeline order — closest-to-landing first — so "what's happening / what's next"
 // reads at a glance. Lanes: Ready to merge (review) · Merging (finalizing, only
 // when present) · In progress (running/idle) · Blocked (each card shows the
@@ -1822,7 +1822,7 @@ function buildGraphGenSlider(maxGen, onChange) {
 // Terminal-state tasks
 // (merged/aborted/rejected/failed) aren't part of the pipeline and are omitted —
 // they live in the List view's Finished section. Re-rendered wholesale on every
-// SSE event by the directory view, so it live-updates for free.
+// SSE event by the workspace view, so it live-updates for free.
 const BOARD_LANES = [
   { key: "spec_review", title: "Spec review", hint: "spec review", match: (t) => t.status === "spec_review" },
   { key: "in_review", title: "In review", hint: "in review", match: (t) => t.status === "in_review" },
@@ -1885,7 +1885,7 @@ function boardLane(lane, items, byId) {
 // One task card: id (links to the detail page), status chip(s), created time, and
 // a live-terminal link when the agent pane is up. Blocked cards additionally list
 // each blocker with its current status — read from sibling tasks in this
-// directory (a blocker not in this list shows as "unknown"). Aborted/rejected
+// workspace (a blocker not in this list shows as "unknown"). Aborted/rejected
 // blockers will never merge, so they're flagged as stuck.
 function boardCard(t, lane, byId) {
   const card = el("div", { class: "board-card" });
@@ -2200,7 +2200,7 @@ function renderTranscriptPanel(id) {
 
 // Sub-task PROGRESS ROLLUP — for a task that GATES others (its id appears in their
 // blocked_by, e.g. the children a plan decomposed into), summarize how far the
-// dependent sub-tree has landed. Walks the reversed edges of the directory's task
+// dependent sub-tree has landed. Walks the reversed edges of the workspace's task
 // list (no extra API field needed) to find the transitive sub-tree, then counts the
 // merged ones. Returns null when the task gates nothing, so a leaf task shows no
 // rollup. `direct` is the immediate dependents (for the per-child status list);
@@ -2277,13 +2277,13 @@ function rollupPanel(rollup) {
 
 async function renderTask(id) {
   const t = await api("GET", "/tasks/" + id);
-  const dirs = await api("GET", "/directories");
-  const dir = dirs.find((x) => x.id === t.directory_id);
+  const dirs = await api("GET", "/workspaces");
+  const dir = dirs.find((x) => x.id === t.workspace_id);
 
   const wrap = el("div");
   wrap.appendChild(el("div", {
     class: "crumbs",
-    html: `<a href="#/">Directories</a> / <a href="#/dir/${esc(t.directory_id)}">${esc(dir ? (dir.label || dir.path) : t.directory_id)}</a> / ${esc(t.id)}`,
+    html: `<a href="#/">Workspaces</a> / <a href="#/workspace/${esc(t.workspace_id)}">${esc(dir ? (dir.label || dir.path) : t.workspace_id)}</a> / ${esc(t.id)}`,
   }));
   const headerRight = el("div", { class: "row", style: "gap:10px" });
   if (isLive(t)) {
@@ -2375,10 +2375,10 @@ async function renderTask(id) {
   // sub-task progress rollup — if this task GATES others (its id is in their
   // blocked_by), summarize how far the dependent sub-tree has merged: a fraction, a
   // progress bar, and the direct children with their statuses. Computed purely
-  // client-side from the directory's task list (no extra API field); best-effort —
+  // client-side from the workspace's task list (no extra API field); best-effort —
   // a fetch failure just omits the panel — and nothing renders for a task with no
   // dependents. Re-fetched on each render so it live-updates via the SSE re-render.
-  const siblings = await api("GET", "/directories/" + t.directory_id + "/tasks").catch(() => null);
+  const siblings = await api("GET", "/workspaces/" + t.workspace_id + "/tasks").catch(() => null);
   const rollup = siblings ? dependentRollup(t.id, siblings) : null;
   if (rollup) wrap.appendChild(rollupPanel(rollup));
 
@@ -2575,7 +2575,7 @@ async function renderTask(id) {
       // flow: the server renders {{task}}/{{sha}} into the prompt (server.ts). Jump
       // to the new task so the operator can follow it through the pipeline.
       action(ev.target, async () => {
-        const created = await api("POST", "/directories/" + t.directory_id + "/tasks", {
+        const created = await api("POST", "/workspaces/" + t.workspace_id + "/tasks", {
           template: "rollback",
           vars: { task: id, sha: t.merged_sha },
         });
@@ -2609,7 +2609,7 @@ async function renderTask(id) {
         } else {
           toast("approved ✓ — merged, agent wrapping up");
         }
-      }, { onDone: () => backToDirectory(t.directory_id) });
+      }, { onDone: () => backToWorkspace(t.workspace_id) });
     });
     document.getElementById("reject").addEventListener("click", (ev) => {
       // The note sent to the agent is the freeform text plus any inline comments,
@@ -2618,7 +2618,7 @@ async function renderTask(id) {
       const note = composeReviewNote(document.getElementById("rnote").value);
       if (!note) return toast("add a note or at least one inline comment", true);
       action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
-        { success: "changes requested", onDone: () => backToDirectory(t.directory_id) });
+        { success: "changes requested", onDone: () => backToWorkspace(t.workspace_id) });
     });
   }
 
@@ -2627,13 +2627,13 @@ async function renderTask(id) {
       action(ev.target, async () => {
         await api("POST", "/tasks/" + id + "/approve");
         toast("spec approved ✓ — dispatching workspace agent");
-      }, { onDone: () => backToDirectory(t.directory_id) });
+      }, { onDone: () => backToWorkspace(t.workspace_id) });
     });
     document.getElementById("reject").addEventListener("click", (ev) => {
       const note = (document.getElementById("rnote").value || "").trim();
       if (!note) return toast("add a note describing what to change in the spec", true);
       action(ev.target, () => api("POST", "/tasks/" + id + "/reject", { note }),
-        { success: "spec changes requested — revising", onDone: () => backToDirectory(t.directory_id) });
+        { success: "spec changes requested — revising", onDone: () => backToWorkspace(t.workspace_id) });
     });
   }
 
@@ -2642,7 +2642,7 @@ async function renderTask(id) {
       const answer = document.getElementById("answer").value.trim();
       if (!answer) return toast("an answer is required", true);
       action(ev.target, () => api("POST", "/tasks/" + id + "/answer", { answer }),
-        { success: "answer sent — agent resuming", onDone: () => backToDirectory(t.directory_id) });
+        { success: "answer sent — agent resuming", onDone: () => backToWorkspace(t.workspace_id) });
     });
   }
 }
@@ -3000,8 +3000,8 @@ function wireDiff(box, taskId) {
 }
 
 // ---------- topnav active state ----------
-// Highlight the topbar nav link matching the current route. Directory/task pages
-// fall under "Directories"; the Metrics page under "Metrics".
+// Highlight the topbar nav link matching the current route. Workspace/task pages
+// fall under "Workspaces"; the Metrics page under "Metrics".
 function syncTopnav(route) {
   const links = document.querySelectorAll(".topnav-link");
   if (!links.length) return;
@@ -3179,7 +3179,7 @@ async function renderMetrics() {
 // A live pull-signal so the operator gets drawn in instead of polling: GET /health
 // reports needsAttention { review, failed, total } and we reflect it as a tab-title
 // badge ("(2) butchr") plus a header indicator that links to the dashboard (whose
-// directory cards highlight the review/failed counts). When permitted, a Web
+// workspace cards highlight the review/failed counts). When permitted, a Web
 // Notification fires as a task NEWLY enters review/failed. Refreshed on boot and on
 // every SSE event, so it tracks without a reload.
 const BASE_TITLE = "butchr";

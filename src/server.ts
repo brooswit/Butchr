@@ -6,19 +6,19 @@ import { getLastSnapshotAt, listBackups } from "./backup.ts";
 import { config } from "./config.ts";
 import { computeDiskUsage } from "./disk.ts";
 import { computeMetrics, db, listTaskEvents, metricRows } from "./db.ts";
-import type { DirectoryRow, TaskRow } from "./db.ts";
+import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { currentPaneRepairing, dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
   dashboard,
-  getDirectory,
-  getDirectoryByPath,
-  listDirectories,
-  registerDirectory,
-  setDirectoryCtoEnabled,
-  unregisterDirectory,
-  updateDirectoryGateCmd,
-} from "./directories.ts";
+  getWorkspace,
+  getWorkspaceByPath,
+  listWorkspaces,
+  registerWorkspace,
+  setWorkspaceCtoEnabled,
+  unregisterWorkspace,
+  updateWorkspaceGateCmd,
+} from "./workspaces.ts";
 import {
   ctoAgentName,
   ctoAgentStatus,
@@ -97,10 +97,10 @@ function intParam(
   return v;
 }
 
-/** Look up a directory by id or throw 404 — the single guard for the directory-scoped routes. */
-function requireDirectory(id: string): DirectoryRow {
-  const dir = getDirectory(id);
-  if (!dir) throw new HttpError(404, "directory not found");
+/** Look up a workspace by id or throw 404 — the single guard for the workspace-scoped routes. */
+function requireWorkspace(id: string): WorkspaceRow {
+  const dir = getWorkspace(id);
+  if (!dir) throw new HttpError(404, "workspace not found");
   return dir;
 }
 
@@ -114,14 +114,14 @@ function requireTask(id: string): TaskRow {
 /**
  * Resolve a task's session context for the read-only transcript/activity routes:
  * throws 404 (via requireTask) if the task is gone, else returns the worktree path +
- * session id, or null when there's no resolvable session yet (its directory is gone
+ * session id, or null when there's no resolvable session yet (its workspace is gone
  * or it has no session_id) — the caller then yields an empty transcript/activity
  * rather than a 404. The transcript itself lives under ~/.claude/projects (outside
  * the worktree), so the path is only a lookup hint that survives worktree cleanup.
  */
 function taskSessionContext(taskId: string): { wt: string; sessionId: string } | null {
   const t = requireTask(taskId);
-  const dir = getDirectory(t.directory_id);
+  const dir = getWorkspace(t.workspace_id);
   if (!dir || !t.session_id) return null;
   return { wt: worktreePath(dir.path, taskId), sessionId: t.session_id };
 }
@@ -475,7 +475,7 @@ route("GET", "/api/fs", async (req) => {
     if (!isDir && !withFiles) continue;
     entries.push({ name, path: full, isDir, isGitRepo: isDir && existsSync(join(full, ".git")) });
   }
-  // Directories first, then files; alphabetical within each group.
+  // Workspaces first, then files; alphabetical within each group.
   entries.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
 
   const parent = dirname(path);
@@ -516,15 +516,15 @@ route("GET", "/api/metrics", async (req) => {
   return json(computeMetrics(metricRows(), Date.now(), days));
 });
 
-// CROSS-PROJECT DASHBOARD. A top-level home aggregating every registered directory:
-// per-directory active / review / failed / needs-attention counts, its effective
+// CROSS-PROJECT DASHBOARD. A top-level home aggregating every registered workspace:
+// per-workspace active / review / failed / needs-attention counts, its effective
 // build/test gate command, and a `totals` rollup. Powers the webapp dashboard's
-// summary line + per-card counts and lets a supervisor pull per-directory
-// needs-attention without walking every directory's task list. Read-only.
+// summary line + per-card counts and lets a supervisor pull per-workspace
+// needs-attention without walking every workspace's task list. Read-only.
 route("GET", "/api/dashboard", async () => json(dashboard()));
 
-// Directories
-route("GET", "/api/directories", async () => json(listDirectories()));
+// Workspaces
+route("GET", "/api/workspaces", async () => json(listWorkspaces()));
 
 // Built-in TASK TEMPLATES (recipes): the named, parameterized prompt skeletons the
 // CLI `templates` command and the webapp new-task picker list. Each entry carries
@@ -534,53 +534,53 @@ route("GET", "/api/templates", async () => json(listTemplates()));
 // BRIEF → EXPAND. Turns the operator's one-line IDEA into a proper, concrete, scoped
 // task prompt grounded in the target repo, by running a headless, READ-ONLY claude
 // (Read/Grep/Glob over the repo — see config.expandBriefCmd / src/expand.ts) that
-// reuses the spec-conformance reviewer's recipe. Body `{ brief, directory }`:
-// `directory` is the registered directory's id (or its absolute path); the expander
+// reuses the spec-conformance reviewer's recipe. Body `{ brief, workspace }`:
+// `workspace` is the registered workspace's id (or its absolute path); the expander
 // runs with that repo as cwd. Returns `{ prompt }` — the expanded text the webapp
 // drops into the new-task prompt textarea for the operator to review/edit before
-// Create. 400 on a blank brief, 404 on an unknown directory, 502 if expansion failed.
+// Create. 400 on a blank brief, 404 on an unknown workspace, 502 if expansion failed.
 route("POST", "/api/expand-brief", async (req) => {
   const body = await readJson(req);
-  // Resolve the directory by id first (what the webapp sends), then by path, so a
+  // Resolve the workspace by id first (what the webapp sends), then by path, so a
   // caller can pass either. The repo root is the expander's cwd.
-  const dir = getDirectory(body.directory) ?? getDirectoryByPath(body.directory ?? "");
-  if (!dir) throw new HttpError(404, "directory not found");
+  const dir = getWorkspace(body.workspace) ?? getWorkspaceByPath(body.workspace ?? "");
+  if (!dir) throw new HttpError(404, "workspace not found");
   const prompt = await expandBrief(body.brief, dir.path);
   return json({ prompt });
 });
 
-route("POST", "/api/directories", async (req) => {
+route("POST", "/api/workspaces", async (req) => {
   const body = await readJson(req);
-  // Optional gate_cmd: a per-directory build/test gate command set at register time
+  // Optional gate_cmd: a per-workspace build/test gate command set at register time
   // (omit/null → use the default config.verifyCmd; "" → disable the gate). Validated
-  // inside registerDirectory.
-  const view = await registerDirectory(body.path, body.label, body.gate_cmd);
+  // inside registerWorkspace.
+  const view = await registerWorkspace(body.path, body.label, body.gate_cmd);
   return json(view, 201);
 });
 
-// Update a directory's per-directory settings. Two independent fields, handled by
+// Update a workspace's per-workspace settings. Two independent fields, handled by
 // KEY PRESENCE so updating one never clobbers the other:
 //  - `gate_cmd`: the build/test gate command both the CI gate and the post-merge
-//    verify gate run for this directory — a string sets it ("" disables the gate);
+//    verify gate run for this workspace — a string sets it ("" disables the gate);
 //    null/omitted CLEARS the override so it falls back to the default config.verifyCmd.
-//  - `cto_enabled`: the per-directory CTO-agent enable (boot auto-start + supervision)
+//  - `cto_enabled`: the per-workspace CTO-agent enable (boot auto-start + supervision)
 //    — true/false forces it on/off; null CLEARS the override → inherit the global
 //    default config.ctoAgentEnabled.
-// 404 if the directory is gone. Publishes `directory.updated`.
-route("PATCH", "/api/directories/:id", async (req, p) => {
+// 404 if the workspace is gone. Publishes `workspace.updated`.
+route("PATCH", "/api/workspaces/:id", async (req, p) => {
   const body = await readJson(req);
   let view;
-  if ("cto_enabled" in body) view = setDirectoryCtoEnabled(p.id!, body.cto_enabled);
+  if ("cto_enabled" in body) view = setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
   // Preserve the legacy contract that PATCH with no cto_enabled key sets/clears the
   // gate command (an omitted gate_cmd clears the override).
   if ("gate_cmd" in body || !("cto_enabled" in body)) {
-    view = updateDirectoryGateCmd(p.id!, body.gate_cmd ?? null);
+    view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
   }
   return json(view!);
 });
 
-route("DELETE", "/api/directories/:id", async (_req, p) => {
-  await unregisterDirectory(p.id!);
+route("DELETE", "/api/workspaces/:id", async (_req, p) => {
+  await unregisterWorkspace(p.id!);
   return json({ ok: true });
 });
 
@@ -588,13 +588,13 @@ route("DELETE", "/api/directories/:id", async (_req, p) => {
 // (task.md), request_review summary, review notes, and id — filtered SERVER-SIDE so
 // huge prompt bodies never ship to the client (the list projection omits them). A
 // blank/absent q returns the full list unchanged. See tasks.taskListView.
-route("GET", "/api/directories/:id/tasks", async (req, p) => {
-  requireDirectory(p.id!);
+route("GET", "/api/workspaces/:id/tasks", async (req, p) => {
+  requireWorkspace(p.id!);
   const q = new URL(req.url).searchParams.get("q") ?? undefined;
   return json(taskListView(p.id!, q));
 });
 
-route("POST", "/api/directories/:id/tasks", async (req, p) => {
+route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
   const body = await readJson(req);
   // Optional blocked_by: [taskId,...] — the task starts `blocked` until every
   // listed blocker has merged (validated + cycle-checked inside createTask).
@@ -811,37 +811,37 @@ route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   return attachAgentTerminal(p.id!);
 });
 
-// ---- MANAGED CTO AGENT (PER-DIRECTORY) -------------------------------------
-// butchr runs ONE CTO agent PER REGISTERED DIRECTORY (src/cto-agent.ts) — a
+// ---- MANAGED CTO AGENT (PER-WORKSPACE) -------------------------------------
+// butchr runs ONE CTO agent PER REGISTERED WORKSPACE (src/cto-agent.ts) — a
 // first-class, channel-connected Claude session that runs in that repo's ROOT and IS
 // the project's principal/dev agent, with no worktree/branch/review/merge. These
-// routes are all SCOPED to a directory: status + start/stop/restart controls + an
+// routes are all SCOPED to a workspace: status + start/stop/restart controls + an
 // 'Open CTO terminal' attach (reusing the same pane-attach machinery as the
 // workspace-agent terminal button). Each mutating route returns the refreshed
 // CtoStatus (the lifecycle calls also publish a `cto.updated` SSE event so every
-// dashboard reflects it live). 404 if the directory is gone.
-route("GET", "/api/directories/:id/cto", async (_req, p) => {
-  requireDirectory(p.id!);
+// dashboard reflects it live). 404 if the workspace is gone.
+route("GET", "/api/workspaces/:id/cto", async (_req, p) => {
+  requireWorkspace(p.id!);
   return json(await ctoAgentStatus(p.id!));
 });
-route("POST", "/api/directories/:id/cto/start", async (_req, p) => {
-  requireDirectory(p.id!);
+route("POST", "/api/workspaces/:id/cto/start", async (_req, p) => {
+  requireWorkspace(p.id!);
   return json(await startCtoAgent(p.id!));
 });
-route("POST", "/api/directories/:id/cto/stop", async (_req, p) => {
-  requireDirectory(p.id!);
+route("POST", "/api/workspaces/:id/cto/stop", async (_req, p) => {
+  requireWorkspace(p.id!);
   return json(await stopCtoAgent(p.id!));
 });
 // `?fresh=1` cold-starts a BRAND-NEW session (the only way to do so — last-resort
 // context hygiene); otherwise it bounces, RESUMING the same session.
-route("POST", "/api/directories/:id/cto/restart", async (req, p) => {
-  requireDirectory(p.id!);
+route("POST", "/api/workspaces/:id/cto/restart", async (req, p) => {
+  requireWorkspace(p.id!);
   const fresh = new URL(req.url).searchParams.get("fresh") === "1";
   return json(await restartCtoAgent(p.id!, { fresh }));
 });
-// Open a GUI terminal attached to this directory's CTO agent's live pane.
-route("POST", "/api/directories/:id/cto/terminal", async (_req, p) => {
-  requireDirectory(p.id!);
+// Open a GUI terminal attached to this workspace's CTO agent's live pane.
+route("POST", "/api/workspaces/:id/cto/terminal", async (_req, p) => {
+  requireWorkspace(p.id!);
   const s = await ctoAgentStatus(p.id!);
   if (!s.running || !s.paneId) {
     throw new HttpError(409, "CTO agent has no live pane (not running)");

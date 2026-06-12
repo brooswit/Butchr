@@ -1,6 +1,6 @@
 // task.md is the on-disk source of truth for a task: prompt, metadata, and the
 // running log of rejection notes. Lives at
-//   <directory-root>/.butchr/tasks/<task-id>/task.md
+//   <workspace-root>/.butchr/tasks/<task-id>/task.md
 //
 // We deliberately hand-roll a tiny YAML reader/writer for the front matter
 // (zero dependencies). The shape is fixed and simple, so this is safe.
@@ -166,18 +166,18 @@ const PLAN_PREVIEW_PROTOCOL = [
 ].join("\n");
 
 /** Absolute path to a task's directory under .butchr/tasks/. */
-export function taskDir(directoryRoot: string, taskId: string): string {
-  return join(directoryRoot, ".butchr", "tasks", taskId);
+export function taskDir(workspaceRoot: string, taskId: string): string {
+  return join(workspaceRoot, ".butchr", "tasks", taskId);
 }
 
-/** Absolute path to a directory's CTO context file under .butchr/. */
-export function ctoMdPath(directoryRoot: string): string {
-  return join(directoryRoot, ".butchr", "CTO.md");
+/** Absolute path to a workspace's CTO context file under .butchr/. */
+export function ctoMdPath(workspaceRoot: string): string {
+  return join(workspaceRoot, ".butchr", "CTO.md");
 }
 
 /** Absolute path to a task's task.md. */
-export function taskMdPath(directoryRoot: string, taskId: string): string {
-  return join(taskDir(directoryRoot, taskId), "task.md");
+export function taskMdPath(workspaceRoot: string, taskId: string): string {
+  return join(taskDir(workspaceRoot, taskId), "task.md");
 }
 
 function serializeFrontMatter(meta: TaskMeta): string {
@@ -212,11 +212,11 @@ function serializeFrontMatter(meta: TaskMeta): string {
 
 /** Create the task directory and write the initial task.md. */
 export function writeTaskMd(
-  directoryRoot: string,
+  workspaceRoot: string,
   meta: TaskMeta,
   prompt: string,
 ): void {
-  const dir = taskDir(directoryRoot, meta.id);
+  const dir = taskDir(workspaceRoot, meta.id);
   mkdirSync(dir, { recursive: true });
   const body = [
     serializeFrontMatter(meta),
@@ -230,17 +230,17 @@ export function writeTaskMd(
     REVIEW_BANNER,
     "",
   ].join("\n");
-  writeFileSync(taskMdPath(directoryRoot, meta.id), body, "utf8");
+  writeFileSync(taskMdPath(workspaceRoot, meta.id), body, "utf8");
 }
 
 /** Append a rejection note to an existing task.md's Review Notes section. */
 export function appendRejection(
-  directoryRoot: string,
+  workspaceRoot: string,
   taskId: string,
   note: string,
   whenIso: string,
 ): void {
-  const p = taskMdPath(directoryRoot, taskId);
+  const p = taskMdPath(workspaceRoot, taskId);
   let text = existsSync(p) ? readFileSync(p, "utf8") : "";
   if (!text.includes("## Review Notes")) {
     text += `\n\n## Review Notes\n\n${REVIEW_BANNER}\n`;
@@ -259,13 +259,13 @@ const CLARIFY_SECTION = "## Clarifications";
  * while the resume reads them back.
  */
 export function appendAnswer(
-  directoryRoot: string,
+  workspaceRoot: string,
   taskId: string,
   question: string,
   answer: string,
   whenIso: string,
 ): void {
-  const p = taskMdPath(directoryRoot, taskId);
+  const p = taskMdPath(workspaceRoot, taskId);
   let text = existsSync(p) ? readFileSync(p, "utf8") : "";
   if (!text.includes(CLARIFY_SECTION)) {
     text += `\n\n${CLARIFY_SECTION}\n`;
@@ -348,11 +348,11 @@ export function renderRegroundBlock(doc: TaskDoc): string {
 
 /** Update only the `status:` line in the front matter, in place. */
 export function updateTaskMdStatus(
-  directoryRoot: string,
+  workspaceRoot: string,
   taskId: string,
   status: TaskStatus,
 ): void {
-  const p = taskMdPath(directoryRoot, taskId);
+  const p = taskMdPath(workspaceRoot, taskId);
   if (!existsSync(p)) return;
   const text = readFileSync(p, "utf8");
   const updated = text.replace(/^status:.*$/m, `status: ${status}`);
@@ -369,11 +369,11 @@ export function updateTaskMdStatus(
  * `## ` heading (e.g. "## Review Notes") onward.
  */
 export function updateTaskMdPrompt(
-  directoryRoot: string,
+  workspaceRoot: string,
   taskId: string,
   prompt: string,
 ): void {
-  const p = taskMdPath(directoryRoot, taskId);
+  const p = taskMdPath(workspaceRoot, taskId);
   if (!existsSync(p)) return;
   const text = readFileSync(p, "utf8");
   // Match "## Prompt\n<body>" up to (but not including) the next "## " heading or EOF,
@@ -385,8 +385,8 @@ export function updateTaskMdPrompt(
 }
 
 /** Parse a task.md file. Tolerant of minor formatting differences. */
-export function readTaskMd(directoryRoot: string, taskId: string): TaskDoc {
-  const p = taskMdPath(directoryRoot, taskId);
+export function readTaskMd(workspaceRoot: string, taskId: string): TaskDoc {
+  const p = taskMdPath(workspaceRoot, taskId);
   const raw = readFileSync(p, "utf8");
   return parseTaskMd(raw);
 }
@@ -461,7 +461,7 @@ export function parseTaskMd(raw: string): TaskDoc {
 }
 
 /**
- * Build the full prompt to hand the agent: the directory's CTO context, then the
+ * Build the full prompt to hand the agent: the workspace's CTO context, then the
  * LIST of context-file PATHS to read, then the task prompt.
  *
  * We deliberately do NOT inline the context files' bodies. The rendered prompt is
@@ -472,12 +472,12 @@ export function parseTaskMd(raw: string): TaskDoc {
  * files itself with its own tools (it has the worktree open), which is what it
  * would do anyway.
  */
-export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
+export function renderAgentPrompt(workspaceRoot: string, doc: TaskDoc): string {
   const parts: string[] = [];
 
-  // Prepend the directory's CTO context (best-effort) so every agent starts with
+  // Prepend the workspace's CTO context (best-effort) so every agent starts with
   // it ABOVE the context files, task prompt, and review-handshake instructions.
-  const ctoPath = ctoMdPath(directoryRoot);
+  const ctoPath = ctoMdPath(workspaceRoot);
   if (existsSync(ctoPath)) {
     try {
       const cto = readFileSync(ctoPath, "utf8").trim();
@@ -532,7 +532,7 @@ export function renderAgentPrompt(directoryRoot: string, doc: TaskDoc): string {
  * to address them and submit again. Falls back to a generic instruction if no
  * review notes are recorded (shouldn't happen, but keeps the agent unblocked).
  */
-export function renderReworkPrompt(directoryRoot: string, doc: TaskDoc, reground = ""): string {
+export function renderReworkPrompt(workspaceRoot: string, doc: TaskDoc, reground = ""): string {
   const notes = doc.reviewNotes.trim();
   const body = notes
     ? `Your previous submission was reviewed and changes were requested. Address ` +

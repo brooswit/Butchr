@@ -20,15 +20,15 @@ USAGE
 
 COMMANDS
   health                          Server health snapshot (exit 1 if degraded).
-  dashboard                       Cross-project rollup: per-directory active /
+  dashboard                       Cross-project rollup: per-workspace active /
                                     review / needs-attention / failed counts.
-  gate <dir> [--set "<cmd>"]      Show or update a directory's build/test gate
+  gate <workspace> [--set "<cmd>"]      Show or update a workspace's build/test gate
        [--clear]                    command. --set updates it; --clear reverts to
                                     the default; no flag prints the effective one.
-  ls [--dir <id>] [--status <s>]  List tasks as a compact id/status/ci/tags table.
+  ls [--workspace <id>] [--status <s>]  List tasks as a compact id/status/ci/tags table.
      [--tag a,b]                    Keep only tasks carrying any of the given tags.
      [--search <text>]              Full-text match on prompt/summary/review notes/id.
-  new <dir> -m <prompt>           Create a task in directory <dir> (id or path).
+  new <workspace> -m <prompt>           Create a task in <workspace> (id or path).
       [--blocked-by id,id]          Start it blocked on the given task ids.
       [--tag a,b]                   Attach organizational labels (comma-separated).
       [--priority N]                Dispatch priority (higher = sooner; default 0).
@@ -44,7 +44,7 @@ COMMANDS
   requeue <id>                    Re-queue a failed/stuck task for a fresh dispatch.
   block <id> --on id,id           Replace a task's blocked_by set (empty to clear).
   priority <id> <N>               Set a task's dispatch priority (higher = sooner).
-  selftest [--dir <id|path>]      Smoke-test the FULL lifecycle with a throwaway
+  selftest [--workspace <id|path>]      Smoke-test the FULL lifecycle with a throwaway
      [--merge] [--timeout <sec>]    probe in the sandbox (dispatch→review→cleanup).
                                     --merge also approves+merges then rolls it back.
   backups                         List local DB snapshots (newest first). OFFLINE.
@@ -64,7 +64,7 @@ ENVIRONMENT
 
 // Flags that consume the following token as their value. Everything else is a
 // positional. Also supports the --flag=value form.
-const VALUE_FLAGS = new Set(["--dir", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set"]);
+const VALUE_FLAGS = new Set(["--workspace", "--status", "-m", "--message", "--blocked-by", "--on", "--tag", "--priority", "--template", "--timeout", "--search", "--set"]);
 
 // Boolean flags: present → true, consume no following token.
 const BOOLEAN_FLAGS = new Set(["--merge", "--clear", "--plan"]);
@@ -206,18 +206,18 @@ function ciBadge(t) {
 }
 
 /**
- * Resolve a directory argument to a registered directory id. Accepts the id
- * directly, or a filesystem path that matches a registered directory. Errors
+ * Resolve a workspace argument to a registered workspace id. Accepts the id
+ * directly, or a filesystem path that matches a registered workspace. Errors
  * (listing what's available) when nothing matches.
  */
-async function resolveDirectoryId(arg) {
-  const dirs = await api("GET", "/api/directories");
+async function resolveWorkspaceId(arg) {
+  const dirs = await api("GET", "/api/workspaces");
   const byId = dirs.find((d) => d.id === arg);
   if (byId) return byId.id;
   const byPath = dirs.find((d) => d.path === arg);
   if (byPath) return byPath.id;
-  const known = dirs.map((d) => `  ${d.id}  ${d.path}`).join("\n") || "  (no directories registered)";
-  throw new ApiError(`no registered directory matches "${arg}". Known directories:\n${known}`);
+  const known = dirs.map((d) => `  ${d.id}  ${d.path}`).join("\n") || "  (no workspaces registered)";
+  throw new ApiError(`no registered workspace matches "${arg}". Known workspaces:\n${known}`);
 }
 
 // ---- commands -------------------------------------------------------------
@@ -260,12 +260,12 @@ async function cmdDashboard(flags) {
     printJson(d);
     return;
   }
-  if (!d.directories.length) {
-    process.stdout.write("(no directories registered)\n");
+  if (!d.workspaces.length) {
+    process.stdout.write("(no workspaces registered)\n");
     return;
   }
-  const out = table(d.directories, [
-    { header: "DIRECTORY", get: (x) => x.label || x.path },
+  const out = table(d.workspaces, [
+    { header: "WORKSPACE", get: (x) => x.label || x.path },
     { header: "ID", get: (x) => x.id },
     { header: "ACTIVE", get: (x) => x.active },
     { header: "REVIEW", get: (x) => x.review },
@@ -275,22 +275,22 @@ async function cmdDashboard(flags) {
   const t = d.totals;
   process.stdout.write(
     out +
-      `\n\ntotals: ${t.directories} dirs · ${t.active} active · ${t.review} review · ` +
+      `\n\ntotals: ${t.workspaces} dirs · ${t.active} active · ${t.review} review · ` +
       `${t.needsAttention} need attention · ${t.failed} failed\n`,
   );
 }
 
 async function cmdGate(positionals, flags) {
   const dir = positionals[0];
-  if (!dir) fail("gate: missing <dir> (directory id or path)");
-  const dirId = await resolveDirectoryId(dir);
+  if (!dir) fail("gate: missing <workspace> (workspace id or path)");
+  const dirId = await resolveWorkspaceId(dir);
   // --set and --clear are mutually exclusive; both update the gate command.
   if (flags.set !== undefined && flags.clear) {
     fail("gate: pass either --set or --clear, not both");
   }
   if (flags.set !== undefined || flags.clear) {
     const gate_cmd = flags.clear ? null : flags.set;
-    const v = await api("PATCH", `/api/directories/${encodeURIComponent(dirId)}`, { gate_cmd });
+    const v = await api("PATCH", `/api/workspaces/${encodeURIComponent(dirId)}`, { gate_cmd });
     if (flags.json) {
       printJson(v);
       return;
@@ -299,28 +299,28 @@ async function cmdGate(positionals, flags) {
     process.stdout.write(`${dirId} gate_cmd = ${shown}\n`);
     return;
   }
-  // No update flag — show the directory's effective gate command (from the dashboard
+  // No update flag — show the workspace's effective gate command (from the dashboard
   // rollup, which carries both the override and the resolved effective command).
   const d = await api("GET", "/api/dashboard");
-  const entry = d.directories.find((x) => x.id === dirId);
+  const entry = d.workspaces.find((x) => x.id === dirId);
   if (flags.json) {
     printJson(entry || null);
     return;
   }
-  if (!entry) fail(`gate: directory ${dirId} not found`);
+  if (!entry) fail(`gate: workspace ${dirId} not found`);
   const overridden = entry.gate_cmd !== null;
   process.stdout.write(
     `${dirId} gate_cmd: ${entry.effective_gate_cmd || "(disabled)"}` +
-      `${overridden ? "" : "  (default — no per-directory override)"}\n`,
+      `${overridden ? "" : "  (default — no per-workspace override)"}\n`,
   );
 }
 
 async function cmdLs(flags) {
   let dirIds;
-  if (flags.dir) {
-    dirIds = [await resolveDirectoryId(flags.dir)];
+  if (flags.workspace) {
+    dirIds = [await resolveWorkspaceId(flags.workspace)];
   } else {
-    const dirs = await api("GET", "/api/directories");
+    const dirs = await api("GET", "/api/workspaces");
     dirIds = dirs.map((d) => d.id);
   }
   // --search <text> is a SERVER-SIDE full-text filter (?q=) over each task's
@@ -330,7 +330,7 @@ async function cmdLs(flags) {
   const qs = search ? `?q=${encodeURIComponent(search)}` : "";
   let tasks = [];
   for (const id of dirIds) {
-    const list = await api("GET", `/api/directories/${encodeURIComponent(id)}/tasks${qs}`);
+    const list = await api("GET", `/api/workspaces/${encodeURIComponent(id)}/tasks${qs}`);
     tasks.push(...list);
   }
   if (flags.status) tasks = tasks.filter((t) => t.status === flags.status);
@@ -356,8 +356,8 @@ async function cmdLs(flags) {
 
 async function cmdNew(positionals, flags) {
   const dir = positionals[0];
-  if (!dir) fail("new: missing <dir> (directory id or path)");
-  const dirId = await resolveDirectoryId(dir);
+  if (!dir) fail("new: missing <workspace> (workspace id or path)");
+  const dirId = await resolveWorkspaceId(dir);
   const blockedBy = parseIdList(flags["blocked-by"]);
   const tags = parseIdList(flags.tag);
   const reqBody = { blocked_by: blockedBy, tags };
@@ -379,7 +379,7 @@ async function cmdNew(positionals, flags) {
   }
   const task = await api(
     "POST",
-    `/api/directories/${encodeURIComponent(dirId)}/tasks`,
+    `/api/workspaces/${encodeURIComponent(dirId)}/tasks`,
     reqBody,
   );
   if (flags.json) {
@@ -414,7 +414,7 @@ async function cmdShow(positionals, flags) {
   }
   const lines = [
     `id:        ${t.id}`,
-    `directory: ${t.directory_id}`,
+    `workspace: ${t.workspace_id}`,
     `status:    ${t.status}${t.idle ? " (idle)" : ""}${t.conflict ? " (conflict)" : ""}`,
     `ci:        ${ciBadge(t)}`,
   ];
@@ -600,7 +600,7 @@ async function cmdSelftest(flags) {
     api,
     // Stage lines stream live during the (possibly long) wait; suppressed under --json.
     log: flags.json ? undefined : (msg) => process.stdout.write(msg + "\n"),
-    dir: flags.dir,
+    dir: flags.workspace,
     merge: Boolean(flags.merge),
     timeoutMs,
   });

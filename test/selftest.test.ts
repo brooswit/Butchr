@@ -24,7 +24,7 @@ const noSleep = async () => {};
  * queued→running→review progression.
  */
 function mockApi(opts: {
-  directories?: any[];
+  workspaces?: any[];
   created?: any;
   taskSequence?: any[];
   approve?: any;
@@ -34,8 +34,8 @@ function mockApi(opts: {
   const seq = [...(opts.taskSequence ?? [])];
   const api: SelftestApi = async (method, path, body) => {
     calls.push({ method, path, body });
-    if (method === "GET" && path === "/api/directories") {
-      return opts.directories ?? [];
+    if (method === "GET" && path === "/api/workspaces") {
+      return opts.workspaces ?? [];
     }
     if (method === "POST" && /\/tasks$/.test(path)) {
       return opts.created ?? { id: "probe-1", status: "queued" };
@@ -65,9 +65,9 @@ test("buildProbePrompt sanitizes the marker into the file names", () => {
   expect(p).toContain("request_review");
 });
 
-test("resolveSandbox auto-finds the directory labelled 'sandbox'", async () => {
+test("resolveSandbox auto-finds the workspace labelled 'sandbox'", async () => {
   const { api } = mockApi({
-    directories: [{ id: "d1", label: "Prod", path: "/repos/prod" }, SANDBOX],
+    workspaces: [{ id: "d1", label: "Prod", path: "/repos/prod" }, SANDBOX],
   });
   const dir = await resolveSandbox(api);
   expect(dir.id).toBe("dir-sandbox");
@@ -75,27 +75,27 @@ test("resolveSandbox auto-finds the directory labelled 'sandbox'", async () => {
 
 test("resolveSandbox falls back to a path basename of 'sandbox'", async () => {
   const { api } = mockApi({
-    directories: [{ id: "d2", label: "scratch", path: "/repos/sandbox" }],
+    workspaces: [{ id: "d2", label: "scratch", path: "/repos/sandbox" }],
   });
   const dir = await resolveSandbox(api);
   expect(dir.id).toBe("d2");
 });
 
 test("resolveSandbox resolves an explicit --dir by id or path", async () => {
-  const { api } = mockApi({ directories: [SANDBOX, { id: "d3", label: "x", path: "/repos/x" }] });
+  const { api } = mockApi({ workspaces: [SANDBOX, { id: "d3", label: "x", path: "/repos/x" }] });
   expect((await resolveSandbox(api, "d3")).id).toBe("d3");
   expect((await resolveSandbox(api, "/repos/x")).id).toBe("d3");
 });
 
 test("resolveSandbox errors clearly when no sandbox is registered", async () => {
-  const { api } = mockApi({ directories: [{ id: "d1", label: "prod", path: "/repos/prod" }] });
-  await expect(resolveSandbox(api)).rejects.toThrow(/no 'sandbox' directory/);
+  const { api } = mockApi({ workspaces: [{ id: "d1", label: "prod", path: "/repos/prod" }] });
+  await expect(resolveSandbox(api)).rejects.toThrow(/no 'sandbox' workspace/);
 });
 
 test("happy path (no merge): resolve→create→dispatch→review→abort cleanup", async () => {
   let aborted = false;
   const { api, calls } = mockApi({
-    directories: [SANDBOX],
+    workspaces: [SANDBOX],
     created: { id: "probe-1", status: "in_progress" },
     taskSequence: [
       { id: "probe-1", status: "in_progress" },
@@ -125,7 +125,7 @@ test("happy path (no merge): resolve→create→dispatch→review→abort cleanu
 
 test("dispatch observed even when polling skips straight to review", async () => {
   const { api } = mockApi({
-    directories: [SANDBOX],
+    workspaces: [SANDBOX],
     taskSequence: [{ id: "probe-1", status: "in_review", ci_status: "pass" }],
   });
   const result = await runSelftest({ api, sleep: noSleep, now: fakeClock(), marker: "m2" });
@@ -139,7 +139,7 @@ test("--merge: approves, confirms merge, then reverts to clean the sandbox", asy
   let revertedWith: { path: string; from: string; to: string } | null = null;
   let aborted = false;
   const { api, calls } = mockApi({
-    directories: [SANDBOX],
+    workspaces: [SANDBOX],
     taskSequence: [
       { id: "probe-1", status: "in_progress" },
       { id: "probe-1", status: "in_review", ci_status: "pass" },
@@ -174,7 +174,7 @@ test("--merge: approves, confirms merge, then reverts to clean the sandbox", asy
 test("--merge failure: a conflict-sent-back approve fails AND still cleans up", async () => {
   let aborted = false;
   const { api } = mockApi({
-    directories: [SANDBOX],
+    workspaces: [SANDBOX],
     taskSequence: [{ id: "probe-1", status: "in_review", ci_status: "pass" }],
     approve: { task: { id: "probe-1", status: "in_progress" }, conflictSentBack: true },
     onAbort: () => (aborted = true),
@@ -195,7 +195,7 @@ test("--merge failure: a conflict-sent-back approve fails AND still cleans up", 
 test("probe failing before review is reported and cleaned up", async () => {
   let aborted = false;
   const { api } = mockApi({
-    directories: [SANDBOX],
+    workspaces: [SANDBOX],
     taskSequence: [
       { id: "probe-1", status: "in_progress" },
       { id: "probe-1", status: "aborted", last_dispatch_error: "herdr down" },
@@ -211,7 +211,7 @@ test("probe failing before review is reported and cleaned up", async () => {
 test("timeout waiting for review fails and still cleans up", async () => {
   let aborted = false;
   const { api } = mockApi({
-    directories: [SANDBOX],
+    workspaces: [SANDBOX],
     // Never advances past in_progress → the deadline is crossed.
     taskSequence: [{ id: "probe-1", status: "in_progress" }],
     onAbort: () => (aborted = true),
@@ -231,7 +231,7 @@ test("timeout waiting for review fails and still cleans up", async () => {
 
 test("a failed run whose cleanup ALSO fails surfaces the cleanup failure", async () => {
   const api: SelftestApi = async (method, path) => {
-    if (method === "GET" && path === "/api/directories") return [SANDBOX];
+    if (method === "GET" && path === "/api/workspaces") return [SANDBOX];
     if (method === "POST" && /\/tasks$/.test(path)) return { id: "probe-1", status: "queued" };
     if (method === "GET" && /\/api\/tasks\//.test(path)) {
       return { id: "probe-1", status: "aborted", last_dispatch_error: "boom" };

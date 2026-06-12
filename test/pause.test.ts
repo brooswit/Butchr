@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 let DATA_DIR: string;
 let REPO_ROOT: string;
-// Unique per-file directory id — the db/config singletons are shared across test
+// Unique per-file workspace id — the db/config singletons are shared across test
 // files in one run, so a distinct id keeps this file's rows from colliding.
 const DIR_ID = "pause-dir";
 
@@ -40,7 +40,7 @@ beforeAll(async () => {
 
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 
@@ -48,7 +48,7 @@ beforeAll(async () => {
   // no dispatch backoff). This is the new dispatchable state (was `queued`).
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`,
     )
     .run("pause-q1", DIR_ID, "in_progress", null, dbMod.nowIso());
 });

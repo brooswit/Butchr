@@ -1,14 +1,14 @@
 // In-process pub/sub for Server-Sent Events. The HTTP layer subscribes each SSE
-// client; services publish whenever task/directory state changes.
+// client; services publish whenever task/workspace state changes.
 export type ButchrEvent =
   | { type: "task.created"; task: unknown }
   | { type: "task.updated"; task: unknown }
   | { type: "task.deleted"; id: string }
-  | { type: "directory.created"; directory: unknown }
-  // A directory row changed in place (e.g. its per-directory gate command was
-  // updated) — carries the refreshed DirectoryView so the dashboard reflects it live.
-  | { type: "directory.updated"; directory: unknown }
-  | { type: "directory.deleted"; id: string }
+  | { type: "workspace.created"; workspace: unknown }
+  // A workspace row changed in place (e.g. its per-workspace gate command was
+  // updated) — carries the refreshed WorkspaceView so the dashboard reflects it live.
+  | { type: "workspace.updated"; workspace: unknown }
+  | { type: "workspace.deleted"; id: string }
   // Dispatcher pause/resume toggled — lets every connected webapp reflect the
   // PAUSED banner + control live (see server POST /api/pause|resume).
   | { type: "dispatch.paused"; paused: boolean }

@@ -1,6 +1,6 @@
 // Tests for the reaper self-heal visibility seam consumed by GET /health
 // (see reaper.getLastReap + server.healthResponse). Pure / in-process: no real
-// git repo or herdr — with NO directories registered, reapOrphans walks nothing,
+// git repo or herdr — with NO workspaces registered, reapOrphans walks nothing,
 // and herdrUp=false skips the husk pass, so it just returns {0,0} and stamps
 // lastReap. BUTCHR_HERDR_BIN points at `true` so any incidental herdr probe is a
 // harmless no-op, matching the other test files.

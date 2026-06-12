@@ -21,7 +21,7 @@
 // import cycle at evaluation time.
 import { herdrRunner } from "./herdr.ts";
 
-/** A provisioned workspace (a directory's herdr workspace) + its root pane id. */
+/** A provisioned workspace (a workspace's herdr workspace) + its root pane id. */
 export type Workspace = { workspaceId: string; rootPaneId: string };
 
 /** A dedicated tab for a task: its id + the empty root pane the backend spawns in it. */
@@ -95,8 +95,8 @@ export interface AgentRunner {
   /** Is the underlying runtime (the herdr server, or its replacement) reachable? */
   isUp(): Promise<boolean>;
 
-  // ---- workspace (one per registered directory) -----------------------------
-  /** Provision a workspace for a directory; returns the workspace + root pane id. */
+  // ---- herdr workspace (one per registered workspace) -----------------------
+  /** Provision a herdr workspace for a registered workspace; returns it + root pane id. */
   workspaceCreate(cwd: string, label: string): Promise<Workspace>;
   /** Does a workspace still exist? (the runtime may have been restarted/closed) */
   workspaceExists(workspaceId: string): Promise<boolean>;

@@ -1,4 +1,4 @@
-// Git operations butchr owns directly. All run against a directory root that
+// Git operations butchr owns directly. All run against a workspace root that
 // is a git repository. Task branches/worktrees are named by task ID.
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -761,7 +761,7 @@ export async function cleanup(dir: string, taskId: string): Promise<void> {
   await run([git, "-C", dir, "branch", "-D", taskId]);
 }
 
-/** Ensure `.butchr/` is gitignored in the directory root. */
+/** Ensure `.butchr/` is gitignored in the workspace root. */
 export function ensureGitignore(dir: string): void {
   const p = join(dir, ".gitignore");
   let text = existsSync(p) ? readFileSync(p, "utf8") : "";

@@ -30,11 +30,11 @@ function envList(name: string, fallback: string[]): string[] {
 }
 
 /**
- * Parse a comma-separated `key=value` env map (e.g. `dir-1=sess-a,dir-2=sess-b`),
- * trimming each side and dropping malformed/blank entries. Used for the PER-DIRECTORY
+ * Parse a comma-separated `key=value` env map (e.g. `ws-1=sess-a,ws-2=sess-b`),
+ * trimming each side and dropping malformed/blank entries. Used for the PER-WORKSPACE
  * CTO-agent session seeds (`BUTCHR_CTO_AGENT_SESSION_IDS`), where each registered
- * directory's first CTO launch resumes the operator-provided session for THAT
- * directory. Empty/unset → an empty map (every directory starts a fresh session).
+ * workspace's first CTO launch resumes the operator-provided session for THAT
+ * workspace. Empty/unset → an empty map (every workspace starts a fresh session).
  */
 function envMap(name: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -51,7 +51,7 @@ function envMap(name: string): Map<string, string> {
 }
 
 // Where butchr keeps its own state (the SQLite db). This is distinct from the
-// per-directory `.butchr/` folders that live inside each registered repo.
+// per-workspace `.butchr/` folders that live inside each registered repo.
 const dataDir = env("BUTCHR_DATA_DIR", join(home, ".local", "share", "butchr"));
 
 // The HTTP bind host, hoisted so `loopbackHost` can be derived from it once below.
@@ -151,7 +151,7 @@ export const config = {
 
   /**
    * Optional path to a file whose contents seed a freshly registered
-   * directory's `.butchr/CTO.md`. When unset or unreadable, the built-in
+   * workspace's `.butchr/CTO.md`. When unset or unreadable, the built-in
    * default CTO context is used instead.
    */
   ctoContextPath: env("BUTCHR_CTO_CONTEXT", ""),
@@ -175,10 +175,10 @@ export const config = {
    * butchr is a GENERAL tool that manages OTHER people's repos, so there is no
    * universal build/test command — this global default is therefore EMPTY (the gate
    * is OFF until configured), and a managed repo opts in to a gate by setting its
-   * build/test command. Configure it PER-DIRECTORY via the directory's `gate_cmd`
-   * (set at register time or via `PUT /api/directories/:id`), or set a global default
-   * for every directory with BUTCHR_VERIFY_CMD. An empty effective command DISABLES
-   * the gate for that directory (every merge is accepted — no verify, no revert).
+   * build/test command. Configure it PER-WORKSPACE via the workspace's `gate_cmd`
+   * (set at register time or via `PUT /api/workspaces/:id`), or set a global default
+   * for every workspace with BUTCHR_VERIFY_CMD. An empty effective command DISABLES
+   * the gate for that workspace (every merge is accepted — no verify, no revert).
    *
    * Run via `bash -lc` with the repo root as cwd. If your command runs a test
    * discoverer, SCOPE it to your repo's own tests (e.g. `bun test ./test`, not a bare
@@ -443,32 +443,32 @@ export const config = {
    */
   terminalCmd: env("BUTCHR_TERMINAL_CMD", ""),
 
-  // ---- MANAGED CTO AGENT (PER-DIRECTORY) ------------------------------------
+  // ---- MANAGED CTO AGENT (PER-WORKSPACE) ------------------------------------
   // butchr can LAUNCH and SUPERVISE one long-lived CTO agent PER REGISTERED
-  // DIRECTORY (repo) — a persistent Claude Code session that runs in that repo's
+  // WORKSPACE (repo) — a persistent Claude Code session that runs in that repo's
   // ROOT and IS the principal/dev agent for that project, operating butchr via its
   // API/CLI. Each is a first-class, channel-connected agent, just like the per-task
   // workspace agents but with NO worktree/branch/review/merge. Each receives ONLY
-  // that directory's PUSH attention notifications via the one-way CTO channel
-  // (src/channel.ts, scoped to the directory_id), and each directory's dashboard card
+  // that workspace's PUSH attention notifications via the one-way CTO channel
+  // (src/channel.ts, scoped to the workspace_id), and each workspace's dashboard card
   // exposes an 'Open CTO terminal' button for it. See src/cto-agent.ts.
 
   /**
-   * GLOBAL DEFAULT for the per-directory CTO-agent enable. DEFAULT OFF so nothing
-   * surprise-launches a Claude session. A directory's own `cto_enabled` column WINS
-   * over this (NULL on a directory → inherit this default); with both off butchr
-   * never boot-starts or supervises that directory's CTO agent (existing behavior
-   * unchanged). The per-directory `/api/directories/:id/cto/*` endpoints still work
+   * GLOBAL DEFAULT for the per-workspace CTO-agent enable. DEFAULT OFF so nothing
+   * surprise-launches a Claude session. A workspace's own `cto_enabled` column WINS
+   * over this (NULL on a workspace → inherit this default); with both off butchr
+   * never boot-starts or supervises that workspace's CTO agent (existing behavior
+   * unchanged). The per-workspace `/api/workspaces/:id/cto/*` endpoints still work
    * when disabled (so an operator can start one on demand) but nothing auto-starts.
    */
   ctoAgentEnabled: envBool("BUTCHR_CTO_AGENT", false),
 
   /**
-   * NAME PREFIX for a directory's CTO agent. The actual herdr agent name is
-   * `<prefix>-<directoryId>` (see cto-agent.ctoAgentName) — the stable handle
-   * `herdr agent attach <name>` uses, one per directory. Must NOT collide with any
+   * NAME PREFIX for a workspace's CTO agent. The actual herdr agent name is
+   * `<prefix>-<workspaceId>` (see cto-agent.ctoAgentName) — the stable handle
+   * `herdr agent attach <name>` uses, one per workspace. Must NOT collide with any
    * task id; the default is hyphenated like an id but with a reserved human prefix so
-   * it's unmistakable, and the appended `dir-<hex>` keeps each directory's distinct.
+   * it's unmistakable, and the appended `ws-<hex>` keeps each workspace's distinct.
    */
   ctoAgentName: env("BUTCHR_CTO_AGENT_NAME", "butchr-cto-agent"),
 
@@ -479,9 +479,9 @@ export const config = {
   ctoAgentModel: env("BUTCHR_CTO_AGENT_MODEL", ""),
 
   /**
-   * PER-DIRECTORY CTO-agent session SEEDS: `BUTCHR_CTO_AGENT_SESSION_IDS` is a
-   * comma-separated `directoryId=sessionId` map. On a directory's FIRST CTO launch
-   * (no persisted session yet) butchr RESUMES that directory's seeded session when
+   * PER-WORKSPACE CTO-agent session SEEDS: `BUTCHR_CTO_AGENT_SESSION_IDS` is a
+   * comma-separated `workspaceId=sessionId` map. On a workspace's FIRST CTO launch
+   * (no persisted session yet) butchr RESUMES that workspace's seeded session when
    * present, else starts fresh and captures the new id; every later relaunch resumes
    * the persisted id. This replaces the old single global BUTCHR_CTO_SESSION_ID seed
    * for the MANAGED CTO agent (that env is still honored ONLY by the separate
@@ -490,7 +490,7 @@ export const config = {
   ctoAgentSessionSeeds: envMap("BUTCHR_CTO_AGENT_SESSION_IDS"),
 
   /**
-   * LAUNCH AUTO-CONFIRM (every per-directory CTO (re)launch comes up READY
+   * LAUNCH AUTO-CONFIRM (every per-workspace CTO (re)launch comes up READY
    * unattended). After the agent registers its pane, butchr polls the live pane and,
    * whenever it detects an unanswered blocking startup prompt (the
    * `--dangerously-load-development-channels` dev-channels consent, the Claude Code
@@ -513,7 +513,7 @@ export const config = {
   ctoBriefPath: env("BUTCHR_CTO_BRIEF", ""),
 
   /**
-   * Command (run via `bash -lc`, cwd = the directory's repo root) that starts the
+   * Command (run via `bash -lc`, cwd = the workspace's repo root) that starts the
    * ONE-WAY CTO notification channel bridge. The bridge is butchr's OWN code
    * (`src/channel.ts`), so the default points at it by ABSOLUTE path (derived from
    * butchr's install dir) rather than `src/channel.ts` — the cwd is the MANAGED
@@ -523,8 +523,8 @@ export const config = {
    * a development channel via
    * `--dangerously-load-development-channels server:butchr-cto-channel`. The bridge
    * derives its SSE URL from butchr's host/port (overridable via
-   * BUTCHR_CHANNEL_SSE_URL, which butchr sets on it) and is SCOPED to the directory
-   * via BUTCHR_CHANNEL_DIR (set per-launch) so it only pushes that directory's events.
+   * BUTCHR_CHANNEL_SSE_URL, which butchr sets on it) and is SCOPED to the workspace
+   * via BUTCHR_CHANNEL_WORKSPACE (set per-launch) so it only pushes that workspace's events.
    */
   ctoChannelCmd: env(
     "BUTCHR_CTO_CHANNEL_CMD",
@@ -532,8 +532,8 @@ export const config = {
   ),
 
   /**
-   * Command template that LAUNCHES a directory's CTO agent (run via `bash -lc`,
-   * wrapped under `script` for a PTY + log, cwd = the directory's repo root).
+   * Command template that LAUNCHES a workspace's CTO agent (run via `bash -lc`,
+   * wrapped under `script` for a PTY + log, cwd = the workspace's repo root).
    * Placeholders, all substituted by
    * cto-agent.ts:
    *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (see `ctoAgentModel`).

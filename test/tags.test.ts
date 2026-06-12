@@ -20,7 +20,7 @@ import { join } from "node:path";
 
 let DATA_DIR: string;
 let REPO_ROOT: string;
-// Distinct directory id — the db/config singletons are shared across test files, so a
+// Distinct workspace id — the db/config singletons are shared across test files, so a
 // unique dir keeps this file's rows from colliding with another file's.
 const DIR_ID = "tags-dir";
 
@@ -50,7 +50,7 @@ beforeAll(async () => {
   tasksMod = await import("../src/tasks.ts");
 
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
 

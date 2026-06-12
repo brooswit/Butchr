@@ -16,7 +16,7 @@
 // reject it re-launches the SAME Claude session (`--resume <session-id>`) with the
 // notes. This is what makes review durable across an agent or butchr restart — an
 // MCP server cannot wake an idle Claude Code client, so we never park a call.
-import { HttpError } from "./directories.ts";
+import { HttpError } from "./workspaces.ts";
 import type { TaskRow } from "./db.ts";
 import {
   isNotificationOrIdless,

@@ -12,7 +12,7 @@ import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
 import { listWorktrees } from "./git.ts";
-import { listDirectories } from "./directories.ts";
+import { listWorkspaces } from "./workspaces.ts";
 
 /** Default ceiling on entries a single dirSizeBytes walk will visit before it stops. */
 export const DEFAULT_MAX_ENTRIES = 100_000;
@@ -112,12 +112,12 @@ async function computeDiskUsageUncached(): Promise<DiskUsage> {
   let worktreeCount = 0;
   let truncated = false;
 
-  for (const dir of listDirectories()) {
+  for (const dir of listWorkspaces()) {
     let worktrees: string[];
     try {
       worktrees = await listWorktrees(dir.path);
     } catch {
-      continue; // not a repo anymore / git error — skip this directory
+      continue; // not a repo anymore / git error — skip this workspace
     }
     for (const wt of worktrees) {
       const size = dirSizeBytes(wt);

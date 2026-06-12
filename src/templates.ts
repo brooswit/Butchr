@@ -14,7 +14,7 @@
 //                            route when a task is created from a template.
 // See server.ts (GET /api/templates + the template branch of the create route),
 // bin/butchr (`templates` / `new --template`), and public/app.js (new-task picker).
-import { HttpError } from "./directories.ts";
+import { HttpError } from "./workspaces.ts";
 
 /** A built-in task template: a name, a one-line description, and a prompt body with `{{placeholders}}`. */
 export type Template = {

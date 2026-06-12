@@ -1,5 +1,5 @@
 // Tests for the DIRECTORY TASK-LIST projection (tasks.taskListView, behind
-// `GET /api/directories/:id/tasks`). Per CONTRIBUTING §3 the list endpoint returns
+// `GET /api/workspaces/:id/tasks`). Per CONTRIBUTING §3 the list endpoint returns
 // the parsed `taskView` shape — NOT raw DB rows — so the webapp/CLI consume one
 // consistent form: `blocked_by` / `spawned_subtasks` come back as real id arrays
 // (the DB stores them as JSON-string TEXT) and each blocker's status is precomputed
@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let DATA_DIR: string;
-// Distinct directory id — the db/config singletons are shared across test files, so
+// Distinct workspace id — the db/config singletons are shared across test files, so
 // a unique dir keeps this file's rows from colliding with another file's.
 const DIR_ID = "list-view-dir";
 const OTHER_DIR_ID = "list-view-other-dir";
@@ -35,7 +35,7 @@ beforeAll(async () => {
 
   for (const id of [DIR_ID, OTHER_DIR_ID]) {
     dbMod.db
-      .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+      .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(id, `/tmp/${id}`, "test", dbMod.nowIso());
   }
 });
@@ -54,17 +54,17 @@ function seed(opts: {
   kind?: string;
   idle?: number;
   ciStatus?: string;
-  directoryId?: string;
+  workspaceId?: string;
 }): string {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, blocked_by, spawned_subtasks,
+      `INSERT INTO tasks (id, workspace_id, status, blocked_by, spawned_subtasks,
          kind, idle, ci_status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       opts.id,
-      opts.directoryId ?? DIR_ID,
+      opts.workspaceId ?? DIR_ID,
       opts.status,
       opts.blockedBy ? JSON.stringify(opts.blockedBy) : null,
       opts.spawnedSubtasks ? JSON.stringify(opts.spawnedSubtasks) : null,
@@ -156,15 +156,15 @@ test("is the LIGHT projection: no task.md bodies or estimate, but keeps row fiel
   expect(v.ci_status).toBe("pass");
 });
 
-test("scoped to the directory and ordered newest-first", () => {
+test("scoped to the workspace and ordered newest-first", () => {
   seed({ id: "lv-ord-old", status: "queued", createdAt: "2026-01-04T00:00:00.000Z" });
   seed({ id: "lv-ord-new", status: "queued", createdAt: "2026-01-04T00:00:05.000Z" });
-  // A task in a different directory must not leak into this list.
+  // A task in a different workspace must not leak into this list.
   seed({
     id: "lv-other",
     status: "queued",
     createdAt: "2026-01-04T00:00:10.000Z",
-    directoryId: OTHER_DIR_ID,
+    workspaceId: OTHER_DIR_ID,
   });
 
   const ids = tasksMod.taskListView(DIR_ID).map((t) => t.id);

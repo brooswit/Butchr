@@ -8,7 +8,7 @@
 // DB and lets the agent exit — no live process is held waiting for a human).
 //
 // Concurrency model: fully concurrent, uncapped. Every queued task runs as soon
-// as it is seen — there is no per-directory "one at a time" limit and no global
+// as it is seen — there is no per-workspace "one at a time" limit and no global
 // cap on the number of simultaneous tasks. Worktree isolation keeps tasks safe at
 // the filesystem level (each is its own git worktree on its own branch), and one
 // herdr tab per task keeps them from crowding the workspace. The
@@ -18,8 +18,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from "node:path";
 import { config } from "./config.ts";
 import { db, getSetting, recordTaskEvent, setSetting } from "./db.ts";
-import type { DirectoryRow, TaskRow } from "./db.ts";
-import { ensureDirectoryWorkspace } from "./directories.ts";
+import type { WorkspaceRow, TaskRow } from "./db.ts";
+import { ensureHerdrWorkspace } from "./workspaces.ts";
 import { buildScriptArgv, modelFlag, stripAnsi } from "./exec.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
@@ -106,7 +106,7 @@ export function readRunLogSnapshot(taskId: string): string {
 // close renumbered everything down (verified live — it killed A's agent and left
 // B's real root pane orphaned). Serializing per workspace makes each task's pane
 // setup atomic with respect to renumbering. Keyed by workspace id (panes only
-// renumber within their own workspace), so tasks in DIFFERENT directories still
+// renumber within their own workspace), so tasks in DIFFERENT workspaces still
 // run their herdr setup concurrently.
 const herdrPaneLocks = new Map<string, Promise<unknown>>();
 function withHerdrPaneLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -165,10 +165,10 @@ export function stopDispatcher(): void {
   timer = null;
 }
 
-// A queued task joined to its directory, as returned by the dispatch query.
-// `dir_id` aliases the directory's id (the unaliased `id` is the task's). The
-// task's `created_at` shadows the directory's, which is fine — we never read the
-// directory's created_at here.
+// A queued task joined to its workspace, as returned by the dispatch query.
+// `dir_id` aliases the workspace's id (the unaliased `id` is the task's). The
+// task's `created_at` shadows the workspace's, which is fine — we never read the
+// workspace's created_at here.
 type QueuedRow = TaskRow & {
   path: string;
   label: string | null;
@@ -177,10 +177,10 @@ type QueuedRow = TaskRow & {
   dir_id: string;
 };
 
-// Project the directory columns the dispatch query joins in (aliased `dir_id`) back
-// into a DirectoryRow — the shape the dispatch/heal/watch paths take. Used wherever a
-// QueuedRow needs its directory peeled out.
-function dirOf(row: QueuedRow): DirectoryRow {
+// Project the workspace columns the dispatch query joins in (aliased `dir_id`) back
+// into a WorkspaceRow — the shape the dispatch/heal/watch paths take. Used wherever a
+// QueuedRow needs its workspace peeled out.
+function dirOf(row: QueuedRow): WorkspaceRow {
   return {
     id: row.dir_id,
     path: row.path,
@@ -236,7 +236,7 @@ export async function reconcileRunningTasks(
   const rows = db
     .query<QueuedRow, []>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
-         FROM tasks t JOIN directories d ON d.id = t.directory_id
+         FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
          WHERE t.status IN ('in_progress','finalizing') AND t.herdr_pane_id IS NOT NULL`,
     )
     .all();
@@ -324,7 +324,7 @@ export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
   return db
     .query<QueuedRow, [string]>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
-         FROM tasks t JOIN directories d ON d.id = t.directory_id
+         FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
          WHERE t.status IN ('in_progress','finalizing')
            AND t.herdr_pane_id IS NULL
            AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
@@ -345,7 +345,7 @@ export function selectIdeaForDispatch(nowStr: string): QueuedRow[] {
   return db
     .query<QueuedRow, [string]>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
-         FROM tasks t JOIN directories d ON d.id = t.directory_id
+         FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
          WHERE t.status='idea'
            AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
          ORDER BY t.priority DESC, t.created_at ASC`,
@@ -443,7 +443,7 @@ async function tick(): Promise<void> {
  *    retry/backoff and gives up to `failed` at the cap.
  * Best-effort: never throws (the tick must not break on one idea's failure).
  */
-export async function generateSpecForIdea(dir: DirectoryRow, task: TaskRow): Promise<void> {
+export async function generateSpecForIdea(dir: WorkspaceRow, task: TaskRow): Promise<void> {
   try {
     // Ensure the worktree exists (idempotent) so the read-only spec writer can ground
     // itself against the repo's CONTRIBUTING.md / code.
@@ -469,17 +469,17 @@ export async function generateSpecForIdea(dir: DirectoryRow, task: TaskRow): Pro
   }
 }
 
-// Heal the directory's herdr workspace (recreate it after an herdr restart / manual
+// Heal the workspace's herdr workspace (recreate it after an herdr restart / manual
 // close) and surface the id for this dispatch. The create/heal DEDUPE now lives inside
-// ensureDirectoryWorkspace itself (a module-level in-flight map keyed by directory id),
+// ensureHerdrWorkspace itself (a module-level in-flight map keyed by workspace id),
 // so concurrent task dispatches AND the managed CTO agent funnel through ONE create per
-// directory — this wrapper just adds the dispatcher's create-only bookkeeping: on a
-// recreate, mirror the new id onto the in-memory DirectoryRow and log it. The reuse
+// workspace — this wrapper just adds the dispatcher's create-only bookkeeping: on a
+// recreate, mirror the new id onto the in-memory WorkspaceRow and log it. The reuse
 // path — and any concurrent awaiter that didn't own the create (created=false) — leave
 // both untouched, as before.
-async function ensureWorkspace(dir: DirectoryRow): Promise<string | undefined> {
+async function ensureWorkspace(dir: WorkspaceRow): Promise<string | undefined> {
   const label = dir.label ?? dir.path.split("/").pop() ?? dir.path;
-  const { workspaceId, created } = await ensureDirectoryWorkspace(dir.id, dir.path, label);
+  const { workspaceId, created } = await ensureHerdrWorkspace(dir.id, dir.path, label);
   if (created) {
     dir.herdr_workspace = workspaceId ?? null;
     console.log(`[butchr] recreated herdr workspace for ${label} (${workspaceId})`);
@@ -555,7 +555,7 @@ export function resolveLaunchCommand(
   return { isResume, sessionId, agentCmd, lostContext };
 }
 
-export async function dispatch(dir: DirectoryRow, task: TaskRow): Promise<void> {
+export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> {
   // Hoisted out of the try so the catch (below) can report whether a RESUME
   // (rework re-launch) failed, not just a fresh dispatch — see fix #2.
   let isResume = false;
@@ -960,7 +960,7 @@ export function isExecFailure(exitCode: string, hasOutput: boolean): boolean {
 }
 
 function spawnWatcher(
-  _dir: DirectoryRow,
+  _dir: WorkspaceRow,
   taskId: string,
   paneId: string,
   logFile: string,

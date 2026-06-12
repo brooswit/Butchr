@@ -12,8 +12,60 @@ export const db = new Database(config.dbPath, { create: true });
 db.exec("PRAGMA journal_mode = WAL;");
 db.exec("PRAGMA foreign_keys = ON;");
 
+// ---------------------------------------------------------------------------
+// IN-PLACE RENAME: directories -> workspaces (pre-1.0 conceptual rename).
+// MUST run BEFORE the baseline CREATE TABLEs *and* before migrateCtoAgentPerWorkspace
+// so an existing DB is renamed IN PLACE — every row and its opaque `dir-…` id VALUE
+// preserved (we never rewrite id values) — and the later `CREATE TABLE IF NOT EXISTS`
+// / cto-agent migration become no-ops. On a fresh DB every guard is false, so this is
+// a clean no-op and the baseline creates the new shape directly.
+//
+// IDEMPOTENT: each ALTER is guarded by a presence check, so re-running on an
+// already-migrated DB (workspaces exists, directories doesn't) skips every statement
+// and never throws. SQLite with legacy_alter_table OFF (bun's default) auto-rewrites
+// the child FK references `REFERENCES directories(id)` -> `workspaces(id)` in
+// tasks/cto_agent on the table rename, and updates the renamed column inside indexes.
+function tableExists(database: Database, name: string): boolean {
+  return !!database
+    .query<{ name: string }, [string]>(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name=?`,
+    )
+    .get(name);
+}
+function columnExists(database: Database, table: string, column: string): boolean {
+  return database
+    .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+    .all()
+    .some((c) => c.name === column);
+}
+// Pure (takes the connection) so it is unit-testable on a hand-built legacy DB
+// independent of the module-level singleton (see test/workspace-migration.test.ts).
+export function migrateDirectoriesToWorkspaces(database: Database): void {
+  if (tableExists(database, "directories") && !tableExists(database, "workspaces")) {
+    database.exec(`ALTER TABLE directories RENAME TO workspaces`);
+  }
+  if (
+    tableExists(database, "tasks") &&
+    columnExists(database, "tasks", "directory_id") &&
+    !columnExists(database, "tasks", "workspace_id")
+  ) {
+    database.exec(`ALTER TABLE tasks RENAME COLUMN directory_id TO workspace_id`);
+  }
+  if (
+    tableExists(database, "cto_agent") &&
+    columnExists(database, "cto_agent", "directory_id") &&
+    !columnExists(database, "cto_agent", "workspace_id")
+  ) {
+    database.exec(`ALTER TABLE cto_agent RENAME COLUMN directory_id TO workspace_id`);
+  }
+  // The old index carried the renamed column under a stale name; drop it so the
+  // baseline below can (re)create idx_tasks_ws. IF EXISTS keeps this idempotent.
+  database.exec(`DROP INDEX IF EXISTS idx_tasks_dir`);
+}
+migrateDirectoriesToWorkspaces(db);
+
 db.exec(`
-CREATE TABLE IF NOT EXISTS directories (
+CREATE TABLE IF NOT EXISTS workspaces (
   id              TEXT PRIMARY KEY,
   path            TEXT UNIQUE NOT NULL,
   label           TEXT,
@@ -24,7 +76,7 @@ CREATE TABLE IF NOT EXISTS directories (
 
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
-  directory_id    TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   status          TEXT NOT NULL,            -- CANONICAL 9-state model: idea | spec_review | blocked | needs_info | in_progress | in_review | finalizing | merged | aborted (see TaskStatus / STATE_META)
   herdr_pane_id   TEXT,
   output_snapshot TEXT,
@@ -36,7 +88,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   merged_at       TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_tasks_dir    ON tasks(directory_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_ws    ON tasks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
 -- PER-TASK AUDIT TIMELINE: an append-only log of a task's status transitions. One
@@ -45,7 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 -- behavior; it powers the task-detail timeline (see recordTaskEvent /
 -- listTaskEvents below + server GET /api/tasks/:id/events). from_status is NULL for
 -- the creation event. Cascade-deletes with its task (which only happens when a
--- directory is unregistered — merged tasks keep their rows + history).
+-- workspace is unregistered — merged tasks keep their rows + history).
 CREATE TABLE IF NOT EXISTS task_events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -68,12 +120,12 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `);
 
-// MANAGED CTO AGENT (PER-DIRECTORY). butchr runs ONE CTO agent per registered
-// directory (repo), in that repo's ROOT — a FIRST-CLASS, butchr-launched,
+// MANAGED CTO AGENT (PER-WORKSPACE). butchr runs ONE CTO agent per registered
+// workspace (repo), in that repo's ROOT — a FIRST-CLASS, butchr-launched,
 // channel-connected Claude session, like a workspace agent but with NO worktree/
-// branch/review/merge. Each directory's runtime handles live in their OWN row, keyed
-// by directory_id with a FK cascade so a directory's CTO state dies with the
-// directory. (This SUPERSEDES the old GLOBAL SINGLETON table keyed by the literal id
+// branch/review/merge. Each workspace's runtime handles live in their OWN row, keyed
+// by workspace_id with a FK cascade so a workspace's CTO state dies with the
+// workspace. (This SUPERSEDES the old GLOBAL SINGLETON table keyed by the literal id
 // 'singleton'; the migration below drops that shape — pre-1.0, destroying the old
 // singleton row is fine.)
 //   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
@@ -84,21 +136,21 @@ CREATE TABLE IF NOT EXISTS settings (
 //     0 when explicitly stopped (supervisor leaves it down -- survives a restart).
 //   - restarts: count of supervised relaunches since the last fresh start.
 //   - last_error: most recent launch/supervision failure, surfaced to the operator.
-// The per-directory ENABLE flag is the `directories.cto_enabled` column (NULL =
+// The per-workspace ENABLE flag is the `workspaces.cto_enabled` column (NULL =
 // inherit the global default config.ctoAgentEnabled, 1 = on, 0 = off — see below),
-// not a column here, so a directory can be enabled before its first launch.
-function migrateCtoAgentPerDirectory(): void {
+// not a column here, so a workspace can be enabled before its first launch.
+function migrateCtoAgentPerWorkspace(): void {
   const cols = db
     .query<{ name: string }, []>(`PRAGMA table_info(cto_agent)`)
     .all();
-  // An existing table with no `directory_id` column is the OLD singleton shape — drop
+  // An existing table with no `workspace_id` column is the OLD singleton shape — drop
   // it (pre-1.0: the priority is "works forward"; the old singleton row is discarded).
-  if (cols.length > 0 && !cols.some((c) => c.name === "directory_id")) {
+  if (cols.length > 0 && !cols.some((c) => c.name === "workspace_id")) {
     db.exec(`DROP TABLE cto_agent`);
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS cto_agent (
-      directory_id    TEXT PRIMARY KEY REFERENCES directories(id) ON DELETE CASCADE,
+      workspace_id    TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
       session_id      TEXT,
       herdr_pane_id   TEXT,
       herdr_tab_id    TEXT,
@@ -111,7 +163,7 @@ function migrateCtoAgentPerDirectory(): void {
     );
   `);
 }
-migrateCtoAgentPerDirectory();
+migrateCtoAgentPerWorkspace();
 
 // Lightweight forward migrations: add columns introduced after the initial
 // schema. Guarded so existing databases upgrade in place without data loss.
@@ -124,28 +176,28 @@ function ensureColumn(table: string, column: string, decl: string): void {
   }
 }
 
-// PER-DIRECTORY BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
+// PER-WORKSPACE BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
 // worktree) and the post-merge verify gate (repo root) both need a build/test
 // command to run. butchr manages OTHER projects with no universal build command, so
-// this column lets each registered directory carry its OWN gate command (e.g. a
+// this column lets each registered workspace carry its OWN gate command (e.g. a
 // 'sandbox' repo defines its own build/test), threaded into both gates. Semantics:
 // NULL means "use the default" (`config.verifyCmd`, which is EMPTY by default — i.e.
 // no gate — and is set globally via BUTCHR_VERIFY_CMD); a non-null value (including
-// the empty string, which DISABLES the gate for that directory) is used verbatim.
-// Resolved by directories.directoryGateCmd and run via `bash -lc` in the relevant
-// cwd. Settable at register time and updatable via PATCH /api/directories/:id.
-ensureColumn("directories", "gate_cmd", "TEXT");
+// the empty string, which DISABLES the gate for that workspace) is used verbatim.
+// Resolved by workspaces.workspaceGateCmd and run via `bash -lc` in the relevant
+// cwd. Settable at register time and updatable via PATCH /api/workspaces/:id.
+ensureColumn("workspaces", "gate_cmd", "TEXT");
 
-// PER-DIRECTORY CTO-AGENT ENABLE. The managed CTO agent is now ONE PER DIRECTORY (it
+// PER-WORKSPACE CTO-AGENT ENABLE. The managed CTO agent is now ONE PER WORKSPACE (it
 // runs in the repo root and IS that project's principal/dev agent — see the cto_agent
-// table). This column is that directory's master switch for boot auto-start +
+// table). This column is that workspace's master switch for boot auto-start +
 // crash supervision: NULL (the default every existing row backfills to) means "inherit
 // the GLOBAL default" config.ctoAgentEnabled (itself DEFAULT OFF); 1 forces it ON, 0
-// forces it OFF — so a directory's own setting WINS over the global default. Resolved
-// by cto-agent.isCtoEnabled; settable via PATCH /api/directories/:id. (The on-demand
-// /api/directories/:id/cto/* endpoints still work regardless, so an operator can start
+// forces it OFF — so a workspace's own setting WINS over the global default. Resolved
+// by cto-agent.isCtoEnabled; settable via PATCH /api/workspaces/:id. (The on-demand
+// /api/workspaces/:id/cto/* endpoints still work regardless, so an operator can start
 // one even when boot-auto-start is off.)
-ensureColumn("directories", "cto_enabled", "INTEGER");
+ensureColumn("workspaces", "cto_enabled", "INTEGER");
 
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
@@ -433,19 +485,19 @@ export function migrateStatusModel(): void {
 }
 migrateStatusModel();
 
-export type DirectoryRow = {
+export type WorkspaceRow = {
   id: string;
   path: string;
   label: string | null;
   herdr_workspace: string | null;
   herdr_pane: string | null;
-  // Per-directory build/test gate command (see the ensureColumn above). NULL = use
+  // Per-workspace build/test gate command (see the ensureColumn above). NULL = use
   // the default (config.verifyCmd); a non-null value (incl. "" to disable) is used
-  // verbatim by both the CI gate and the post-merge verify gate for this directory.
+  // verbatim by both the CI gate and the post-merge verify gate for this workspace.
   gate_cmd: string | null;
-  // Per-directory CTO-agent enable (see the cto_enabled ensureColumn above). NULL =
+  // Per-workspace CTO-agent enable (see the cto_enabled ensureColumn above). NULL =
   // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by
-  // cto-agent.isCtoEnabled (per-directory WINS over the global default).
+  // cto-agent.isCtoEnabled (per-workspace WINS over the global default).
   cto_enabled: number | null;
   created_at: string;
 };
@@ -553,7 +605,7 @@ export function isTerminal(status: TaskStatus): boolean {
 
 export type TaskRow = {
   id: string;
-  directory_id: string;
+  workspace_id: string;
   status: TaskStatus;
   herdr_pane_id: string | null;
   session_id: string | null;
@@ -652,7 +704,7 @@ export function nowIso(): string {
 }
 
 // ---- FULL-TEXT TASK SEARCH (predicate) ------------------------------------
-// The matching primitive behind server-side `?q=` task search (the directory
+// The matching primitive behind server-side `?q=` task search (the workspace
 // task-list endpoint + CLI `ls --search`). A task's searchable text — its prompt
 // and review notes (from task.md on disk) plus its DB summary / review_note and id
 // — is assembled in tasks.ts (taskSearchText) and tested here against this
@@ -684,12 +736,12 @@ export function setSetting(key: string, value: string): void {
   ).run(key, value);
 }
 
-// ---- MANAGED CTO AGENT (per-directory records) ----------------------------
-// One row per registered directory (keyed by directory_id), tracking that
-// directory's CTO agent runtime handles. See the cto_agent table comment above and
+// ---- MANAGED CTO AGENT (per-workspace records) ----------------------------
+// One row per registered workspace (keyed by workspace_id), tracking that
+// workspace's CTO agent runtime handles. See the cto_agent table comment above and
 // src/cto-agent.ts.
 export type CtoAgentRow = {
-  directory_id: string;
+  workspace_id: string;
   session_id: string | null;
   herdr_pane_id: string | null;
   herdr_tab_id: string | null;
@@ -701,38 +753,38 @@ export type CtoAgentRow = {
   updated_at: string | null;
 };
 
-/** A directory's CTO-agent record, or null if it has never been written. */
-export function getCtoAgentRow(directoryId: string): CtoAgentRow | null {
+/** A workspace's CTO-agent record, or null if it has never been written. */
+export function getCtoAgentRow(workspaceId: string): CtoAgentRow | null {
   return (
     db
-      .query<CtoAgentRow, [string]>(`SELECT * FROM cto_agent WHERE directory_id=?`)
-      .get(directoryId) ?? null
+      .query<CtoAgentRow, [string]>(`SELECT * FROM cto_agent WHERE workspace_id=?`)
+      .get(workspaceId) ?? null
   );
 }
 
-/** Every CTO-agent record (one per directory that has ever launched/been desired). */
+/** Every CTO-agent record (one per workspace that has ever launched/been desired). */
 export function listCtoAgentRows(): CtoAgentRow[] {
   return db.query<CtoAgentRow, []>(`SELECT * FROM cto_agent`).all();
 }
 
-/** Drop a directory's CTO-agent record (the directory DELETE also cascades this). */
-export function deleteCtoAgentRow(directoryId: string): void {
-  db.query(`DELETE FROM cto_agent WHERE directory_id=?`).run(directoryId);
+/** Drop a workspace's CTO-agent record (the workspace DELETE also cascades this). */
+export function deleteCtoAgentRow(workspaceId: string): void {
+  db.query(`DELETE FROM cto_agent WHERE workspace_id=?`).run(workspaceId);
 }
 
 /**
- * Upsert a partial patch onto a directory's CTO-agent record (stamping updated_at).
+ * Upsert a partial patch onto a workspace's CTO-agent record (stamping updated_at).
  * Single-row write; the supervisor/lifecycle treat this as best-effort durable state
  * the same way settings are. Unspecified fields are left untouched on an existing row.
- * Requires the directory to exist (the FK cascade keys the row to it).
+ * Requires the workspace to exist (the FK cascade keys the row to it).
  */
 export function saveCtoAgentRow(
-  directoryId: string,
-  patch: Partial<Omit<CtoAgentRow, "directory_id">>,
+  workspaceId: string,
+  patch: Partial<Omit<CtoAgentRow, "workspace_id">>,
 ): void {
-  const cur = getCtoAgentRow(directoryId);
+  const cur = getCtoAgentRow(workspaceId);
   const next: CtoAgentRow = {
-    directory_id: directoryId,
+    workspace_id: workspaceId,
     session_id: cur?.session_id ?? null,
     herdr_pane_id: cur?.herdr_pane_id ?? null,
     herdr_tab_id: cur?.herdr_tab_id ?? null,
@@ -746,10 +798,10 @@ export function saveCtoAgentRow(
   };
   db.query(
     `INSERT INTO cto_agent
-       (directory_id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
+       (workspace_id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
         desired, started_at, restarts, last_error, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(directory_id) DO UPDATE SET
+     ON CONFLICT(workspace_id) DO UPDATE SET
        session_id=excluded.session_id,
        herdr_pane_id=excluded.herdr_pane_id,
        herdr_tab_id=excluded.herdr_tab_id,
@@ -760,7 +812,7 @@ export function saveCtoAgentRow(
        last_error=excluded.last_error,
        updated_at=excluded.updated_at`,
   ).run(
-    next.directory_id,
+    next.workspace_id,
     next.session_id,
     next.herdr_pane_id,
     next.herdr_tab_id,

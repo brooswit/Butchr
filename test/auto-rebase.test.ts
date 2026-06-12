@@ -67,7 +67,7 @@ beforeAll(async () => {
 
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
@@ -92,7 +92,7 @@ describe("auto-rebase: a blocked task promoted to in_progress ends up on the cur
     // In the new model, a LIVE agent task is `in_progress` with herdr_pane_id set.
     const blocker = "ar-blocker";
     dbMod.db
-      .query(`INSERT INTO tasks (id, directory_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .query(`INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`)
       .run(blocker, DIR_ID, "in_progress", "pane-blocker", dbMod.nowIso());
 
     // Dependent task: its worktree branches from the CURRENT (soon-to-be stale) tip.

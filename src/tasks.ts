@@ -11,7 +11,7 @@ import {
   estimateTask,
 } from "./estimate.ts";
 import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
-import { HttpError, directoryGateCmd, getDirectory } from "./directories.ts";
+import { HttpError, workspaceGateCmd, getWorkspace } from "./workspaces.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { publish } from "./events.ts";
 import { runGate } from "./gate.ts";
@@ -204,7 +204,7 @@ export function validateTags(tags: unknown): string[] {
  * Classify a single blocker by id:
  *  - "merged"  → satisfied; this dependency is met.
  *  - "dead"    → terminal non-merged (aborted/rejected/failed) OR no longer exists
- *                (its directory was unregistered) → it will never merge.
+ *                (its workspace was unregistered) → it will never merge.
  *  - "pending" → still in flight (queued/blocked/running/review/finalizing) → may
  *                still merge.
  */
@@ -278,12 +278,12 @@ export function wouldCreateCycle(taskId: string, newBlockers: string[]): boolean
   return false;
 }
 
-export function listTasks(directoryId: string): TaskRow[] {
+export function listTasks(workspaceId: string): TaskRow[] {
   return db
     .query<TaskRow, [string]>(
-      `SELECT * FROM tasks WHERE directory_id=? ORDER BY created_at DESC`,
+      `SELECT * FROM tasks WHERE workspace_id=? ORDER BY created_at DESC`,
     )
-    .all(directoryId);
+    .all(workspaceId);
 }
 
 /**
@@ -309,7 +309,7 @@ function readTaskMdSafe(
 export function taskView(id: string): TaskView | null {
   const row = getTask(id);
   if (!row) return null;
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   let prompt = "";
   let context: string[] = [];
   let review_notes = "";
@@ -336,7 +336,7 @@ export function taskView(id: string): TaskView | null {
   };
 }
 
-// The directory task-list projection: the same parsed/enriched shape taskView
+// The workspace task-list projection: the same parsed/enriched shape taskView
 // returns, MINUS the task.md-derived fields (prompt / context / review_notes) and
 // the per-task duration estimate. The list / board / graph views only need the
 // runtime row plus parsed blocked_by / spawned_subtasks and the server-computed
@@ -352,7 +352,7 @@ export type TaskListView = Omit<
  * id, its DB-side `summary` (request_review summary) and `review_note` (the live
  * change-request note), plus the prompt + accumulated review notes read from
  * task.md on disk. task.md is read best-effort — a missing/unparseable file (or a
- * task whose directory is gone) just contributes the DB fields — so a merged task
+ * task whose workspace is gone) just contributes the DB fields — so a merged task
  * (whose worktree is cleaned up but whose task.md under .butchr/tasks/ persists)
  * still matches on its prompt. The pieces are joined with newlines for one
  * case-insensitive substring scan (see db.matchesQuery).
@@ -369,7 +369,7 @@ function taskSearchText(row: TaskRow, dirPath: string | null): string {
 }
 
 /**
- * List a directory's tasks in the taskView shape (newest first). Per CONTRIBUTING
+ * List a workspace's tasks in the taskView shape (newest first). Per CONTRIBUTING
  * §3, endpoints return the parsed projection rather than raw rows so the webapp and
  * CLI consume one consistent shape: blocked_by / spawned_subtasks come back as real
  * id arrays and each blocker's status is precomputed (blockerStates / deadBlockers).
@@ -384,11 +384,11 @@ function taskSearchText(row: TaskRow, dirPath: string | null): string {
  * task.md to scan its prompt. The filter composes with the webapp/CLI status/tag
  * filters, which narrow the returned set further.
  */
-export function taskListView(directoryId: string, q?: string): TaskListView[] {
+export function taskListView(workspaceId: string, q?: string): TaskListView[] {
   const needle = (q ?? "").trim();
-  const dirPath = needle ? (getDirectory(directoryId)?.path ?? null) : null;
+  const dirPath = needle ? (getWorkspace(workspaceId)?.path ?? null) : null;
   const out: TaskListView[] = [];
-  for (const row of listTasks(directoryId)) {
+  for (const row of listTasks(workspaceId)) {
     if (needle && !matchesQuery(taskSearchText(row, dirPath), needle)) continue;
     const blocked_by = parseBlockedBy(row.blocked_by);
     out.push({
@@ -511,7 +511,7 @@ function setStatus(
   if (res.changes === 0) return false;
 
   if (row.status !== to) recordTaskEvent(id, row.status, to, opts.note ?? null);
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (dir) updateTaskMdStatus(dir.path, id, to);
   emitUpdated(id);
   return true;
@@ -592,7 +592,7 @@ export function validateIdea(idea: unknown): boolean {
 }
 
 export async function createTask(
-  directoryId: string,
+  workspaceId: string,
   prompt: string,
   context: string[] = [],
   blockedBy: string[] = [],
@@ -603,8 +603,8 @@ export async function createTask(
   planPreview: boolean = false,
   idea: boolean = false,
 ): Promise<TaskView> {
-  const dir = getDirectory(directoryId);
-  if (!dir) throw new HttpError(404, `directory not found: ${directoryId}`);
+  const dir = getWorkspace(workspaceId);
+  if (!dir) throw new HttpError(404, `workspace not found: ${workspaceId}`);
   if (!prompt || !prompt.trim()) {
     throw new HttpError(400, "prompt is required");
   }
@@ -662,11 +662,11 @@ export async function createTask(
   );
 
   db.query(
-    `INSERT INTO tasks (id, directory_id, status, blocked_by, kind, model, tags, priority, plan_preview, created_at)
+    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, priority, plan_preview, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
-    directoryId,
+    workspaceId,
     status,
     JSON.stringify(blockers),
     kind,
@@ -816,8 +816,8 @@ export async function proposeSubtasks(
   if (plan.status === "merged") {
     return { created: parseBlockedBy(plan.spawned_subtasks), plan: taskView(planId)! };
   }
-  const dir = getDirectory(plan.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
+  const dir = getWorkspace(plan.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
 
   if (!Array.isArray(specs) || specs.length === 0) {
     throw new HttpError(400, "a decomposition must contain at least one sub-task");
@@ -846,7 +846,7 @@ export async function proposeSubtasks(
     const blockerIds = (spec.blocked_by ?? []).map((b) => idxToId.get(b)!);
     try {
       const sub = await createTask(
-        plan.directory_id,
+        plan.workspace_id,
         spec.prompt,
         spec.context ?? [],
         blockerIds,
@@ -1049,18 +1049,18 @@ export async function setBlockedBy(
   return taskView(id)!;
 }
 
-/** Compute the diff of a task branch vs its directory's default branch. */
+/** Compute the diff of a task branch vs its workspace's default branch. */
 export async function taskDiff(id: string): Promise<string> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
   return git.diff(dir.path, id);
 }
 
 /**
  * Global merge queue: run at most ONE merge at a time across ALL tasks and
- * directories. Approvals that land close together would otherwise rebase+ff into
+ * workspaces. Approvals that land close together would otherwise rebase+ff into
  * a moving default branch in parallel and race; serializing them means each merge
  * rebases onto the up-to-date base tip the previous merge left behind. The chain
  * is process-wide (a single butchr instance owns all merges) and never rejects —
@@ -1216,7 +1216,7 @@ export type BranchPrep = {
 export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> {
   const row = getTask(id);
   if (!row) return { ok: true, rebased: false, conflict: false };
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (!dir) return { ok: true, rebased: false, conflict: false };
 
   // Cheap, lock-free gate: a freshly-created worktree already contains the tip, so
@@ -1274,7 +1274,7 @@ export function promoteIdeaToSpecReview(id: string, spec: string): boolean {
   if (!row || row.status !== "idea") return false;
   const clean = (spec ?? "").trim();
   if (!clean) return false;
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (dir) updateTaskMdPrompt(dir.path, id, clean);
 
   if (
@@ -1403,8 +1403,8 @@ export async function respondToFeedback(
       `a ${row.status} task does not accept '${response.type}' — it awaits ${info.awaiting}`,
     );
   }
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
 
   // ---- APPROVE ----
   if (response.type === "approve") {
@@ -1508,8 +1508,8 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
   if (row.status !== "finalizing") return { task: taskView(id)! };
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
 
   // Serialize through the global merge queue so concurrent approvals rebase+ff
   // one-at-a-time against an up-to-date base tip instead of racing in parallel.
@@ -1533,9 +1533,9 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     // edit CHANGELOG.md / package.json. See git.finalizeLivingDocs.
     const mr = await git.merge(dir.path, id, row.summary ?? null);
     if (!mr.ok) return { mr };
-    // Merge stuck (ff'd into main). Gate the new tip: the directory's build/test
+    // Merge stuck (ff'd into main). Gate the new tip: the workspace's build/test
     // gate command must be GREEN (its own gate_cmd, or the default config.verifyCmd).
-    const verify = await verifyDefaultBranch(dir.path, directoryGateCmd(dir.id));
+    const verify = await verifyDefaultBranch(dir.path, workspaceGateCmd(dir.id));
     if (verify.ok) return { mr, verify };
     // RED — undo the ff so a broken commit never sits on main. We need the prior
     // tip to reset to; if we somehow failed to capture it, we can't safely revert,
@@ -1691,8 +1691,8 @@ export async function abortTask(id: string): Promise<TaskView> {
   if (row.status === "aborted") {
     throw new HttpError(409, "task is already aborted");
   }
-  const dir = getDirectory(row.directory_id);
-  if (!dir) throw new HttpError(404, "directory not found");
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
 
   // Tell the watcher (if any) to stop before we kill the tab / remove the tree,
   // so it never transitions the task to review behind us.
@@ -1815,7 +1815,7 @@ export function repairPaneId(id: string, livePaneId: string): boolean {
 export function captureSessionUsage(id: string): void {
   const row = getTask(id);
   if (!row || !row.session_id) return;
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (!dir) return;
   const usage = readSessionUsage(git.worktreePath(dir.path, id), row.session_id);
   if (!usage) return;
@@ -1847,7 +1847,7 @@ export function captureSessionUsage(id: string): void {
 export async function captureDiffFootprint(id: string): Promise<void> {
   const row = getTask(id);
   if (!row) return;
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (!dir) return;
   if (!existsSync(git.worktreePath(dir.path, id))) return;
   let stat: git.DiffStat;
@@ -1871,8 +1871,8 @@ export async function captureDiffFootprint(id: string): Promise<void> {
  * transitions OUT of `in_progress` into `in_review` / `needs_info`. Best-effort +
  * idempotent (see git.commitWorktree): a failure here must never break the transition.
  */
-function autoCommitOnReview(id: string, directoryId: string): void {
-  const dir = getDirectory(directoryId);
+function autoCommitOnReview(id: string, workspaceId: string): void {
+  const dir = getWorkspace(workspaceId);
   if (dir) git.commitWorktree(dir.path, id, `butchr: wip ${id} (auto-saved)`);
 }
 
@@ -1889,7 +1889,7 @@ export function markInReview(id: string, snapshot: string): void {
   // the diff as worktree-only state a later deletion would lose. Only when genuinely
   // in_progress (the state this rescues from) — best-effort, never blocks the move.
   const pre = getTask(id);
-  if (pre?.status === "in_progress") autoCommitOnReview(id, pre.directory_id);
+  if (pre?.status === "in_progress") autoCommitOnReview(id, pre.workspace_id);
   if (
     !setStatus(id, "in_review", {
       from: "in_progress",
@@ -1962,7 +1962,7 @@ export function markReviewFromAgent(
   // COMMIT-ON-REVIEW (FIRST): the agent is told it need not commit — butchr captures
   // its worktree. On the genuine in_progress→in_review transition, commit that diff
   // onto the branch NOW so it can't be lost as worktree-only state before merge.
-  if (row.status === "in_progress") autoCommitOnReview(id, row.directory_id);
+  if (row.status === "in_progress") autoCommitOnReview(id, row.workspace_id);
 
   // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a
   // duplicate call). Clear the pane: the agent is exiting and review holds no live
@@ -2028,7 +2028,7 @@ export function markNeedsInfoFromAgent(
   // needs_info so the diff survives a worktree deletion and the resume-on-answer
   // continues on top of it. Only on the in_progress transition (finalizing work is
   // already committed); best-effort, never blocks the park.
-  if (row.status === "in_progress") autoCommitOnReview(id, row.directory_id);
+  if (row.status === "in_progress") autoCommitOnReview(id, row.workspace_id);
 
   // in_progress/finalizing → needs_info (normal), or needs_info → needs_info (a
   // duplicate ask). Clear the pane: the agent is exiting and this state holds no
@@ -2118,8 +2118,8 @@ export type CiResult = {
 
 /**
  * Signature of the function that actually runs the build/test gate for a task's
- * worktree. `gateCmd` is the directory's EFFECTIVE gate command (its own `gate_cmd`
- * or the default — resolved by triggerCi via directories.directoryGateCmd).
+ * worktree. `gateCmd` is the workspace's EFFECTIVE gate command (its own `gate_cmd`
+ * or the default — resolved by triggerCi via workspaces.workspaceGateCmd).
  */
 export type CiRunner = (dirPath: string, taskId: string, gateCmd: string) => Promise<CiResult>;
 
@@ -2140,16 +2140,16 @@ function ciTail(s: string): string {
 }
 
 /**
- * The real CI runner: run the directory's EFFECTIVE gate command (`gateCmd` — its
+ * The real CI runner: run the workspace's EFFECTIVE gate command (`gateCmd` — its
  * own `gate_cmd` or the global default `config.verifyCmd`, which is EMPTY unless set
  * via BUTCHR_VERIFY_CMD) as a single `bash -lc` invocation IN THE TASK'S
  * WORKTREE, through the shared gate runner (src/gate.ts) so the CI gate and the
  * post-merge verify gate share one bounded spawn — the CI gate inherits the same
  * `config.verifyTimeoutMs` kill-timer. A non-zero exit (or a timeout) is a FAIL with
  * the output tail; an empty gate command means "no gate configured" → a trivial
- * pass (the directory opted out, mirroring an empty verify gate). Running the gate
+ * pass (the workspace opted out, mirroring an empty verify gate). Running the gate
  * as one command (rather than a hardcoded build-then-test split) is what lets each
- * directory define its own arbitrary build/test command.
+ * workspace define its own arbitrary build/test command.
  */
 async function defaultCiRunner(dirPath: string, taskId: string, gateCmd: string): Promise<CiResult> {
   const cmd = gateCmd.trim();
@@ -2192,7 +2192,7 @@ async function runCiOnce(dirPath: string, id: string, gateCmd: string): Promise<
 export async function triggerCi(id: string): Promise<void> {
   const row = getTask(id);
   if (!row) return;
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (!dir) return;
   // Nothing to build/test — leave CI unset rather than spawning bun in a dir that
   // isn't there (also what keeps tests that seed worktree-less rows from running
@@ -2202,9 +2202,9 @@ export async function triggerCi(id: string): Promise<void> {
   db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
   emitUpdated(id);
 
-  // Resolve the directory's effective gate command ONCE for this CI run (own
+  // Resolve the workspace's effective gate command ONCE for this CI run (own
   // gate_cmd or the default) and thread it through every (re)run.
-  const gateCmd = directoryGateCmd(dir.id);
+  const gateCmd = workspaceGateCmd(dir.id);
   let result = await runCiOnce(dir.path, id, gateCmd);
   // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
   const retries = Math.max(0, config.ciRetries);
@@ -2320,7 +2320,7 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
   if (row.conflict) return false; // already-known conflict → human handles it
   if (row.auto_merged) return false; // already auto-merged (defensive)
 
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (!dir) return false;
 
   // Footprint check (a + b). On any git error, bail safely (leave for a human).

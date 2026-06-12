@@ -6,7 +6,7 @@
 // the next real task.
 //
 // This is almost entirely a REST CLIENT: it adds no server logic and maps onto
-// existing routes (GET /api/directories, POST …/tasks, GET …/tasks/:id, POST
+// existing routes (GET /api/workspaces, POST …/tasks, GET …/tasks/:id, POST
 // …/approve, …/abort). The ONE exception is the `--merge` cleanup: a merged probe
 // can no longer be undone via a server route (the mechanical /rollback endpoint was
 // retired — deliberate rollback is now a normal task), so the harness reverts its
@@ -19,7 +19,7 @@ import { basename } from "node:path";
  * Default `revertMerge`: undo a merged probe's commits by reverting the recorded
  * range directly in the sandbox repo, leaving the tree CLEAN (a conflicting revert
  * is aborted, then surfaced). Only ever runs against the throwaway selftest probe
- * in the sandbox directory. Injected (so tests stub it out); never touches a real
+ * in the sandbox workspace. Injected (so tests stub it out); never touches a real
  * project's history because the probe only ever lands in the sandbox.
  */
 async function defaultRevertMerge(
@@ -55,7 +55,7 @@ export type SelftestResult = {
   ok: boolean;
   /** The probe task's id (null if creation never happened). */
   taskId: string | null;
-  /** The sandbox directory the probe ran in (null if it couldn't be resolved). */
+  /** The sandbox workspace the probe ran in (null if it couldn't be resolved). */
   dir: { id: string; label: string; path: string } | null;
   stages: SelftestStage[];
   /** Set when the run failed: the first error that stopped it. */
@@ -80,8 +80,8 @@ export type SelftestOptions = {
    */
   revertMerge?: (sandboxPath: string, fromSha: string, toSha: string) => Promise<void>;
   /**
-   * Directory selector: an explicit registered-directory id or path. When unset,
-   * the harness AUTO-FINDS the directory labelled `sandbox` (or whose path basename
+   * Workspace selector: an explicit registered-workspace id or path. When unset,
+   * the harness AUTO-FINDS the workspace labelled `sandbox` (or whose path basename
    * is `sandbox`) — the registered throwaway repo intended for exactly this.
    */
   dir?: string;
@@ -130,8 +130,8 @@ export function buildProbePrompt(marker: string): string {
 }
 
 /**
- * Resolve the sandbox directory. With an explicit `dir` (id or path), match it;
- * otherwise auto-find the directory labelled `sandbox` (case-insensitive) or whose
+ * Resolve the sandbox workspace. With an explicit `dir` (id or path), match it;
+ * otherwise auto-find the workspace labelled `sandbox` (case-insensitive) or whose
  * path basename is `sandbox`. Throws a helpful error (listing what's registered)
  * when nothing matches.
  */
@@ -141,16 +141,16 @@ export async function resolveSandbox(
 ): Promise<{ id: string; label: string; path: string }> {
   const dirs: Array<{ id: string; label: string; path: string }> = await api(
     "GET",
-    "/api/directories",
+    "/api/workspaces",
   );
   let target: { id: string; label: string; path: string } | undefined;
   const known =
     dirs.map((d) => `  ${d.id}  ${d.label}  ${d.path}`).join("\n") ||
-    "  (no directories registered)";
+    "  (no workspaces registered)";
   if (dir) {
     target = dirs.find((d) => d.id === dir) ?? dirs.find((d) => d.path === dir);
     if (!target) {
-      throw new Error(`no registered directory matches "${dir}". Known directories:\n${known}`);
+      throw new Error(`no registered workspace matches "${dir}". Known workspaces:\n${known}`);
     }
   } else {
     target =
@@ -158,8 +158,8 @@ export async function resolveSandbox(
       dirs.find((d) => basename(d.path ?? "") === "sandbox");
     if (!target) {
       throw new Error(
-        `no 'sandbox' directory is registered — pass --dir <id|path> to choose one.\n` +
-          `Known directories:\n${known}`,
+        `no 'sandbox' workspace is registered — pass --workspace <id|path> to choose one.\n` +
+          `Known workspaces:\n${known}`,
       );
     }
   }
@@ -202,7 +202,7 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
   let mergedRange: { from: string; to: string } | null = null;
 
   try {
-    // (1) Resolve the sandbox directory.
+    // (1) Resolve the sandbox workspace.
     const dir = await resolveSandbox(api, options.dir);
     result.dir = dir;
     mark("resolve", true, `${dir.label} (${dir.id})`);
@@ -210,7 +210,7 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     // (2) Create the throwaway probe task (tagged so it's identifiable in the UI).
     const marker = options.marker ?? String(now());
     const prompt = buildProbePrompt(marker);
-    const task = await api("POST", `/api/directories/${encodeURIComponent(dir.id)}/tasks`, {
+    const task = await api("POST", `/api/workspaces/${encodeURIComponent(dir.id)}/tasks`, {
       prompt,
       tags: ["selftest"],
     });

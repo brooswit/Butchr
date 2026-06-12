@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 let DATA_DIR: string;
 let BACKUP_DIR: string;
-// Distinct directory id so this file's rows don't collide with another file's in
+// Distinct workspace id so this file's rows don't collide with another file's in
 // the shared db.
 const DIR_ID = "backup-test-dir";
 
@@ -47,13 +47,13 @@ beforeAll(async () => {
   savedDbPath = configMod.config.dbPath;
   configMod.config.backupDir = BACKUP_DIR;
 
-  // Seed a directory + a couple of tasks so a snapshot has real content to verify.
+  // Seed a workspace + a couple of tasks so a snapshot has real content to verify.
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR_ID, DATA_DIR, "test", dbMod.nowIso());
   for (const id of ["bk-a", "bk-b", "bk-c"]) {
     dbMod.db
-      .query(`INSERT INTO tasks (id, directory_id, status, created_at) VALUES (?, ?, ?, ?)`)
+      .query(`INSERT INTO tasks (id, workspace_id, status, created_at) VALUES (?, ?, ?, ?)`)
       .run(id, DIR_ID, "queued", dbMod.nowIso());
   }
 });
@@ -89,7 +89,7 @@ describe("snapshotDb", () => {
     const snap = new Database(path, { readonly: true });
     try {
       const n = snap
-        .query<{ c: number }, [string]>(`SELECT COUNT(*) AS c FROM tasks WHERE directory_id=?`)
+        .query<{ c: number }, [string]>(`SELECT COUNT(*) AS c FROM tasks WHERE workspace_id=?`)
         .get(DIR_ID)!.c;
       expect(n).toBe(3);
     } finally {
@@ -215,7 +215,7 @@ describe("restoreFromBackup", () => {
     const restored = new Database(target, { readonly: true });
     try {
       const n = restored
-        .query<{ c: number }, [string]>(`SELECT COUNT(*) AS c FROM tasks WHERE directory_id=?`)
+        .query<{ c: number }, [string]>(`SELECT COUNT(*) AS c FROM tasks WHERE workspace_id=?`)
         .get(DIR_ID)!.c;
       expect(n).toBe(3);
     } finally {

@@ -19,14 +19,14 @@ export type VerifyResult = {
 
 /**
  * The actual gate executor; overridable for tests. `dir` is the repo root; `cmd` is
- * the EFFECTIVE gate command for that directory (the per-directory `gate_cmd` or the
- * default — resolved by the caller via directories.directoryGateCmd).
+ * the EFFECTIVE gate command for that workspace (the per-workspace `gate_cmd` or the
+ * default — resolved by the caller via workspaces.workspaceGateCmd).
  */
 export type VerifyRunner = (dir: string, cmd: string) => Promise<VerifyResult>;
 
 /**
  * Default runner: a thin layer over the shared gate runner (src/gate.ts) — run the
- * directory's gate command via `bash -lc` in the repo root, bounded by
+ * workspace's gate command via `bash -lc` in the repo root, bounded by
  * `config.verifyTimeoutMs` (a timeout is treated as RED with a verify-specific
  * message). An empty command DISABLES the gate (skipped → ok); everything else is
  * the gate runner's spawn + timeout + combined-output, shared with the CI gate.
@@ -59,10 +59,10 @@ export function setVerifyRunner(fn?: VerifyRunner): void {
 
 /**
  * Run the post-merge verify gate against the default-branch worktree at `dir`,
- * using the EFFECTIVE gate command `cmd` for that directory (resolved by the caller
- * via directories.directoryGateCmd — the directory's own `gate_cmd` or the default
+ * using the EFFECTIVE gate command `cmd` for that workspace (resolved by the caller
+ * via workspaces.workspaceGateCmd — the workspace's own `gate_cmd` or the default
  * `config.verifyCmd`). `cmd` defaults to `config.verifyCmd` so a caller with no
- * directory in hand still gets the global gate.
+ * workspace in hand still gets the global gate.
  */
 export function verifyDefaultBranch(
   dir: string,

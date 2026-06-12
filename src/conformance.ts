@@ -20,7 +20,7 @@
 import { existsSync } from "node:fs";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
-import { getDirectory } from "./directories.ts";
+import { getWorkspace } from "./workspaces.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
 import { runHeadlessWithPrompt } from "./headless.ts";
@@ -198,7 +198,7 @@ function statusFor(v: ConformanceVerdict): "pass" | "concern" {
 export async function triggerConformance(id: string): Promise<void> {
   const row = getTask(id);
   if (!row) return;
-  const dir = getDirectory(row.directory_id);
+  const dir = getWorkspace(row.workspace_id);
   if (!dir) return;
   const wt = git.worktreePath(dir.path, id);
   // Nothing to review/inspect — leave conformance unset rather than reviewing a tree

@@ -1,4 +1,4 @@
-// Tests for FULL-TEXT TASK SEARCH (server-side `?q=` on the directory task-list
+// Tests for FULL-TEXT TASK SEARCH (server-side `?q=` on the workspace task-list
 // endpoint, backed by tasks.taskListView's optional `q` arg + db.matchesQuery).
 // Search matches case-insensitively across a task's:
 //   - prompt + accumulated review notes (read from task.md on disk),
@@ -8,7 +8,7 @@
 // blank query returns the full list unchanged and reads no task.md.
 //
 // In-process / pure: rows are seeded straight into the DB and their task.md written
-// to a real on-disk directory root (registered as the directory's path) so the
+// to a real on-disk directory root (registered as the workspace's path) so the
 // prompt-on-disk read path is exercised. No real claude or herdr.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -35,10 +35,10 @@ beforeAll(async () => {
   tasksMod = await import("../src/tasks.ts");
   taskmdMod = await import("../src/taskmd.ts");
 
-  // The directory's path points at the on-disk repo root so taskListView can read
+  // The workspace's path points at the on-disk repo root so taskListView can read
   // each task's task.md to scan its prompt.
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR_ID, REPO_DIR, "test", dbMod.nowIso());
 });
 
@@ -58,7 +58,7 @@ function seed(opts: {
 }): string {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, summary, review_note, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, summary, review_note, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(opts.id, DIR_ID, opts.status, opts.summary ?? null, opts.reviewNote ?? null, opts.createdAt);

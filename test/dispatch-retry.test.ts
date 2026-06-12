@@ -28,7 +28,7 @@ let DATA_DIR: string;
 let REPO_ROOT: string;
 // Unique per-file id: bun caches the db/config singletons across test files, so
 // the first-imported file's BUTCHR_DB wins and all files share ONE database. A
-// distinct directory id keeps this file's rows from colliding with another file's.
+// distinct workspace id keeps this file's rows from colliding with another file's.
 const DIR_ID = "retry-dir";
 
 let tasksMod: typeof import("../src/tasks.ts");
@@ -57,7 +57,7 @@ beforeAll(async () => {
 
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
@@ -78,7 +78,7 @@ function seedTask(opts: {
   const created = dbMod.nowIso();
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, session_id, dispatch_attempts, next_dispatch_at, herdr_pane_id, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, session_id, dispatch_attempts, next_dispatch_at, herdr_pane_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(

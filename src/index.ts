@@ -51,9 +51,9 @@ async function main(): Promise<void> {
     );
   }
 
-  // Managed CTO agents — ONE PER REGISTERED DIRECTORY (each default OFF unless that
-  // directory opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).
-  // Reconcile every enabled directory's desired state ONCE (adopt a live pane that
+  // Managed CTO agents — ONE PER REGISTERED WORKSPACE (each default OFF unless that
+  // workspace opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).
+  // Reconcile every enabled workspace's desired state ONCE (adopt a live pane that
   // survived this restart, or (re)launch it RESUMING its session), then start the
   // supervisor that relaunches them on death.
   const cto = await reconcileCtoAgents(herdrUp);
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log("\n[butchr] shutting down…");
     stopDispatcher();
-    // Stop SUPERVISING the per-directory CTO agents, but leave their panes alive —
+    // Stop SUPERVISING the per-workspace CTO agents, but leave their panes alive —
     // like workspace agents, the next boot re-adopts and resumes each (session
     // continuity). The reaper tracks the CTO agents separately and never orphans them.
     stopCtoSupervisor();

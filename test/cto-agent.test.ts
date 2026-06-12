@@ -1,21 +1,21 @@
-// Tests for the PER-DIRECTORY MANAGED CTO AGENT (src/cto-agent.ts) driven through a
+// Tests for the PER-WORKSPACE MANAGED CTO AGENT (src/cto-agent.ts) driven through a
 // FAKE AgentRunner backend — no real herdr or claude. butchr runs ONE CTO agent per
-// registered directory (in that repo's root); every lifecycle op is scoped to a
-// directory_id. The module talks to the swappable `harness` proxy, so setRunner()
+// registered workspace (in that repo's root); every lifecycle op is scoped to a
+// workspace_id. The module talks to the swappable `harness` proxy, so setRunner()
 // drops in a fake whose liveness (`agentExists`) and recorded calls we control.
 //
 // What this exercises:
-//   - LIFECYCLE (scoped to a directory): start launches through the harness RESUMING
-//     the per-directory operator-seeded session (first launch), with cwd = the repo
-//     root, wired to the channel SCOPED to the directory (dev-channel flag + MCP
-//     config carrying BUTCHR_CHANNEL_DIR); stop tears it down; restart resumes the
+//   - LIFECYCLE (scoped to a workspace): start launches through the harness RESUMING
+//     the per-workspace operator-seeded session (first launch), with cwd = the repo
+//     root, wired to the channel SCOPED to the workspace (dev-channel flag + MCP
+//     config carrying BUTCHR_CHANNEL_WORKSPACE); stop tears it down; restart resumes the
 //     SAME session; restart(fresh) cold-starts a brand-new one.
 //   - SINGLE INSTANCE PER DIRECTORY: a start when one is already live ADOPTS it.
-//   - PER-DIRECTORY ISOLATION: two directories run independent CTO agents whose names,
+//   - PER-WORKSPACE ISOLATION: two workspaces run independent CTO agents whose names,
 //     sessions, and supervision state never collide.
 //   - BOOT RECONCILE: adopt a live pane vs (re)launch a dead one; honor a prior stop.
 //   - SUPERVISED RELAUNCH on death RESUMES the same session via `--resume`.
-//   - STATUS shape (the data behind the /api/directories/:id/cto endpoints).
+//   - STATUS shape (the data behind the /api/workspaces/:id/cto endpoints).
 //
 // config fields are set DIRECTLY on the imported config object (not via env) so the
 // test is deterministic regardless of bun's shared-config import order.
@@ -39,7 +39,7 @@ const SEED = "seed-session-aaaa";
 function insertDir(id: string): void {
   dbMod.db
     .query(
-      `INSERT OR IGNORE INTO directories (id, path, label, herdr_workspace, herdr_pane, gate_cmd, cto_enabled, created_at)
+      `INSERT OR IGNORE INTO workspaces (id, path, label, herdr_workspace, herdr_pane, gate_cmd, cto_enabled, created_at)
        VALUES (?, ?, ?, NULL, NULL, NULL, 1, ?)`,
     )
     .run(id, join(DATA_DIR, id), id, dbMod.nowIso());
@@ -60,7 +60,7 @@ beforeAll(async () => {
 
   // Pin the CTO-agent config deterministically (mutating the singleton is robust to
   // import order — unlike env, which only wins if this file imports config first).
-  cfgMod.config.ctoAgentEnabled = false; // prove per-directory cto_enabled=1 WINS
+  cfgMod.config.ctoAgentEnabled = false; // prove per-workspace cto_enabled=1 WINS
   cfgMod.config.ctoAgentSessionSeeds = new Map([[DIR, SEED]]);
   cfgMod.config.ctoAgentName = "butchr-cto-agent";
   cfgMod.config.ctoBriefPath = "";
@@ -84,7 +84,7 @@ afterAll(() => {
 
 /**
  * A fake backend whose liveness + recorded calls the test drives. Liveness is tracked
- * PER AGENT NAME (so multiple directories' CTO agents are independent): `opts.alive`
+ * PER AGENT NAME (so multiple workspaces' CTO agents are independent): `opts.alive`
  * pre-seeds every name as already-live (the adopt scenarios); otherwise a name becomes
  * live only once it is started, and is cleared on teardown/deregister.
  */
@@ -140,12 +140,12 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
 const row = (id = DIR) => dbMod.getCtoAgentRow(id);
 
 beforeEach(() => {
-  // Reset the per-directory records + in-memory supervision state between scenarios.
+  // Reset the per-workspace records + in-memory supervision state between scenarios.
   dbMod.db.query(`DELETE FROM cto_agent`).run();
   cto._resetSupervisionStateForTest();
 });
 
-describe("CTO agent lifecycle (per directory)", () => {
+describe("CTO agent lifecycle (per workspace)", () => {
   test("start launches through the harness, RESUMING the seeded session + wiring the scoped channel", async () => {
     const { runner, calls } = makeFake({ alive: false });
     harnessMod.setRunner(runner);
@@ -154,12 +154,12 @@ describe("CTO agent lifecycle (per directory)", () => {
 
     expect(calls.agentStart.length).toBe(1);
     const start = calls.agentStart[0]!;
-    // Named + run with cwd = the directory's repo root.
+    // Named + run with cwd = the workspace's repo root.
     expect(start.name).toBe(cto.ctoAgentName(DIR));
     expect(start.name).toContain(DIR);
     expect(start.cwd).toBe(join(DATA_DIR, DIR));
     const launched = start.argv.join(" ");
-    // First launch resumes the per-directory seeded session (NOT a fresh --session-id).
+    // First launch resumes the per-workspace seeded session (NOT a fresh --session-id).
     expect(launched).toContain(`--resume ${SEED}`);
     expect(launched).not.toContain("--session-id");
     // Channel wiring: the development-channel flag + the per-CTO MCP config.
@@ -169,21 +169,21 @@ describe("CTO agent lifecycle (per directory)", () => {
     expect(start.tabId).toBe("cto-tab");
     expect(calls.paneClose).toContain("rp-1");
 
-    // The MCP config registers the channel stdio server SCOPED to this directory.
+    // The MCP config registers the channel stdio server SCOPED to this workspace.
     const mcp = JSON.parse(readFileSync(join(cfgMod.config.dataDir, "cto", DIR, "mcp.json"), "utf8"));
     expect(mcp.mcpServers["butchr-cto-channel"]).toBeTruthy();
     expect(mcp.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_SSE_URL).toContain("/api/events");
-    expect(mcp.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_DIR).toBe(DIR);
+    expect(mcp.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_WORKSPACE).toBe(DIR);
 
     // Persisted record + returned status.
     const r = row()!;
-    expect(r.directory_id).toBe(DIR);
+    expect(r.workspace_id).toBe(DIR);
     expect(r.session_id).toBe(SEED);
     expect(r.herdr_pane_id).toBe("pane-final");
     expect(r.herdr_tab_id).toBe("cto-tab");
     expect(r.desired).toBe(1);
     expect(r.restarts).toBe(0);
-    expect(status.directoryId).toBe(DIR);
+    expect(status.workspaceId).toBe(DIR);
     expect(status.running).toBe(true);
     expect(status.enabled).toBe(true); // cto_enabled=1 wins over the global default off
     expect(status.sessionId).toBe(SEED);
@@ -243,7 +243,7 @@ describe("CTO agent lifecycle (per directory)", () => {
     expect(row()!.session_id).not.toBe(sid);
   });
 
-  test("two directories run independent CTO agents (distinct names/sessions/rows)", async () => {
+  test("two workspaces run independent CTO agents (distinct names/sessions/rows)", async () => {
     const f1 = makeFake({ alive: false });
     harnessMod.setRunner(f1.runner);
     await cto.startCtoAgent(DIR);
@@ -261,11 +261,11 @@ describe("CTO agent lifecycle (per directory)", () => {
     expect(f2.calls.agentStart[0]!.argv.join(" ")).toContain("--session-id");
     // The DIR2 MCP config is scoped to DIR2.
     const mcp2 = JSON.parse(readFileSync(join(cfgMod.config.dataDir, "cto", DIR2, "mcp.json"), "utf8"));
-    expect(mcp2.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_DIR).toBe(DIR2);
+    expect(mcp2.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_WORKSPACE).toBe(DIR2);
   });
 });
 
-describe("CTO agent boot reconcile (per directory)", () => {
+describe("CTO agent boot reconcile (per workspace)", () => {
   test("adopts an already-live pane (no relaunch)", async () => {
     const { runner, calls } = makeFake({ alive: true });
     harnessMod.setRunner(runner);
@@ -299,15 +299,15 @@ describe("CTO agent boot reconcile (per directory)", () => {
     expect(calls.agentStart.length).toBe(0);
   });
 
-  test("is DISABLED when the directory is not CTO-enabled", async () => {
+  test("is DISABLED when the workspace is not CTO-enabled", async () => {
     // cto_enabled=0 → off regardless of the global default.
-    dbMod.db.query(`UPDATE directories SET cto_enabled=0 WHERE id=?`).run(DIR);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=0 WHERE id=?`).run(DIR);
     const { runner, calls } = makeFake({ alive: false });
     harnessMod.setRunner(runner);
     const res = await cto.reconcileCtoAgent(DIR, true);
     expect(res.action).toBe("disabled");
     expect(calls.agentStart.length).toBe(0);
-    dbMod.db.query(`UPDATE directories SET cto_enabled=1 WHERE id=?`).run(DIR); // restore
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR); // restore
   });
 
   test("is a no-op when herdr is down (defer to the supervisor)", async () => {
@@ -318,7 +318,7 @@ describe("CTO agent boot reconcile (per directory)", () => {
     expect(calls.agentStart.length).toBe(0);
   });
 
-  test("reconcileCtoAgents folds every directory into aggregate counts", async () => {
+  test("reconcileCtoAgents folds every workspace into aggregate counts", async () => {
     const { runner } = makeFake({ alive: false });
     harnessMod.setRunner(runner);
     const counts = await cto.reconcileCtoAgents(true);
@@ -327,7 +327,7 @@ describe("CTO agent boot reconcile (per directory)", () => {
   });
 });
 
-describe("CTO agent supervision (per directory)", () => {
+describe("CTO agent supervision (per workspace)", () => {
   test("a supervised relaunch on death RESUMES the same session (not a cold start)", async () => {
     const up = makeFake({ alive: false });
     harnessMod.setRunner(up.runner);
@@ -370,14 +370,14 @@ describe("CTO agent supervision (per directory)", () => {
   });
 });
 
-describe("CTO agent status (the /api/directories/:id/cto payload)", () => {
+describe("CTO agent status (the /api/workspaces/:id/cto payload)", () => {
   test("reports the persisted record + live state", async () => {
     const { runner } = makeFake({ alive: false });
     harnessMod.setRunner(runner);
     await cto.startCtoAgent(DIR);
 
     const s = await cto.ctoAgentStatus(DIR);
-    expect(s.directoryId).toBe(DIR);
+    expect(s.workspaceId).toBe(DIR);
     expect(s.enabled).toBe(true);
     expect(s.desired).toBe(true);
     expect(s.running).toBe(true);
@@ -387,14 +387,14 @@ describe("CTO agent status (the /api/directories/:id/cto payload)", () => {
   });
 });
 
-describe("isCtoEnabled resolution (per-directory wins over the global default)", () => {
+describe("isCtoEnabled resolution (per-workspace wins over the global default)", () => {
   test("explicit 1/0 override the global default; NULL inherits it", async () => {
-    dbMod.db.query(`UPDATE directories SET cto_enabled=1 WHERE id=?`).run(DIR);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
     expect(cto.isCtoEnabled(DIR)).toBe(true);
-    dbMod.db.query(`UPDATE directories SET cto_enabled=0 WHERE id=?`).run(DIR);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=0 WHERE id=?`).run(DIR);
     expect(cto.isCtoEnabled(DIR)).toBe(false);
 
-    dbMod.db.query(`UPDATE directories SET cto_enabled=NULL WHERE id=?`).run(DIR);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=NULL WHERE id=?`).run(DIR);
     cfgMod.config.ctoAgentEnabled = false;
     expect(cto.isCtoEnabled(DIR)).toBe(false); // inherit global OFF
     cfgMod.config.ctoAgentEnabled = true;
@@ -402,7 +402,7 @@ describe("isCtoEnabled resolution (per-directory wins over the global default)",
 
     // restore the suite's invariant
     cfgMod.config.ctoAgentEnabled = false;
-    dbMod.db.query(`UPDATE directories SET cto_enabled=1 WHERE id=?`).run(DIR);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
     expect(cto.isCtoEnabled("dir-nonexistent")).toBe(false);
   });
 });

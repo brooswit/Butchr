@@ -46,7 +46,7 @@ beforeAll(async () => {
 
   dbMod.db
     .query(
-      `INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`,
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
@@ -145,7 +145,7 @@ describe("an immediate exec failure routes to the dispatch-failure path, not in_
     const created = dbMod.nowIso();
     dbMod.db
       .query(
-        `INSERT INTO tasks (id, directory_id, status, session_id, herdr_pane_id, herdr_tab_id, started_at, dispatch_attempts, created_at)
+        `INSERT INTO tasks (id, workspace_id, status, session_id, herdr_pane_id, herdr_tab_id, started_at, dispatch_attempts, created_at)
          VALUES (?, ?, 'in_progress', 'sess-x', 'pane-1', 'tab-1', ?, 0, ?)`,
       )
       .run(id, DIR_ID, created, created);

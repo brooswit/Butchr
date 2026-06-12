@@ -65,7 +65,7 @@ function makeFakeRunner(): AgentRunner {
 function seedTask(id: string, status: string, paneId: string | null): void {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, directory_id, status, herdr_pane_id, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     )
     .run(id, DIR_ID, status, paneId, dbMod.nowIso());
@@ -128,7 +128,7 @@ if (argv[0] === "agent" && argv[1] === "get") {
   harnessApi.setRunner(makeFakeRunner());
 
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR_ID, DATA_DIR, "test", dbMod.nowIso());
 });
 

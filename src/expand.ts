@@ -17,7 +17,7 @@
 // gate this is NOT best-effort: a failure surfaces an error to the operator (who keeps
 // their brief and can retry or write the prompt by hand).
 import { config } from "./config.ts";
-import { HttpError } from "./directories.ts";
+import { HttpError } from "./workspaces.ts";
 import { runHeadlessWithPrompt } from "./headless.ts";
 
 /** Everything the expander needs; passed to the (mockable) runner. */

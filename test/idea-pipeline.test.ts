@@ -63,9 +63,9 @@ beforeAll(async () => {
   conformanceMod = await import("../src/conformance.ts");
 
   // gate_cmd="" disables the in-worktree CI gate + the post-merge verify gate for this
-  // directory; the conformance gate is silenced with a no-op runner.
+  // workspace; the conformance gate is silenced with a no-op runner.
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, gate_cmd, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, gate_cmd, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(DIR_ID, REPO_ROOT, "test", "", dbMod.nowIso());
   conformanceMod.setConformanceRunner(async () => null);
 });
@@ -79,7 +79,7 @@ function row(id: string) {
   return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;
 }
 function dirRow() {
-  return dbMod.db.query<any, [string]>(`SELECT * FROM directories WHERE id=?`).get(DIR_ID)!;
+  return dbMod.db.query<any, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(DIR_ID)!;
 }
 
 describe("a normal task enters 'ready' (in_progress) directly", () => {
@@ -272,7 +272,7 @@ describe("the `stage` axis is folded out (backward compatibility)", () => {
     }
     const mk = (id: string, status: string, stage: string) => {
       dbMod.db
-        .query(`INSERT INTO tasks (id, directory_id, status, stage, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .query(`INSERT INTO tasks (id, workspace_id, status, stage, created_at) VALUES (?, ?, ?, ?, ?)`)
         .run(id, DIR_ID, status, stage, dbMod.nowIso());
     };
     // Insert rows with old-style status values; migrateStageAxisToStatus runs BEFORE

@@ -24,7 +24,7 @@ let DATA_DIR: string;
 let expandMod: typeof import("../src/expand.ts");
 
 beforeAll(async () => {
-  // expand.ts imports directories.ts → db.ts, whose singleton opens a DB at import.
+  // expand.ts imports workspaces.ts → db.ts, whose singleton opens a DB at import.
   // Point it at a throwaway dir so the test never touches the operator's real db.
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-expand-data-"));
   process.env.BUTCHR_DATA_DIR = DATA_DIR;

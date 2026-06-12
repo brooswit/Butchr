@@ -61,7 +61,7 @@ beforeAll(async () => {
   cfgMod = await import("../src/config.ts");
 
   dbMod.db
-    .query(`INSERT INTO directories (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+    .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 });
 
