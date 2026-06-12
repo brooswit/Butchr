@@ -441,6 +441,51 @@ async function publishStatus(workspaceId: string): Promise<CtoStatus> {
 }
 
 /**
+ * The single 'live agent registered → adopt, else launch' decision, shared by
+ * startCtoAgent and reconcileCtoAgent. Probes harness.agentExists EXACTLY ONCE: a live
+ * agent (and not a forced-`fresh` start) is ADOPTED rather than double-launched
+ * (single-instance per workspace); otherwise we launch. Returns which path it took.
+ * Callers hold the per-workspace guard.
+ */
+async function adoptOrLaunch(workspaceId: string, fresh: boolean): Promise<"adopted" | "launched"> {
+  if (!fresh && (await harness.agentExists(ctoAgentName(workspaceId)))) {
+    await adoptCtoAgent(workspaceId);
+    return "adopted";
+  }
+  await performLaunch(workspaceId, fresh);
+  return "launched";
+}
+
+/**
+ * The guarded START core shared by the public startCtoAgent and the boot
+ * reconcileCtoAgent: mark DESIRED-up (so the supervisor keeps it alive), reset that
+ * workspace's backoff, then adopt-or-launch (a SINGLE liveness probe — RESUMING the
+ * persisted/seeded session unless `fresh` forces a brand-new one), resetting the
+ * supervised-restart counter on a fresh launch. Returns BOTH the action taken (for
+ * reconcile's accounting) and the published status (startCtoAgent's return).
+ */
+function ensureCtoStarted(
+  workspaceId: string,
+  fresh: boolean,
+): Promise<{ action: "adopted" | "launched"; status: CtoStatus }> {
+  // Captured outside the guarded fn so we can surface the path it took alongside the
+  // status (guarded() runs fn() eagerly, so this is set before `status` resolves).
+  let action: "adopted" | "launched" = "launched";
+  const status = guarded(workspaceId, async () => {
+    saveCtoAgentRow(workspaceId, { desired: 1 });
+    const st = wsState(workspaceId);
+    st.consecutiveFailures = 0;
+    st.nextRetryAt = 0;
+    action = await adoptOrLaunch(workspaceId, fresh);
+    if (action === "launched") {
+      saveCtoAgentRow(workspaceId, { restarts: 0 }); // a manual (re)launch resets the counter
+    }
+    return publishStatus(workspaceId);
+  });
+  return status.then((s) => ({ action, status: s }));
+}
+
+/**
  * START (or adopt) a workspace's CTO agent. Marks it DESIRED-up (so the supervisor
  * keeps it alive), then: if a live agent is already registered (and not a fresh start)
  * it ADOPTS rather than double-launching (single-instance per workspace); otherwise it
@@ -448,19 +493,7 @@ async function publishStatus(workspaceId: string): Promise<CtoStatus> {
  * brand-new one. A manual start resets that workspace's supervised-restart counter.
  */
 export function startCtoAgent(workspaceId: string, opts: { fresh?: boolean } = {}): Promise<CtoStatus> {
-  return guarded(workspaceId, async () => {
-    saveCtoAgentRow(workspaceId, { desired: 1 });
-    const st = wsState(workspaceId);
-    st.consecutiveFailures = 0;
-    st.nextRetryAt = 0;
-    if (!opts.fresh && (await harness.agentExists(ctoAgentName(workspaceId)))) {
-      await adoptCtoAgent(workspaceId);
-    } else {
-      await performLaunch(workspaceId, !!opts.fresh);
-      saveCtoAgentRow(workspaceId, { restarts: 0 }); // a manual (re)launch resets the counter
-    }
-    return publishStatus(workspaceId);
-  });
+  return ensureCtoStarted(workspaceId, !!opts.fresh).then((r) => r.status);
 }
 
 /**
@@ -524,19 +557,15 @@ export async function reconcileCtoAgent(
 ): Promise<{ action: "disabled" | "skipped" | "stopped" | "adopted" | "launched" }> {
   if (!isCtoEnabled(workspaceId)) return { action: "disabled" };
   if (!herdrUp) return { action: "skipped" };
-  const name = ctoAgentName(workspaceId);
   const row = getCtoAgentRow(workspaceId);
   if (row && row.desired === 0 && row.updated_at) {
     // The operator stopped it before this restart — honor that.
     return { action: "stopped" };
   }
-  if (await harness.agentExists(name)) {
-    await adoptCtoAgent(workspaceId);
-    await publishStatus(workspaceId);
-    return { action: "adopted" };
-  }
-  await startCtoAgent(workspaceId);
-  return { action: "launched" };
+  // Single decision + single liveness probe, shared with startCtoAgent: adopt a live
+  // agent, else launch (no re-entry into startCtoAgent, so no redundant double-probe).
+  const { action } = await ensureCtoStarted(workspaceId, false);
+  return { action };
 }
 
 /**
