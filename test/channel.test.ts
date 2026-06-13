@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ATTENTION_STATES,
   AttentionBridge,
+  CONNECTIVITY_ONLY_INSTRUCTIONS,
   channelInitializeResult,
   channelNotificationMessage,
   handleRpc,
@@ -430,5 +431,88 @@ describe("channel: malformed / irrelevant events dropped silently", () => {
       expect(() => bridge.consume(j)).not.toThrow();
       expect(bridge.consume(j)).toBeNull();
     }
+  });
+});
+
+describe("channel: connectivity-restored broadcast (global)", () => {
+  const restored = (downMs: number) => ({
+    type: "connectivity.restored",
+    restoredAt: "2026-06-12T10:00:00.000Z",
+    downMs,
+  });
+
+  test("emits a connectivity_restored notification carrying restored_at + down_ms", () => {
+    const bridge = new AttentionBridge();
+    const note = bridge.consume(restored(125000)); // 2m 5s
+    expect(note).not.toBeNull();
+    expect(note!.meta.state).toBe("connectivity_restored");
+    expect(note!.meta.restored_at).toBe("2026-06-12T10:00:00.000Z");
+    expect(note!.meta.down_ms).toBe(125000);
+    // The human content surfaces the recovery + the outage duration.
+    expect(note!.content).toContain("RESTORED");
+    expect(note!.content).toContain("2m 5s");
+  });
+
+  test("is GLOBAL — a workspace-scoped bridge still emits it (not dropped by scope)", () => {
+    const bridge = new AttentionBridge("dir-1");
+    // A different workspace's attention event is dropped...
+    expect(
+      bridge.consume(taskUpdated({ id: "t", workspace_id: "dir-2", status: "in_review", summary: "x" })),
+    ).toBeNull();
+    // ...but the connectivity broadcast is delivered regardless of scope.
+    expect(bridge.consume(restored(1000))).not.toBeNull();
+  });
+
+  test("handles a missing/invalid duration gracefully", () => {
+    const bridge = new AttentionBridge();
+    const note = bridge.consume({ type: "connectivity.restored", restoredAt: "x", downMs: -5 });
+    expect(note).not.toBeNull();
+    expect(note!.meta.down_ms).toBe(0);
+    expect(note!.content).toContain("unknown period");
+  });
+});
+
+describe("channel: connectivity-only mode (worker bridge)", () => {
+  test("delivers ONLY connectivity_restored — every attention/idle event is suppressed", () => {
+    const bridge = new AttentionBridge("dir-1", /* connectivityOnly */ true);
+
+    // Attention transitions in the bridge's OWN workspace are suppressed (a worker
+    // must never see another task's review/idle/attention events).
+    expect(
+      bridge.consume(taskUpdated({ id: "t1", workspace_id: "dir-1", status: "in_review", summary: "x" })),
+    ).toBeNull();
+    expect(
+      bridge.consume(taskUpdated({ id: "t2", workspace_id: "dir-1", status: "needs_info", question: "q" })),
+    ).toBeNull();
+    // The idle surface is suppressed too.
+    expect(
+      bridge.consume(
+        taskUpdated({ id: "t3", workspace_id: "dir-1", status: "in_progress", idle: 1, idle_context: "stuck" }),
+      ),
+    ).toBeNull();
+
+    // But the connectivity broadcast IS delivered.
+    const note = bridge.consume({
+      type: "connectivity.restored",
+      restoredAt: "2026-06-12T10:00:00.000Z",
+      downMs: 3000,
+    });
+    expect(note).not.toBeNull();
+    expect(note!.meta.state).toBe("connectivity_restored");
+  });
+
+  test("initialize for a connectivity-only bridge advertises the channel + the connectivity-only instructions", () => {
+    const res = channelInitializeResult(undefined, /* connectivityOnly */ true);
+    expect(res.capabilities.experimental["claude/channel"]).toBeDefined();
+    expect((res.capabilities as { tools?: unknown }).tools).toBeUndefined();
+    expect(res.instructions).toBe(CONNECTIVITY_ONLY_INSTRUCTIONS);
+    expect(res.instructions).not.toContain("spec requested");
+  });
+
+  test("handleRpc threads connectivity-only into the initialize instructions", () => {
+    const res = handleRpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, true) as {
+      result: { instructions: string };
+    };
+    expect(res.result.instructions).toBe(CONNECTIVITY_ONLY_INSTRUCTIONS);
   });
 });

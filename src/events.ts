@@ -16,6 +16,11 @@ export type ButchrEvent =
   // adopted/relaunched) — carries the refreshed CtoStatus so the dashboard's CTO
   // card reflects it live. See src/cto-agent.ts.
   | { type: "cto.updated"; cto: unknown }
+  // NETWORK CONNECTIVITY to the model API was RESTORED after an outage (a debounced
+  // DOWN→UP transition — see src/connectivity.ts). EVENT-ONLY: butchr takes no action;
+  // this fans out the SSE stream so the CTO channel + worker connectivity channels push
+  // it to live sessions. `restoredAt` = ISO time of recovery; `downMs` = outage length.
+  | { type: "connectivity.restored"; restoredAt: string; downMs: number }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;

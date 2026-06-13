@@ -474,6 +474,40 @@ by hand. That was a real incident.
   power dies mid-gate → on next boot, the gate re-runs and the task settles to a real
   pass/fail with no operator action.
 
+### Connectivity-restored event (event-only; no auto-recovery)
+
+The recurring failure mode is the **opposite** of the restart cases above: the host
+loses internet (laptop on battery, a network blip), so the **agents'** model-API calls
+die mid-work and sessions get killed/zombied — while **butchr itself survives** (it's
+local; only the agents' model calls need the internet). butchr is therefore the right
+place to detect the outage and signal **recovery**.
+
+`src/connectivity.ts` runs a monitor for the life of the process (independent of any
+workspace, started in `index.ts`): it periodically probes the model API endpoint and
+tracks a **debounced** up/down state machine. ANY resolved HTTP response (even a
+401/403/405/5xx) proves the internet works → reachable; only a network error / DNS
+failure / timeout is a failed probe. It declares **DOWN only after N consecutive
+failures** (so one transient probe can't false-trigger) and fires **exactly once** on
+the DOWN→UP transition, capturing how long it was down — never on steady-up,
+steady-down, or the down-transition.
+
+On recovery it **broadcasts a single `connectivity.restored` SSE event** (carrying
+`restoredAt` + `downMs`) which fans out to push notifications on **both** recipients:
+the long-lived **CTO sessions** (the existing one-way CTO channel) and **every live
+worker build agent** — the same channel is attached to the worker launch
+(`{{CHANNEL_FLAG}}` in `agentCmd`/`resumeCmd` + a stdio server in the per-task MCP
+config) in a **connectivity-only mode** (`BUTCHR_CHANNEL_CONNECTIVITY_ONLY=1`) so a
+worker hears "network restored" mid-session but **never** sees another task's
+review/idle/attention events.
+
+It is **strictly EVENT-ONLY**: butchr takes **no** recovery action on regain (no
+auto-requeue/resume/abort — the restart-resilience layers above are untouched); each
+recipient decides what to do (surface, don't blind-automate). The worker-side channel
+is **gated on the master switch** and **non-fatal** — if it fails to attach, the worker
+still launches and works normally. Configurable via `BUTCHR_CONNECTIVITY` (master
+switch, default on), `BUTCHR_CONNECTIVITY_URL`, `BUTCHR_CONNECTIVITY_INTERVAL_MS`,
+`BUTCHR_CONNECTIVITY_TIMEOUT_MS`, and `BUTCHR_CONNECTIVITY_FAILURES`.
+
 ### Power-loss resilience (durable writes + loose-object self-heal)
 
 A power loss that interrupts a git write **mid-fsync** can leave **truncated/0-byte

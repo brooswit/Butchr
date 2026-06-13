@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Connectivity-restored event (event-only).** butchr now runs a network
+  connectivity monitor (`src/connectivity.ts`) that periodically probes the model API
+  endpoint, tracks a debounced up/down state machine (declares DOWN only after N
+  consecutive failed probes, so one transient probe can't false-trigger), and fires
+  EXACTLY ONCE on a DOWN→UP transition — capturing how long the network was down. On
+  recovery it BROADCASTS a single `connectivity.restored` event to BOTH the long-lived
+  CTO sessions (the existing one-way CTO channel) AND every live worker build agent
+  (the same channel attached to the worker launch in a new CONNECTIVITY-ONLY mode, so a
+  worker hears "network restored" mid-session but never sees another task's
+  review/idle/attention events). This surfaces the recurring failure mode where a host
+  network blip kills agents' model calls mid-work. It is strictly EVENT-ONLY: butchr
+  takes NO recovery action on regain (no auto-requeue/resume/abort — the existing
+  liveness/auto-resume/gate-recovery layers are untouched); each recipient decides what
+  to do. Configurable via `BUTCHR_CONNECTIVITY` (master switch, default on),
+  `BUTCHR_CONNECTIVITY_URL`, `BUTCHR_CONNECTIVITY_INTERVAL_MS`,
+  `BUTCHR_CONNECTIVITY_TIMEOUT_MS`, and `BUTCHR_CONNECTIVITY_FAILURES`. The worker-side
+  channel is gated on the master switch and is non-fatal — if it fails to attach, the
+  worker still launches and works normally.
+
 ## [0.9.76] - 2026-06-12
 
 ### Added

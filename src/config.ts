@@ -303,6 +303,16 @@ export const config = {
    *    See tasks.createTask (the `model` column) + dispatcher.resolveLaunchCommand.
    *    A custom override that omits this placeholder simply never threads a
    *    per-task model — the substitution is a no-op on it.
+   *  - `{{CHANNEL_FLAG}}` → `--dangerously-load-development-channels
+   *    server:butchr-cto-channel` when connectivity monitoring is ON (so a LIVE worker
+   *    receives the broadcast `connectivity.restored` push mid-session via the same
+   *    one-way channel the CTO uses, in CONNECTIVITY-ONLY mode — it never sees another
+   *    task's review/idle/attention events), or EMPTY when connectivity is OFF. The
+   *    matching `butchr-cto-channel` stdio server is added to the per-task MCP config
+   *    only in that same case (see dispatcher.dispatch). NON-FATAL: if the channel
+   *    fails to load/attach, the worker still launches and works normally — its real
+   *    work is never blocked by this side-channel. A custom override that omits this
+   *    placeholder simply never attaches the channel (the substitution is a no-op).
    * It is run via `bash -lc`, in the worktree as cwd.
    *
    * Default: launch Claude Code INTERACTIVELY (no `-p`) with the prompt as the
@@ -321,7 +331,7 @@ export const config = {
     // would otherwise swallow the positional prompt as a second config path.
     // `--` ends option parsing so the prompt is treated as the positional arg.
     "claude --dangerously-skip-permissions {{MODEL_FLAG}} --session-id {{SESSION_ID}} " +
-      '--mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
+      '--mcp-config {{MCP_CONFIG}} {{CHANNEL_FLAG}} -- "$(cat {{PROMPT_FILE}})"',
   ),
 
   /**
@@ -337,7 +347,7 @@ export const config = {
   resumeCmd: env(
     "BUTCHR_RESUME_CMD",
     "claude --dangerously-skip-permissions {{MODEL_FLAG}} --resume {{SESSION_ID}} " +
-      '--mcp-config {{MCP_CONFIG}} -- "$(cat {{PROMPT_FILE}})"',
+      '--mcp-config {{MCP_CONFIG}} {{CHANNEL_FLAG}} -- "$(cat {{PROMPT_FILE}})"',
   ),
 
   /** Max time (ms) a single watcher waits for the agent to finish. */
@@ -486,6 +496,42 @@ export const config = {
    * emulator (gnome-terminal, kitty, konsole, …).
    */
   terminalCmd: env("BUTCHR_TERMINAL_CMD", ""),
+
+  // ---- CONNECTIVITY MONITOR (EVENT-ONLY) ------------------------------------
+  // butchr ITSELF survives a host network outage (it's local — only the AGENTS'
+  // model-API calls need the internet), so it is the right place to detect the
+  // outage and signal RECOVERY. A monitor probes the model API endpoint, tracks a
+  // debounced up/down state machine, and on a DOWN→UP transition BROADCASTS a single
+  // `connectivity.restored` event (out the SSE stream → the CTO channel + the worker
+  // connectivity channel) carrying the restored-at timestamp + outage duration. It is
+  // strictly EVENT-ONLY: butchr takes NO recovery action on regain (no requeue/resume/
+  // abort — the existing liveness/auto-resume/gate-recovery layers are untouched); each
+  // recipient (worker or CTO) decides what to do. See src/connectivity.ts.
+
+  /** Master switch (default on). When off, no probing, no event — and the worker
+   * connectivity channel is NOT attached (it would have nothing to deliver). */
+  connectivityEnabled: envBool("BUTCHR_CONNECTIVITY", true),
+
+  /**
+   * Reachability probe target — the model API the agents actually need. The probe
+   * treats ANY resolved HTTP response (even 401/403/405/5xx) as REACHABLE (it proves
+   * the internet works); only a network error / DNS failure / timeout is a failed
+   * probe. Default is the Anthropic API root.
+   */
+  connectivityUrl: env("BUTCHR_CONNECTIVITY_URL", "https://api.anthropic.com/"),
+
+  /** How often (ms) to probe reachability. */
+  connectivityIntervalMs: envInt("BUTCHR_CONNECTIVITY_INTERVAL_MS", 15000),
+
+  /** Per-probe timeout (ms): a probe that doesn't resolve within this counts as a failure. */
+  connectivityProbeTimeoutMs: envInt("BUTCHR_CONNECTIVITY_TIMEOUT_MS", 5000),
+
+  /**
+   * DEBOUNCE: require this many CONSECUTIVE failed probes to declare the network DOWN,
+   * so a single transient failed probe can't false-trigger an outage (and thus can't
+   * false-fire a spurious "restored" event on the next success). Default 3.
+   */
+  connectivityFailuresToDown: envInt("BUTCHR_CONNECTIVITY_FAILURES", 3),
 
   // ---- MANAGED CTO AGENT (PER-WORKSPACE) ------------------------------------
   // butchr can LAUNCH and SUPERVISE one long-lived CTO agent PER REGISTERED

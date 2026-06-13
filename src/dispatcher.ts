@@ -23,6 +23,7 @@ import { ensureHerdrWorkspace } from "./workspaces.ts";
 import { buildScriptArgv, modelFlag, sleep, stripAnsi } from "./exec.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
+import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
@@ -466,6 +467,48 @@ export type LaunchPlan = {
 };
 
 /**
+ * The `--dangerously-load-development-channels` flag that attaches the one-way
+ * CONNECTIVITY channel to a WORKER agent, or "" when connectivity monitoring is OFF.
+ * Gated on config.connectivityEnabled — guard-rail: don't attach a channel that would
+ * have nothing to deliver. Kept in lockstep with `taskMcpServers` (which registers the
+ * matching stdio server only in the same case). NON-FATAL: a dev-channel that fails to
+ * spawn is logged + skipped by claude — the agent still launches and does its work.
+ */
+export function connectivityChannelFlag(): string {
+  return config.connectivityEnabled
+    ? `--dangerously-load-development-channels server:${CHANNEL_SERVER_NAME}`
+    : "";
+}
+
+/**
+ * The per-task MCP servers config. ALWAYS includes `butchr` (the HTTP review/raise
+ * surface at /mcp/<id>). When connectivity monitoring is ON, ALSO registers the one-way
+ * connectivity channel as a STDIO server in CONNECTIVITY-ONLY mode
+ * (BUTCHR_CHANNEL_CONNECTIVITY_ONLY=1), so a LIVE worker receives the broadcast
+ * `connectivity.restored` push mid-session and NEVER another task's review/idle/
+ * attention events. Off → a lean config with just `butchr`. Exported for testing.
+ */
+export function taskMcpServers(taskId: string): Record<string, unknown> {
+  const servers: Record<string, unknown> = {
+    butchr: {
+      type: "http",
+      url: `http://${config.loopbackHost}:${config.port}/mcp/${taskId}`,
+    },
+  };
+  if (config.connectivityEnabled) {
+    servers[CHANNEL_SERVER_NAME] = {
+      command: "bash",
+      args: ["-lc", config.ctoChannelCmd],
+      env: {
+        BUTCHR_CHANNEL_SSE_URL: `http://${config.loopbackHost}:${config.port}/api/events`,
+        BUTCHR_CHANNEL_CONNECTIVITY_ONLY: "1",
+      },
+    };
+  }
+  return servers;
+}
+
+/**
  * Decide how to (re-)launch a task's agent and build the fully-substituted agent
  * command — the single source of truth for the fresh-vs-resume rules that
  * dispatch() used to inline. Exported so it can be unit-tested directly.
@@ -512,7 +555,8 @@ export function resolveLaunchCommand(
     .replaceAll("{{PROMPT_FILE}}", promptFile)
     .replaceAll("{{MCP_CONFIG}}", mcpConfigFile)
     .replaceAll("{{SESSION_ID}}", sessionId)
-    .replaceAll("{{MODEL_FLAG}}", modelFlag(task.model));
+    .replaceAll("{{MODEL_FLAG}}", modelFlag(task.model))
+    .replaceAll("{{CHANNEL_FLAG}}", connectivityChannelFlag());
 
   return { isResume, sessionId, agentCmd, lostContext };
 }
@@ -621,17 +665,12 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
     }
     writeFileSync(promptFile, rendered, "utf8");
 
-    // Per-task MCP config pointing the agent at butchr's /mcp/<id> endpoint.
+    // Per-task MCP config: the agent's butchr HTTP surface (/mcp/<id>) plus — when
+    // connectivity monitoring is on — the one-way connectivity channel (stdio,
+    // connectivity-only) so a live worker hears "network restored" mid-session.
     writeFileSync(
       mcpConfigFile,
-      JSON.stringify({
-        mcpServers: {
-          butchr: {
-            type: "http",
-            url: `http://${config.loopbackHost}:${config.port}/mcp/${task.id}`,
-          },
-        },
-      }),
+      JSON.stringify({ mcpServers: taskMcpServers(task.id) }),
       "utf8",
     );
 

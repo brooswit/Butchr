@@ -80,6 +80,63 @@ describe("config templates", () => {
     expect(cfgMod.config.agentCmd).toContain("{{MODEL_FLAG}}");
     expect(cfgMod.config.resumeCmd).toContain("{{MODEL_FLAG}}");
   });
+
+  test("agentCmd and resumeCmd carry the {{CHANNEL_FLAG}} placeholder", () => {
+    expect(cfgMod.config.agentCmd).toContain("{{CHANNEL_FLAG}}");
+    expect(cfgMod.config.resumeCmd).toContain("{{CHANNEL_FLAG}}");
+  });
+});
+
+describe("dispatcher — worker connectivity channel wiring", () => {
+  const PF = "/data/prompts/t.md";
+  const MC = "/data/mcp/t.json";
+
+  test("when connectivity is ON, the launch attaches the dev-channel and the MCP config registers a connectivity-only stdio server", () => {
+    const prev = cfgMod.config.connectivityEnabled;
+    cfgMod.config.connectivityEnabled = true;
+    try {
+      const r = dispatchMod.resolveLaunchCommand(
+        { started_at: null, session_id: null, model: null } as any,
+        PF,
+        MC,
+      );
+      expect(r.agentCmd).toContain(
+        "--dangerously-load-development-channels server:butchr-cto-channel",
+      );
+      expect(r.agentCmd).not.toContain("{{CHANNEL_FLAG}}");
+
+      const servers = dispatchMod.taskMcpServers("task-1") as Record<string, any>;
+      expect(servers.butchr.type).toBe("http"); // the review/raise surface is always present
+      const ch = servers["butchr-cto-channel"];
+      expect(ch).toBeDefined();
+      expect(ch.command).toBe("bash");
+      expect(ch.env.BUTCHR_CHANNEL_CONNECTIVITY_ONLY).toBe("1");
+      // It must NOT be workspace-scoped: connectivity is a global broadcast.
+      expect(ch.env.BUTCHR_CHANNEL_WORKSPACE).toBeUndefined();
+    } finally {
+      cfgMod.config.connectivityEnabled = prev;
+    }
+  });
+
+  test("when connectivity is OFF, NO channel flag and NO channel server are attached (lean launch)", () => {
+    const prev = cfgMod.config.connectivityEnabled;
+    cfgMod.config.connectivityEnabled = false;
+    try {
+      const r = dispatchMod.resolveLaunchCommand(
+        { started_at: null, session_id: null, model: null } as any,
+        PF,
+        MC,
+      );
+      expect(r.agentCmd).not.toContain("development-channels");
+      expect(r.agentCmd).not.toContain("{{CHANNEL_FLAG}}"); // placeholder still substituted (to empty)
+
+      const servers = dispatchMod.taskMcpServers("task-1") as Record<string, any>;
+      expect(servers.butchr).toBeDefined(); // the butchr surface stays
+      expect(servers["butchr-cto-channel"]).toBeUndefined();
+    } finally {
+      cfgMod.config.connectivityEnabled = prev;
+    }
+  });
 });
 
 describe("dispatcher.resolveLaunchCommand — model threading", () => {

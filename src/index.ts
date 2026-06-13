@@ -2,6 +2,7 @@
 // up clean shutdown. Run with `bun run src/index.ts` (see package.json scripts).
 import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts";
 import { config } from "./config.ts";
+import { startConnectivityMonitor, stopConnectivityMonitor } from "./connectivity.ts";
 import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import * as git from "./git.ts";
@@ -112,6 +113,11 @@ async function main(): Promise<void> {
   // Periodic, SQLite-safe snapshots of the source-of-truth db (see src/backup.ts)
   // so a crash/power loss mid-write can be rolled back to the last good copy.
   startBackupLoop();
+  // CONNECTIVITY MONITOR (EVENT-ONLY). Probes the model API for the life of the
+  // process (independent of any workspace) and, on a debounced DOWN→UP transition,
+  // BROADCASTS a `connectivity.restored` event to the CTO channel + worker channels.
+  // It takes NO recovery action itself — each recipient decides what to do.
+  startConnectivityMonitor();
 
   // Clean shutdown: stop the loops, then capture one final snapshot so the very
   // latest state survives even a deliberate restart. Async so the snapshot
@@ -127,6 +133,7 @@ async function main(): Promise<void> {
     // continuity). The reaper tracks the CTO agents separately and never orphans them.
     stopCtoSupervisor();
     stopBackupLoop();
+    stopConnectivityMonitor();
     await snapshotOnShutdown();
     process.exit(0);
   };

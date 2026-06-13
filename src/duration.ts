@@ -7,6 +7,21 @@
 //     time-to-review / time-to-merge medians — pinned by test/metrics.test.ts).
 // They are not interchangeable; keep them separate.
 
+/**
+ * Render a millisecond span as a short human phrase ("3s", "2m 5s", "1h 2m") for
+ * log lines / notification content. Pure; clamps negatives to 0. Seconds are dropped
+ * once the span is an hour or more (minute precision is plenty there).
+ */
+export function humanizeMs(ms: number): string {
+  const total = Math.max(0, Math.round((Number.isFinite(ms) ? ms : 0) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}
+
 /** Positive ms span between two ISO timestamps; null if missing or non-positive. */
 export function spanMs(a: string | null, b: string | null): number | null {
   if (!a || !b) return null;

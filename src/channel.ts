@@ -22,6 +22,7 @@
 // the pieces stay unit-testable without a live butchr or a real claude.
 import { config } from "./config.ts";
 import { ATTENTION_STATES } from "./db.ts";
+import { humanizeMs } from "./duration.ts";
 import {
   isNotificationOrIdless,
   type JsonRpcMessage,
@@ -47,7 +48,19 @@ export const CHANNEL_INSTRUCTIONS =
   "reply through this channel. For a `spec requested` event, ONLY write+submit the spec " +
   "when this workspace's `spec-generation` responder is `cto` — if it is `user`, a human " +
   "will write it, so just observe. An `agent idle` event is routed the same way by the " +
-  "`idle-handling` responder.";
+  "`idle-handling` responder. One GLOBAL event also arrives here: `connectivity_restored` " +
+  "— the host's network/model-API came back after an outage (carrying how long it was " +
+  "down); it is informational, not a task to act on.";
+
+// The instructions for a CONNECTIVITY-ONLY bridge (the WORKER channel): it delivers
+// nothing but the global connectivity-restored broadcast, so it must NOT describe the
+// CTO attention feed (a build agent is not a CTO and never sees those events here).
+export const CONNECTIVITY_ONLY_INSTRUCTIONS =
+  "One-way connectivity channel. The ONLY event delivered here is " +
+  "`connectivity_restored`: the host's network/model-API connectivity came back after " +
+  "an outage (it carries how long it was down). If your work was interrupted by the " +
+  "outage, re-orient — re-check what you have, re-commit anything lost, and continue. " +
+  "You cannot reply through this channel.";
 
 /**
  * The CTO attention transitions we push. `idea` (a brief awaiting a spec — surfaced as
@@ -81,11 +94,22 @@ const STATE_PHRASE: Record<AttentionState, string> = {
 // `idle-handling` responder to act on gracefully (nudge-with-guidance, requeue, or abort).
 const IDLE_PHRASE = "agent idle — needs idle-handling";
 
+// The human phrase for the GLOBAL connectivity-restored broadcast. Unlike the
+// attention/idle notifications this is NOT tied to a task or workspace — the network
+// the AGENTS need is back, so every connected session (CTO + each live worker) should
+// re-orient (re-check its work, re-commit anything lost) and continue.
+const CONNECTIVITY_RESTORED_PHRASE =
+  "network connectivity RESTORED — the model API is reachable again. If your work was " +
+  "interrupted by the outage, re-orient: re-check what you have, re-commit anything " +
+  "lost, and continue.";
+
 /** The channel notification payload (params of `notifications/claude/channel`). */
 export type ChannelNotification = {
   content: string;
   // Identifier-keyed metadata (keys are bare identifiers: letters/digits/underscore).
-  meta: { task_id: string; workspace: string; state: string };
+  // Always carries `state`; task-scoped notifications add task_id/workspace, while the
+  // GLOBAL connectivity-restored broadcast carries restored_at/down_ms instead.
+  meta: { state: string } & Record<string, string | number>;
 };
 
 // --- initialize result -------------------------------------------------------
@@ -95,7 +119,10 @@ export type ChannelNotification = {
  * capability under `experimental` and DELIBERATELY omits `tools` (and everything
  * else). Pure + exported so a test can assert the one-way shape.
  */
-export function channelInitializeResult(requestedProtocol?: string): {
+export function channelInitializeResult(
+  requestedProtocol?: string,
+  connectivityOnly = false,
+): {
   protocolVersion: string;
   capabilities: { experimental: { "claude/channel": Record<string, never> } };
   serverInfo: { name: string; version: string };
@@ -107,7 +134,7 @@ export function channelInitializeResult(requestedProtocol?: string): {
     // ONE-WAY: channel capability only. No `tools`, no `resources`, no `prompts`.
     capabilities: { experimental: { "claude/channel": {} } },
     serverInfo: { name: CHANNEL_SERVER_NAME, version: "1.0.0" },
-    instructions: CHANNEL_INSTRUCTIONS,
+    instructions: connectivityOnly ? CONNECTIVITY_ONLY_INSTRUCTIONS : CHANNEL_INSTRUCTIONS,
   };
 }
 
@@ -187,9 +214,16 @@ export class AttentionBridge {
   // events. Unset (empty/undefined) → unscoped: every workspace's events flow (the
   // legacy global feed).
   private readonly scopeDir: string;
+  // CONNECTIVITY-ONLY mode. When true (the WORKER bridge), consume() emits ONLY the
+  // global `connectivity.restored` broadcast and SUPPRESSES every attention/idle
+  // notification — a live build agent must NEVER see another task's review/idle/
+  // attention events (that would be a confusing leak). The CTO bridge leaves this OFF
+  // and gets the full attention feed PLUS connectivity.
+  private readonly connectivityOnly: boolean;
 
-  constructor(scopeDir?: string) {
+  constructor(scopeDir?: string, connectivityOnly = false) {
     this.scopeDir = (scopeDir ?? "").trim();
+    this.connectivityOnly = connectivityOnly;
   }
 
   /** Seed the workspace-label cache (best-effort, e.g. from GET /api/workspaces). */
@@ -208,6 +242,26 @@ export class AttentionBridge {
   consume(event: unknown): ChannelNotification | null {
     if (!event || typeof event !== "object") return null;
     const e = event as Record<string, unknown>;
+
+    // GLOBAL connectivity-restored broadcast — handled FIRST, BEFORE the scope/mode
+    // gates and the task-event handling, because it is neither workspace-scoped nor
+    // task-scoped: the network the AGENTS need is back, so EVERY connected session
+    // gets it (any scopeDir, AND in connectivity-only mode). EVENT-ONLY — it just
+    // surfaces the recovery; the recipient decides what to do.
+    if (e.type === "connectivity.restored") {
+      const restoredAt = typeof e.restoredAt === "string" ? e.restoredAt : "";
+      const downMs = typeof e.downMs === "number" && e.downMs >= 0 ? e.downMs : 0;
+      const dur = downMs > 0 ? `~${humanizeMs(downMs)}` : "an unknown period";
+      const content = `${CONNECTIVITY_RESTORED_PHRASE} (was down ${dur})`;
+      return {
+        content,
+        meta: { state: "connectivity_restored", restored_at: restoredAt, down_ms: downMs },
+      };
+    }
+
+    // CONNECTIVITY-ONLY (the worker bridge): nothing past the connectivity broadcast
+    // above is delivered — no attention, no idle, no label tracking.
+    if (this.connectivityOnly) return null;
 
     // Keep the workspace-label cache fresh off the same stream.
     if (e.type === "workspace.created" || e.type === "workspace.updated") {
@@ -391,13 +445,16 @@ export async function runSseLoop(opts: SseLoopOpts): Promise<void> {
  * object to write back, or null for notifications (which get no reply). This bridge
  * exposes NO tools — only the channel lifecycle methods (initialize / ping).
  */
-export function handleRpc(msg: JsonRpcMessage): Record<string, unknown> | null {
+export function handleRpc(
+  msg: JsonRpcMessage,
+  connectivityOnly = false,
+): Record<string, unknown> | null {
   if (!msg || typeof msg.method !== "string") return null;
   switch (msg.method) {
     case "initialize":
       return jsonRpcResult(
         msg.id,
-        channelInitializeResult(msg.params?.protocolVersion),
+        channelInitializeResult(msg.params?.protocolVersion, connectivityOnly),
       );
     case "ping":
       return jsonRpcResult(msg.id, {});
@@ -448,22 +505,33 @@ export async function main(): Promise<void> {
   // agent and passes that workspace_id via BUTCHR_CHANNEL_WORKSPACE, so the bridge pushes
   // only that workspace's attention events. Unset → an unscoped (all-workspaces) feed.
   const scopeDir = (process.env.BUTCHR_CHANNEL_WORKSPACE ?? "").trim();
-  const bridge = new AttentionBridge(scopeDir);
+  // CONNECTIVITY-ONLY (the WORKER bridge): deliver ONLY the global connectivity-restored
+  // broadcast, suppressing every attention/idle event. Set by the dispatcher on the
+  // per-task channel server (BUTCHR_CHANNEL_CONNECTIVITY_ONLY=1) so a build agent hears
+  // "network restored" mid-session but never another task's review/idle events.
+  const connectivityOnly = /^(1|true|yes|on)$/i.test(
+    (process.env.BUTCHR_CHANNEL_CONNECTIVITY_ONLY ?? "").trim(),
+  );
+  const bridge = new AttentionBridge(scopeDir, connectivityOnly);
   if (scopeDir) elog(`scoped to workspace ${scopeDir}`);
+  if (connectivityOnly) elog("connectivity-only mode (worker channel)");
   let stopped = false;
 
   // Best-effort seed of workspace labels so the very first notifications carry a
   // human label rather than a bare workspace id (the cache then self-updates off the
-  // workspace.* events on the stream).
-  try {
-    const base = url.replace(/\/api\/events.*$/, "");
-    const res = await fetch(`${base}/api/workspaces`);
-    if (res.ok) {
-      const dirs = await res.json();
-      if (Array.isArray(dirs)) bridge.seedWorkspaceLabels(dirs);
+  // workspace.* events on the stream). Skipped in connectivity-only mode — that bridge
+  // emits no workspace-labelled notifications, so there is nothing to seed.
+  if (!connectivityOnly) {
+    try {
+      const base = url.replace(/\/api\/events.*$/, "");
+      const res = await fetch(`${base}/api/workspaces`);
+      if (res.ok) {
+        const dirs = await res.json();
+        if (Array.isArray(dirs)) bridge.seedWorkspaceLabels(dirs);
+      }
+    } catch {
+      /* seeding is optional */
     }
-  } catch {
-    /* seeding is optional */
   }
 
   // Translate each SSE event into a channel notification (if it is a transition).
@@ -511,7 +579,7 @@ export async function main(): Promise<void> {
     }
     let res: Record<string, unknown> | null = null;
     try {
-      res = handleRpc(msg);
+      res = handleRpc(msg, connectivityOnly);
     } catch (e) {
       elog(`rpc error: ${(e as Error).message}`);
       return;
