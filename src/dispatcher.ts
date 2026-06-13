@@ -25,6 +25,7 @@ import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
+import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
 import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
@@ -481,6 +482,33 @@ export function connectivityChannelFlag(): string {
 }
 
 /**
+ * LAUNCH AUTO-CONFIRM for a freshly-dispatched WORKER — the symmetric counterpart to
+ * the CTO's launch auto-confirm (cto-agent.ts performLaunch). When connectivity is ON,
+ * a worker carries `--dangerously-load-development-channels` (connectivityChannelFlag),
+ * and Claude Code stops on the BLOCKING dev-channels consent prompt the first time the
+ * session loads it ("1. I am using this for local development"); left unanswered the
+ * worker never reaches its task. This polls the live pane and sends the safe confirming
+ * response (also covering the folder-trust / generic prompts the rule table handles).
+ *
+ * Reuses src/startup-confirm.ts as-is with the SAME launch-auto-confirm config the CTO
+ * uses. Best-effort + bounded + idempotent: a confirming keystroke is sent ONLY while a
+ * prompt is actually on screen (de-bounced), so once the worker is past startup nothing
+ * leaks into its real session; it never throws (so it can never fail a dispatch).
+ * Exported so the dispatcher startup path is unit-testable directly.
+ */
+export function autoConfirmTaskStartup(name: string): Promise<string[]> {
+  return autoConfirmStartupPrompts(name, {
+    read: (n) => harness.agentRead(n),
+    send: (n, input) => harness.send(n, input),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    pollMs: config.ctoPromptPollMs,
+    maxPolls: config.ctoPromptMaxPolls,
+    quietPolls: config.ctoPromptQuietPolls,
+    log: (m) => console.log(`[butchr] task ${name}: ${m}`),
+  }).catch(() => []);
+}
+
+/**
  * The per-task MCP servers config. ALWAYS includes `butchr` (the HTTP review/raise
  * surface at /mcp/<id>). When connectivity monitoring is ON, ALSO registers the one-way
  * connectivity channel as a STDIO server in CONNECTIVITY-ONLY mode
@@ -719,6 +747,16 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
 
     markRunning(task.id, paneId, sessionId, tabId, groundingFp);
     spawnWatcher(dir, task.id, paneId, logFile, doneFile);
+
+    // LAUNCH AUTO-CONFIRM: when connectivity is on, this worker carries the
+    // dev-channel flag (connectivityChannelFlag) and Claude Code blocks on the
+    // dev-channels consent prompt the first time it loads — clear it so the worker
+    // reaches its task unattended. Symmetric to the CTO's launch auto-confirm.
+    // Gated on connectivityEnabled (no flag → no consent prompt); best-effort +
+    // idempotent, so it can never wedge or fail an already-running dispatch. Fired
+    // AFTER markRunning/spawnWatcher (task tracked first) and NOT awaited so it never
+    // delays the dispatch — it polls the pane in the background.
+    if (config.connectivityEnabled) void autoConfirmTaskStartup(task.id);
   } catch (e) {
     // Dispatch failed — re-queue so the next tick retries. Any herdr tab/agent we
     // created was already torn down inside the locked section above (where its id

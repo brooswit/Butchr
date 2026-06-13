@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Worker dispatch no longer hangs on the dev-channels consent prompt.** Since the
+  connectivity-restored feature attaches `--dangerously-load-development-channels` to
+  WORKER (build-agent) launches, every freshly dispatched worker stopped at Claude
+  Code's blocking interactive dev-channels consent prompt ("1. I am using this for
+  local development") and never reached its task — butchr's launch auto-confirm
+  (`autoConfirmStartupPrompts`, src/startup-confirm.ts) was only wired into the CTO
+  launch, not the worker dispatch path. The dispatcher now runs the same best-effort,
+  bounded, idempotent auto-confirm (new `autoConfirmTaskStartup`) on a freshly launched
+  worker — gated on `connectivityEnabled` (only then does the worker carry the flag) —
+  so it clears the consent (plus the folder-trust / generic prompts the rule table
+  covers) and proceeds unattended. The confirm is prompt-gated, so once past startup no
+  stray keystroke leaks into the worker's real session.
+
 ## [0.9.78] - 2026-06-13
 
 ### Fixed
