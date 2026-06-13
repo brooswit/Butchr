@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.77] - 2026-06-13
+
 ### Added
 - **Connectivity-restored event (event-only).** butchr now runs a network
   connectivity monitor (`src/connectivity.ts`) that periodically probes the model API
