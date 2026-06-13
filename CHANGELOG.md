@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CTO agent now AUTO-RECOVERS after a host reboot (no manual "restart" needed).** The
+  managed CTO adopt path (`adoptOrLaunch` in `src/cto-agent.ts`) decided adopt-vs-launch
+  using ONLY `harness.agentExists(name)`, which stays TRUE after a reboot — herdr restores
+  the pane as a bare login shell while the `claude` process is dead — so butchr ADOPTED the
+  dead husk pane and the operator saw a BLANK shell where the CTO should be, fixable only by
+  hitting "restart" by hand. The adopt path now also requires the OS PROCESS to be alive,
+  mirroring the build-agent paths (`reaper`/`dispatcher` already probe `claudeAlive`). A new
+  tri-state probe `claudeLiveness(sessionId)` in `src/liveness.ts` (reusing the same
+  injectable `/proc` lister) returns `alive` / `dead` / `unknown`, where `dead` is the
+  unambiguous reboot signal (the lister RAN — processes present — but none carry the session
+  token) and `unknown` covers "can't probe" (no `/proc` / no recorded session id). adopt
+  behavior: `alive` → ADOPT (a healthy CTO is never relaunched — double-launching a live
+  session would be worse than the bug); `unknown` → ADOPT (indeterminate, never risk a
+  double-launch); `dead` → tear down the stale pane/tab + free the name FIRST, then relaunch
+  with `--resume <persisted session_id>` so the CTO keeps full context. This runs inside the
+  existing boot `reconcileCtoAgent` and the periodic supervisor, so a butchr restart after a
+  host reboot relaunches the CTO automatically with no operator action. Build agents already
+  auto-recover on reboot via the reaper's `claudeAlive` requeue — confirmed, no gap there.
+
 ## [0.9.77] - 2026-06-13
 
 ### Added

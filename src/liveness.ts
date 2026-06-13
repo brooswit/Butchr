@@ -82,3 +82,30 @@ export function claudeAlive(sessionId: string | null | undefined): boolean {
   }
   return false;
 }
+
+/**
+ * Tri-state liveness for a session id — the SAME /proc probe as `claudeAlive`, but it
+ * separates "provably DEAD" from "can't PROVE anything," which a boolean cannot:
+ *   - `"alive"`   — some live process carries the session id as a distinct argv token.
+ *   - `"dead"`    — the lister returned processes (the probe RAN) but NONE carry the
+ *                   token. This is the host-reboot case: claude was killed, /proc is
+ *                   readable, the token is gone → an UNAMBIGUOUS dead signal.
+ *   - `"unknown"` — the probe could not run: a blank/missing session id (nothing to key
+ *                   on) OR an EMPTY lister (no /proc — non-Linux/sandboxed). We cannot
+ *                   distinguish dead from alive, so callers must NOT treat this as dead.
+ *
+ * Callers that gate a relaunch on death (e.g. the CTO adopt path) act ONLY on `"dead"`;
+ * `"alive"` and `"unknown"` both mean "do not relaunch" (never risk double-launching a
+ * possibly-live agent on an indeterminate signal). Reuses the injectable `lister`, so
+ * tests drive it deterministically via `setCmdlineLister`. Never throws.
+ */
+export function claudeLiveness(sessionId: string | null | undefined): "alive" | "dead" | "unknown" {
+  const sid = sessionId?.trim();
+  if (!sid) return "unknown"; // no session id → nothing to probe
+  const procs = lister();
+  if (procs.length === 0) return "unknown"; // probe could not run (no /proc) → indeterminate
+  for (const argv of procs) {
+    if (argv.includes(sid)) return "alive";
+  }
+  return "dead"; // /proc readable, processes present, token gone → provably dead (reboot)
+}

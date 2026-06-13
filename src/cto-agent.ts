@@ -55,6 +55,7 @@ import { publish } from "./events.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
+import { claudeLiveness } from "./liveness.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
 
 // butchr's own state dir for the CTO agents' generated artifacts (never the repo).
@@ -441,16 +442,42 @@ async function publishStatus(workspaceId: string): Promise<CtoStatus> {
 }
 
 /**
- * The single 'live agent registered → adopt, else launch' decision, shared by
- * startCtoAgent and reconcileCtoAgent. Probes harness.agentExists EXACTLY ONCE: a live
- * agent (and not a forced-`fresh` start) is ADOPTED rather than double-launched
- * (single-instance per workspace); otherwise we launch. Returns which path it took.
- * Callers hold the per-workspace guard.
+ * The 'live agent registered → adopt, else launch' decision, shared by startCtoAgent
+ * and reconcileCtoAgent. A registered herdr agent (and not a forced-`fresh` start) is
+ * normally ADOPTED rather than double-launched (single-instance per workspace).
+ *
+ * BUT `harness.agentExists` only checks that herdr still has the agent NAME/pane
+ * registered — NOT that the `claude` PROCESS is alive. After a HOST REBOOT the pane
+ * persists as a bare login shell (claude died with the reboot) while the name stays
+ * registered, so adopting it would leave a BLANK shell where the CTO should be (the
+ * exact divergence src/liveness.ts documents). So we additionally probe the OS process
+ * (claudeLiveness on the persisted session id, mirroring the build-agent paths):
+ *   - `alive`   → ADOPT (a healthy CTO is NEVER relaunched — double-launching a live
+ *                 session would be worse than the bug).
+ *   - `unknown` → ADOPT (no /proc / no recorded session id — indeterminate, so we must
+ *                 not risk double-launching a possibly-live CTO on an ambiguous signal).
+ *   - `dead`    → the reboot case: tear down the stale husk pane/tab + free the name
+ *                 FIRST (no duplicate/zombie pane), then fall through to a fresh launch
+ *                 that `--resume`s the persisted session (resolveCtoSession), preserving
+ *                 the CTO's full context. No operator action required.
+ * Returns which path it took. Callers hold the per-workspace guard.
  */
 async function adoptOrLaunch(workspaceId: string, fresh: boolean): Promise<"adopted" | "launched"> {
-  if (!fresh && (await harness.agentExists(ctoAgentName(workspaceId)))) {
-    await adoptCtoAgent(workspaceId);
-    return "adopted";
+  const name = ctoAgentName(workspaceId);
+  if (!fresh && (await harness.agentExists(name))) {
+    const row = getCtoAgentRow(workspaceId);
+    if (claudeLiveness(row?.session_id) !== "dead") {
+      // alive OR unknown → adopt the live/maybe-live agent (never double-launch).
+      await adoptCtoAgent(workspaceId);
+      return "adopted";
+    }
+    // pane exists but claude is PROVABLY dead (reboot) → tear down the stale pane/tab and
+    // free the name before relaunching, so there's no duplicate/zombie pane.
+    console.log(
+      `[butchr] CTO agent for ${workspaceId} has a registered pane but a DEAD claude (host reboot suspected) — tearing down the stale pane and relaunching (--resume)`,
+    );
+    await harness.teardownTask(row?.herdr_tab_id, name, row?.herdr_pane_id).catch(() => {});
+    await harness.agentDeregister(name).catch(() => {});
   }
   await performLaunch(workspaceId, fresh);
   return "launched";

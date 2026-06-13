@@ -19,7 +19,7 @@
 //
 // config fields are set DIRECTLY on the imported config object (not via env) so the
 // test is deterministic regardless of bun's shared-config import order.
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +29,7 @@ let DATA_DIR: string;
 let dbMod: typeof import("../src/db.ts");
 let cfgMod: typeof import("../src/config.ts");
 let harnessMod: typeof import("../src/harness.ts");
+let livenessMod: typeof import("../src/liveness.ts");
 let cto: typeof import("../src/cto-agent.ts");
 let originalRunner: AgentRunner;
 
@@ -55,6 +56,7 @@ beforeAll(async () => {
   cfgMod = await import("../src/config.ts");
   dbMod = await import("../src/db.ts");
   harnessMod = await import("../src/harness.ts");
+  livenessMod = await import("../src/liveness.ts");
   cto = await import("../src/cto-agent.ts");
   originalRunner = harnessMod.getRunner();
 
@@ -99,7 +101,11 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     tabClose: [] as Array<string | null | undefined>,
     agentDeregister: 0,
     teardownTask: 0,
+    teardownArgs: [] as Array<{ tab: string | null | undefined; name: string; pane: string | null | undefined }>,
     paneClose: [] as string[],
+    // Ordered log of lifecycle calls (additive) so a test can assert teardown ran
+    // BEFORE the relaunch in the reboot case.
+    order: [] as string[],
   };
   const runner: AgentRunner = {
     async isUp() { return true; },
@@ -111,6 +117,7 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     async agentTabId(name) { return live(name) ? "cto-tab" : undefined; },
     async agentStart(name, cwd, argv, _ws, tabId): Promise<StartedAgent> {
       calls.agentStart.push({ name, cwd, argv, tabId });
+      calls.order.push("agentStart");
       started.add(name);
       return { paneId: "pane-raw", terminalId: "term-1" };
     },
@@ -130,8 +137,13 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     async agentRead() { return ""; }, // no startup prompt → auto-confirm exits at once
     async send() {},
     async paneClose(target) { calls.paneClose.push(target); },
-    async teardownTask(_tab, name) { calls.teardownTask++; if (name) started.delete(name); },
-    async agentDeregister(name) { calls.agentDeregister++; started.delete(name); },
+    async teardownTask(tab, name, pane) {
+      calls.teardownTask++;
+      calls.teardownArgs.push({ tab, name, pane });
+      calls.order.push("teardownTask");
+      if (name) started.delete(name);
+    },
+    async agentDeregister(name) { calls.agentDeregister++; calls.order.push("agentDeregister"); started.delete(name); },
     async runHeadless() { return { ok: true, code: 0, stdout: "", stderr: "", timedOut: false }; },
   };
   return { runner, calls };
@@ -324,6 +336,79 @@ describe("CTO agent boot reconcile (per workspace)", () => {
     const counts = await cto.reconcileCtoAgents(true);
     // Both DIR and DIR2 are enabled + have no live agent → both launched.
     expect(counts.launched).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("CTO agent reboot auto-recovery (adopt requires a LIVE claude process)", () => {
+  // adoptOrLaunch (driven through reconcileCtoAgent) must not adopt a registered-but-DEAD
+  // pane: after a host reboot herdr keeps the agent NAME/pane (a bare shell) while claude
+  // is gone, so `agentExists` lies. We gate adopt on the OS-process probe (claudeLiveness),
+  // injected here via the liveness module's lister so no real processes are touched.
+  const SID = "cto-sess-reboot";
+
+  afterEach(() => {
+    livenessMod.setCmdlineLister(null); // restore the real /proc lister for other suites
+  });
+
+  test("pane-exists + claude ALIVE → ADOPTS (no relaunch)", async () => {
+    dbMod.saveCtoAgentRow(DIR, { session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1 });
+    // A live process carries the session id as a distinct argv token → "alive".
+    livenessMod.setCmdlineLister(() => [["claude", "--resume", SID, "--mcp-config", "x"]]);
+    const { runner, calls } = makeFake({ alive: true });
+    harnessMod.setRunner(runner);
+
+    const res = await cto.reconcileCtoAgent(DIR, true);
+
+    expect(res.action).toBe("adopted");
+    expect(calls.agentStart.length).toBe(0); // healthy CTO is NEVER relaunched
+    expect(calls.teardownTask).toBe(0); // and the live pane is left untouched
+  });
+
+  test("pane-exists + claude DEAD → RELAUNCHES via --resume, tearing down the stale pane FIRST (THE REBOOT CASE)", async () => {
+    dbMod.saveCtoAgentRow(DIR, { session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1 });
+    // /proc is readable (non-empty) but NO process carries the session id → "dead".
+    livenessMod.setCmdlineLister(() => [["bash", "-lc", "sleep"], ["systemd"]]);
+    const { runner, calls } = makeFake({ alive: true }); // pane/name still registered (husk shell)
+    harnessMod.setRunner(runner);
+
+    const res = await cto.reconcileCtoAgent(DIR, true);
+
+    expect(res.action).toBe("launched");
+    expect(calls.agentStart.length).toBe(1);
+    // Context preserved: the relaunch RESUMES the persisted session.
+    expect(calls.agentStart[0]!.argv.join(" ")).toContain(`--resume ${SID}`);
+    // The stale pane/tab was torn down + the name freed BEFORE the relaunch.
+    expect(calls.teardownTask).toBe(1);
+    expect(calls.teardownArgs[0]).toEqual({ tab: "tab-stale", name: cto.ctoAgentName(DIR), pane: "pane-stale" });
+    expect(calls.agentDeregister).toBeGreaterThanOrEqual(1);
+    const firstStart = calls.order.indexOf("agentStart");
+    expect(calls.order.indexOf("teardownTask")).toBeLessThan(firstStart);
+    expect(calls.order.indexOf("agentDeregister")).toBeLessThan(firstStart);
+    expect(row()!.session_id).toBe(SID); // same session preserved on the row
+  });
+
+  test("pane-exists but the probe CANNOT run (empty lister / no /proc) → ADOPTS (indeterminate, never double-launch)", async () => {
+    dbMod.saveCtoAgentRow(DIR, { session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1 });
+    livenessMod.setCmdlineLister(() => []); // can't prove anything → "unknown"
+    const { runner, calls } = makeFake({ alive: true });
+    harnessMod.setRunner(runner);
+
+    const res = await cto.reconcileCtoAgent(DIR, true);
+
+    expect(res.action).toBe("adopted"); // indeterminate signal → adopt, do NOT relaunch
+    expect(calls.agentStart.length).toBe(0);
+    expect(calls.teardownTask).toBe(0);
+  });
+
+  test("pane-ABSENT → LAUNCHES (nothing to adopt)", async () => {
+    livenessMod.setCmdlineLister(() => [["bash", "-lc", "sleep"]]); // irrelevant: no pane registered
+    const { runner, calls } = makeFake({ alive: false }); // agentExists → false
+    harnessMod.setRunner(runner);
+
+    const res = await cto.reconcileCtoAgent(DIR, true);
+
+    expect(res.action).toBe("launched");
+    expect(calls.agentStart.length).toBe(1);
   });
 });
 
