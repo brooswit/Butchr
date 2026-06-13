@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.80] - 2026-06-13
+
 ### Fixed
 - **An EMPTY review submission is now bounced back instead of entering review on a
   falsely-green CI.** When a build agent called `request_review` but its branch carried
