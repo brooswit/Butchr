@@ -88,6 +88,20 @@ export async function commitsBehind(dir: string, taskId: string): Promise<number
 }
 
 /**
+ * Whether the task branch ref <taskId> exists in the repo at `dir`. Used by the
+ * empty-submission guard (tasks.markReviewFromAgent) to confirm the submission is even
+ * MEASURABLE before concluding it carries no changes: with no task branch there is
+ * nothing to diff against, so the guard FAILS OPEN (proceeds to review) rather than
+ * false-bouncing a submission it cannot probe. Best-effort: false on any git error.
+ */
+export async function branchExists(dir: string, taskId: string): Promise<boolean> {
+  const res = await run([
+    git, "-C", dir, "rev-parse", "--verify", "--quiet", `refs/heads/${taskId}`,
+  ]);
+  return res.ok;
+}
+
+/**
  * Absolute path to a task's git worktree: <dir>/<taskId>. The single source of
  * truth for where a task's checkout lives — used by createWorktree/diff/merge here
  * and by the CI gate (tasks.ts) to run build/tests in the task's tree.

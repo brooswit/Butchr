@@ -15,7 +15,7 @@
 // non-transition (a duplicate request_review) records NO extra event.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -94,12 +94,16 @@ describe("task_events audit timeline", () => {
     tasksMod.markRunning(id, "pane-1", "sess-lifecycle-1", "tab-1");
     expect(tasksMod.getTask(id)!.status).toBe("in_progress");
 
+    // The "agent" does some real work in its worktree so the submission is non-empty
+    // (markReviewFromAgent bounces an EMPTY submission rather than entering review).
+    writeFileSync(join(REPO_ROOT, id, "work.txt"), "did the thing\n");
+
     // in_progress -> in_review (agent requested review)
-    expect(tasksMod.markReviewFromAgent(id, "all done")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "all done")).toBe("ok");
     expect(tasksMod.getTask(id)!.status).toBe("in_review");
 
     // A DUPLICATE request_review (in_review -> in_review) is NOT a transition: no event.
-    expect(tasksMod.markReviewFromAgent(id, "still done")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "still done")).toBe("ok");
 
     // in_review -> inactive (reviewer requested changes; re-queued for resume)
     await tasksMod.rejectTask(id, "please tweak the thing");

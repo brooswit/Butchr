@@ -98,7 +98,7 @@ describe("commit-on-review durability", () => {
     expect(commitsAhead(id)).toBe(0);
 
     // Live request_review: in_progress → in_review.
-    expect(tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
     expect(row(id).status).toBe("in_review");
 
     // The diff is now COMMITTED on the branch (branch ahead of base) as a WIP commit —
@@ -138,7 +138,7 @@ describe("commit-on-review durability", () => {
     const wt = join(REPO_ROOT, id);
     // First pass: uncommitted file1 → review.
     writeFileSync(join(wt, "file1.txt"), "first pass\n");
-    expect(tasksMod.markReviewFromAgent(id, "v1")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "v1")).toBe("ok");
     expect(row(id).status).toBe("in_review");
     const afterFirst = commitsAhead(id);
     expect(afterFirst).toBeGreaterThan(0);
@@ -154,7 +154,7 @@ describe("commit-on-review durability", () => {
 
     // Resumed agent makes FURTHER (uncommitted) changes on top of the WIP commit.
     writeFileSync(join(wt, "file2.txt"), "second pass\n");
-    expect(tasksMod.markReviewFromAgent(id, "v2")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "v2")).toBe("ok");
     expect(row(id).status).toBe("in_review");
 
     // Approve → MECHANICAL merge. The agent's further changes must merge cleanly.
@@ -174,7 +174,7 @@ describe("commit-on-review durability", () => {
 
     // The work is still committed (durability is unconditional — we never DROP work,
     // even poisoned work; the merge gate, not this commit, protects the base).
-    expect(tasksMod.markReviewFromAgent(id, "oops markers")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "oops markers")).toBe("ok");
     expect(row(id).status).toBe("in_review");
     expect(commitsAhead(id)).toBeGreaterThan(0);
     expect(g(["show", `${id}:conflict.txt`])).toContain("<<<<<<<");

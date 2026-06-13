@@ -237,7 +237,7 @@ describe("the full idea → spec_review → inactive → in_progress → in_revi
     g(["commit", "-q", "-m", "add pipeline.txt"], wt);
 
     // in_progress → in_review: the agent calls request_review.
-    const state = tasksMod.markReviewFromAgent(t.id, "done");
+    const state = await tasksMod.markReviewFromAgent(t.id, "done");
     expect(state).toBe("ok");
     expect(row(t.id).status).toBe("in_review");
 

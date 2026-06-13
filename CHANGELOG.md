@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An EMPTY review submission is now bounced back instead of entering review on a
+  falsely-green CI.** When a build agent called `request_review` but its branch carried
+  no work — zero commits ahead of the default branch AND a clean worktree (e.g. a
+  `git reset` wiped its uncommitted changes) — butchr routed it into `in_review`, where
+  the CI gate built the empty tree green and presented a clean, reviewable diff that was
+  actually nothing (an incident that only manual git/reflog forensics caught).
+  `markReviewFromAgent` (the `request_review` path) now checks FIRST, on the genuine
+  `in_progress` submission, whether the branch actually has changes — reusing the
+  existing `git.hasChanges` probe (commits-ahead OR a dirty worktree via
+  `git status --porcelain`, so brand-new UNTRACKED files still count as real work). An
+  empty submission is bounced like a changes-request (→ `inactive` with an actionable
+  `review_note`, re-launched in the same session) and the `request_review` tool reports
+  `empty` so the agent knows it submitted nothing; a non-empty submission (committed or
+  merely uncommitted — including docs/changelog-only changes) is unaffected and enters
+  review as before. The guard runs only on the live agent-submission path and FAILS OPEN
+  when there is no task branch to measure against, so a real submission is never
+  false-bounced; the dead-agent rescue paths (which deliberately hand a stuck agent to a
+  human) are untouched.
+
 ## [0.9.79] - 2026-06-13
 
 ### Fixed

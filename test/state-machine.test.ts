@@ -249,7 +249,7 @@ describe("3. in_review approve → MECHANICAL MERGE → merged", () => {
   test("approve merges the in_review task MECHANICALLY (no finalize agent)", async () => {
     const id = await buildReadyTask("build a thing", "thing.txt", "thing\n");
     // Build agent submits → in_review.
-    expect(tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
     expect(row(id).status).toBe("in_review");
 
     // Approve → the mechanical merge runs synchronously inside approveTask (no finalize
@@ -313,7 +313,7 @@ describe("5. the unified feedback mechanism (one code path)", () => {
 
     // in_review request_changes via respondToFeedback → resume the agent (→ inactive).
     const b = await buildReadyTask("unified review", "u2.txt", "u2\n");
-    tasksMod.markReviewFromAgent(b, "done");
+    await tasksMod.markReviewFromAgent(b, "done");
     const r2 = await tasksMod.respondToFeedback(b, { type: "request_changes", note: "tweak it" });
     expect(r2.task.status).toBe("inactive");
     expect(row(b).review_note).toContain("tweak it");
@@ -337,7 +337,7 @@ describe("5. the unified feedback mechanism (one code path)", () => {
     expect(err?.status).toBe(409);
 
     // in_review does not accept `answer`.
-    tasksMod.markReviewFromAgent(id, "done");
+    await tasksMod.markReviewFromAgent(id, "done");
     let err2: any;
     try {
       await tasksMod.respondToFeedback(id, { type: "answer", answer: "x" });

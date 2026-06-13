@@ -299,7 +299,21 @@ async function awaitingInputTool(
  */
 async function runRequestReview(taskId: string, args: any): Promise<ToolResult> {
   const summary: string | undefined = args.summary;
-  const state = markReviewFromAgent(taskId, summary);
+  const state = await markReviewFromAgent(taskId, summary);
+  if (state === "empty") {
+    // The submission carried NO changes vs the base branch — butchr refused to enter
+    // review and bounced the task back for rework (it will be re-launched in this same
+    // session). Tell the agent plainly so it doesn't think the empty submit succeeded.
+    return toolResult({
+      status: "empty",
+      message:
+        "Your submission had NO changes vs the base branch (zero commits ahead and a " +
+        "clean worktree), so it was NOT submitted for review — an empty diff is never " +
+        "a real review. The work may have been lost or never started. butchr will " +
+        "re-launch you in this same session to actually do the work; then call " +
+        "request_review again.",
+    });
+  }
   if (state !== "ok") {
     return terminalStatusResult(taskId);
   }

@@ -191,7 +191,7 @@ describe("triggerCi persistence", () => {
 });
 
 describe("review-transition trigger", () => {
-  test("markReviewFromAgent (in_progress→in_review) kicks off CI", () => {
+  test("markReviewFromAgent (in_progress→in_review) kicks off CI", async () => {
     const id = seed({ id: "trig-agent", status: "in_progress", worktree: true });
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
@@ -199,7 +199,7 @@ describe("review-transition trigger", () => {
       return new Promise(() => {}); // never resolves: leaves ci_status='running'
     });
 
-    expect(tasksMod.markReviewFromAgent(id)).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id)).toBe("ok");
     // CI was kicked off synchronously by the transition.
     expect(calls).toEqual([id]);
     expect(row(id).status).toBe("in_review");
@@ -222,7 +222,7 @@ describe("review-transition trigger", () => {
     expect(row(id).ci_status).toBe("running");
   });
 
-  test("a duplicate request_review (review→review) does NOT re-run CI", () => {
+  test("a duplicate request_review (review→review) does NOT re-run CI", async () => {
     const id = seed({ id: "trig-dup", status: "in_review", worktree: true });
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
@@ -230,7 +230,7 @@ describe("review-transition trigger", () => {
       return new Promise(() => {});
     });
 
-    expect(tasksMod.markReviewFromAgent(id, "again")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "again")).toBe("ok");
     expect(calls).toEqual([]); // no re-trigger on a non-transition
   });
 

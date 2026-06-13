@@ -2476,6 +2476,25 @@ export function markInReview(id: string, snapshot: string): void {
 }
 
 /**
+ * The actionable note the agent is re-launched with when it submits an EMPTY review
+ * (see markReviewFromAgent's guard). Tells it exactly what was wrong (zero changes vs
+ * `base`) and what to do — butchr captures the worktree, so it need not commit.
+ */
+function emptySubmissionNote(id: string, base: string): string {
+  return [
+    `Your \`request_review\` submission was EMPTY: branch \`${id}\` has zero commits`,
+    `ahead of \`${base}\` AND a clean worktree, so there are no changes to review.`,
+    `butchr did NOT enter review — an empty diff is never a real submission (and the`,
+    `CI gate would build the empty tree green, hiding that nothing was done).`,
+    ``,
+    `This usually means the work was lost (e.g. a \`git reset\` wiped uncommitted`,
+    `changes) or never started. Do the actual work now, then call \`request_review\``,
+    `again. You do NOT need to commit — butchr captures your worktree changes`,
+    `automatically; just make sure the work is actually present in the worktree.`,
+  ].join("\n");
+}
+
+/**
  * The agent called the MCP `request_review` tool. The build (in_progress) agent is the
  * only workspace-agent phase that runs now (there is no post-approval 'final thoughts'
  * agent — approval merges MECHANICALLY, see finalizeMerge):
@@ -2484,15 +2503,58 @@ export function markInReview(id: string, snapshot: string): void {
  *    right after, so we clear herdr_pane_id (its pane is about to close).
  *  - in_review (duplicate call) → no-op ok.
  *
+ * EMPTY-SUBMISSION GUARD (FIRST): an in_progress submission carrying NO work — zero
+ * commits ahead of the default branch AND a clean worktree — is bounced back like a
+ * changes-request (→ inactive, re-launched in the same session with an actionable note)
+ * instead of entering review on a falsely-green empty diff. Only the genuine in_progress
+ * transition is checked (a duplicate in_review call stays a no-op `ok`); it reuses the
+ * existing git.hasChanges probe (commits-ahead OR a dirty worktree, untracked files
+ * included), run BEFORE parkExitingAgent's auto-commit so real-but-uncommitted work still
+ * counts as non-empty; and it FAILS OPEN (proceeds to review) when there is no task branch
+ * to measure against, so a real submission is never false-bounced.
+ *
  * Returns:
  *  - "ok"        → handled (transitioned, or a duplicate).
+ *  - "empty"     → submission had no changes vs base; bounced back for rework.
  *  - "terminal"  → task is in a terminal state; nothing to do.
  *  - "notfound"  → no such task.
  */
-export function markReviewFromAgent(
+export async function markReviewFromAgent(
   id: string,
   summary?: string,
-): "ok" | "terminal" | "notfound" {
+): Promise<"ok" | "terminal" | "notfound" | "empty"> {
+  // EMPTY-SUBMISSION GUARD — see the doc-comment above. Only on a genuine in_progress
+  // submission; measured before the auto-commit; fails open whenever we cannot measure.
+  const row = getTask(id);
+  if (row && row.status === "in_progress") {
+    const dir = getWorkspace(row.workspace_id);
+    // Measurable ONLY with a real workspace AND an existing task branch to diff against.
+    // No branch → nothing to compare → unmeasurable → FAIL OPEN (proceed to review) so a
+    // real submission is never false-bounced (and a probe error mid-measure does the same).
+    if (dir && (await git.branchExists(dir.path, id))) {
+      // hasChanges is the existing probe: commits-ahead > 0 OR a dirty worktree
+      // (`git status --porcelain`, which counts UNTRACKED new files too — so a real
+      // submission the agent left as new uncommitted files is correctly non-empty).
+      let empty = false;
+      try {
+        empty = !(await git.hasChanges(dir.path, id));
+      } catch {
+        empty = false; // unmeasurable mid-probe → fail open (treat as a real submission)
+      }
+      if (empty) {
+        const base = await git.defaultBranch(dir.path);
+        await requestChanges(
+          id,
+          emptySubmissionNote(id, base),
+          row.herdr_pane_id,
+          row.herdr_tab_id,
+          "empty review submission bounced — no changes vs base",
+        );
+        return "empty";
+      }
+    }
+  }
+
   // BUILD PHASE: in_progress → in_review (normal), or in_review → in_review (a duplicate
   // call — status-unchanged, so no event + no gates, matching the old guard). completed_at
   // is stamped once (keep). Runs the gates on the genuine transition.

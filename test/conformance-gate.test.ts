@@ -218,26 +218,26 @@ describe("triggerConformance persistence", () => {
 });
 
 describe("review-transition trigger", () => {
-  test("markReviewFromAgent (in_progress→in_review) kicks off the conformance gate", () => {
+  test("markReviewFromAgent (in_progress→in_review) kicks off the conformance gate", async () => {
     const id = seed({ id: "conf-trig-agent", status: "in_progress" });
     confMod.setConformanceRunner(() => new Promise(() => {})); // never resolves
     // The CI gate also fires on this transition — stub it so it doesn't spawn real bun.
     tasksMod.setCiRunner(() => new Promise(() => {}));
 
-    expect(tasksMod.markReviewFromAgent(id)).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id)).toBe("ok");
     expect(row(id).status).toBe("in_review");
     // The fire-and-forget gate's synchronous prefix already claimed the task → 'checking'.
     expect(row(id).conformance_status).toBe("checking");
   });
 
-  test("a duplicate request_review (review→review) does NOT re-run the gate", () => {
+  test("a duplicate request_review (review→review) does NOT re-run the gate", async () => {
     // Seed already in review with NO conformance verdict; a duplicate request_review
     // must not kick the gate off (it would flip conformance_status to 'checking').
     const id = seed({ id: "conf-trig-dup", status: "in_review" });
     confMod.setConformanceRunner(() => new Promise(() => {}));
     tasksMod.setCiRunner(() => new Promise(() => {}));
 
-    expect(tasksMod.markReviewFromAgent(id, "again")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "again")).toBe("ok");
     expect(row(id).conformance_status).toBeNull(); // no re-trigger on a non-transition
   });
 });

@@ -145,6 +145,9 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
   async function runningWithPaneAndTab(prompt: string): Promise<string> {
     const v = await tasksMod.createTask(DIR_ID, prompt);
     tasksMod.markRunning(v.id, `pane-${v.id}`, `sess-${v.id}`, `tab-${v.id}`);
+    // Leave a real worktree change so a request_review submission is non-empty
+    // (markReviewFromAgent bounces an EMPTY submission instead of entering review).
+    writeFileSync(join(REPO_ROOT, v.id, "work.txt"), `work for ${v.id}\n`);
     const r = row(v.id);
     expect(r.status).toBe("in_progress");
     expect(r.herdr_pane_id).toBe(`pane-${v.id}`);
@@ -163,7 +166,7 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
 
   test("markReviewFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
     const id = await runningWithPaneAndTab("request_review leaves tab id");
-    expect(tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
+    expect(await tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
     const r = row(id);
     expect(r.status).toBe("in_review");
     expect(r.herdr_pane_id).toBeNull();
@@ -180,11 +183,11 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
   });
 
   test("the agent-tool paths return notfound/terminal without transitioning", async () => {
-    expect(tasksMod.markReviewFromAgent("no-such-task")).toBe("notfound");
+    expect(await tasksMod.markReviewFromAgent("no-such-task")).toBe("notfound");
     expect(tasksMod.markNeedsInfoFromAgent("no-such-task", "q")).toBe("notfound");
     const merged = await tasksMod.createTask(DIR_ID, "terminal task");
     dbMod.db.query(`UPDATE tasks SET status='merged' WHERE id=?`).run(merged.id);
-    expect(tasksMod.markReviewFromAgent(merged.id)).toBe("terminal");
+    expect(await tasksMod.markReviewFromAgent(merged.id)).toBe("terminal");
     expect(tasksMod.markNeedsInfoFromAgent(merged.id, "q")).toBe("terminal");
     expect(row(merged.id).status).toBe("merged"); // untouched
   });
