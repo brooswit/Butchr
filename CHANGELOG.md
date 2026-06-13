@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.79] - 2026-06-13
+
 ### Fixed
 - **Worker dispatch no longer hangs on the dev-channels consent prompt.** Since the
   connectivity-restored feature attaches `--dangerously-load-development-channels` to
