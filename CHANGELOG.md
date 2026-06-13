@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.78] - 2026-06-13
+
 ### Fixed
 - **CTO agent now AUTO-RECOVERS after a host reboot (no manual "restart" needed).** The
   managed CTO adopt path (`adoptOrLaunch` in `src/cto-agent.ts`) decided adopt-vs-launch
