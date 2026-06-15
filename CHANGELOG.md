@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.87] - 2026-06-15
+
 ### Added
 - **Stories epic, Phase 6 — completion detection + surfacing.** When the last subtask of a
   story lands (every member `merged`/`rolled_back`, ≥1 subtask), `finalizeMerge` now fires a
