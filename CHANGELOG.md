@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.85] - 2026-06-15
+
 ### Added
 - **Stories epic, Phase 4 — story-scoped attention channel + bubble-up routing.** Each
   story-leader agent now gets its own one-way attention feed, scoped to ITS story's subtasks
