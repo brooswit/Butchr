@@ -88,7 +88,7 @@ function counts(workspaceId: string): Record<string, number> {
   // peel it out of the in_progress count so the dashboard shows active vs. quiet agents.
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND status='in_progress' AND has_agent=1 AND idle=1`,
     )
     .get(workspaceId)!.n;
   out.idle = idle;

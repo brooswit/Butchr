@@ -106,8 +106,8 @@ function insTask(
     .query(
       `INSERT INTO tasks
          (id, workspace_id, status, blocked_by, kind, tags, priority, plan_preview,
-          version_bump, idle, herdr_pane_id, question, summary, last_dispatch_error, created_at)
-       VALUES (?, ?, ?, '[]', 'task', '[]', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          version_bump, idle, herdr_pane_id, has_agent, question, summary, last_dispatch_error, created_at)
+       VALUES (?, ?, ?, '[]', 'task', '[]', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -117,6 +117,8 @@ function insTask(
       o.version_bump ?? "patch",
       o.idle ? 1 : 0,
       o.pane ? "pane-x" : null,
+      // has_agent mirrors the old pane-as-liveness (attentionList's idle gate keys on it).
+      o.pane ? 1 : 0,
       o.question ?? null,
       o.summary ?? null,
       o.last_dispatch_error ?? null,

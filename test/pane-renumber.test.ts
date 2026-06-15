@@ -65,12 +65,14 @@ function makeFakeRunner(): AgentRunner {
 }
 
 function seedTask(id: string, status: string, paneId: string | null): void {
+  // has_agent mirrors the old pane-as-liveness: a launched agent has a pane (and now the
+  // honest marker too). Derive it from paneId so a live `in_progress` seed reads as owned.
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, has_agent, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, DIR_ID, status, paneId, dbMod.nowIso());
+    .run(id, DIR_ID, status, paneId, paneId ? 1 : 0, dbMod.nowIso());
 }
 
 function storedPane(id: string): string | null {

@@ -54,10 +54,12 @@ function makeFakeRunner(): AgentRunner {
 
 // A LIVE build agent: in_progress with a pane (the precondition setIdle/idle guards on).
 function seedLive(id: string, sessionId = "sess-" + id): void {
+  // A LIVE launched build agent: in_progress + pane + has_agent=1 (the honest ownership
+  // marker markRunning sets; setIdle/nudge now gate on it instead of pane-as-liveness).
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, session_id, created_at)
-       VALUES (?, ?, 'in_progress', ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, has_agent, session_id, created_at)
+       VALUES (?, ?, 'in_progress', ?, 1, ?, ?)`,
     )
     .run(id, DIR_ID, "pane-" + id, sessionId, dbMod.nowIso());
 }

@@ -152,6 +152,8 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
     expect(r.status).toBe("in_progress");
     expect(r.herdr_pane_id).toBe(`pane-${v.id}`);
     expect(r.herdr_tab_id).toBe(`tab-${v.id}`);
+    // markRunning sets the honest agent-ownership marker atomically with status + pane.
+    expect(r.has_agent).toBe(1);
     return v.id;
   }
 
@@ -162,6 +164,7 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
     expect(r.status).toBe("in_review");
     expect(r.herdr_pane_id).toBeNull();
     expect(r.herdr_tab_id).toBeNull(); // the regression the reviewer caught
+    expect(r.has_agent).toBe(0); // honest marker cleared by setStatus's exit rule
   });
 
   test("markReviewFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
@@ -171,6 +174,7 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
     expect(r.status).toBe("in_review");
     expect(r.herdr_pane_id).toBeNull();
     expect(r.herdr_tab_id).toBe(`tab-${id}`); // NOT cleared (matches pre-refactor)
+    expect(r.has_agent).toBe(0); // honest marker cleared on the exit to in_review
   });
 
   test("markNeedsInfoFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
@@ -180,6 +184,7 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
     expect(r.status).toBe("needs_info");
     expect(r.herdr_pane_id).toBeNull();
     expect(r.herdr_tab_id).toBe(`tab-${id}`); // NOT cleared (matches pre-refactor)
+    expect(r.has_agent).toBe(0); // honest marker cleared on the exit to needs_info
   });
 
   test("the agent-tool paths return notfound/terminal without transitioning", async () => {

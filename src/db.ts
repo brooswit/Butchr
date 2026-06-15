@@ -686,6 +686,20 @@ ensureColumn("stories", "ask_responder", "TEXT");
 // them once) both succeed. Pre-1.0: no back-compat, the columns are physically dropped.
 dropColumnIfExists("tasks", "responder_tier");
 dropColumnIfExists("workspaces", "step_responders");
+
+// HONEST AGENT-OWNERSHIP MARKER (story st-a77b050f — AGENT IDENTITY = NAME ONLY). 1 ⇔
+// butchr launched an agent for this `in_progress` task and hasn't torn it down. It is the
+// truthful in-DB replacement for the old `herdr_pane_id IS NOT NULL`-as-liveness proxy: a
+// pane id survives a herdr/host restart that KILLED claude (and was mis-recorded by the
+// boot reconcile), so "has a pane" never honestly meant "agent is live". This marker is
+// honest about what it IS — an OWNED-agent record, not a liveness claim — and is used
+// ONLY as the cheap SQL/JS pre-filter; the TRUE liveness signal at the recovery/nudge
+// sites stays the /proc probe (claudeAlive/agentExists). Default 0 (the value every
+// existing row backfills to); migrateReadyRunningSplit backfills 1 from the legacy pane
+// signal before re-bucketing. Standalone additive column (no surrounding edits) to keep
+// the merge-conflict surface minimal. Maintained in markRunning (=1), setStatus's exit
+// rule (=0 on any transition off in_progress), and requeueForResume (=0).
+ensureColumn("tasks", "has_agent", "INTEGER NOT NULL DEFAULT 0");
 }
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
@@ -746,21 +760,39 @@ export function migrateStatusModel(): void {
 // (re-)launch it) and a row WITH a pane meant a LIVE agent. The new model carries that
 // distinction in the STATUS itself: `inactive` = ready/queued (dispatcher keys on it),
 // `in_progress` = a live workspace agent. So on this boot we MUST re-bucket every
-// existing row or a ready task would be stranded (the dispatcher no longer looks at
-// `in_progress`+null-pane):
-//   in_progress + NULL pane → inactive       (ready — the dispatcher will pick it up)
-//   in_progress + a pane    → in_progress     (running — reconcileRunningTasks re-adopts)
+// existing row or a ready task would be stranded (the dispatcher no longer looks at a
+// ready `in_progress` row). The re-bucket now keys off the honest `has_agent` marker
+// (backfilled from the legacy pane signal in the first statement below) rather than the
+// doomed `herdr_pane_id` column:
+//   in_progress + no owned agent → inactive   (ready — the dispatcher will pick it up)
+//   in_progress + an owned agent → in_progress (running — reconcileRunningTasks re-adopts)
 // Lingering `finalizing` rows (a removed state — the post-approval merge is now
 // MECHANICAL, no finalize agent): route to `in_review` and clear the pane so the
 // operator re-approves into the new mechanical-merge-on-approve path rather than us
 // auto-merging stale work at boot without a fresh gate. Any orphaned finalize pane is
-// reaped (reapOrphans). Idempotent: in the new model a running `in_progress` ALWAYS
-// has a pane (markRunning sets status+pane atomically; a dispatch failure clears the
-// pane AND moves to `inactive`), so no steady-state `in_progress`+null-pane exists and
-// re-running this is a no-op once converged.
+// reaped (reapOrphans). Idempotent: in the new model a running `in_progress` ALWAYS has
+// has_agent=1 (markRunning sets status+marker atomically; a dispatch failure clears the
+// marker AND moves to `inactive`), so no steady-state `in_progress`+has_agent=0 lingers
+// and re-running this is a no-op once converged.
 export function migrateReadyRunningSplit(): void {
+  // BACKFILL the honest agent-ownership marker (has_agent) from the LEGACY pane-as-
+  // liveness signal, ONCE, BEFORE the re-bucket below reads it. Runs here (not in the
+  // additive-column step) so it follows migrateStatusModel's `running`→`in_progress`
+  // fold — at this point every legacy live agent is `in_progress` with its pane intact,
+  // so this is the single moment the pane truthfully marks "butchr owns a launched
+  // agent". Idempotent (sets 1→1 for steady-state running tasks markRunning already set).
+  // NOTE TO THE CUTOVER SUBTASK (st-a77b050f step 3): when you drop herdr_pane_id, REMOVE
+  // this one backfill line — it is the ONLY remaining dependency of this migration on the
+  // doomed column; the re-bucket below already keys off has_agent.
   db.exec(
-    `UPDATE tasks SET status='inactive' WHERE status='in_progress' AND herdr_pane_id IS NULL`,
+    `UPDATE tasks SET has_agent=1 WHERE status='in_progress' AND herdr_pane_id IS NOT NULL`,
+  );
+  // Re-bucket legacy READY rows — `in_progress` with NO owned agent — to `inactive` so the
+  // dispatcher (which keys on `inactive`) picks them up instead of stranding them. Keyed
+  // on has_agent (NOT the doomed pane column): equivalent to the old pane-IS-NULL test
+  // after the backfill above, but it no longer references a column the cutover deletes.
+  db.exec(
+    `UPDATE tasks SET status='inactive' WHERE status='in_progress' AND has_agent=0`,
   );
   db.exec(
     `UPDATE tasks SET status='in_review', herdr_pane_id=NULL, herdr_tab_id=NULL WHERE status='finalizing'`,
@@ -1123,6 +1155,16 @@ export type TaskRow = {
   herdr_pane_id: string | null;
   session_id: string | null;
   herdr_tab_id: string | null;
+  // HONEST AGENT-OWNERSHIP MARKER (story st-a77b050f): 1 ⇔ butchr LAUNCHED an agent for
+  // this `in_progress` task and has not torn it down. It is the truthful replacement for
+  // the old `herdr_pane_id IS NOT NULL`-as-liveness proxy — an OWNED-agent record, NOT a
+  // process-liveness claim (it survives a herdr/host restart exactly like the pane did, so
+  // TRUE liveness still comes from the /proc probe, claudeAlive in src/liveness.ts). Set
+  // once in markRunning (atomic with status=in_progress + pane), cleared centrally in
+  // setStatus on every exit from in_progress, and cleared explicitly in requeueForResume
+  // (which keeps status=in_progress while the agent is gone, awaiting --resume). See
+  // db.migrateReadyRunningSplit (backfill from the legacy pane signal).
+  has_agent: number;
   output_snapshot: string | null;
   conflict: number;
   idle: number;

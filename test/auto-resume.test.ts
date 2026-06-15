@@ -74,10 +74,13 @@ function liveSessions(...sids: string[]): () => string[][] {
 }
 
 function seedRunning(id: string, sessionId: string, status = "in_progress"): void {
+  // A LAUNCHED build agent: in_progress + pane + has_agent=1 (the honest ownership marker
+  // markRunning sets). reconcile/reaper now pre-filter on has_agent=1, then probe the
+  // process (claudeAlive) for true liveness.
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, herdr_tab_id, session_id, started_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, herdr_tab_id, has_agent, session_id, started_at, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
     )
     .run(id, WS_ID, status, "pane-" + id, "tab-" + id, sessionId, dbMod.nowIso(), dbMod.nowIso());
 }
@@ -174,6 +177,10 @@ describe("requeueForResume (the bounded auto-resume transition)", () => {
     const row = tasksMod.getTask("resume-ok")!;
     expect(row.status).toBe("in_progress");
     expect(row.herdr_pane_id).toBeNull(); // READY again → dispatcher relaunches it
+    // The killed agent is gone: the honest marker drops to 0 even though the task STAYS
+    // in_progress (the one in_progress→in_progress transition that clears has_agent), so
+    // reconcile/reaper/setIdle/nudge all correctly read it as "no owned live agent".
+    expect(row.has_agent).toBe(0);
     expect(row.session_id).toBe("sid-resume-ok"); // kept → resolveLaunchCommand uses --resume
     expect(row.resume_attempts).toBe(1);
   });

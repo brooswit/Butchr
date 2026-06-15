@@ -805,7 +805,7 @@ export function attentionList(): AttentionItem[] {
     .query<TaskRow, []>(
       `SELECT * FROM tasks
         WHERE status IN ('spec_review','in_review','needs_info','failed')
-           OR (status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1)
+           OR (status='in_progress' AND has_agent=1 AND idle=1)
         ORDER BY created_at ASC`,
     )
     .all();
@@ -1118,6 +1118,16 @@ function setStatus(
   // that has left the idle condition. Skipped if a caller set idle_context explicitly.
   if (opts.set && "idle" in opts.set && !("idle_context" in opts.set)) {
     assigns.push("idle_context=NULL");
+  }
+  // HONEST AGENT-OWNERSHIP (story st-a77b050f): `has_agent` is true ONLY while a launched
+  // agent owns a LIVE `in_progress` task, so EVERY transition OFF in_progress (to review /
+  // needs_info / inactive / a terminal state / …) clears it here, centrally — no need to
+  // thread `has_agent: 0` through each of those callers. Transitions INTO in_progress set
+  // it explicitly (markRunning → 1; requeueForResume → 0, staying in_progress but agent
+  // gone), so we never override a caller that named it.
+  if (to !== "in_progress" && !(opts.set && "has_agent" in opts.set)) {
+    assigns.push("has_agent=?");
+    params.push(0);
   }
   let where = "id=?";
   params.push(id);
@@ -2660,6 +2670,10 @@ export function markRunning(
       set: {
         herdr_pane_id: paneId,
         herdr_tab_id: tabId ?? null,
+        // The honest "butchr owns a launched agent" marker — set atomically with
+        // status=in_progress + pane. Cleared on every exit (setStatus rule) / resume
+        // (requeueForResume). The truthful replacement for pane-as-liveness.
+        has_agent: 1,
         session_id: keep(sessionId),
         started_at: keep(nowIso()),
         dispatch_attempts: 0,
@@ -3573,11 +3587,11 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
   // Peek first: only a genuine flip of a LIVE build agent does anything — and only then
   // do we run the (log-reading) capture thunk.
   const cur = db
-    .query<{ idle: number; status: string; herdr_pane_id: string | null }, [string]>(
-      `SELECT idle, status, herdr_pane_id FROM tasks WHERE id=?`,
+    .query<{ idle: number; status: string; has_agent: number }, [string]>(
+      `SELECT idle, status, has_agent FROM tasks WHERE id=?`,
     )
     .get(id);
-  if (!cur || cur.status !== "in_progress" || cur.herdr_pane_id == null || cur.idle === want) {
+  if (!cur || cur.status !== "in_progress" || cur.has_agent === 0 || cur.idle === want) {
     return;
   }
   // Going idle → snapshot the run-log tail as context (empty → NULL); clearing → NULL.
@@ -3587,7 +3601,7 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
   // not touch it.
   const escalateReset = want === 1 ? ", escalated_to_user=0" : "";
   const res = db.query(
-    `UPDATE tasks SET idle=?, idle_context=?${escalateReset} WHERE id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle<>?`,
+    `UPDATE tasks SET idle=?, idle_context=?${escalateReset} WHERE id=? AND status='in_progress' AND has_agent=1 AND idle<>?`,
   ).run(want, context, id, want);
   if (res.changes === 0) return;
   emitUpdated(id);
@@ -3603,7 +3617,7 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
  *
  * GUARDS:
  *  - 404 if the task is gone; 409 if it has no live build agent (not in_progress, or no
- *    pane) — there is nothing to nudge.
+ *    owned agent: has_agent=0) — there is nothing to nudge.
  *  - LIVENESS (the incident fix): if the agent's claude is NOT actually alive (a dead
  *    login shell after a herdr/host restart, with the agent name still registered), do
  *    NOT poke it — route to requeueForResume (tear down the husk + re-dispatch the same
@@ -3616,7 +3630,7 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
 export async function nudgeTask(id: string, text?: string): Promise<TaskView> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
-  if (row.status !== "in_progress" || !row.herdr_pane_id) {
+  if (row.status !== "in_progress" || row.has_agent === 0) {
     throw new HttpError(409, `task has no live agent to nudge (status=${row.status})`);
   }
   const line = (text ?? "").trim() || "continue";
@@ -3855,6 +3869,11 @@ export async function requeueForResume(
       set: {
         herdr_pane_id: null,
         herdr_tab_id: null,
+        // The killed agent is gone — clear the ownership marker even though the task
+        // STAYS in_progress (awaiting the dispatcher's --resume relaunch). This is the
+        // one in_progress→in_progress transition where has_agent must drop to 0, so it
+        // is set explicitly (setStatus's central clear only fires when LEAVING in_progress).
+        has_agent: 0,
         output_snapshot: null,
         idle: 0,
         conflict: 0,

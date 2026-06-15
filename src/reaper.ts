@@ -156,7 +156,7 @@ export async function reapDeadRunningAgents(herdrUp: boolean): Promise<number> {
   const runsDir = join(config.dataDir, "runs");
   const rows = db
     .query<TaskRow, []>(
-      `SELECT * FROM tasks WHERE status='in_progress' AND herdr_pane_id IS NOT NULL`,
+      `SELECT * FROM tasks WHERE status='in_progress' AND has_agent=1`,
     )
     .all();
   let resumed = 0;

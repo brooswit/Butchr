@@ -245,14 +245,17 @@ export function dispatcherHealth(): { lastTickAt: number; tickCount: number; tic
 export async function reconcileRunningTasks(
   herdrUp: boolean,
 ): Promise<{ adopted: number; rescued: number; resumed: number; skipped: number }> {
-  // A LIVE agent task is one that is `in_progress` (a running build agent) — by the
-  // 12-state model a running task always recorded a pane. Ready `inactive` tasks are
-  // never-launched/rework and are handled by the normal tick, not here.
+  // A task butchr LAUNCHED an agent for is `in_progress` with has_agent=1 (the honest
+  // ownership marker — markRunning sets it atomically; requeueForResume clears it). This
+  // is only the CHEAP PRE-FILTER for which tasks to consider: the real adopt-vs-resume
+  // decision below is the /proc + name probe (agentExists && claudeAlive), because the
+  // marker — like the old pane id — survives a herdr/host restart that killed claude.
+  // Ready `inactive` tasks are never-launched/rework and are handled by the normal tick.
   const rows = db
     .query<QueuedRow, []>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
-         WHERE t.status='in_progress' AND t.herdr_pane_id IS NOT NULL`,
+         WHERE t.status='in_progress' AND t.has_agent=1`,
     )
     .all();
   if (rows.length === 0) return { adopted: 0, rescued: 0, resumed: 0, skipped: 0 };
@@ -988,11 +991,12 @@ function spawnWatcher(
       const curTask = getTask(taskId);
       const cur = curTask?.status;
       if (cur !== "in_progress") break;
-      // AUTO-RESUME HAND-OFF: the pane was cleared (NULL) out from under us — the
-      // nudge guard auto-resumed a dead-claude agent (requeueForResume), a reaper
-      // backstop did, or an operator re-queued. A fresh dispatch+watcher will own it;
-      // stop here so we don't rescue a task that's already being relaunched.
-      if (curTask!.herdr_pane_id == null) {
+      // AUTO-RESUME HAND-OFF: the agent ownership was dropped (has_agent=0) out from
+      // under us — the nudge guard auto-resumed a dead-claude agent (requeueForResume), a
+      // reaper backstop did, or an operator re-queued. A fresh dispatch+watcher will own
+      // it; stop here so we don't rescue a task that's already being relaunched. Keyed on
+      // the honest marker (not the doomed pane column) — requeueForResume clears both.
+      if (curTask!.has_agent === 0) {
         handedOff = true;
         break;
       }

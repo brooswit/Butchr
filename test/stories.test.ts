@@ -172,10 +172,11 @@ function seedMember(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, story_id, herdr_pane_id, idle, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, story_id, herdr_pane_id, has_agent, idle, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, ws, status, storyId, opts.pane ?? null, opts.idle ? 1 : 0, dbMod.nowIso());
+    // has_agent mirrors the old pane-as-liveness (storyCounts' idle gate keys on it).
+    .run(id, ws, status, storyId, opts.pane ?? null, opts.pane ? 1 : 0, opts.idle ? 1 : 0, dbMod.nowIso());
 }
 
 /** Capture every `story.attention` event for a given story while `fn` runs. */

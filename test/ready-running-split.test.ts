@@ -73,6 +73,11 @@ describe("migrateReadyRunningSplit (the restart that activates the 12-state mode
     // The running row is left as-is so reconcileRunningTasks re-adopts its live agent.
     expect(row("rr-running").status).toBe("in_progress");
     expect(row("rr-running").herdr_pane_id).toBe("pane-running");
+    // HONEST SIGNAL (story st-a77b050f): the migration BACKFILLS has_agent from the legacy
+    // pane signal and re-buckets off it (not the doomed pane column). The live row now
+    // carries has_agent=1; the re-bucketed ready row has has_agent=0.
+    expect(row("rr-running").has_agent).toBe(1);
+    expect(row("rr-ready").has_agent).toBe(0);
   });
 
   test("a lingering finalizing row is routed to in_review (pane cleared) — no agent stranded", () => {

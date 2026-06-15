@@ -503,7 +503,7 @@ export function storyCounts(storyId: string): Record<string, number> {
   for (const r of rows) out[r.status] = r.n;
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND status='in_progress' AND has_agent=1 AND idle=1`,
     )
     .get(storyId)!.n;
   out.idle = idle;

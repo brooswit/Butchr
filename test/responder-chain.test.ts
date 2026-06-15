@@ -60,8 +60,8 @@ function seedTask(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, story_id, escalated_to_user, plan_preview, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, has_agent, story_id, escalated_to_user, plan_preview, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -69,6 +69,8 @@ function seedTask(
       status,
       opts.idle ?? 0,
       opts.paneId ?? null,
+      // has_agent mirrors the old pane-as-liveness: a launched live agent has a pane.
+      opts.paneId ? 1 : 0,
       opts.storyId ?? null,
       opts.escalated ?? 0,
       opts.planPreview ?? 0,

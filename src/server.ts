@@ -859,11 +859,14 @@ route("GET", "/api/tasks/:id/events", async (_req, p) => {
 });
 
 // Best-effort live snapshot of the agent's recent terminal output, for the task
-// page's "Live output" panel. Only meaningful while the task has a live pane;
-// returns "" once the pane is gone. Never the source of truth for review.
+// page's "Live output" panel. Only meaningful while the task owns a live agent;
+// returns "" once the agent is gone. Never the source of truth for review.
 route("GET", "/api/tasks/:id/output", async (_req, p) => {
   const t = requireTask(p.id!);
-  const output = t.herdr_pane_id ? await herdr.agentRead(p.id!) : "";
+  // Gate on the honest agent-ownership marker (has_agent), not the doomed pane column.
+  // agentRead resolves the pane BY NAME, so the marker is purely the cheap "is there an
+  // agent to read" gate (a polled endpoint — a /proc probe per poll would be too heavy).
+  const output = t.has_agent ? await herdr.agentRead(p.id!) : "";
   return json({ output });
 });
 
@@ -1187,10 +1190,11 @@ async function attachAgentTerminal(agentName: string): Promise<Response> {
 // request_review, so `review` (and queued/merged/aborted) have no pane.
 route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   const t = requireTask(p.id!);
-  // Gate on an actual live pane rather than a specific status — only a running
-  // agent has a pane (herdr_pane_id set); everything else has nothing to attach to.
-  if (!t.herdr_pane_id) {
-    throw new HttpError(409, `task has no live agent pane (status=${t.status})`);
+  // Gate on the honest agent-ownership marker rather than a specific status — only a
+  // task butchr launched an agent for (has_agent=1) has something to attach to; the
+  // attach itself targets the pane BY NAME (currentPaneRepairing/attachAgentTerminal).
+  if (!t.has_agent) {
+    throw new HttpError(409, `task has no live agent to attach to (status=${t.status})`);
   }
   // herdr may have RENUMBERED the pane since launch (a sibling tab closed), so the
   // stored id can now point at a dead sibling shell. Re-resolve the CURRENT pane by
