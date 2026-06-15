@@ -569,6 +569,10 @@ export type DashboardWorkspace = {
   review: number;
   failed: number;
   needsAttention: number;
+  /** OPEN stories in this workspace (Phase 6 story rollup) — the count of stories still
+   *  driving work, so the dashboard surfaces story-level progress alongside task buckets.
+   *  Per-story member-task counts + leader status live on GET /api/stories(/:id). */
+  openStories: number;
 };
 
 export type Dashboard = {
@@ -579,14 +583,31 @@ export type Dashboard = {
     review: number;
     failed: number;
     needsAttention: number;
+    openStories: number;
   };
 };
+
+/** The count of OPEN stories in a workspace (the dashboard story rollup; cheap COUNT). */
+function openStoryCount(workspaceId: string): number {
+  return db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM stories WHERE workspace_id=? AND status='open'`,
+    )
+    .get(workspaceId)!.n;
+}
 
 export function dashboard(): Dashboard {
   const rows = db
     .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
     .all();
-  const totals = { workspaces: rows.length, active: 0, review: 0, failed: 0, needsAttention: 0 };
+  const totals = {
+    workspaces: rows.length,
+    active: 0,
+    review: 0,
+    failed: 0,
+    needsAttention: 0,
+    openStories: 0,
+  };
   const workspaces = rows.map((d) => {
     const c = counts(d.id);
     const active =
@@ -597,10 +618,12 @@ export function dashboard(): Dashboard {
     const failed = c.failed ?? 0; // the terminal `failed` state — see comment above
     // = review + failed, expressed via the exported membership set (numerically identical).
     const needsAttention = sumStatuses(c, REVIEW_STATES);
+    const openStories = openStoryCount(d.id);
     totals.active += active;
     totals.review += review;
     totals.failed += failed;
     totals.needsAttention += needsAttention;
+    totals.openStories += openStories;
     return {
       id: d.id,
       path: d.path,
@@ -612,6 +635,7 @@ export function dashboard(): Dashboard {
       review,
       failed,
       needsAttention,
+      openStories,
     };
   });
   return { workspaces, totals };

@@ -2142,6 +2142,10 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // other blockers are also merged) to queued right away, rather than waiting for
   // the next dispatcher tick to notice.
   reevaluateAllBlocked();
+  // STORY COMPLETION (Phase 6): if this was a STORY member, the story may now be fully
+  // delivered (every member merged/rolled_back) — fire the leader's completion-review
+  // attention event. story_id-guarded so STANDALONE tasks never trigger it (no regression).
+  if (row.story_id) notifyStoryCompletionIfReady(row.story_id);
   return { task: taskView(id)! };
 }
 
@@ -2282,6 +2286,55 @@ export function escalateTask(id: string): TaskView {
   // Publish the fresh view so the next tier's notification fires (emitUpdated → task.updated).
   emitUpdated(id);
   return taskView(id)!;
+}
+
+// --- STORY COMPLETION DETECTION (Phase 6 of the STORIES epic) ----------------
+
+/**
+ * Is a STORY COMPLETE — does it have >=1 subtask AND is every member task in a terminal
+ * MERGED state (merged or rolled_back)? Pure direct db read of the tasks table (NOT
+ * importing stories.ts — that would close the tasks↔stories import cycle, the same reason
+ * createTask reads the stories table directly). A story with no members, or with ANY member
+ * not yet merged/rolled_back (still in flight, or terminal-but-not-merged like
+ * aborted/failed), is NOT complete.
+ */
+export function isStoryComplete(storyId: string): boolean {
+  const members = db
+    .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
+    .all(storyId);
+  if (members.length === 0) return false;
+  return members.every((m) => m.status === "merged" || m.status === "rolled_back");
+}
+
+/**
+ * STORY COMPLETION DETECTION. When a story member lands in a terminal MERGED state, check
+ * whether the WHOLE story is now complete (isStoryComplete) and, if so, publish a STORY-LEVEL
+ * attention event targeted at the LEADER feed ('story <id> ready for completion review') so
+ * the leader verifies the story's goal is met — then it PATCHes the story `done` (which tears
+ * the leader down + reports completion UP to the CTO) or, if the goal is NOT met, creates more
+ * subtasks. Fires ONLY for an `open` story (a done/aborted story has no live leader to receive
+ * it). Returns whether the completion event fired. The single completion-detection seam,
+ * called from finalizeMerge's success path (story_id-guarded so STANDALONE tasks never reach
+ * here — no merge-behavior regression for story-less tasks). Best-effort: events.publish
+ * swallows a dead-subscriber throw, so this never breaks the merge that triggered it.
+ */
+export function notifyStoryCompletionIfReady(storyId: string): boolean {
+  const story = db
+    .query<{ workspace_id: string; brief: string | null; status: string }, [string]>(
+      `SELECT workspace_id, brief, status FROM stories WHERE id=?`,
+    )
+    .get(storyId);
+  if (!story || story.status !== "open") return false;
+  if (!isStoryComplete(storyId)) return false;
+  publish({
+    type: "story.attention",
+    story_id: storyId,
+    workspace_id: story.workspace_id,
+    target: "story",
+    reason: "completion-review",
+    detail: story.brief ?? null,
+  });
+  return true;
 }
 
 // --- dispatcher-facing state transitions (kept here so all writes live together) ---

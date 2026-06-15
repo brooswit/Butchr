@@ -453,6 +453,85 @@ describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routin
   });
 });
 
+describe("channel: story-level attention (Phase 6 — completion + report-up routing)", () => {
+  // The story-leader bridge for st-1 (in dir-1) and the workspace/CTO bridge for dir-1.
+  const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
+  const ctoBridge = () => new AttentionBridge("dir-1");
+  const completionReview = {
+    type: "story.attention",
+    story_id: "st-1",
+    workspace_id: "dir-1",
+    target: "story",
+    reason: "completion-review",
+    detail: "Ship the widget",
+  };
+  const complete = {
+    type: "story.attention",
+    story_id: "st-1",
+    workspace_id: "dir-1",
+    target: "cto",
+    reason: "complete",
+    detail: "Ship the widget",
+  };
+
+  test("a completion-review event routes to the LEADER feed (target 'story'), not the CTO", () => {
+    const note = storyBridge().consume(completionReview);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({
+      story_id: "st-1",
+      workspace: "dir-1",
+      state: "story_completion_review",
+    });
+    expect(note!.content).toContain("story ready for completion review");
+    expect(note!.content).toContain("Ship the widget");
+    // The CTO feed never sees a leader-targeted completion-review.
+    expect(ctoBridge().consume(completionReview)).toBeNull();
+  });
+
+  test("a complete event routes to the CTO feed (target 'cto'), not the leader", () => {
+    const note = ctoBridge().consume(complete);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({
+      story_id: "st-1",
+      workspace: "dir-1",
+      state: "story_complete",
+    });
+    expect(note!.content).toContain("story complete");
+    // The leader bridge does not own a CTO-targeted report-up.
+    expect(storyBridge().consume(complete)).toBeNull();
+  });
+
+  test("a completion-review for a DIFFERENT story is dropped by an st-1 leader bridge", () => {
+    const other = { ...completionReview, story_id: "st-2" };
+    expect(storyBridge().consume(other)).toBeNull();
+  });
+
+  test("a complete for a DIFFERENT workspace is dropped by a dir-1 CTO bridge", () => {
+    const other = { ...complete, workspace_id: "dir-2" };
+    expect(ctoBridge().consume(other)).toBeNull();
+  });
+
+  test("an UNSCOPED CTO bridge owns any workspace's complete event", () => {
+    const note = new AttentionBridge().consume({ ...complete, workspace_id: "dir-9" });
+    expect(note).not.toBeNull();
+    expect(note!.meta.state).toBe("story_complete");
+  });
+
+  test("the connectivity-only WORKER bridge never sees story attention", () => {
+    const worker = new AttentionBridge("dir-1", /* connectivityOnly */ true, "st-1");
+    expect(worker.consume(completionReview)).toBeNull();
+    expect(worker.consume(complete)).toBeNull();
+  });
+
+  test("a malformed story.attention (missing target/reason) is dropped, not thrown", () => {
+    const bridge = storyBridge();
+    expect(bridge.consume({ type: "story.attention", story_id: "st-1" })).toBeNull();
+    expect(
+      bridge.consume({ type: "story.attention", story_id: "st-1", target: "story" }),
+    ).toBeNull();
+  });
+});
+
 describe("channel: one-way capability (no tools)", () => {
   test("initialize advertises claude/channel and NO tools", () => {
     const res = channelInitializeResult("2025-06-18");

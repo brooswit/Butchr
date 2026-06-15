@@ -94,6 +94,20 @@ const STATE_PHRASE: Record<AttentionState, string> = {
 // `idle-handling` responder to act on gracefully (nudge-with-guidance, requeue, or abort).
 const IDLE_PHRASE = "agent idle — needs idle-handling";
 
+// STORY-LEVEL attention phrases (Phase 6 of the STORIES epic). These are NOT task status
+// transitions but story-scoped notifications routed by `target` (see AttentionBridge.
+// consumeStoryAttention): a `completion-review` is pushed to the story LEADER's feed (all
+// subtasks merged → verify the goal), a `complete` is pushed UP to the WORKSPACE/CTO feed
+// (the leader marked the story done). Each carries its own `meta.state` so a recipient can
+// branch on the surface, mirroring STATE_PHRASE/IDLE_PHRASE for the task surfaces.
+const STORY_ATTENTION: Record<
+  "completion-review" | "complete",
+  { phrase: string; state: string }
+> = {
+  "completion-review": { phrase: "story ready for completion review", state: "story_completion_review" },
+  complete: { phrase: "story complete", state: "story_complete" },
+};
+
 // The human phrase for the GLOBAL connectivity-restored broadcast. Unlike the
 // attention/idle notifications this is NOT tied to a task or workspace — the network
 // the AGENTS need is back, so every connected session (CTO + each live worker) should
@@ -286,6 +300,15 @@ export class AttentionBridge {
     // above is delivered — no attention, no idle, no label tracking.
     if (this.connectivityOnly) return null;
 
+    // STORY-LEVEL attention (Phase 6) — a story-scoped notification that is NOT a task
+    // status transition, so it is handled here BEFORE the task-event gates. `target`
+    // decides which feed owns it: a `completion-review` event goes to the STORY LEADER's
+    // feed (this bridge must be scoped to that story), a `complete` event goes to the
+    // WORKSPACE/CTO feed. Stateless (no de-dup map) — the publishers fire each event once.
+    if (e.type === "story.attention") {
+      return this.consumeStoryAttention(e);
+    }
+
     // Keep the workspace-label cache fresh off the same stream.
     if (e.type === "workspace.created" || e.type === "workspace.updated") {
       const dir = e.workspace as Record<string, unknown> | undefined;
@@ -380,6 +403,41 @@ export class AttentionBridge {
       content,
       meta: { task_id: id, workspace: dirId, state: status, ...storyMeta },
     };
+  }
+
+  /**
+   * Translate a STORY-LEVEL attention event into a channel notification, or null when THIS
+   * bridge's scope does not own it. Routing by `target` (the story-scoped vs workspace/CTO
+   * feed split — the story analog of routeOwns):
+   *  - `target:'story'` (a `completion-review`) is owned ONLY by the STORY-leader bridge whose
+   *    scopeStory === the event's story_id. A WORKSPACE/CTO bridge never sees it.
+   *  - `target:'cto'` (a `complete`) is owned by the WORKSPACE/CTO bridge: NOT a story bridge,
+   *    and (when workspace-scoped) the event's workspace must match scopeDir. A story bridge
+   *    never sees it.
+   * Resilient: a missing/unknown field yields null rather than throwing.
+   */
+  private consumeStoryAttention(e: Record<string, unknown>): ChannelNotification | null {
+    const storyId = typeof e.story_id === "string" && e.story_id ? e.story_id : null;
+    const dirId = typeof e.workspace_id === "string" ? e.workspace_id : "";
+    const target = e.target === "story" || e.target === "cto" ? e.target : null;
+    const reason =
+      e.reason === "completion-review" || e.reason === "complete" ? e.reason : null;
+    if (!storyId || !target || !reason) return null;
+
+    // OWNERSHIP — does this bridge's scope own the event?
+    if (target === "story") {
+      if (!this.scopeStory || this.scopeStory !== storyId) return null;
+    } else {
+      // target === 'cto' → the WORKSPACE/CTO feed only (never a story-leader bridge).
+      if (this.scopeStory) return null;
+      if (this.scopeDir && dirId !== this.scopeDir) return null;
+    }
+
+    const { phrase, state } = STORY_ATTENTION[reason];
+    const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
+    const detail = tidy(e.detail);
+    const content = `[${storyId}] ${label} — ${phrase}` + (detail ? `: ${detail}` : "");
+    return { content, meta: { story_id: storyId, workspace: dirId, state } };
   }
 
   /**

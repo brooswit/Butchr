@@ -77,12 +77,13 @@ import {
   taskView,
 } from "./tasks.ts";
 import {
+  allStoryViews,
   assignTaskToStory,
   createStory,
   createSubtask,
   deleteStory,
-  getStory,
-  listStories,
+  listStoryViews,
+  storyView,
   updateStory,
 } from "./stories.ts";
 import { listTemplates, renderTemplate } from "./templates.ts";
@@ -1020,17 +1021,24 @@ route("POST", "/api/workspaces/:id/stories", async (req, p) => {
   return json(createStory(p.id!, body.brief), 201);
 });
 
-// List a workspace's stories (newest-first). 404 if the workspace is gone.
+// List a workspace's stories as enriched StoryViews (newest-first) — each carries a
+// member-task `counts` rollup + the leader-agent status (Phase 6). 404 if the workspace
+// is gone.
 route("GET", "/api/workspaces/:id/stories", async (_req, p) => {
   requireWorkspace(p.id!);
-  return json(listStories(p.id!));
+  return json(await listStoryViews(p.id!));
 });
 
-// A single story. 404 if gone.
+// EVERY workspace's stories as enriched StoryViews — the cross-workspace operator surface
+// for story progress + leaders (newest-first across all workspaces).
+route("GET", "/api/stories", async () => json(await allStoryViews()));
+
+// A single story as an enriched StoryView (member-task `counts` rollup + leader status).
+// 404 if gone.
 route("GET", "/api/stories/:id", async (_req, p) => {
-  const story = getStory(p.id!);
-  if (!story) throw new HttpError(404, "story not found");
-  return json(story);
+  const view = await storyView(p.id!);
+  if (!view) throw new HttpError(404, "story not found");
+  return json(view);
 });
 
 // Update a story's brief and/or status (body {brief?, status?}; status ∈

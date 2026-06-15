@@ -7,14 +7,20 @@
 // story or a task's story_id yet. Later phases add a story-leader agent (a mini-CTO that
 // decomposes / feedbacks / merges) + a responder-escalation chain that consume it. This
 // module mirrors the shape of src/workspaces.ts (a thin CRUD service over the DB).
-import { db, nowIso } from "./db.ts";
+import { ALL_STATUSES, db, nowIso } from "./db.ts";
 import type { StoryRow, StoryStatus, TaskKind, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import { generateStoryId } from "./ids.ts";
-import { onStoryCreated, onStoryStatusChanged, stopStoryAgent } from "./story-agent.ts";
+import {
+  onStoryCreated,
+  onStoryStatusChanged,
+  storyAgentStatus,
+  stopStoryAgent,
+} from "./story-agent.ts";
+import type { StoryAgentStatus } from "./story-agent.ts";
 import { createTask, getTask, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
-import { HttpError, getWorkspace } from "./workspaces.ts";
+import { HttpError, getWorkspace, listWorkspaces } from "./workspaces.ts";
 
 // The three valid story statuses (mirrors the StoryStatus union in db.ts). Used to
 // validate an incoming status before it touches the row.
@@ -100,6 +106,22 @@ export function updateStory(
   if (assigns.length) {
     params.push(id);
     db.query(`UPDATE stories SET ${assigns.join(", ")} WHERE id=?`).run(...params);
+  }
+  // STORY COMPLETION REPORTED UP (Phase 6): when the leader marks the story `done` (the goal
+  // is verified met), report completion UP to the CTO via a story-level attention event
+  // targeted at the WORKSPACE/CTO feed ('story <id> complete'). Fire only on the ENTRY into
+  // `done` (story.status was not already `done`) so a no-op re-PATCH doesn't re-notify. This
+  // is published BEFORE the leader teardown below — the leader (the diff-review responder that
+  // merged the last subtask) is provably still up, but the report is for the CTO, not it.
+  if (patch.status === "done" && story.status !== "done") {
+    publish({
+      type: "story.attention",
+      story_id: id,
+      workspace_id: story.workspace_id,
+      target: "cto",
+      reason: "complete",
+      detail: story.brief ?? null,
+    });
   }
   // Drive the STORY-LEADER agent off a status change (Phase 3): `done`/`aborted` stop the
   // leader (desired-down + teardown); `open` (re)launches it. Thin hook into story-agent.ts.
@@ -199,4 +221,73 @@ export async function createSubtask(
     args.allowlist ?? [],
     story.id,
   );
+}
+
+// --- SURFACING: member-task ROLLUP + leader status (Phase 6) -----------------
+
+/**
+ * Per-story member-task ROLLUP: one count per canonical status (ALL_STATUSES) plus the
+ * orthogonal `idle` pseudo-bucket, MIRRORING workspaces.counts but scoped to a story's
+ * members (story_id == storyId) instead of a workspace. `idle` is a flag on a LIVE
+ * in_progress agent (not a status), so it is peeled out of the in_progress count the same
+ * way the workspace rollup does — keeping the two rollups byte-for-byte comparable.
+ */
+export function storyCounts(storyId: string): Record<string, number> {
+  const rows = db
+    .query<{ status: string; n: number }, [string]>(
+      `SELECT status, COUNT(*) AS n FROM tasks WHERE story_id=? GROUP BY status`,
+    )
+    .all(storyId);
+  const out: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
+  out.idle = 0;
+  for (const r of rows) out[r.status] = r.n;
+  const idle = db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle=1`,
+    )
+    .get(storyId)!.n;
+  out.idle = idle;
+  out.in_progress -= idle;
+  return out;
+}
+
+/**
+ * A STORY DETAIL VIEW (Phase 6): the StoryRow plus a member-task `counts` rollup
+ * (storyCounts — the same per-status shape the workspace views use) and the managed
+ * LEADER-agent status (storyAgentStatus). Async because the leader status probes herdr
+ * for live registration (mirrors workspaces' status reads). Powers GET /api/stories/:id
+ * + the operator's story-progress surface so a reader sees each story's progress + its
+ * leader in one call. Returns null if the story is gone.
+ */
+export type StoryView = StoryRow & {
+  counts: Record<string, number>;
+  leader: StoryAgentStatus;
+};
+
+export async function storyView(storyId: string): Promise<StoryView | null> {
+  const story = getStory(storyId);
+  if (!story) return null;
+  return {
+    ...story,
+    counts: storyCounts(storyId),
+    leader: await storyAgentStatus(storyId),
+  };
+}
+
+/** A workspace's stories as enriched StoryViews (newest-first; mirrors listStories' order).
+ *  Leader probes run concurrently (Promise.all). */
+export async function listStoryViews(workspaceId: string): Promise<StoryView[]> {
+  const views = await Promise.all(
+    listStories(workspaceId).map((s) => storyView(s.id)),
+  );
+  return views.filter((v): v is StoryView => v !== null);
+}
+
+/** EVERY workspace's stories as enriched StoryViews — the cross-workspace operator surface
+ *  behind GET /api/stories (newest-first across all workspaces). */
+export async function allStoryViews(): Promise<StoryView[]> {
+  const lists = await Promise.all(listWorkspaces().map((w) => listStoryViews(w.id)));
+  const out = lists.flat();
+  out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+  return out;
 }

@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stories epic, Phase 6 — completion detection + surfacing.** When the last subtask of a
+  story lands (every member `merged`/`rolled_back`, ≥1 subtask), `finalizeMerge` now fires a
+  story-level attention event to the LEADER's channel (`story <id> ready for completion
+  review`) so the leader verifies the goal — then PATCHes the story `done` (which tears the
+  leader down AND reports `story <id> complete` UP to the CTO channel) or creates more
+  subtasks. A new `story.attention` event (`target: story|cto`) is routed by the channel
+  bridge to the matching feed. Story views are enriched: `GET /api/stories/:id` and `GET
+  /api/workspaces/:id/stories` now return a member-task `counts` rollup plus the leader-agent
+  status, a new `GET /api/stories` lists every workspace's stories, and the dashboard reports
+  per-workspace open-story counts. Completion fires only for stories with ≥1 subtask;
+  standalone (story-less) task merges are unaffected.
+
 ## [0.9.86] - 2026-06-15
 
 ### Added

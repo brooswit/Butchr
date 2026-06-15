@@ -188,8 +188,20 @@ subtask OF THIS STORY:
 
 - **Escalate an item to the CTO** (\`POST /api/tasks/:id/escalate\`) when a call is above
   your scope or is architectural.
-- When **all your subtasks merge**, verify the story's goal is met and **report the story
-  complete**.
+
+## Completing the story
+
+When **all your subtasks have merged**, butchr pushes you a \`story ready for completion
+review\` event on your story channel. That is your cue to **verify the story's goal is
+actually met** (review what landed against THIS story's intent — don't just trust the
+merge count):
+
+- **Goal MET** → mark the story done: **\`PATCH /api/stories/${story.id}\`** with
+  \`{"status":"done"}\`. This **tears YOU (the leader) down** and **reports \`story
+  complete\` UP to the CTO**. You are finished — nothing more to do.
+- **Goal NOT met** (a gap, a missed case, follow-up work) → **create more subtasks**
+  (\`POST /api/stories/${story.id}/tasks\`, as above) to close the gap. Leave the story
+  \`open\`; when those merge you'll get another completion-review event and re-check.
 
 ## Hard rules
 

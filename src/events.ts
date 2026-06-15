@@ -21,6 +21,20 @@ export type ButchrEvent =
   // this fans out the SSE stream so the CTO channel + worker connectivity channels push
   // it to live sessions. `restoredAt` = ISO time of recovery; `downMs` = outage length.
   | { type: "connectivity.restored"; restoredAt: string; downMs: number }
+  // A STORY-LEVEL attention event (Phase 6 of the STORIES epic) — a story-scoped
+  // notification that is NOT tied to a single task's status. `target` decides which
+  // channel feed owns it: `story` routes to the story LEADER's feed (reason
+  // `completion-review`: all subtasks merged → verify the goal), `cto` routes to the
+  // WORKSPACE/CTO feed (reason `complete`: the leader marked the story done). `detail`
+  // is a short human hook (e.g. the story brief). See src/channel.ts (AttentionBridge).
+  | {
+      type: "story.attention";
+      story_id: string;
+      workspace_id: string;
+      target: "story" | "cto";
+      reason: "completion-review" | "complete";
+      detail: string | null;
+    }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;
