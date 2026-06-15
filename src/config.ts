@@ -691,6 +691,22 @@ export const config = {
    * work.unifiedWorkEnabled().
    */
   unifiedWork: envBool("BUTCHR_UNIFIED_WORK", false),
+
+  // ---- UNIFIED WORKSPACE ABSTRACTION (story st-540ba705, step 3) -------------
+  /**
+   * MASTER GATE for the UNIFIED WORKSPACE supervisor (src/workspace-agent.ts) — the
+   * single supervision loop that generalizes the three agent kinds (build / story
+   * leader / CTO) into one (agent + directory) execution context over the inert
+   * `workspace` table (see docs/rfc-work-workspace-unification.md §2.2). DEFAULT OFF
+   * and fully INERT: while off the unified supervisor no-ops (it is also NOT wired
+   * into boot), and the EXISTING cto_agent / story_agent supervisors + the per-task
+   * build-agent dispatch stay the sole authoritative paths. This flag exists so the
+   * generalized loop can be exercised in tests and, at the separately-authorized
+   * step-6 cutover, flipped on to replace the three parallel supervisors. Turning it
+   * ON today does NOT remove the old supervisors — coexistence/cutover is step 6, out
+   * of scope here.
+   */
+  unifiedWorkspaceEnabled: envBool("BUTCHR_UNIFIED_WORKSPACE", false),
 };
 
 export type Config = typeof config;

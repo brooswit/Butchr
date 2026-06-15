@@ -1852,3 +1852,148 @@ export function computeMetrics(rows: MetricRow[], nowMs: number, days = 14): Met
 // re-queuing it just makes the dispatcher collide on `agent_name_taken`. Startup
 // reconciliation (dispatcher.reconcileRunningTasks, wired in index.ts) instead
 // re-adopts the live agent or rescues a dead one.
+
+// ---- UNIFIED WORKSPACE (agent + directory) — CRUD helpers -----------------
+// (story st-540ba705, step 3 — UNIFIED WORKSPACE ABSTRACTION, gated OFF + INERT.)
+// Additive accessors over the `workspace` table (created inert in step 1 by
+// migrateWorkspaceTable; row type WorkspaceAgentRow above). NOTHING in the live
+// paths calls these — they back the gated unified supervisor (src/workspace-agent.ts)
+// and its tests. Mirror the saveCtoAgentRow / saveStoryAgentRow upsert pattern, keyed
+// by the workspace's own opaque id. Appended at EOF so this step's db.ts additions are
+// localized (minimizing rebase churn against the parallel spine subtask).
+
+/** A unified-workspace row, or null if it has never been written. */
+export function getWorkspaceAgentRow(id: string): WorkspaceAgentRow | null {
+  return (
+    db
+      .query<WorkspaceAgentRow, [string]>(`SELECT * FROM workspace WHERE id=?`)
+      .get(id) ?? null
+  );
+}
+
+/** Every unified-workspace row (all kinds), oldest → newest. */
+export function listWorkspaceAgentRows(): WorkspaceAgentRow[] {
+  return db
+    .query<WorkspaceAgentRow, []>(`SELECT * FROM workspace ORDER BY created_at ASC`)
+    .all();
+}
+
+/** Every unified-workspace row bound to one unit of Work (a tasks(id)), oldest → newest. */
+export function listWorkspaceAgentRowsForWork(workId: string): WorkspaceAgentRow[] {
+  return db
+    .query<WorkspaceAgentRow, [string]>(
+      `SELECT * FROM workspace WHERE work_id=? ORDER BY created_at ASC`,
+    )
+    .all(workId);
+}
+
+/**
+ * The single LIVE workspace for a unit of Work — the one row whose honest owned-agent
+ * marker (`has_agent`) is set — or null if none is live. The reader half of the RFC Q3
+ * invariant "Work↔Workspace is 1:N with exactly one LIVE at a time" (enforced on the
+ * write side by demoteSiblingWorkspaceAgents). Returns the newest if (defensively) more
+ * than one is marked live.
+ */
+export function liveWorkspaceForWork(workId: string): WorkspaceAgentRow | null {
+  return (
+    db
+      .query<WorkspaceAgentRow, [string]>(
+        `SELECT * FROM workspace WHERE work_id=? AND has_agent=1 ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(workId) ?? null
+  );
+}
+
+/**
+ * 1:N "one live per Work" ENFORCEMENT (RFC Q3): demote every OTHER workspace bound to
+ * `workId` — clear its desired flag AND its owned-agent marker — leaving `keepId` the
+ * sole live one. A no-op when the Work has no siblings. The caller marks `keepId` live
+ * (saveWorkspaceAgentRow has_agent=1) as part of launching it.
+ */
+export function demoteSiblingWorkspaceAgents(workId: string, keepId: string): void {
+  db.query(
+    `UPDATE workspace SET desired=0, has_agent=0, updated_at=? WHERE work_id=? AND id<>?`,
+  ).run(nowIso(), workId, keepId);
+}
+
+/** Drop a unified-workspace row (the directory/Work DELETE also cascades this). */
+export function deleteWorkspaceAgentRow(id: string): void {
+  db.query(`DELETE FROM workspace WHERE id=?`).run(id);
+}
+
+/**
+ * Upsert a partial patch onto a unified-workspace row (stamping updated_at). Mirrors
+ * saveCtoAgentRow: single-row write, unspecified fields untouched on an existing row.
+ * `kind` is required on INSERT (the table CHECK-pins it and it has no safe default) —
+ * supply it in the patch when creating a row; on an UPDATE the existing kind is kept.
+ */
+export function saveWorkspaceAgentRow(
+  id: string,
+  patch: Partial<Omit<WorkspaceAgentRow, "id">>,
+): void {
+  const cur = getWorkspaceAgentRow(id);
+  const kind = patch.kind ?? cur?.kind;
+  if (!kind) {
+    throw new Error(`saveWorkspaceAgentRow(${id}): kind is required to create a workspace row`);
+  }
+  const next: WorkspaceAgentRow = {
+    id,
+    name: cur?.name ?? null,
+    kind,
+    directory_id: cur?.directory_id ?? null,
+    work_id: cur?.work_id ?? null,
+    session_id: cur?.session_id ?? null,
+    desired: cur?.desired ?? 0,
+    started_at: cur?.started_at ?? null,
+    restarts: cur?.restarts ?? 0,
+    last_error: cur?.last_error ?? null,
+    has_agent: cur?.has_agent ?? 0,
+    idle: cur?.idle ?? 0,
+    idle_context: cur?.idle_context ?? null,
+    herdr_workspace: cur?.herdr_workspace ?? null,
+    created_at: cur?.created_at ?? nowIso(),
+    updated_at: cur?.updated_at ?? null,
+    ...patch,
+    // `id`/`kind` are resolved above; keep them authoritative over a stray patch spread.
+    kind,
+  };
+  db.query(
+    `INSERT INTO workspace
+       (id, name, kind, directory_id, work_id, session_id, desired, started_at,
+        restarts, last_error, has_agent, idle, idle_context, herdr_workspace,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name=excluded.name,
+       kind=excluded.kind,
+       directory_id=excluded.directory_id,
+       work_id=excluded.work_id,
+       session_id=excluded.session_id,
+       desired=excluded.desired,
+       started_at=excluded.started_at,
+       restarts=excluded.restarts,
+       last_error=excluded.last_error,
+       has_agent=excluded.has_agent,
+       idle=excluded.idle,
+       idle_context=excluded.idle_context,
+       herdr_workspace=excluded.herdr_workspace,
+       updated_at=excluded.updated_at`,
+  ).run(
+    next.id,
+    next.name,
+    next.kind,
+    next.directory_id,
+    next.work_id,
+    next.session_id,
+    next.desired,
+    next.started_at,
+    next.restarts,
+    next.last_error,
+    next.has_agent,
+    next.idle,
+    next.idle_context,
+    next.herdr_workspace,
+    next.created_at,
+    nowIso(),
+  );
+}
