@@ -26,9 +26,11 @@ const noSleep = async () => {};
 function mockApi(opts: {
   workspaces?: any[];
   created?: any;
+  story?: any;
   taskSequence?: any[];
   approve?: any;
   onAbort?: () => void;
+  onStoryDelete?: () => void;
 }): { api: SelftestApi; calls: Array<{ method: string; path: string; body?: unknown }> } {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   const seq = [...(opts.taskSequence ?? [])];
@@ -36,6 +38,15 @@ function mockApi(opts: {
     calls.push({ method, path, body });
     if (method === "GET" && path === "/api/workspaces") {
       return opts.workspaces ?? [];
+    }
+    // AUTHORITY FLIP: the probe is now a story SUBTASK — create the throwaway story first,
+    // then the subtask via POST /api/stories/:id/tasks (matched by the /tasks$ rule below).
+    if (method === "POST" && /\/stories$/.test(path)) {
+      return opts.story ?? { id: "story-1", status: "open" };
+    }
+    if (method === "DELETE" && /\/api\/stories\//.test(path)) {
+      opts.onStoryDelete?.();
+      return { ok: true };
     }
     if (method === "POST" && /\/tasks$/.test(path)) {
       return opts.created ?? { id: "probe-1", status: "queued" };
@@ -94,6 +105,7 @@ test("resolveSandbox errors clearly when no sandbox is registered", async () => 
 
 test("happy path (no merge): resolve→create→dispatch→review→abort cleanup", async () => {
   let aborted = false;
+  let storyDeleted = false;
   const { api, calls } = mockApi({
     workspaces: [SANDBOX],
     created: { id: "probe-1", status: "in_progress" },
@@ -103,11 +115,13 @@ test("happy path (no merge): resolve→create→dispatch→review→abort cleanu
       { id: "probe-1", status: "in_review", ci_status: "pass" },
     ],
     onAbort: () => (aborted = true),
+    onStoryDelete: () => (storyDeleted = true),
   });
   const result = await runSelftest({ api, sleep: noSleep, now: fakeClock(), marker: "m1" });
 
   expect(result.ok).toBe(true);
   expect(result.taskId).toBe("probe-1");
+  expect(result.storyId).toBe("story-1");
   expect(result.dir?.id).toBe("dir-sandbox");
   expect(result.stages.map((s) => s.name)).toEqual([
     "resolve",
@@ -118,9 +132,16 @@ test("happy path (no merge): resolve→create→dispatch→review→abort cleanu
   ]);
   expect(result.stages.find((s) => s.name === "review")?.detail).toContain("ci=pass");
   expect(aborted).toBe(true);
-  // The probe was tagged so it's identifiable in the UI.
+  // AUTHORITY FLIP: the probe ran as a story SUBTASK — a throwaway story was created first,
+  // the subtask was created under it (POST /api/stories/:id/tasks), and the story was
+  // deleted at cleanup (tearing down its leader).
+  const storyCreate = calls.find((c) => c.method === "POST" && /\/stories$/.test(c.path));
+  expect((storyCreate?.body as any).brief).toContain("self-test probe story");
   const createCall = calls.find((c) => c.method === "POST" && /\/tasks$/.test(c.path));
+  expect(createCall?.path).toContain("/api/stories/story-1/tasks");
+  // The probe subtask was tagged so it's identifiable in the UI.
   expect((createCall?.body as any).tags).toEqual(["selftest"]);
+  expect(storyDeleted).toBe(true);
 });
 
 test("dispatch observed even when polling skips straight to review", async () => {
@@ -232,11 +253,13 @@ test("timeout waiting for review fails and still cleans up", async () => {
 test("a failed run whose cleanup ALSO fails surfaces the cleanup failure", async () => {
   const api: SelftestApi = async (method, path) => {
     if (method === "GET" && path === "/api/workspaces") return [SANDBOX];
+    if (method === "POST" && /\/stories$/.test(path)) return { id: "story-1", status: "open" };
     if (method === "POST" && /\/tasks$/.test(path)) return { id: "probe-1", status: "queued" };
     if (method === "GET" && /\/api\/tasks\//.test(path)) {
       return { id: "probe-1", status: "aborted", last_dispatch_error: "boom" };
     }
     if (method === "POST" && /\/abort$/.test(path)) throw new Error("abort 500");
+    if (method === "DELETE" && /\/api\/stories\//.test(path)) return { ok: true };
     throw new Error(`unexpected ${method} ${path}`);
   };
   const result = await runSelftest({ api, sleep: noSleep, now: fakeClock(), marker: "m7" });

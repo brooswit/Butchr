@@ -55,6 +55,7 @@ import {
   answerTask,
   approvePlan,
   approveTask,
+  assertWorkspaceTaskCreationAllowed,
   attentionList,
   confirmMajor,
   createTask,
@@ -743,6 +744,13 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
     body.kind === "rollback" || body.template === "rollback"
       ? "rollback"
       : "task";
+  // AUTHORITY FLIP (Phase 7): the operator/CTO can only create STORIES here, not story-less
+  // work tasks — tasks are created EXCLUSIVELY by story leaders via POST /api/stories/:id/tasks.
+  // The ONE task kind still creatable from a workspace is a ROLLBACK (the 'Roll back' flow);
+  // any ordinary/idea standalone create is rejected (409) and directed to story creation. This
+  // gates the HTTP ENTRY POINT only — in-process createTask/createSubtask are untouched. See
+  // tasks.assertWorkspaceTaskCreationAllowed.
+  assertWorkspaceTaskCreationAllowed(kind);
   // Optional model: an alias (opus/sonnet/haiku/fable) or full id, threaded into the
   // agent launch. Unset → claude's current default. Validated inside createTask.
   // Optional tags: an array of free-form organizational labels (validated +

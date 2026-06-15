@@ -6,8 +6,11 @@
 // the next real task.
 //
 // This is almost entirely a REST CLIENT: it adds no server logic and maps onto
-// existing routes (GET /api/workspaces, POST …/tasks, GET …/tasks/:id, POST
-// …/approve, …/abort). The ONE exception is the `--merge` cleanup: a merged probe
+// existing routes. It drives the REAL operator path post-authority-flip: the operator
+// creates a STORY (POST /api/workspaces/:id/stories) and the probe runs as a story
+// SUBTASK (POST /api/stories/:id/tasks) — standalone workspace task creation is now
+// rejected, so the smoke test exercises the same surface the operator uses. The ONE
+// exception is the `--merge` cleanup: a merged probe
 // can no longer be undone via a server route (the mechanical /rollback endpoint was
 // retired — deliberate rollback is now a normal task), so the harness reverts its
 // OWN throwaway merge directly in the sandbox repo. Everything time-, IO-, or
@@ -55,6 +58,9 @@ export type SelftestResult = {
   ok: boolean;
   /** The probe task's id (null if creation never happened). */
   taskId: string | null;
+  /** The throwaway STORY the probe subtask belongs to (null if creation never happened) —
+   * deleted at cleanup (which also tears down its leader agent). */
+  storyId: string | null;
   /** The sandbox workspace the probe ran in (null if it couldn't be resolved). */
   dir: { id: string; label: string; path: string } | null;
   stages: SelftestStage[];
@@ -183,7 +189,7 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
 
-  const result: SelftestResult = { ok: true, taskId: null, dir: null, stages: [] };
+  const result: SelftestResult = { ok: true, taskId: null, storyId: null, dir: null, stages: [] };
   let last = now();
   const mark = (name: string, ok: boolean, detail?: string): void => {
     const t = now();
@@ -207,15 +213,22 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     result.dir = dir;
     mark("resolve", true, `${dir.label} (${dir.id})`);
 
-    // (2) Create the throwaway probe task (tagged so it's identifiable in the UI).
+    // (2) Create a throwaway STORY, then its probe SUBTASK — the real operator path
+    // (operator → story → leader-decomposed subtask). Standalone workspace task creation is
+    // now rejected (only story leaders create tasks), so the probe runs as a story subtask;
+    // it dispatches exactly like any task. Tagged so it's identifiable in the UI.
     const marker = options.marker ?? String(now());
+    const story = await api("POST", `/api/workspaces/${encodeURIComponent(dir.id)}/stories`, {
+      brief: `butchr self-test probe story (marker: ${marker})`,
+    });
+    result.storyId = story.id;
     const prompt = buildProbePrompt(marker);
-    const task = await api("POST", `/api/workspaces/${encodeURIComponent(dir.id)}/tasks`, {
+    const task = await api("POST", `/api/stories/${encodeURIComponent(story.id)}/tasks`, {
       prompt,
       tags: ["selftest"],
     });
     result.taskId = task.id;
-    mark("create", true, `${task.id} (${task.status})`);
+    mark("create", true, `${task.id} (${task.status}) in story ${story.id}`);
 
     // (3) Poll until the probe DISPATCHES (→ running) and then reaches REVIEW. A
     // status outside the expected transient set before review (failed/aborted/
@@ -310,6 +323,17 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
         // Cleanup failure is itself a problem worth flagging (a leftover task/
         // worktree defeats the harness's "keeps the sandbox clean" guarantee).
         mark("cleanup", false, `FAILED: ${(e as Error).message}`);
+      }
+    }
+    // Delete the throwaway STORY (best-effort): removes the story row + its managed LEADER
+    // agent. Member tasks are only DETACHED (story_id nulled), so the subtask teardown above
+    // stands. Runs even when the subtask was never created (story-only leftover). A deletion
+    // failure is flagged — a leftover story/leader defeats the "clean sandbox" guarantee.
+    if (result.storyId) {
+      try {
+        await api("DELETE", `/api/stories/${encodeURIComponent(result.storyId)}`);
+      } catch (e) {
+        mark("cleanup", false, `story delete FAILED: ${(e as Error).message}`);
       }
     }
   }

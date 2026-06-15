@@ -64,11 +64,24 @@ test("--help renders usage and exits 0 (script parses + runs)", () => {
   expect(stdout).toContain("confirm-major <id>");
 });
 
-// `new --bump` is validated BEFORE any network call, so a bad level fails fast with the
-// standard message and exit 1 (no server needed). This also proves --bump is a recognized
-// value-flag rather than an "unknown flag" parse error.
+// AUTHORITY FLIP: `new` no longer creates standalone work tasks — new work flows through
+// `story`, and the ONLY task `new` creates is a rollback. A plain `new -m` errors offline
+// (before any network call), pointing at `story`.
+test("new -m errors offline: standalone task creation is disabled (use story)", () => {
+  const { stderr, code } = runCli(["new", "some-ws", "-m", "x"]);
+  expect(code).toBe(1);
+  expect(stderr).toContain("standalone task creation is disabled");
+  expect(stderr).toContain("butchr story <workspace>");
+});
+
+// `new --template rollback --bump` is validated BEFORE any network call, so a bad level fails
+// fast with the standard message and exit 1 (no server needed). This also proves --bump is a
+// recognized value-flag rather than an "unknown flag" parse error (and that the rollback form
+// passes the authority-flip gate to reach the bump validation).
 test("new --bump rejects an invalid level offline (validated pre-network)", () => {
-  const { stderr, code } = runCli(["new", "some-ws", "-m", "x", "--bump", "bananas"]);
+  const { stderr, code } = runCli(
+    ["new", "some-ws", "--template", "rollback", "--var", "task=t", "--var", "sha=s", "--bump", "bananas"],
+  );
   expect(code).toBe(1);
   expect(stderr.trim()).toBe(`butchr: new: --bump must be 'patch', 'minor', or 'major' (got "bananas")`);
 });
@@ -80,10 +93,14 @@ test("new --bump rejects an invalid level offline (validated pre-network)", () =
 // not an "unknown flag" parse error). Environment-robust: makes no assumption about whether
 // a butchr server is up.
 test("new --bump major is accepted by parsing (fails later, not on the flag)", () => {
-  const { stderr, code } = runCli(["new", "some-ws-that-does-not-exist", "-m", "x", "--bump", "major"]);
+  const { stderr, code } = runCli(
+    ["new", "some-ws-that-does-not-exist", "--template", "rollback", "--var", "task=t", "--var", "sha=s", "--bump", "major"],
+  );
   expect(code).toBe(1);
   expect(stderr).not.toContain("--bump must be");
   expect(stderr).not.toContain("unknown flag");
+  // Not blocked by the authority-flip gate either (the rollback form is permitted).
+  expect(stderr).not.toContain("standalone task creation is disabled");
 });
 
 test("ciBadge is renamed to ciCell in bin/butchr (and app.js is untouched)", () => {

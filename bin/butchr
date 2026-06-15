@@ -28,19 +28,15 @@ COMMANDS
   ls [--workspace <id>] [--status <s>]  List tasks as a compact id/status/ci/tags table.
      [--tag a,b]                    Keep only tasks carrying any of the given tags.
      [--search <text>]              Full-text match on prompt/summary/review notes/id.
-  new <workspace> -m <prompt>           Create a task in <workspace> (id or path).
-      [--blocked-by id,id]          Start it blocked on the given task ids.
-      [--tag a,b]                   Attach organizational labels (comma-separated).
-      [--priority N]                Dispatch priority (higher = sooner; default 0).
-      [--plan]                      Plan-preview gate: the agent proposes a plan and
-                                    pauses for your approval before writing code.
-      [--allowlist a,b]             File allowlist (glob/path entries, comma-separated):
-                                    the CI gate FAILS if the diff strays outside it.
-      [--bump patch|minor|major]    Declared semver bump applied at merge in a
-                                    release_mode workspace (default patch; inert
-                                    otherwise). A major bump needs confirm-major x2.
-      [--template <name>]           Create from a template instead of -m; fill its
-      [--var key=val ...]             {{placeholders}} with repeatable --var pairs.
+  story <workspace> -m <brief>          Create a STORY in <workspace> (id or path). This is
+                                    the operator's entry point for new work: a story leader
+                                    decomposes it into subtasks. Tasks are NOT created
+                                    directly anymore (see 'new').
+  new <workspace> --template rollback   Create a ROLLBACK task (revert a merged task's
+      --var task=<id> --var sha=<sha>   commit through the pipeline). This is the ONLY task
+      [--blocked-by id,id] [--tag a,b]  creatable directly — standalone work tasks now flow
+      [--priority N] [--allowlist a,b]  through 'story'. Other --template / -m forms error.
+      [--bump patch|minor|major]
   templates                       List the built-in task templates + placeholders.
   show <id>                       Task detail: status, ci, tags, summary, notes.
   approve <id>                    Approve a task in review (merges its branch).
@@ -382,9 +378,32 @@ async function cmdLs(flags) {
   );
 }
 
+async function cmdStory(positionals, flags) {
+  const dir = positionals[0];
+  if (!dir) fail("story: missing <workspace> (workspace id or path)");
+  const brief = flags.message;
+  if (!brief) fail("story: missing -m <brief>");
+  const dirId = await resolveWorkspaceId(dir);
+  const story = await api("POST", `/api/workspaces/${encodeURIComponent(dirId)}/stories`, { brief });
+  return emit(flags, story, `created story ${story.id} (${story.status})\n`);
+}
+
 async function cmdNew(positionals, flags) {
   const dir = positionals[0];
   if (!dir) fail("new: missing <workspace> (workspace id or path)");
+  // AUTHORITY FLIP: `new` no longer creates standalone work tasks — new work flows through
+  // STORIES (`butchr story`), and the tasks themselves are created by story LEADERS. The ONE
+  // task still creatable here is a ROLLBACK (revert a merged task's commit), mirroring the API
+  // gate exactly (POST /api/workspaces/:id/tasks admits only kind=rollback). Anything else
+  // errors, pointing at `story`.
+  if (flags.template !== "rollback") {
+    fail(
+      'new: standalone task creation is disabled — create a STORY instead: ' +
+        '`butchr story <workspace> -m "<brief>"`. Story leaders create the tasks. ' +
+        '(The only task creatable here is a rollback: ' +
+        '`butchr new <workspace> --template rollback --var task=<id> --var sha=<sha>`.)',
+    );
+  }
   // Validate the cheap flag args (the declared bump level) BEFORE any network call, so a
   // typo'd --bump fails fast without a round-trip. Inert outside a release_mode workspace.
   if (flags.bump !== undefined && !["patch", "minor", "major"].includes(flags.bump)) {
@@ -794,6 +813,8 @@ async function main() {
       return cmdGate(positionals, flags);
     case "ls":
       return cmdLs(flags);
+    case "story":
+      return cmdStory(positionals, flags);
     case "new":
       return cmdNew(positionals, flags);
     case "templates":

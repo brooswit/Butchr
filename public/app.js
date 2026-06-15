@@ -857,11 +857,15 @@ async function ctoMiniBadge(dirId, slot) {
 async function renderWorkspace(id) {
   // Pull the workspace from the dashboard rollup (it carries the effective gate
   // command + override state the gate panel needs) alongside its task list.
-  const [dash, tasks] = await Promise.all([
+  const [dash, tasks, stories] = await Promise.all([
     api("GET", "/dashboard"),
     // Carry the active full-text search so it survives SSE-driven re-renders; the
     // server filters by `?q=` (see searchParam / buildFilterBar).
     api("GET", "/workspaces/" + id + "/tasks" + searchParam()),
+    // The workspace's STORIES (enriched StoryViews: brief + status + per-status subtask
+    // counts + leader status) — the operator's primary work surface post-authority-flip.
+    // Best-effort: a failure leaves the section empty rather than blanking the page.
+    api("GET", "/workspaces/" + id + "/stories").catch(() => []),
   ]);
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
@@ -871,24 +875,23 @@ async function renderWorkspace(id) {
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path" }, dir.path));
 
-  // create-task launcher — a button that opens the New-task modal (prompt +
-  // optional blocked_by). The modal POSTs to the existing create endpoint; the
-  // resulting task appears via the SSE-driven re-render.
+  // create-work launcher (AUTHORITY FLIP, Phase 7) — the operator's entry point for new
+  // work is now a STORY, not a standalone task. A single "New story" button opens the
+  // brief modal (POST /api/workspaces/:id/stories); a story leader then decomposes it into
+  // subtasks. Standalone task + idea creation are gone (the server rejects them) — the only
+  // task creatable directly is a rollback, via the per-task "Roll back" button.
   const launch = el("div", { class: "row between", style: "margin-top:18px" });
   launch.appendChild(el("small", { class: "muted" },
-    `Tasks run concurrently, each in its own worktree. ${queueLine(tasks)}`));
-  // The two creation entry points sit together on the right: the full New-task form,
-  // and the lightweight "Add idea" path (jot a brief; butchr parks it awaiting a spec
-  // from the workspace's spec-generation responder).
-  const launchBtns = el("div", { class: "row", style: "gap:8px" });
-  const ideaBtn = el("button", { class: "btn ghost", id: "add-idea" }, "Add idea");
-  ideaBtn.addEventListener("click", () => openAddIdeaModal(id));
-  launchBtns.appendChild(ideaBtn);
-  const newBtn = el("button", { class: "btn", id: "new-task" }, "New task");
-  newBtn.addEventListener("click", () => openNewTaskModal(id));
-  launchBtns.appendChild(newBtn);
-  launch.appendChild(launchBtns);
+    `New work is a STORY — a leader decomposes it into subtasks. ${queueLine(tasks)}`));
+  const newStoryBtn = el("button", { class: "btn", id: "new-story" }, "New story");
+  newStoryBtn.addEventListener("click", () => openNewStoryModal(id));
+  launch.appendChild(newStoryBtn);
   wrap.appendChild(launch);
+
+  // STORIES panel — the operator's primary work surface: every story with its brief,
+  // status, member-subtask counts, and leader status (the Phase 6 GET /api/stories rollup).
+  // So the operator isn't blind to the stories they just created. Minimal by design.
+  wrap.appendChild(renderStories(stories));
 
   // List / Graph view toggle. The toggle bar sits outside the body region so it
   // persists while the body is swapped; the chosen mode lives in dirView (module
@@ -1070,279 +1073,89 @@ async function responderPanel(id) {
   return panel;
 }
 
-// ---------- new-task modal ----------
-// Inline modal for creating a task, redesigned for LOW-EFFORT creation. The default
-// surface is just: a one-line IDEA (with an Expand button) or a template → the prompt
-// textarea → Create. The operator gives ideas, not full specs, so "Expand" runs a
-// headless read-only claude over the repo (POST /api/expand-brief) to turn the idea
-// into a proper, grounded task prompt dropped into the textarea for review/edit. The
-// manual "write your own prompt" path and the template dropdown both still work.
-//
-// The five less-common knobs (blocked_by, model, tags, priority, plan-preview)
-// are collapsed behind an "Advanced" disclosure (closed by default). Context is
-// intentionally left empty (the agent reads files itself). Submits to the existing
-// create endpoint; the new task surfaces via the SSE-driven re-render.
-function openNewTaskModal(workspaceId) {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML = `
-    <label class="field" style="margin-bottom:8px">
-      <span class="lbl">idea — a one-line brief; Expand grounds it in the repo into a full prompt</span>
-      <div class="row" style="gap:8px; align-items:stretch">
-        <input type="text" id="nt-brief" placeholder="e.g. add a dark-mode toggle to the header" style="flex:1" />
-        <button type="button" class="btn ghost" id="nt-expand" style="white-space:nowrap">Expand ✨</button>
-      </div>
-      <span class="hint" id="nt-brief-hint"></span>
-    </label>
-    <label class="field" style="margin-bottom:8px">
-      <span class="lbl">template (optional) — fills the prompt with a recipe to complete</span>
-      <select id="nt-template"><option value="">— none (write your own prompt) —</option></select>
-      <span class="hint" id="nt-tpl-hint"></span>
-    </label>
-    <label class="field">
-      <span class="lbl">prompt</span>
-      <textarea id="nt-prompt" placeholder="Describe the work for the agent — or type an idea above and Expand it…"></textarea>
-    </label>
-    <label class="field" id="nt-bump-field" style="display:none">
-      <span class="lbl">version bump — this workspace is in versioned-releases mode; the merge bumps the version by this level (a major needs a human double-confirm)</span>
-      <select id="nt-bump">
-        <option value="patch">patch (default) — backwards-compatible fix</option>
-        <option value="minor">minor — backwards-compatible feature</option>
-        <option value="major">major — breaking change (parks for a double-confirm)</option>
-      </select>
-    </label>
-    <div class="adv" id="nt-adv">
-      <button type="button" class="adv-head" id="nt-adv-head"><span class="caret">▸</span><span>Advanced</span></button>
-      <div class="adv-body" id="nt-adv-body">
-        <label class="field" style="margin-bottom:0">
-          <span class="lbl">blocked by (optional) — comma-separated task ids</span>
-          <input type="text" id="nt-blocked" placeholder="e.g. snug-crag-ffae, wise-crag-b403" />
-        </label>
-        <label class="field" style="margin-bottom:0">
-          <span class="lbl">model (optional) — blank uses the default</span>
-          <input type="text" id="nt-model" placeholder="e.g. opus, sonnet, haiku, or claude-opus-4-8" />
-        </label>
-        <label class="field" style="margin-bottom:0">
-          <span class="lbl">tags (optional) — comma-separated labels for organizing/filtering</span>
-          <input type="text" id="nt-tags" placeholder="e.g. webapp, core, docs" />
-        </label>
-        <label class="field" style="margin-bottom:0">
-          <span class="lbl">priority (optional) — higher dispatches sooner; default 0</span>
-          <input type="number" step="1" id="nt-priority" placeholder="0" />
-        </label>
-        <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
-          <input type="checkbox" id="nt-plan-preview" />
-          <span class="lbl" style="margin:0">Plan-preview — the agent proposes a plan and pauses for your approval before writing code</span>
-        </label>
-        <label class="field check-field" style="margin-bottom:0; flex-direction:row; align-items:center; gap:8px">
-          <input type="checkbox" id="nt-idea" />
-          <span class="lbl" style="margin:0">New Idea — submit the one-line idea above as-is; butchr parks it awaiting a spec and requests one from this workspace's spec-generation responder (the CTO agent, or you in the webapp), then it goes to spec review (no Expand or prompt needed)</span>
-        </label>
-      </div>
-    </div>`;
+// ---------- stories panel + new-story modal (AUTHORITY FLIP, Phase 7) ----------
+// New work is a STORY, not a standalone task: the operator creates a story (a one-line
+// brief) and a managed story-LEADER agent decomposes it into the subtasks. So the old
+// New-task / Add-idea modals are gone — the server now REJECTS standalone task creation
+// (only a rollback may be created directly, via the per-task "Roll back" button). Two
+// surfaces replace them: a minimal "New story" modal, and a read-only stories list/progress
+// panel built from the Phase 6 GET /api/stories rollup (brief + status + per-status subtask
+// counts + leader status), so the operator isn't blind to the stories they just created.
 
-  const foot = el("div", { class: "m-foot" });
-  const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const create = el("button", { class: "btn" }, "Create task");
-  foot.appendChild(errEl);
-  foot.appendChild(cancel);
-  foot.appendChild(create);
-
-  const { close } = openModal({ title: "New task", body, footer: foot });
-  cancel.addEventListener("click", close);
-
-  // Advanced disclosure — collapsed by default so the default modal is just
-  // idea/template → prompt → Create.
-  const advEl = body.querySelector("#nt-adv");
-  const advHead = body.querySelector("#nt-adv-head");
-  advHead.addEventListener("click", () => {
-    const open = advEl.classList.toggle("open");
-    advHead.querySelector(".caret").textContent = open ? "▾" : "▸";
-  });
-
-  const briefEl = body.querySelector("#nt-brief");
-  const expandBtn = body.querySelector("#nt-expand");
-  const briefHintEl = body.querySelector("#nt-brief-hint");
-  const promptEl = body.querySelector("#nt-prompt");
-  const blockedEl = body.querySelector("#nt-blocked");
-  const modelEl = body.querySelector("#nt-model");
-  const tagsEl = body.querySelector("#nt-tags");
-  const priorityEl = body.querySelector("#nt-priority");
-  const planPreviewEl = body.querySelector("#nt-plan-preview");
-  const ideaEl = body.querySelector("#nt-idea");
-  const tplEl = body.querySelector("#nt-template");
-  const tplHintEl = body.querySelector("#nt-tpl-hint");
-  const bumpFieldEl = body.querySelector("#nt-bump-field");
-  const bumpEl = body.querySelector("#nt-bump");
-  // The idea box is the primary low-effort entry point, so start focus there.
-  briefEl.focus();
-
-  // VERSIONED-RELEASES: the bump-size selector is only relevant when the target
-  // workspace is in release_mode, so reveal it solely off the workspace view (no
-  // hardcoded id). Fetch the workspace after mount — like responderPanel does — and
-  // un-hide the field only when release_mode is on. While off it stays hidden and the
-  // create body never carries version_bump (see below), so non-release_mode creates are
-  // byte-identical. Best-effort: a fetch failure just leaves the field hidden.
-  let releaseMode = false;
-  api("GET", "/workspaces/" + workspaceId)
-    .then((w) => { releaseMode = !!(w && w.release_mode); if (releaseMode) bumpFieldEl.style.display = ""; })
-    .catch(() => { /* leave the bump field hidden on failure */ });
-
-  function showBriefHint(msg, isErr) {
-    briefHintEl.textContent = msg || "";
-    briefHintEl.classList.toggle("err", !!isErr);
-  }
-
-  // BRIEF → EXPAND. Turn the one-line idea into a proper, repo-grounded task prompt via
-  // the headless read-only claude behind POST /api/expand-brief, then drop the result
-  // into the prompt textarea for the operator to review/edit. A spinner runs while it
-  // works; on error the brief is left intact with a message so the operator can retry
-  // or just write the prompt by hand.
-  async function expand() {
-    const brief = briefEl.value.trim();
-    if (!brief) { showBriefHint("Type a one-line idea first.", true); briefEl.focus(); return; }
-    const prior = expandBtn.textContent;
-    expandBtn.disabled = true; expandBtn.classList.add("loading");
-    expandBtn.textContent = "Expanding…";
-    showBriefHint("Reading the repo and drafting a prompt…");
-    try {
-      const r = await api("POST", "/expand-brief", { brief, workspace: workspaceId });
-      promptEl.value = r.prompt || "";
-      showBriefHint("Expanded — review and edit the prompt below, then Create.");
-      promptEl.focus();
-    } catch (e) {
-      showBriefHint(e.message || "could not expand the brief", true);
-    } finally {
-      expandBtn.disabled = false; expandBtn.classList.remove("loading");
-      expandBtn.textContent = prior;
-    }
-  }
-  expandBtn.addEventListener("click", expand);
-  // Enter in the single-line idea box expands (rather than submitting nothing).
-  briefEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); expand(); }
-  });
-
-  // Load the built-in templates and populate the picker. Selecting one fills the
-  // prompt textarea with its body (placeholders intact) so the operator completes
-  // the {{markers}} inline — the form still submits a plain prompt to the create
-  // endpoint, so no template field crosses the wire from the webapp.
-  let templates = [];
-  api("GET", "/templates")
-    .then((list) => {
-      templates = Array.isArray(list) ? list : [];
-      for (const t of templates) {
-        tplEl.appendChild(el("option", { value: t.name }, `${t.name} — ${t.description}`));
-      }
-    })
-    .catch(() => { /* templates are optional — leave the picker empty on failure */ });
-
-  tplEl.addEventListener("change", () => {
-    const t = templates.find((x) => x.name === tplEl.value);
-    if (!t) { tplHintEl.textContent = ""; return; }
-    promptEl.value = t.body;
-    tplHintEl.textContent = t.placeholders.length
-      ? `Fill in: ${t.placeholders.map((p) => "{{" + p + "}}").join(", ")}`
-      : "";
-    promptEl.focus();
-  });
-
-  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
-
-  create.addEventListener("click", async () => {
-    // NEW IDEA mode: the one-line idea box IS the submission (the operator gives a brief,
-    // not a spec). The task parks awaiting a spec from the workspace's spec-generation
-    // responder, so neither Expand nor a full prompt is required — fall back to the prompt
-    // textarea only if the idea box is empty. Normal mode requires the prompt textarea as before.
-    const idea = ideaEl.checked;
-    const brief = briefEl.value.trim();
-    const prompt = idea ? (brief || promptEl.value.trim()) : promptEl.value.trim();
-    if (!prompt) {
-      if (idea) { showErr("Type a one-line idea above first."); briefEl.focus(); }
-      else { showErr("Prompt is required."); promptEl.focus(); }
-      return;
-    }
-    // Split the comma-separated blocker list into trimmed, non-empty ids.
-    const blocked_by = blockedEl.value.split(",").map((s) => s.trim()).filter(Boolean);
-    // The plan-preview gate doesn't apply to an idea task (its first step is spec
-    // generation, not a build agent), so force it off in idea mode. When on, the agent
-    // proposes a plan and pauses for approval before writing code.
-    const plan_preview = !idea && planPreviewEl.checked;
-    // Optional model — omit when blank so the backend defaults it.
-    const model = modelEl.value.trim() || null;
-    // Optional tags — split the comma-separated list into trimmed, non-empty labels
-    // (the backend de-dupes + validates).
-    const tags = tagsEl.value.split(",").map((s) => s.trim()).filter(Boolean);
-    // Optional priority — higher dispatches sooner; blank defaults to 0. Reject a
-    // non-integer here so the operator gets immediate feedback (the server also
-    // re-validates).
-    const priorityRaw = priorityEl.value.trim();
-    let priority = 0;
-    if (priorityRaw) {
-      priority = Number(priorityRaw);
-      if (!Number.isInteger(priority)) { showErr("Priority must be an integer."); priorityEl.focus(); return; }
-    }
-    showErr("");
-    const reqBody = { prompt, blocked_by, model, tags, priority, plan_preview, idea };
-    // VERSIONED-RELEASES: carry version_bump ONLY when the bump selector is shown
-    // (release_mode on) and this isn't an idea task — so a non-release_mode create
-    // request is byte-identical to before. The build task declares the bump; a major
-    // is later gated behind the human double-confirm at review.
-    if (releaseMode && !idea) reqBody.version_bump = bumpEl.value;
-    create.disabled = true; cancel.disabled = true;
-    try {
-      await api("POST", "/workspaces/" + workspaceId + "/tasks", reqBody);
-      toast(idea ? "idea created" : plan_preview ? "plan-preview task created" : "task created");
-      close();
-      render();
-    } catch (e) {
-      showErr(e.message || "could not create task");
-      create.disabled = false; cancel.disabled = false;
-    }
-  });
-}
-
-// ---------- add-idea modal ----------
-// The lightweight idea path: jot a one-line brief and let the spec-generation responder
-// spec it. Deliberately minimal — just a brief + Submit — in contrast to the full
-// New-task modal. POSTs { prompt: <brief>, idea: true } to the existing create endpoint;
-// the task PARKS in `idea` (a `spec requested` event is pushed on the CTO channel) until
-// the workspace's spec-generation responder (the CTO agent, or a human via the task's
-// spec form) submits a spec, advancing it to spec_review. The workspace is already scoped
-// here, so no selector is needed; the new idea task surfaces via the SSE-driven re-render.
-function openAddIdeaModal(workspaceId) {
+// The brief modal: jot a one-line story brief and POST it to /api/workspaces/:id/stories.
+// butchr lands the story `open` and launches its leader (which creates + reviews the
+// subtasks); the new story surfaces via the SSE-driven re-render.
+function openNewStoryModal(workspaceId) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
     <label class="field" style="margin-bottom:6px">
-      <span class="lbl">idea — a one-line brief; butchr requests a spec from this workspace's spec-generation responder (the CTO agent, or you), then parks it for spec review</span>
-      <textarea id="ai-brief" placeholder="Describe the idea in a sentence or two…"></textarea>
+      <span class="lbl">story — a one-line brief; a story leader decomposes it into the subtasks needed to deliver it</span>
+      <textarea id="ns-brief" placeholder="Describe the story in a sentence or two…"></textarea>
     </label>
-    <small class="hint muted">No prompt or expansion needed — record the idea and the spec-generation responder turns it into a reviewable spec.</small>`;
-  const briefEl = body.querySelector("#ai-brief");
+    <small class="hint muted">The operator creates STORIES; the leader creates + reviews the tasks. Each story's subtask progress shows below.</small>`;
+  const briefEl = body.querySelector("#ns-brief");
 
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
   const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const submit = el("button", { class: "btn" }, "Submit idea");
+  const submit = el("button", { class: "btn" }, "Create story");
   foot.appendChild(errEl);
   foot.appendChild(cancel);
   foot.appendChild(submit);
 
-  const { close } = openModal({ title: "Add idea", body, footer: foot });
+  const { close } = openModal({ title: "New story", body, footer: foot });
   cancel.addEventListener("click", close);
   briefEl.focus();
 
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
   submit.addEventListener("click", () => {
-    const prompt = briefEl.value.trim();
-    if (!prompt) { showErr("Describe the idea first."); briefEl.focus(); return; }
+    const brief = briefEl.value.trim();
+    if (!brief) { showErr("Describe the story first."); briefEl.focus(); return; }
     showErr("");
-    // Route through action(): it disables the button, toasts on success/failure, and
-    // re-enables on error so the operator can retry. On success we close + re-render.
-    action(submit, () => api("POST", "/workspaces/" + workspaceId + "/tasks", { prompt, idea: true }),
-      { success: "idea created", onDone: () => { close(); render(); } });
+    // action(): disables the button, toasts on success/failure, re-enables on error. On
+    // success close + re-render so the new story appears in the panel below.
+    action(submit, () => api("POST", "/workspaces/" + workspaceId + "/stories", { brief }),
+      { success: "story created", onDone: () => { close(); render(); } });
   });
+}
+
+// Read-only STORIES panel: a heading plus one row per story (newest-first, as the API
+// returns). Empty-state prompts the operator to create one. Minimal by design — it reuses
+// the GET /api/stories rollup already fetched in renderWorkspace; no per-story drill-in.
+function renderStories(stories) {
+  const panel = el("div", { class: "stories", style: "margin-top:18px" });
+  panel.appendChild(el("h2", {}, "Stories"));
+  if (!Array.isArray(stories) || stories.length === 0) {
+    panel.appendChild(el("div", { class: "muted hint" },
+      "No stories yet — create one to start work."));
+    return panel;
+  }
+  for (const s of stories) panel.appendChild(renderStoryRow(s));
+  return panel;
+}
+
+// One story row: brief + status + a compact subtask-progress summary + leader state. The 12
+// member statuses are rolled into the few buckets the operator scans for (active / review /
+// done / failed); `idle` is a flag peeled out of in_progress (see stories.storyCounts), not
+// a status, so it is excluded from the total. Leader state comes from the StoryAgentStatus.
+function renderStoryRow(s) {
+  const counts = s.counts || {};
+  const sum = (...keys) => keys.reduce((n, k) => n + (counts[k] || 0), 0);
+  const total = Object.keys(counts).filter((k) => k !== "idle").reduce((n, k) => n + (counts[k] || 0), 0);
+  const review = sum("spec_review", "in_review", "needs_info");
+  const active = sum("idea", "inactive", "blocked", "in_progress", "rolling_back");
+  const done = sum("merged", "rolled_back");
+  const failed = sum("failed", "aborted");
+  const leader = s.leader || {};
+  const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
+  const row = el("div", { class: "card", style: "cursor:default" });
+  row.innerHTML = `
+    <div class="title">${esc(s.brief || "(no brief)")}</div>
+    <div class="path">${esc(s.id)} · <b>${esc(s.status)}</b> · ${total} subtask${total === 1 ? "" : "s"}` +
+    ` · ${active} active · ${review} review · ${done} done${failed ? " · " + failed + " failed" : ""}` +
+    ` · ${esc(leaderState)}</div>`;
+  return row;
 }
 
 function queueLine(tasks) {

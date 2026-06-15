@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Stories epic, Phase 7 — AUTHORITY FLIP.** The operator/CTO now creates only STORIES;
+  work TASKS are created exclusively by story leaders. `POST /api/workspaces/:id/tasks`
+  rejects ordinary/idea standalone creation (409, pointing at `POST /api/workspaces/:id/stories`)
+  and admits only the `rollback` flow — the gate lives at the HTTP entry point
+  (`tasks.assertWorkspaceTaskCreationAllowed`), so leader decomposition (`POST /api/stories/:id/tasks`),
+  the 'Roll back' flow, and all in-process/internal task creation are unaffected. The CLI gains
+  `butchr story <ws> -m <brief>` and `new` now errors for non-rollback creation; the webapp
+  replaces its New-task/Add-idea launchers with a "New story" modal plus a stories progress
+  panel; the CTO brief flips to creating stories + handling escalations and story sign-off
+  (keeping responder handling for the non-story tasks that still exist); and `butchr selftest`
+  drives its probe through the real operator→story→subtask path.
+
 ## [0.9.87] - 2026-06-15
 
 ### Added

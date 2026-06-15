@@ -1160,6 +1160,32 @@ export function validateIdea(idea: unknown): boolean {
   return idea;
 }
 
+/**
+ * THE OPERATOR STANDALONE-TASK-CREATION GATE (Phase 7 — AUTHORITY FLIP). The operator/CTO
+ * may no longer create story-less work tasks directly: new work flows through STORIES
+ * (POST /api/workspaces/:id/stories) and the tasks themselves are created EXCLUSIVELY by
+ * story LEADERS (POST /api/stories/:id/tasks → createSubtask). The ONE task kind still
+ * creatable straight from a workspace is a ROLLBACK — the 'Roll back' flow, which reverts a
+ * merged task's commit through the normal pipeline (src/templates.ts). So the workspace task
+ * route admits ONLY kind==='rollback' and rejects every ordinary/idea standalone create with
+ * 409, pointing the caller at story creation.
+ *
+ * This gates the HTTP ENTRY POINT only — it is called by the POST /api/workspaces/:id/tasks
+ * route, NOT by createTask itself. In-process createTask/createSubtask (leader decomposition
+ * + any internal/system task creation) are deliberately UNAFFECTED, since they never pass
+ * through this gate. Pure + exported so the rule is unit-testable without the HTTP server
+ * (mirrors csrfGuard). Throws HttpError(409) to reject; returns for an allowed (rollback) kind.
+ */
+export function assertWorkspaceTaskCreationAllowed(kind: TaskKind): void {
+  if (kind === "rollback") return;
+  throw new HttpError(
+    409,
+    "standalone task creation is disabled — the operator creates STORIES " +
+      "(POST /api/workspaces/:id/stories) and story leaders create the tasks " +
+      "(POST /api/stories/:id/tasks). Only the 'Roll back' flow may create a task directly here.",
+  );
+}
+
 export async function createTask(
   workspaceId: string,
   prompt: string,
