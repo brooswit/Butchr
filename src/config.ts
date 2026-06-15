@@ -678,6 +678,19 @@ export const config = {
   ctoMaxRestarts: envInt("BUTCHR_CTO_MAX_RESTARTS", 5),
   ctoRestartBackoffBaseMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_BASE_MS", 2000),
   ctoRestartBackoffCapMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_CAP_MS", 60000),
+
+  /**
+   * UNIFIED-WORK ROUTING GATE (story st-540ba705, step 2 — DEFAULT OFF). The OFF feature
+   * flag for the unified self-referential WORK model + the RECURSIVE parent-chain feedback
+   * responder (src/work.ts, docs/rfc-work-workspace-unification.md §2.1). DEFAULT OFF so the
+   * running system, and `/api/tasks` + `/api/stories`, stay byte-identical: nothing in the
+   * live dispatch / review / channel path branches on it this step, and the recursive
+   * resolvers are pure of it (a test exercises them directly while the live system is inert).
+   * A later, separately-authorized cutover flips it on (via BUTCHR_UNIFIED_WORK) to route the
+   * generalized recursive bubble-up in place of today's 2-level story|cto|user rules. Read by
+   * work.unifiedWorkEnabled().
+   */
+  unifiedWork: envBool("BUTCHR_UNIFIED_WORK", false),
 };
 
 export type Config = typeof config;
