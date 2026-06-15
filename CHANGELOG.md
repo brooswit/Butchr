@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.84] - 2026-06-15
+
 ### Added
 - **Stories epic, Phase 3 — story-leader agent lifecycle.** Each `open` story now gets a
   managed, supervised, `--resume`'d story-leader agent (a "mini-CTO" scoped to one story),
