@@ -2,7 +2,7 @@
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
 import { checkChangelogUpdated } from "./changelog.ts";
 import type { VersionBumpLevel } from "./changelog.ts";
-import { config } from "./config.ts";
+import { config, responderV2Enabled } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import {
   ALL_STATUSES,
@@ -528,8 +528,35 @@ export const ESCALATION_CHAIN = ["story", "cto", "user"] as const;
 export type EscalationRung = (typeof ESCALATION_CHAIN)[number];
 
 /**
+ * RESPONDER-REDESIGN V2 (story st-def561dd, design §3/§4): is a task currently AWAITING
+ * FEEDBACK? True iff its status is a feedback state (idea / spec_review / in_review /
+ * needs_info) OR it is a LIVE build agent gone idle (in_progress + idle flag). This is the
+ * single predicate V2 collapses RESPONDER_STEPS / feedbackStep / pendingResponderStep into;
+ * the idle arm is kept IDENTICAL to V1 pendingResponderStep (status==in_progress && idle) so
+ * the two agree until the activation subtask deletes V1. ADDITIVE — V1's feedbackStep /
+ * pendingResponderStep are NOT removed here.
+ */
+export function isAwaitingFeedback(row: TaskRow): boolean {
+  if (row.status === "in_progress" && row.idle) return true;
+  return (
+    row.status === "idea" ||
+    row.status === "spec_review" ||
+    row.status === "in_review" ||
+    row.status === "needs_info"
+  );
+}
+
+/**
  * The resolved RESPONDER for a task's CURRENT pending feedback step, or null when the task
- * is not in a feedback state. Two distinct paths:
+ * is not in a feedback state.
+ *
+ * V2 (responderV2Enabled() — design §3): STRUCTURAL resolution, no tier, no config:
+ *  - not awaiting feedback → null
+ *  - story member (story_id != null) → `story` (the leader), ALWAYS — terminal, no tier.
+ *  - non-story + NOT escalated_to_user → `cto`
+ *  - non-story + escalated_to_user → `user`
+ *
+ * V1 (gate OFF — UNCHANGED): two distinct paths:
  *  - STORY MEMBER (story_id != null): walk the FIXED escalation chain ['story','cto','user']
  *    indexed by the task's `responder_tier` (clamped to the last rung) — INDEPENDENT of the
  *    workspace step_responders config. So a brand-new feedback item (tier 0) resolves to
@@ -542,6 +569,11 @@ export type EscalationRung = (typeof ESCALATION_CHAIN)[number];
  * also covers the in_progress+idle surface, so "in a feedback state" includes idle here.
  */
 export function pendingResponder(row: TaskRow): EscalationRung | null {
+  if (responderV2Enabled()) {
+    if (!isAwaitingFeedback(row)) return null;
+    if (row.story_id != null) return "story";
+    return row.escalated_to_user ? "user" : "cto";
+  }
   const step = pendingResponderStep(row);
   if (!step) return null;
   if (row.story_id != null) {
@@ -2020,7 +2052,10 @@ export async function respondToFeedback(
           last_dispatch_error: null,
           next_dispatch_at: null,
           // Entering a NEW feedback state (spec awaiting approval) → escalation back to rung 0.
+          // V2 (design §4a): a fresh feedback entry also clears escalated_to_user so a re-opened
+          // item starts back at the CTO. No-op under V1 (the column is never set there).
           responder_tier: 0,
+          escalated_to_user: 0,
         },
       })
     ) {
@@ -2076,7 +2111,9 @@ export async function respondToFeedback(
           last_dispatch_error: null,
           next_dispatch_at: null,
           // Re-entering the `idea` feedback state = a brand-new spec request → rung 0.
+          // V2 (design §4a): also clear escalated_to_user. No-op under V1.
           responder_tier: 0,
+          escalated_to_user: 0,
         },
       });
       emitUpdated(id);
@@ -2482,14 +2519,22 @@ export async function abortTask(id: string): Promise<TaskView> {
 }
 
 /**
- * ESCALATE a story-member task's CURRENT pending feedback item UP one rung of the fixed
+ * ESCALATE a task's CURRENT pending feedback item up to the next responder. Two models,
+ * selected by the V2 gate; the gate-OFF path is unchanged.
+ *
+ * V2 (responderV2Enabled() — design §4a): the SINGLE cto→user boundary for a NON-STORY task.
+ * Escalation is valid ONLY for a non-story task that is awaiting feedback — it sets
+ * `escalated_to_user = 1` so pendingResponder resolves to `user`. GUARDS (each a 409):
+ *  - the task must be awaiting feedback (isAwaitingFeedback) — nothing to escalate otherwise;
+ *  - it must NOT be a STORY MEMBER (story_id != null) — subtask feedback is TERMINAL at the
+ *    leader, there is nothing to escalate;
+ *  - it must NOT already be `escalated_to_user` — re-escalating crosses no new boundary.
+ *
+ * V1 (gate OFF — UNCHANGED): bump a STORY-MEMBER task's feedback UP one rung of the fixed
  * escalation chain ['story','cto','user'] (Phase 2 of the STORIES epic). Bumps
  * `responder_tier` by one so pendingResponder resolves to the next rung, persists it, and
- * publishes `task.updated` so the next tier's notification fires. Returns the refreshed view.
- *
- * GUARDS (each a 409):
- *  - the task must be in a feedback state (have a pending responder) — there is nothing to
- *    escalate otherwise (pendingResponderStep covers the feedback states + the idle surface);
+ * publishes `task.updated` so the next tier's notification fires.
+ *  - the task must be in a feedback state (have a pending responder);
  *  - the task must be a STORY MEMBER (story_id != null) — only members have the chain;
  *  - it must NOT already be at the LAST rung ('user') — there is nowhere higher to bubble.
  * 404 if the task is gone.
@@ -2497,6 +2542,21 @@ export async function abortTask(id: string): Promise<TaskView> {
 export function escalateTask(id: string): TaskView {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (responderV2Enabled()) {
+    if (!isAwaitingFeedback(row)) {
+      throw new HttpError(409, `task is not awaiting feedback (status=${row.status})`);
+    }
+    if (row.story_id != null) {
+      throw new HttpError(409, "task is a story member — its feedback is terminal at the leader, nothing to escalate");
+    }
+    if (row.escalated_to_user) {
+      throw new HttpError(409, "task is already escalated to the user");
+    }
+    db.query(`UPDATE tasks SET escalated_to_user=1 WHERE id=?`).run(id);
+    // Publish the fresh view so the user-tier notification fires (emitUpdated → task.updated).
+    emitUpdated(id);
+    return taskView(id)!;
+  }
   if (!pendingResponderStep(row)) {
     throw new HttpError(409, `task is not awaiting feedback (status=${row.status})`);
   }
@@ -2833,7 +2893,10 @@ export function markInReview(id: string, snapshot: string): void {
       // A fresh review cycle starts the major double-confirm streak at 0 (re-review reset).
       major_confirm_count: 0,
       // Entering the in_review feedback state → escalation back to rung 0 (story leader).
+      // V2 (design §4a): also clear escalated_to_user so a re-opened review starts at the CTO.
+      // No-op under V1 (the column is never set there).
       responder_tier: 0,
+      escalated_to_user: 0,
     },
     { note: "agent finished — submitted for review", gates: true, snapshot, from: "in_progress" },
   );
@@ -2933,7 +2996,10 @@ export async function markReviewFromAgent(
       // A fresh review cycle starts the major double-confirm streak at 0 (re-review reset).
       major_confirm_count: 0,
       // Entering the in_review feedback state → escalation back to rung 0 (story leader).
+      // V2 (design §4a): also clear escalated_to_user so a re-opened review starts at the CTO.
+      // No-op under V1 (the column is never set there).
       responder_tier: 0,
+      escalated_to_user: 0,
     },
     { note: "agent requested review", gates: true },
   );
@@ -2964,8 +3030,8 @@ export function markNeedsInfoFromAgent(
     "needs_info",
     // Entering the needs_info feedback state → escalation back to rung 0 (story leader).
     // Covers BOTH `raise` (answer-question) and `propose_plan` (plan-approval), which both
-    // route through here.
-    { question, responder_tier: 0 },
+    // route through here. V2 (design §4a): also clear escalated_to_user; no-op under V1.
+    { question, responder_tier: 0, escalated_to_user: 0 },
     { note: "agent asked a clarifying question" },
   );
 }
@@ -3522,7 +3588,8 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
   const context = want === 1 ? captureContext?.() || null : null;
   // The 0→1 flip ENTERS the idle feedback surface (idle-handling) — a new feedback event —
   // so reset the escalation back to rung 0 (story leader). Clearing idle does not touch it.
-  const tierReset = want === 1 ? ", responder_tier=0" : "";
+  // V2 (design §4a): the same fresh-feedback entry clears escalated_to_user; no-op under V1.
+  const tierReset = want === 1 ? ", responder_tier=0, escalated_to_user=0" : "";
   const res = db.query(
     `UPDATE tasks SET idle=?, idle_context=?${tierReset} WHERE id=? AND status='in_progress' AND herdr_pane_id IS NOT NULL AND idle<>?`,
   ).run(want, context, id, want);
