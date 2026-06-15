@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.93] - 2026-06-15
+
 ### Added
 - **Branch-isolation plumbing (inert, phase B-PLUMB).** Threaded an optional `base` merge-target ref through the `git.ts` base-consuming functions (`createWorktree`, `worktreeIsReusable`, `commitsBehind`, `hasChanges`, `diff`, `diffStat`, `isBehindDefault`, `rebaseOntoDefault`) plus an ff-target (`base`/`ffWorktree`/`ffTargetBranch`) on `merge()`, each defaulting to today's single-level values so behavior is byte-for-byte unchanged; added the pure `storyBranchName` helper, the inert `tasks.resolveBase`/`resolveMergeContext` resolvers, and the `workspaces.branch_isolation` + `stories.isolated` columns (default 0). No runtime behavior change — groundwork for the 3-level story branch-isolation merge model (CONTRIBUTING §11).
 
