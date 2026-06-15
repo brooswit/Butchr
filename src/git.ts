@@ -300,9 +300,9 @@ async function addLocalExclude(dir: string, pattern: string): Promise<void> {
 // A story worktree is to its subtasks exactly what the repo root is to standalone tasks
 // (§11.1): an isolated open story gets a checkout on its story branch at
 // <repo>/butchr-story-<storyId>; subtasks branch FROM and fast-forward INTO it. These
-// helpers create / remove that branch + worktree. GUARDED/UNUSED this phase — no story is
-// isolated while the workspace branch_isolation flag is OFF (every story captures
-// isolated=0), so resolveBase never reaches ensureStoryBranch.
+// helpers create / remove that branch + worktree. LIVE but GUARDED per story: they run only
+// for an isolated story (the workspace branch_isolation flag was ON when it was opened, so it
+// captured isolated=1); resolveBase reaches ensureStoryBranch only on that guarded path.
 
 /**
  * Lazily ensure an isolated story's BRANCH + its STORY WORKTREE exist, returning the story
@@ -987,8 +987,9 @@ export async function merge(
  * merge(): task = the story branch, base = main, the SOURCE checkout = the story worktree
  * (where the story branch is checked out), and the ff-target = main at the repo root (dir).
  * This is "today's merge() flow with task = story-branch and base = main" the design calls
- * for; encoding the §11.4 mapping in one place keeps the eventual completion path trivial.
- * GUARDED/UNUSED this phase — the story-completion path that calls it is not built yet.
+ * for; encoding the §11.4 mapping in one place keeps the completion path trivial.
+ * Called from tasks.mergeStoryBranch on an isolated story's completion path — LIVE but
+ * guarded by that story's captured isolated bit (stories.landStory only lands isolated stories).
  */
 export async function mergeStoryToMain(
   dir: string,

@@ -313,10 +313,11 @@ ensureColumn("workspaces", "release_mode", "INTEGER NOT NULL DEFAULT 0");
 // default), and the completed story is re-gated + merged into the default branch — so the
 // default branch only ever sees whole, verified stories. Mirrors release_mode exactly:
 // default 0 (OFF — today's behavior, every task merges straight to the default branch).
-// Phase B-PLUMB (this column) is INERT — nothing reads it yet; later phases gate every
-// new isolation path behind it. Critically, isolation keys off a story's CAPTURED
-// `isolated` bit (see stories.isolated), NOT this live flag, so flipping it NEVER
-// retroactively changes an already-open story (§11.8). Settable via PATCH /api/workspaces/:id.
+// LIVE: the isolation paths read it (gated per story), but it stays OFF by default and is
+// not enabled on any live workspace by default. Critically, isolation keys off a story's
+// CAPTURED `isolated` bit (see stories.isolated), NOT this live flag, so flipping it NEVER
+// retroactively changes an already-open story (§11.8). Settable via PATCH /api/workspaces/:id
+// (workspaces.setWorkspaceBranchIsolation).
 ensureColumn("workspaces", "branch_isolation", "INTEGER NOT NULL DEFAULT 0");
 
 // PER-STORY ISOLATION BIT (the bootstrapping cut — CONTRIBUTING §11.8). Captured ONCE at
@@ -326,8 +327,8 @@ ensureColumn("workspaces", "branch_isolation", "INTEGER NOT NULL DEFAULT 0");
 // branch — today's behavior). Base/merge-context resolution keys off THIS captured bit,
 // NOT the live workspace flag, so flipping the flag never retroactively changes an
 // already-open story. Default 0 (every existing row + every story opened while the flag is
-// OFF). Phase B-PLUMB is INERT — nothing reads it yet (Phase C captures it at createStory;
-// Phase D consumes it). Additive nullable-with-default column, mirroring release_mode.
+// OFF). LIVE: captured at createStory and consumed by the base/merge-context resolvers +
+// the story→main land path. Additive nullable-with-default column, mirroring release_mode.
 ensureColumn("stories", "isolated", "INTEGER NOT NULL DEFAULT 0");
 
 // STORY-LEVEL MERGE-RANGE bookkeeping (CONTRIBUTING §11.6 — Phase E). When an isolated
@@ -901,7 +902,7 @@ export type WorkspaceRow = {
   // Per-workspace 3-LEVEL BRANCH-ISOLATION guard (see the branch_isolation ensureColumn
   // above): 1 = stories opened after the flag is set are isolated (own branch; subtasks
   // merge into the story branch; re-gate + merge to the default branch on completion);
-  // 0 (default) = today's behavior. INERT this phase — nothing reads it yet (CONTRIBUTING §11).
+  // 0 (default) = today's behavior. LIVE but guarded per story; OFF by default (CONTRIBUTING §11).
   branch_isolation: number;
   created_at: string;
 };
@@ -943,7 +944,7 @@ export type StoryRow = {
   // PER-STORY ISOLATION BIT (see the isolated ensureColumn above): 1 = isolated (own
   // branch; subtasks merge into the story branch), 0 (default) = standalone (subtasks
   // merge straight to the default branch). Captured ONCE at createStory from the
-  // workspace branch_isolation flag, NOT the live flag. INERT this phase (CONTRIBUTING §11.8).
+  // workspace branch_isolation flag, NOT the live flag. LIVE (CONTRIBUTING §11.8).
   isolated: number;
   // RESPONDER-REDESIGN V2 (story st-def561dd — see the pending_ask/ask_responder ensureColumns
   // above): a story LEADER's open STORY-LEVEL ask to the CTO. `pending_ask` is the question

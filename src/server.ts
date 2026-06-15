@@ -26,6 +26,7 @@ import {
   getWorkspaceByPath,
   listWorkspaces,
   registerWorkspace,
+  setWorkspaceBranchIsolation,
   setWorkspaceCtoEnabled,
   setWorkspaceReleaseMode,
   unregisterWorkspace,
@@ -701,6 +702,10 @@ route("POST", "/api/workspaces", async (req) => {
 //  - `release_mode`: the per-workspace VERSIONED-RELEASES mode (true/false; null = off) —
 //    when on, every merge bumps the version + stamps the changelog with a versioned heading
 //    and the changelog gate is strict. See workspaces.setWorkspaceReleaseMode.
+//  - `branch_isolation`: the per-workspace 3-LEVEL BRANCH-ISOLATION guard (true/false; null
+//    = off) — when on, stories OPENED afterward are isolated (own branch; subtasks merge into
+//    the story branch; re-gate + merge to the default branch on completion). Already-open
+//    stories keep their captured isolated bit (§11.8). See workspaces.setWorkspaceBranchIsolation.
 // A bare PATCH (no recognized key) clears the gate command, preserving the legacy
 // contract. 404 if the workspace is gone. Publishes `workspace.updated`.
 route("PATCH", "/api/workspaces/:id", async (req, p) => {
@@ -711,11 +716,12 @@ route("PATCH", "/api/workspaces/:id", async (req, p) => {
   if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
   if ("step_responders" in body) view = updateWorkspaceStepResponders(p.id!, body.step_responders);
   if ("release_mode" in body) view = setWorkspaceReleaseMode(p.id!, body.release_mode);
+  if ("branch_isolation" in body) view = setWorkspaceBranchIsolation(p.id!, body.branch_isolation);
   // gate_cmd: set when its key is present, OR when NO other recognized key was sent
   // (a bare PATCH clears the gate override — the legacy contract).
   const touchedOther =
     "cto_enabled" in body || "version_file" in body || "changelog_path" in body ||
-    "step_responders" in body || "release_mode" in body;
+    "step_responders" in body || "release_mode" in body || "branch_isolation" in body;
   if ("gate_cmd" in body || !touchedOther) {
     view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
   }

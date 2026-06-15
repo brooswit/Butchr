@@ -993,9 +993,9 @@ function emitUpdated(id: string): void {
 // the STORY branch / story worktree; for every other task they return today's single-level
 // values (default branch / { dir, default branch }). The whole isolated path is GATED by
 // isolatedStoryBranch (workspace branch_isolation ON AND the story's captured `isolated`
-// bit = 1) — OFF everywhere this phase, so non-isolated members + standalone tasks are
-// byte-for-byte unchanged. The live subtask merge path (finalizeMerge) is wired to
-// resolveMergeContext below; the story→main path stays single-level until Phase E.
+// bit = 1) — LIVE but guarded, so non-isolated members + standalone tasks are byte-for-byte
+// unchanged. The subtask merge path (finalizeMerge) is wired to resolveMergeContext below;
+// the story→main path runs through tasks.mergeStoryBranch / stories.landStory.
 
 /**
  * GUARDED (CONTRIBUTING §11.8) — the story branch an isolated story member retargets onto,
@@ -1004,8 +1004,8 @@ function emitUpdated(id: string): void {
  * Reads the story's isolated bit via a DIRECT db query (not stories.ts) to avoid a
  * tasks↔stories import cycle. GATES the whole isolated subtask path (resolveBase /
  * resolveMergeContext / every threaded base): it returns null whenever the flag is OFF or
- * the story captured isolated=0, so the path is inert until activation (Phase F flips the
- * flag) — non-isolated members + standalone tasks always resolve to null here.
+ * the story captured isolated=0, so the isolated path stays guarded — non-isolated members +
+ * standalone tasks always resolve to null here (today's single-level behavior).
  */
 function isolatedStoryBranch(row: TaskRow): string | null {
   if (!row.story_id) return null;
@@ -1020,8 +1020,8 @@ function isolatedStoryBranch(row: TaskRow): string | null {
 /**
  * Resolve a task's REBASE/MERGE BASE — the ref its branch is measured/rebased against.
  * For an ISOLATED story member (isolatedStoryBranch != null) this is the STORY BRANCH; for
- * every other task it is the workspace default branch (today's value). The guard keeps it
- * INERT until activation: isolatedStoryBranch returns null whenever the workspace flag is
+ * every other task it is the workspace default branch (today's value). The guard keeps the
+ * isolated path OPT-IN: isolatedStoryBranch returns null whenever the workspace flag is
  * OFF or the story's captured isolated bit is 0, so non-isolated members + standalone tasks
  * resolve to defaultBranch — byte-for-byte today's behavior (CONTRIBUTING §11.2/§11.8).
  *
@@ -1058,8 +1058,8 @@ export type MergeContext = {
  * storyBranch }` so the subtask fast-forwards INTO the story worktree, the post-merge verify
  * runs THERE, and reset-on-red resets THAT checkout (CONTRIBUTING §11.4/§11.5). For every
  * other task it returns `{ ffWorktree: dir.path, targetBranch: <default>, base: <default> }`
- * — exactly today's single-level main flow. The guard (isolatedStoryBranch) keeps it INERT
- * until activation, so standalone tasks + non-isolated members are byte-for-byte unchanged.
+ * — exactly today's single-level main flow. The guard (isolatedStoryBranch) keeps it OPT-IN,
+ * so standalone tasks + non-isolated members are byte-for-byte unchanged.
  *
  * For an isolated member it ensures the story branch + worktree exist FIRST (idempotent), so
  * the ff-target checkout provably exists even on a restart-recovery merge. Throws 404 if the

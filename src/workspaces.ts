@@ -387,8 +387,8 @@ export function workspaceReleaseMode(id: string): boolean {
  * !== 0 — see db.ts + CONTRIBUTING §11). Mirrors workspaceReleaseMode. Stories OPENED while
  * this is on capture isolated=1; thereafter isolation keys off that captured per-story bit,
  * NOT this live flag (§11.8), so flipping the flag never retroactively changes an open story.
- * Pure read of the workspace row; unknown id → false. INERT until the activation phase —
- * default OFF.
+ * Pure read of the workspace row; unknown id → false. LIVE but guarded by each story's
+ * captured isolated bit — default OFF (set via setWorkspaceBranchIsolation).
  */
 export function workspaceBranchIsolation(id: string): boolean {
   return (getWorkspace(id)?.branch_isolation ?? 0) !== 0;
@@ -423,7 +423,8 @@ function updateWorkspaceColumn(
     | "changelog_path"
     | "cto_enabled"
     | "step_responders"
-    | "release_mode",
+    | "release_mode"
+    | "branch_isolation",
   stored: string | number | null,
 ): WorkspaceView {
   if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
@@ -500,6 +501,25 @@ export function setWorkspaceReleaseMode(id: string, value: unknown): WorkspaceVi
   else if (typeof value === "boolean") stored = value ? 1 : 0;
   else throw new HttpError(400, "release_mode must be a boolean (or null for off)");
   return updateWorkspaceColumn(id, "release_mode", stored);
+}
+
+/**
+ * Set a workspace's 3-LEVEL BRANCH-ISOLATION guard and return the refreshed view (the
+ * F-ACTIVATE operator switch — CONTRIBUTING §11.8). `true`/`false` turns branch_isolation
+ * on/off; `null`/`undefined` is treated as OFF (the default — a plain on/off flag, not a
+ * tri-state inherit, mirroring setWorkspaceReleaseMode). 404 if the workspace is gone; 400
+ * if the value is neither a boolean nor null. Takes effect on the NEXT story OPENED in this
+ * workspace: that story captures isolated=1 at createStory and gets a story branch. Stories
+ * already open keep the isolated bit they captured at create — flipping this flag never
+ * retroactively changes them (§11.8). See workspaceBranchIsolation.
+ */
+export function setWorkspaceBranchIsolation(id: string, value: unknown): WorkspaceView {
+  if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
+  let stored: number;
+  if (value === undefined || value === null) stored = 0;
+  else if (typeof value === "boolean") stored = value ? 1 : 0;
+  else throw new HttpError(400, "branch_isolation must be a boolean (or null for off)");
+  return updateWorkspaceColumn(id, "branch_isolation", stored);
 }
 
 /** A WorkspaceView plus its FULLY-RESOLVED step-responder map (every step present). */

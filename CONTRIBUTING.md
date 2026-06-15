@@ -805,6 +805,7 @@ inline where their columns are declared in `src/db.ts`:
 | `version_file` | `BUTCHR_VERSION_FILE` (empty) | The version file butchr **patch-bumps at merge** (e.g. `package.json`). Empty/absent = no bump; a docs-only diff and a missing/parseless file are graceful no-ops. |
 | `changelog_path` | `BUTCHR_CHANGELOG_PATH` (empty) | The changelog file the **CI gate requires a code change to update** (e.g. `CHANGELOG.md`). Empty = gate off; docs-only/empty diffs are exempt. |
 | `release_mode` | OFF | **Versioned-releases mode** (see ["Versioned releases"](#versioned-releases-per-workspace) below). When on, EVERY merge bumps `version_file` by the task's declared level and stamps that task's changelog entry with the assigned version + date; the changelog gate goes strict. Off = today's opt-in patch-bump behavior. |
+| `branch_isolation` | OFF | **3-level branch isolation** (see [§11](#11-3-level-branch-isolation-stories)). When on, stories *opened afterward* are isolated — each gets its own branch, its subtasks merge into the story branch (re-gated + merged to the default branch on completion). Off = today's behavior (every task merges straight to the default branch). Boolean (`null` = off); already-open stories keep their captured `isolated` bit (§11.8). |
 
 ### Versioned releases (per-workspace)
 
@@ -1056,14 +1057,17 @@ tool. However a change is authored, the gates are the same:
 
 ---
 
-## 11. 3-level branch isolation (stories) — DESIGN
+## 11. 3-level branch isolation (stories)
 
-> **Status: APPROVED DESIGN, not yet built.** This section is the signed-off
-> merge-model spec the *later* code subtasks build against. Every new path is
-> **guarded OFF by default**, so until the final activation subtask flips the
-> guard, butchr behaves **exactly** as documented in §1 (every task merges
-> straight to the default branch). Build it **phase by phase, additive and
-> inert**, mirroring how the stories epic landed.
+> **Status: BUILT.** The merge model below is implemented and available
+> **per-workspace** via the `branch_isolation` flag (`PATCH /api/workspaces/:id
+> {"branch_isolation": true}`; see workspaces.setWorkspaceBranchIsolation). The flag
+> **defaults OFF** and is **not enabled on any live workspace** by default — so with no
+> workspace opted in, butchr behaves **exactly** as documented in §1 (every task merges
+> straight to the default branch). Each new path stays **guarded by the per-story
+> `isolated` bit** (§11.8): only stories *opened while a workspace has the flag ON*
+> capture `isolated = 1` and route through the story-branch model; everything else is
+> byte-for-byte today's single-level merge.
 
 ### 11.1 Goal & the core insight
 

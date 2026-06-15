@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **3-level branch isolation is now activatable per workspace.** A new
+  `branch_isolation` workspace flag (set via `PATCH /api/workspaces/:id
+  {"branch_isolation": true}`, mirroring `release_mode`) turns on the story-branch merge
+  model: stories opened afterward are isolated — each gets its own branch, its subtasks
+  merge into the story branch with both gates (subtask CI + post-merge verify in the story
+  worktree), and the completed story is re-gated and merged into the default branch (a RED
+  re-gate hard-blocks, leaving the default branch untouched). The flag defaults OFF and is
+  not enabled on any live workspace; workspaces without it — and standalone tasks — merge
+  straight to the default branch exactly as before. See CONTRIBUTING.md §11.
+
 ## [0.9.101] - 2026-06-15
 
 - Branch isolation (stories) phase E-story-merge, behind the `isolated=1` guard (CONTRIBUTING §11.4/§11.5/§11.6/§11.7 — inert until activation, so non-isolated stories + standalone tasks are byte-for-byte unchanged). An isolated story's completion is now a story→main LAND: two butchr-owned transient story states (`merging`, `merge_blocked`) join the `StoryStatus` union, plus story-level `stories.merge_base_sha`/`merged_sha`. A leader's PATCH `done` on an isolated story becomes a **request to land** (`open|merge_blocked → merging`), driven by `stories.landStory` over the new `tasks.mergeStoryBranch` mechanics — the whole sequence inside ONE global-merge-queue slot: re-gate the story-branch tip in the story worktree (**RED ⇒ HARD BLOCK**, no merge, main untouched), rebase the story branch onto main + ff main at the repo root, post-merge verify on main (RED ⇒ reset main), then `removeStoryBranch` + story-level shas. **Only a landed-and-green story reaches `done`** (leader torn down + `complete` reported to the CTO). A RED re-gate/post-verify lands `merge_blocked` + a `gate-red` attention event to the LEADER (it fixes with more subtasks — `createSubtask` now accepts a `merge_blocked` story); a story↔main conflict lands `merge_blocked` + a `merge-conflict` attention event to the **CTO** (the leader has no worktree; the event carries a resolve-in-the-story-worktree runbook). The leader is kept up through `merging`/`merge_blocked` to re-attempt; `merging` is restart-recoverable (boot `recoverMergingStories`, mirroring rollback recovery).

@@ -68,7 +68,7 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
   // Capture the per-story ISOLATION bit ONCE from the workspace flag — the §11.8
   // bootstrapping cut. Isolation keys off THIS captured bit, never the live flag, so
   // flipping the workspace flag never retroactively changes an already-open story. The
-  // flag is OFF everywhere today ⇒ every story still captures isolated=0.
+  // A story opened while the flag is ON captures isolated=1; while OFF, isolated=0.
   const isolated = workspaceBranchIsolation(workspaceId) ? 1 : 0;
   db.query(
     `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, ?, ?, ?)`,
