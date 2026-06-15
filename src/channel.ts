@@ -20,7 +20,7 @@
 // the same way src/mcp.ts hand-rolls the Streamable-HTTP framing. The only butchr
 // import is `config` (for the default SSE URL); everything else is self-contained so
 // the pieces stay unit-testable without a live butchr or a real claude.
-import { config, responderV2Enabled } from "./config.ts";
+import { config } from "./config.ts";
 import { ATTENTION_STATES } from "./db.ts";
 import { humanizeMs } from "./duration.ts";
 import {
@@ -36,21 +36,23 @@ import { clipLine } from "./text.ts";
 // blurb describing what these notifications mean.
 export const CHANNEL_SERVER_NAME = "butchr-cto-channel";
 export const CHANNEL_INSTRUCTIONS =
-  "One-way CTO notification channel. Each <" +
+  "One-way notification channel. Each <" +
   CHANNEL_SERVER_NAME +
-  "> event is a butchr task that just entered a state needing the CTO's attention " +
+  "> event is a butchr task or story that just entered a state needing YOUR attention " +
   "(a brief awaiting a spec — `spec requested`, a generated spec awaiting approval, a " +
-  "diff awaiting review, an agent question awaiting an answer, a failed task, or a LIVE " +
-  "build agent that went IDLE — `agent idle`, carrying a snapshot of what it was doing) — " +
-  "the same attention feed a human sees in the butchr dashboard. These are PUSH " +
+  "diff awaiting review, an agent question awaiting an answer, a failed task, a LIVE " +
+  "build agent that went IDLE — `agent idle`, carrying a snapshot of what it was doing, " +
+  "or a STORY-LEVEL notification — a story ask, a completion review, or a completed " +
+  "story) — the same attention feed a human sees in the butchr dashboard. These are PUSH " +
   "notifications to ACT on (write+submit a spec, approve/reject/answer/requeue, or for an " +
   "idle agent: nudge-with-guidance/requeue/abort — via the butchr API or CLI); you cannot " +
-  "reply through this channel. For a `spec requested` event, ONLY write+submit the spec " +
-  "when this workspace's `spec-generation` responder is `cto` — if it is `user`, a human " +
-  "will write it, so just observe. An `agent idle` event is routed the same way by the " +
-  "`idle-handling` responder. One GLOBAL event also arrives here: `connectivity_restored` " +
-  "— the host's network/model-API came back after an outage (carrying how long it was " +
-  "down); it is informational, not a task to act on.";
+  "reply through this channel. Routing is STRUCTURAL: butchr delivers each item to the " +
+  "responder that OWNS it (a story LEADER sees only its OWN story's subtasks + its " +
+  "ask-answered notifications; the CTO sees NON-STORY tasks + story-level asks + " +
+  "story-completion). Everything that arrives HERE is yours to handle — act on it. One " +
+  "GLOBAL event also arrives here: `connectivity_restored` — the host's network/model-API " +
+  "came back after an outage (carrying how long it was down); it is informational, not a " +
+  "task to act on.";
 
 // The instructions for a CONNECTIVITY-ONLY bridge (the WORKER channel): it delivers
 // nothing but the global connectivity-restored broadcast, so it must NOT describe the
@@ -225,12 +227,13 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
  * (which replays no history) cannot re-fire a transition we already saw this run.
  *
  * It ALSO emits on a RESPONDER transition while the task is already on an attention
- * surface — an escalation 'story'→'cto' or a reset back to 'story' — by remembering each
- * task's last-seen resolved responder alongside its status (see lastResponder). Which
+ * surface — a non-story task's cto→user escalation (escalated_to_user) — by remembering
+ * each task's last-seen resolved responder alongside its status (see lastResponder). Which
  * channel a given event flows to is decided by SCOPE: a STORY-leader bridge
- * (BUTCHR_CHANNEL_STORY) gets its story's subtasks' tier-0 feedback + failures, while a
- * WORKSPACE/CTO bridge (BUTCHR_CHANNEL_WORKSPACE, or unscoped) gets standalone tasks
- * (today's behavior) plus story items escalated up to the CTO. See routeOwns.
+ * (BUTCHR_CHANNEL_STORY) gets its OWN story's subtasks' feedback + failures (always
+ * responder 'story' — terminal at the leader), while a WORKSPACE/CTO bridge
+ * (BUTCHR_CHANNEL_WORKSPACE, or unscoped) gets NON-STORY tasks awaiting the CTO. See
+ * routeOwns.
  */
 export class AttentionBridge {
   private lastStatus = new Map<string, string>();
@@ -241,9 +244,9 @@ export class AttentionBridge {
   private lastIdle = new Map<string, boolean>();
   // Per-task last-seen RESOLVED RESPONDER ('story'|'cto'|'user'|null), tracked alongside
   // status/idle so a RESPONDER TRANSITION fires even when the status itself did not change:
-  // an escalation 'story'→'cto' must (re)notify the CTO feed, and a reset back to 'story' (a
-  // fresh feedback event) must (re)notify the leader feed. We emit only on an ACTUAL change
-  // (prev !== current), so a same-status re-render with an unchanged responder never re-fires.
+  // a non-story task's cto→user escalation (escalated_to_user) must (re)notify so the user
+  // tier is surfaced. We emit only on an ACTUAL change (prev !== current), so a same-status
+  // re-render with an unchanged responder never re-fires.
   private lastResponder = new Map<string, string | null>();
   // workspace_id -> human label, populated from workspace.* events on the same
   // stream (and optionally seeded once at startup). Used only for the content line;
@@ -257,11 +260,10 @@ export class AttentionBridge {
   private readonly scopeDir: string;
   // PER-STORY SCOPE (the story-leader feed; from BUTCHR_CHANNEL_STORY). When set, the bridge
   // runs in STORY mode: it emits an attention event for a task IFF the task belongs to THIS
-  // story (story_id === scopeStory) AND the item is the leader's to own — its tier-0 feedback
-  // (resolved responder 'story', incl. a reset-back-to-story) OR a failure (failed/aborted).
-  // A story member's items that ESCALATE up to the CTO (responder 'cto') are NOT emitted here
-  // — they go to the workspace/CTO feed instead. Unset → the bridge runs in WORKSPACE/CTO mode
-  // (the scopeDir feed below). See routeOwns.
+  // story (story_id === scopeStory) AND the item is the leader's to own — its feedback
+  // (resolved responder 'story' — subtask feedback is TERMINAL at the leader) OR a failure
+  // (failed/aborted). Unset → the bridge runs in WORKSPACE/CTO mode (the scopeDir feed
+  // below). See routeOwns.
   private readonly scopeStory: string;
   // CONNECTIVITY-ONLY mode. When true (the WORKER bridge), consume() emits ONLY the
   // global `connectivity.restored` broadcast and SUPPRESSES every attention/idle
@@ -354,10 +356,10 @@ export class AttentionBridge {
 
     const dirId = typeof t.workspace_id === "string" ? t.workspace_id : "";
     // STORY MEMBERSHIP + RESOLVED RESPONDER, read straight off the serialized TaskView the
-    // SSE event carries: taskView already computes `pending_responder` (the Phase-2
-    // escalation chain → 'story'|'cto'|'user' for a story member, the workspace responder
-    // for a standalone task, or null when not in a feedback state). Reading these fields
-    // keeps the bridge a light, DB-free process — it never imports tasks.ts / touches the db.
+    // SSE event carries: taskView already computes `pending_responder` STRUCTURALLY ('story'
+    // for a story member — terminal at the leader; 'cto' or 'user' for a non-story task; or
+    // null when not awaiting feedback). Reading these fields keeps the bridge a light, DB-free
+    // process — it never imports tasks.ts / touches the db.
     const storyId = typeof t.story_id === "string" && t.story_id ? t.story_id : null;
     const responder =
       typeof t.pending_responder === "string" ? t.pending_responder : null;
@@ -467,25 +469,17 @@ export class AttentionBridge {
 
   /**
    * Does THIS bridge's scope OWN a task's current attention item — i.e. should it emit?
-   * The crux of the Phase-4 routing contract:
-   *  - STORY scope (BUTCHR_CHANNEL_STORY): the leader owns its OWN story's subtasks' tier-0
-   *    feedback (resolved responder 'story', which includes a reset-back-to-story on a fresh
-   *    feedback event) AND their failures (failed/aborted — a terminal failure has no
-   *    responder, but the leader still owns its subtasks' failures). Items that ESCALATE up
-   *    to the CTO (responder 'cto') are NOT owned here. This arm is IDENTICAL under V1 and V2.
-   *  - WORKSPACE/CTO scope (BUTCHR_CHANNEL_WORKSPACE, or unscoped legacy): GATED by
-   *    responderV2Enabled() (story st-def561dd, design §5):
-   *     - V1 (gate OFF — the live model): a task in this workspace that is either STANDALONE
-   *       (story_id == null — TODAY'S EXACT behavior: the CTO is notified and self-selects
-   *       cto-vs-user) OR a story item ESCALATED to the CTO (responder 'cto'). A story
-   *       member's tier-0 / failed items go to its LEADER, never here.
-   *     - V2 (gate ON): the CTO feed owns ONLY NON-STORY tasks — it NEVER owns a story member
-   *       (those always belong to the leader). A non-story task is owned when it is awaiting
-   *       the CTO (responder 'cto') OR has FAILED (failed/aborted — a failure has no responder,
-   *       hence the explicit status check). A non-story task ESCALATED to the user (responder
-   *       'user' from escalated_to_user) is DROPPED here — the webapp/dashboard surfaces it to
-   *       the user. Under V2 a story member never resolves to 'cto', so the V1 form's
-   *       `responder === 'cto'` story-member arm is simply unreachable — gated, not deleted.
+   * The STRUCTURAL routing contract (design §5):
+   *  - STORY scope (BUTCHR_CHANNEL_STORY): the leader owns its OWN story's subtasks'
+   *    feedback (resolved responder 'story' — subtask feedback is TERMINAL at the leader)
+   *    AND their failures (failed/aborted — a terminal failure has no responder, but the
+   *    leader still owns its subtasks' failures).
+   *  - WORKSPACE/CTO scope (BUTCHR_CHANNEL_WORKSPACE, or unscoped legacy): the CTO feed owns
+   *    ONLY NON-STORY tasks — it NEVER owns a story member (those always belong to the
+   *    leader). A non-story task is owned when it is awaiting the CTO (responder 'cto') OR has
+   *    FAILED (failed/aborted — a failure has no responder, hence the explicit status check).
+   *    A non-story task ESCALATED to the user (responder 'user' from escalated_to_user) is
+   *    DROPPED here — the webapp/dashboard surfaces it to the user.
    */
   private routeOwns(
     storyId: string | null,
@@ -500,15 +494,12 @@ export class AttentionBridge {
       );
     }
     if (this.scopeDir && dirId !== this.scopeDir) return false;
-    if (responderV2Enabled()) {
-      // V2: NON-STORY tasks only — awaiting the CTO ('cto') or a non-story failure. A
-      // non-story 'user' escalation falls through to false (dropped → webapp surfaces it).
-      return (
-        storyId == null &&
-        (responder === "cto" || status === "failed" || status === "aborted")
-      );
-    }
-    return storyId == null || responder === "cto";
+    // NON-STORY tasks only — awaiting the CTO ('cto') or a non-story failure. A non-story
+    // 'user' escalation falls through to false (dropped → the webapp surfaces it).
+    return (
+      storyId == null &&
+      (responder === "cto" || status === "failed" || status === "aborted")
+    );
   }
 }
 
@@ -691,9 +682,9 @@ export async function main(): Promise<void> {
   const scopeDir = (process.env.BUTCHR_CHANNEL_WORKSPACE ?? "").trim();
   // PER-STORY SCOPE (the story-leader bridge): butchr launches one bridge per OPEN story's
   // leader and passes that story_id via BUTCHR_CHANNEL_STORY, so the bridge pushes only that
-  // story's subtasks' tier-0 feedback + failures (the WORKSPACE scope above is also set, for
-  // SSE filtering / the workspace label, but STORY scope drives the routing). Unset → the
-  // bridge runs in WORKSPACE/CTO mode.
+  // story's subtasks' feedback + failures (the WORKSPACE scope above is also set, for SSE
+  // filtering / the workspace label, but STORY scope drives the routing). Unset → the bridge
+  // runs in WORKSPACE/CTO mode.
   const scopeStory = (process.env.BUTCHR_CHANNEL_STORY ?? "").trim();
   // CONNECTIVITY-ONLY (the WORKER bridge): deliver ONLY the global connectivity-restored
   // broadcast, suppressing every attention/idle event. Set by the dispatcher on the

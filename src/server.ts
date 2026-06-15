@@ -32,7 +32,6 @@ import {
   unregisterWorkspace,
   updateWorkspaceChangelogPath,
   updateWorkspaceGateCmd,
-  updateWorkspaceStepResponders,
   updateWorkspaceVersionFile,
   workspaceDetail,
 } from "./workspaces.ts";
@@ -624,11 +623,9 @@ route("GET", "/api/attention", async () => json(attentionList()));
 // Workspaces
 route("GET", "/api/workspaces", async () => json(listWorkspaces()));
 
-// A single workspace's DETAIL view: the WorkspaceView (counts + columns) with the
-// FULLY-RESOLVED step-responder map attached (every step present with its effective
-// `cto`/`user` value — see workspaces.resolveStepResponders). This resolved shape is the
-// single source the webapp's step-responder panel and the later feedback-routing tasks
-// read. 404 if the workspace is gone.
+// A single workspace's DETAIL view: the WorkspaceView (counts + columns). Responder
+// routing is STRUCTURAL (per-task pending_responder), so there is no per-workspace
+// responder config to surface here. 404 if the workspace is gone.
 route("GET", "/api/workspaces/:id", async (_req, p) => json(workspaceDetail(p.id!)));
 
 // CANONICAL STATE METADATA. The single source of truth for the 12-state machine —
@@ -696,9 +693,6 @@ route("POST", "/api/workspaces", async (req) => {
 //  - `cto_enabled`: the per-workspace CTO-agent enable (boot auto-start + supervision)
 //    — true/false forces it on/off; null CLEARS the override → inherit the global
 //    default config.ctoAgentEnabled.
-//  - `step_responders`: a PARTIAL {step: 'cto'|'user'} update of the feedback-workflow
-//    step-responder config — merged onto the existing overrides (validated step names +
-//    values; CONFIG ONLY, nothing routes off it yet). See workspaces.updateWorkspaceStepResponders.
 //  - `release_mode`: the per-workspace VERSIONED-RELEASES mode (true/false; null = off) —
 //    when on, every merge bumps the version + stamps the changelog with a versioned heading
 //    and the changelog gate is strict. See workspaces.setWorkspaceReleaseMode.
@@ -714,14 +708,13 @@ route("PATCH", "/api/workspaces/:id", async (req, p) => {
   if ("cto_enabled" in body) view = setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
   if ("version_file" in body) view = updateWorkspaceVersionFile(p.id!, body.version_file);
   if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
-  if ("step_responders" in body) view = updateWorkspaceStepResponders(p.id!, body.step_responders);
   if ("release_mode" in body) view = setWorkspaceReleaseMode(p.id!, body.release_mode);
   if ("branch_isolation" in body) view = setWorkspaceBranchIsolation(p.id!, body.branch_isolation);
   // gate_cmd: set when its key is present, OR when NO other recognized key was sent
   // (a bare PATCH clears the gate override — the legacy contract).
   const touchedOther =
     "cto_enabled" in body || "version_file" in body || "changelog_path" in body ||
-    "step_responders" in body || "release_mode" in body || "branch_isolation" in body;
+    "release_mode" in body || "branch_isolation" in body;
   if ("gate_cmd" in body || !touchedOther) {
     view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
   }
@@ -995,11 +988,11 @@ route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
 });
 
-// ESCALATE a story-member task's pending feedback item UP one rung of the fixed escalation
-// chain ['story','cto','user'] (Phase 2 of the STORIES epic). Bumps responder_tier so
-// pending_responder resolves to the next tier and that tier's notification fires. 404 if
-// gone; 409 if the task is not awaiting feedback, is not a story member, or is already at
-// the last rung ('user'). See tasks.escalateTask.
+// ESCALATE a NON-STORY task's pending feedback up to the USER — the single cto→user
+// boundary for a task. Sets escalated_to_user so pending_responder resolves to `user` and
+// the user-tier notification fires. 404 if gone; 409 if the task is not awaiting feedback,
+// IS a story member (its feedback is terminal at the leader), or is already escalated to
+// the user. See tasks.escalateTask.
 route("POST", "/api/tasks/:id/escalate", async (_req, p) => {
   return json(escalateTask(p.id!));
 });
@@ -1045,11 +1038,11 @@ route("POST", "/api/tasks/:id/requeue", async (_req, p) => {
   return json(await requeueTask(p.id!));
 });
 
-// ---- STORIES (Phase 1: DATA MODEL + CRUD only — fully inert) ----------------
-// A STORY is a CONTAINER that GROUPS subtasks (tasks carry a nullable story_id FK).
-// These are pure CRUD endpoints over the `stories` table + a task↔story assignment;
-// NOTHING in the dispatch/review/lifecycle/responder/channel machinery reads them yet
-// (later phases add a story-leader agent + escalation chain). See src/stories.ts.
+// ---- STORIES --------------------------------------------------------------
+// A STORY is a CONTAINER that GROUPS subtasks (tasks carry a nullable story_id FK), led by
+// a persistent story-leader agent. These are CRUD endpoints over the `stories` table + a
+// task↔story assignment, plus the story-level ask seam (/ask, /answer, /escalate — a
+// leader's question to the CTO, who may escalate it to the user). See src/stories.ts.
 
 // Create a story in a workspace (body {brief}). 404 if the workspace is gone; 400 if the
 // brief is blank. Lands `open`.

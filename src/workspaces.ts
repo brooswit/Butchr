@@ -73,93 +73,6 @@ export type WorkspaceView = WorkspaceRow & {
   counts: Record<string, number>;
 };
 
-// ---- PER-WORKSPACE STEP RESPONDERS ----------------------------------------
-// The feedback-workflow model: every pipeline step that needs a response has a
-// configurable RESPONDER — `cto` (the persistent CTO agent handles it automatically)
-// or `user` (butchr waits for a human in the webapp). The config is PER-WORKSPACE (an
-// operator decision applying to all the workspace's tasks) and DEFAULTS every step to
-// `cto` (today's full-auto behavior). THIS IS CONFIG STORAGE/READ ONLY — nothing routes
-// off it yet; later tasks consume it. See the `step_responders` column in db.ts.
-//
-// THE STEPS (each a step in a task's pipeline that surfaces something needing a reply):
-//   spec-generation  idea → spec: generate the spec.
-//   spec-approval    a generated spec awaiting approval (status spec_review).
-//   plan-approval    a plan-preview plan awaiting approval (plan-preview gate).
-//   diff-review      a finished diff awaiting review (status in_review).
-//   answer-question  an agent raised a question (status needs_info).
-//   idle-handling    an agent stalled/went idle (surfaced as a feedback step later).
-export const RESPONDER_STEPS = [
-  "spec-generation",
-  "spec-approval",
-  "plan-approval",
-  "diff-review",
-  "answer-question",
-  "idle-handling",
-] as const;
-export type ResponderStep = (typeof RESPONDER_STEPS)[number];
-export type Responder = "cto" | "user";
-
-const RESPONDER_STEP_SET: ReadonlySet<string> = new Set(RESPONDER_STEPS);
-const RESPONDER_VALUE_SET: ReadonlySet<string> = new Set<Responder>(["cto", "user"]);
-
-/** A step name is one of the canonical RESPONDER_STEPS. */
-export function isResponderStep(step: string): step is ResponderStep {
-  return RESPONDER_STEP_SET.has(step);
-}
-
-// Parse a workspace's raw step_responders JSON into a clean overrides map, tolerating
-// ANY bad stored data (NULL, non-JSON, non-object, unknown steps, bad values) by
-// silently dropping it — a corrupt/legacy value must never throw, it just yields no
-// overrides (→ every step falls back to `cto`). Only KNOWN steps with a VALID responder
-// value survive.
-function parseStepResponders(raw: string | null): Partial<Record<ResponderStep, Responder>> {
-  if (!raw) return {};
-  let obj: unknown;
-  try {
-    obj = JSON.parse(raw);
-  } catch {
-    return {};
-  }
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
-  const out: Partial<Record<ResponderStep, Responder>> = {};
-  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-    if (isResponderStep(k) && typeof v === "string" && RESPONDER_VALUE_SET.has(v)) {
-      out[k] = v as Responder;
-    }
-  }
-  return out;
-}
-
-/**
- * The configured RESPONDER for one pipeline step of a workspace: `cto` (the CTO agent
- * handles it automatically) or `user` (butchr waits for a human). Defaults to `cto` for
- * any unset step — and for ANY corrupt/legacy stored value (parseStepResponders tolerates
- * bad data). THROWS only on an unknown `step` name (a programming error — the caller
- * passed a step outside RESPONDER_STEPS). An unknown workspace id also defaults to `cto`.
- * Pure read of the workspace row.
- */
-export function responderFor(workspaceId: string, step: string): Responder {
-  if (!isResponderStep(step)) {
-    throw new Error(`unknown responder step: ${step}`);
-  }
-  const dir = getWorkspace(workspaceId);
-  if (!dir) return "cto";
-  return parseStepResponders(dir.step_responders)[step] ?? "cto";
-}
-
-/**
- * The FULLY-RESOLVED responder map for a workspace: every step present with its
- * effective responder (configured override or the `cto` default). This is the single
- * shape the API / webapp / later routing consume — they never read the raw column or
- * re-apply the default themselves. An unknown workspace id yields an all-`cto` map.
- */
-export function resolveStepResponders(workspaceId: string): Record<ResponderStep, Responder> {
-  const overrides = parseStepResponders(getWorkspace(workspaceId)?.step_responders ?? null);
-  const out = {} as Record<ResponderStep, Responder>;
-  for (const step of RESPONDER_STEPS) out[step] = overrides[step] ?? "cto";
-  return out;
-}
-
 function counts(workspaceId: string): Record<string, number> {
   const rows = db
     .query<{ status: string; n: number }, [string]>(
@@ -422,7 +335,6 @@ function updateWorkspaceColumn(
     | "version_file"
     | "changelog_path"
     | "cto_enabled"
-    | "step_responders"
     | "release_mode"
     | "branch_isolation",
   stored: string | number | null,
@@ -522,56 +434,16 @@ export function setWorkspaceBranchIsolation(id: string, value: unknown): Workspa
   return updateWorkspaceColumn(id, "branch_isolation", stored);
 }
 
-/** A WorkspaceView plus its FULLY-RESOLVED step-responder map (every step present). */
-export type WorkspaceDetail = WorkspaceView & {
-  step_responders: Record<ResponderStep, Responder>;
-};
-
 /**
- * A workspace's detail view: the WorkspaceView (counts + raw columns) with the resolved
- * step-responder map attached (see resolveStepResponders) — the shape GET
- * /api/workspaces/:id returns and the webapp + later routing consume. The resolved
- * `step_responders` field deliberately OVERRIDES the raw JSON column from the row spread.
- * 404 if the workspace is gone.
+ * A workspace's detail view: the WorkspaceView (counts + raw columns) — the shape GET
+ * /api/workspaces/:id returns and the webapp consumes. 404 if the workspace is gone.
+ * Responder routing is now STRUCTURAL (per-task pending_responder), so there is no
+ * per-workspace responder config to attach here.
  */
-export function workspaceDetail(id: string): WorkspaceDetail {
+export function workspaceDetail(id: string): WorkspaceView {
   const dir = getWorkspace(id);
   if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
-  return { ...dir, counts: counts(id), step_responders: resolveStepResponders(id) };
-}
-
-/**
- * Apply a PARTIAL update to a workspace's step-responder config and return the refreshed
- * view. `patch` is an object whose keys must each be a known RESPONDER_STEPS name and
- * whose values must each be `cto` or `user` (400 otherwise). The patch is MERGED onto the
- * existing overrides, then NORMALIZED for storage: a `cto` entry (the default) is dropped
- * as redundant, and an empty result is stored as NULL (= all steps cto). 404 if the
- * workspace is gone. Publishes `workspace.updated`. CONFIG ONLY — no routing yet.
- */
-export function updateWorkspaceStepResponders(id: string, patch: unknown): WorkspaceView {
-  const dir = getWorkspace(id);
-  if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
-  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
-    throw new HttpError(400, "step_responders must be an object of {step: 'cto'|'user'}");
-  }
-  // Start from the existing (clean) overrides and apply the validated patch.
-  const merged = parseStepResponders(dir.step_responders);
-  for (const [step, value] of Object.entries(patch as Record<string, unknown>)) {
-    if (!isResponderStep(step)) {
-      throw new HttpError(400, `unknown responder step: ${step}`);
-    }
-    if (typeof value !== "string" || !RESPONDER_VALUE_SET.has(value)) {
-      throw new HttpError(400, `responder for '${step}' must be 'cto' or 'user'`);
-    }
-    merged[step] = value as Responder;
-  }
-  // Normalize: drop redundant `cto` defaults; store NULL when nothing remains.
-  const normalized: Partial<Record<ResponderStep, Responder>> = {};
-  for (const step of RESPONDER_STEPS) {
-    if (merged[step] && merged[step] !== "cto") normalized[step] = merged[step];
-  }
-  const stored = Object.keys(normalized).length ? JSON.stringify(normalized) : null;
-  return updateWorkspaceColumn(id, "step_responders", stored);
+  return { ...dir, counts: counts(id) };
 }
 
 /**

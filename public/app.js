@@ -130,28 +130,31 @@ const AWAITED_LABEL = {
 function stateKind(status) {
   return STATE_KIND[status] || "idle";
 }
-// FW-3: who is EXPECTED to act on a feedback task's CURRENT step, read from the
-// server-computed `pending_responder` (cto|user — see tasks.pendingResponder). butchr is
+// Who is EXPECTED to act on a feedback task, read from the server-computed STRUCTURAL
+// `pending_responder` (story|cto|user — see tasks.pendingResponder). butchr is
 // responder-agnostic, so the action controls are always available; this is emphasis only.
-// `user` is surfaced prominently ("awaiting you") since it needs a human; `cto` is muted
-// ("awaiting CTO — you can also act") since the CTO agent handles it automatically but a
-// human may still act. Returns "" when the task isn't in a feedback state (responder null).
+// `user` is surfaced prominently ("awaiting you") since it needs a human; `cto` / `story`
+// are muted ("you can also act") since an agent (the CTO, or the story leader) handles it
+// but a human may still act. Returns "" when the task isn't awaiting feedback (responder null).
 function responderChip(t) {
   const r = t && t.pending_responder;
   if (r === "user") {
-    return ' <span class="chip awaiting-you" title="this step is assigned to YOU — act in the controls below">awaiting you</span>';
+    return ' <span class="chip awaiting-you" title="this is assigned to YOU — act in the controls below">awaiting you</span>';
   }
   if (r === "cto") {
-    return ' <span class="chip awaiting-cto" title="this step is assigned to the CTO agent (handled automatically) — you can also act">awaiting CTO</span>';
+    return ' <span class="chip awaiting-cto" title="this is assigned to the CTO agent (handled automatically) — you can also act">awaiting CTO</span>';
+  }
+  if (r === "story") {
+    return ' <span class="chip awaiting-cto" title="this is assigned to the story leader (handled automatically) — you can also act">awaiting leader</span>';
   }
   return "";
 }
-// FW-3: human-facing label for the feedback STEP a task is currently on — a JS mirror of
-// tasks.feedbackStep (incl. the needs_info plan-vs-question split on plan_preview). Used
-// only for the awaiting-who banner copy on the task detail. null for a non-feedback state.
+// Human-facing label for the feedback surface a task is currently on — derived from its
+// status (+ the needs_info plan-vs-question split on plan_preview). Used only for the
+// awaiting-who banner copy on the task detail. null for a non-feedback state.
 function feedbackStepLabel(t) {
   // Idle is orthogonal to status — a flag on a LIVE in_progress agent — but it IS a
-  // feedback condition awaiting the idle-handling responder (mirrors tasks.pendingResponderStep).
+  // feedback condition (the agent went quiet and needs its responder to act).
   if (t.status === "in_progress" && t.idle) return "idle handling";
   switch (t.status) {
     case "idea": return "spec generation";
@@ -937,12 +940,8 @@ async function renderWorkspace(id) {
   // whether it's a per-workspace override or the default, with an inline editor.
   wrap.appendChild(gatePanel(dir));
 
-  // step-responder config panel — who responds at each pipeline step (CTO agent vs a
-  // human). Rendered async (its own fetch of the resolved map) so a probe hiccup never
-  // blocks the page; mounted in place once it resolves.
-  const responderSlot = el("div");
-  wrap.appendChild(responderSlot);
-  responderPanel(id).then((panel) => responderSlot.replaceWith(panel)).catch(() => {});
+  // (Responder routing is now STRUCTURAL — per-task pending_responder, not per-workspace
+  // config — so there is no step-responder config panel here anymore.)
 
   // danger zone
   const dz = el("div", { class: "row", style: "margin-top:32px" });
@@ -1020,57 +1019,6 @@ function openGateModal(dir) {
       { success: msg, onDone: () => { close(); render(); } });
   save.addEventListener("click", () => patch(save, ta.value, "gate command updated"));
   useDefault.addEventListener("click", () => patch(useDefault, null, "reverted to the default gate"));
-}
-
-// ---------- per-workspace step-responder panel ----------
-// The feedback-workflow config: every pipeline step that needs a response has a
-// configurable RESPONDER — `cto` (the persistent CTO agent handles it automatically) or
-// `user` (butchr waits for a human here in the webapp). Per-workspace (applies to all the
-// workspace's tasks), default CTO. THIS IS CONFIG ONLY — nothing routes off it yet;
-// later work wires up the routing. Reads the RESOLVED map from GET /api/workspaces/:id
-// and PATCHes a single {step: value} on each change. Mirrors gatePanel's shape; rendered
-// async (its own fetch) so a hiccup never blocks the page.
-const RESPONDER_STEP_LABELS = [
-  ["spec-generation", "Spec generation", "Turn an idea/brief into a spec."],
-  ["spec-approval", "Spec approval", "Approve a generated spec before it builds."],
-  ["plan-approval", "Plan approval", "Approve a plan-preview plan before it writes code."],
-  ["diff-review", "Diff review", "Review the finished diff before it merges."],
-  ["answer-question", "Answer question", "Answer a question an agent raised."],
-  ["idle-handling", "Idle handling", "Handle an agent that stalled / went idle."],
-];
-
-async function responderPanel(id) {
-  const detail = await api("GET", "/workspaces/" + id);
-  const resolved = detail.step_responders || {};
-  const panel = el("div", { class: "panel", style: "margin-top:28px" });
-  panel.appendChild(el("h2", { style: "margin:0" }, "Step responders"));
-  panel.appendChild(el("small", { class: "muted", style: "display:block;margin:6px 0 12px" },
-    "Who responds at each pipeline step — the CTO agent (automatic) or you (a human, here in the webapp). Per-workspace; applies to every task. Default CTO. (Config only for now — routing is added in follow-up work.)"));
-
-  const rows = el("div", { class: "responder-rows" });
-  for (const [step, label, desc] of RESPONDER_STEP_LABELS) {
-    const row = el("div", { class: "responder-row" });
-    const text = el("div", { class: "responder-text" });
-    text.appendChild(el("span", { class: "responder-label" }, label));
-    text.appendChild(el("span", { class: "responder-desc muted" }, desc));
-    row.appendChild(text);
-
-    const sel = el("select", { class: "responder-select" });
-    for (const [val, optLabel] of [["cto", "CTO"], ["user", "User"]]) {
-      const opt = el("option", { value: val }, optLabel);
-      if ((resolved[step] || "cto") === val) opt.setAttribute("selected", "selected");
-      sel.appendChild(opt);
-    }
-    sel.addEventListener("change", () => {
-      const value = sel.value;
-      action(null, () => api("PATCH", "/workspaces/" + id, { step_responders: { [step]: value } }),
-        { success: label + " → " + (value === "cto" ? "CTO" : "User"), onDone: () => {} });
-    });
-    row.appendChild(sel);
-    rows.appendChild(row);
-  }
-  panel.appendChild(rows);
-  return panel;
 }
 
 // ---------- stories panel + new-story modal (AUTHORITY FLIP, Phase 7) ----------
@@ -2481,18 +2429,22 @@ async function renderTask(id) {
   // on first open (transcripts get large) and paged via a "Load more" button.
   if (t.session_id) wrap.appendChild(renderTranscriptPanel(t.id));
 
-  // FW-3 AWAITING-WHO BANNER. For a task sitting in a feedback state, surface WHO is
-  // expected to act on the current step — the server-computed `pending_responder` (the
-  // resolved cto/user from the workspace's step-responder config). `user` is emphasized
-  // ("awaiting you"); `cto` is muted ("the CTO agent handles this — you can also act").
-  // butchr is responder-agnostic: the action controls below render regardless, so a human
-  // can always act. Null pending_responder (non-feedback state) shows no banner.
+  // AWAITING-WHO BANNER. For a task awaiting feedback, surface WHO is expected to act — the
+  // server-computed STRUCTURAL `pending_responder` (story|cto|user). `user` is emphasized
+  // ("awaiting you"); `cto` / `story` are muted (an agent — the CTO, or the story leader —
+  // handles it, but you can also act). butchr is responder-agnostic: the action controls
+  // below render regardless. Null pending_responder (non-feedback state) shows no banner.
   if (t.pending_responder) {
     const stepLbl = feedbackStepLabel(t);
     const stepStr = stepLbl ? ` (${esc(stepLbl)})` : "";
-    const html = t.pending_responder === "user"
-      ? `<strong>Awaiting you</strong> — this step${stepStr} is assigned to <strong>you</strong>. Act in the controls below.`
-      : `<strong>Awaiting the CTO agent</strong> — this step${stepStr} is handled automatically by this workspace's CTO agent. You can also act in the controls below.`;
+    let html;
+    if (t.pending_responder === "user") {
+      html = `<strong>Awaiting you</strong> — this${stepStr} is assigned to <strong>you</strong>. Act in the controls below.`;
+    } else if (t.pending_responder === "story") {
+      html = `<strong>Awaiting the story leader</strong> — this${stepStr} is handled automatically by the story leader agent. You can also act in the controls below.`;
+    } else {
+      html = `<strong>Awaiting the CTO agent</strong> — this${stepStr} is handled automatically by this workspace's CTO agent. You can also act in the controls below.`;
+    }
     wrap.appendChild(el("div", {
       class: "responder-banner " + (t.pending_responder === "user" ? "awaiting-you" : "awaiting-cto"),
       html,
@@ -2631,23 +2583,24 @@ async function renderTask(id) {
   }
 
   // idea — a brief AWAITING a spec. butchr runs NO agent for it: it pushes a `spec
-  // requested` event on the CTO channel and waits for the workspace's spec-generation
-  // responder to submit a spec (POST /tasks/:id/spec), which advances it to spec_review.
-  // The responder (cto/user) is per-workspace config and only frames this UI — the editor
-  // is ALWAYS available so a human can submit, but for a `cto` workspace the CTO agent
-  // normally handles it from the channel push.
+  // requested` event on the channel and waits for the task's STRUCTURAL responder to submit
+  // a spec (POST /tasks/:id/spec), which advances it to spec_review. The responder
+  // (story|cto|user) only frames this UI — the editor is ALWAYS available so a human can
+  // submit, but for a cto/story task the responsible agent normally handles it.
   if (t.status === "idea") {
-    // The spec-generation responder for this idea, read straight from the task's
-    // server-computed pending_responder (resolved cto/user) — no cross-reference to the
-    // workspace config needed. Falls back to "cto" defensively.
+    // The responder for this idea, read straight from the task's server-computed structural
+    // pending_responder (story|cto|user). Falls back to "cto" defensively.
     const specResponder = t.pending_responder || "cto";
     if (t.review_note) block("Spec changes requested", t.review_note, wrap);
     const specPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    const specResponderCopy = specResponder === "user"
+      ? "You are the responder for this spec. Turn the brief above into a concrete, repo-grounded spec and submit it to advance the task to spec review."
+      : specResponder === "story"
+      ? "The <strong>story leader</strong> agent will write the spec from the brief (it was notified on its story channel). You can also write and submit one yourself below."
+      : "The <strong>CTO agent</strong> will write the spec from the brief (it was notified on the CTO channel). You can also write and submit one yourself below.";
     specPanel.innerHTML = `
       <h2 style="margin-top:0">${specResponder === "user" ? "Write the spec" : "Spec requested"}</h2>
-      <p class="muted" style="margin:0 0 10px">${specResponder === "user"
-        ? "This workspace's spec-generation responder is <strong>you (user)</strong>. Turn the brief above into a concrete, repo-grounded spec and submit it to advance the task to spec review."
-        : "The <strong>CTO agent</strong> is this workspace's spec-generation responder and will write the spec from the brief (it was notified on the CTO channel). You can also write and submit one yourself below."}</p>
+      <p class="muted" style="margin:0 0 10px">${specResponderCopy}</p>
       <label class="field" style="margin-bottom:6px">
         <span class="lbl">spec (required)</span>
         <textarea id="spec" placeholder="Write the full spec for this brief — what to build, where, and how it should be verified."></textarea>

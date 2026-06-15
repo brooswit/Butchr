@@ -1,8 +1,8 @@
-// Tests for the RESPONDER ESCALATION CHAIN (Phase 2 of the STORIES epic). A STORY-MEMBER
-// task's pending feedback resolves up the FIXED chain ['story','cto','user'] keyed by the
-// new tasks.responder_tier column; POST /api/tasks/:id/escalate (tasks.escalateTask) bumps
-// it one rung; the tier RESETS to 0 on each new feedback event. NON-member tasks are
-// unchanged — they still resolve via the workspace step_responders config.
+// Tests for the STRUCTURAL responder escalation (responder redesign, story st-def561dd,
+// design §4a). There is no longer a per-task tier chain: a STORY MEMBER's feedback is
+// TERMINAL at its leader (pendingResponder → 'story', escalate 409s), and a NON-STORY task
+// has a SINGLE cto→user boundary — POST /api/tasks/:id/escalate (tasks.escalateTask) sets
+// `escalated_to_user`, which resets to 0 on each fresh feedback event.
 //
 // Pure / in-process: no real claude/herdr/bun is spawned. BUTCHR_HERDR_BIN points at
 // `true` so herdr probes are no-ops. Workspace / story / task rows are inserted directly
@@ -19,7 +19,6 @@ const DIR = "resp-chain-dir";
 const STORY = "resp-chain-story";
 
 let tasksMod: typeof import("../src/tasks.ts");
-let dirsMod: typeof import("../src/workspaces.ts");
 let dbMod: typeof import("../src/db.ts");
 
 beforeAll(async () => {
@@ -32,7 +31,6 @@ beforeAll(async () => {
   process.env.BUTCHR_HERDR_BIN = "true";
 
   dbMod = await import("../src/db.ts");
-  dirsMod = await import("../src/workspaces.ts");
   tasksMod = await import("../src/tasks.ts");
 
   dbMod.db
@@ -48,13 +46,13 @@ afterAll(() => {
   rmSync(REPO_ROOT, { recursive: true, force: true });
 });
 
-/** Seed a bare task row with the columns the escalation chain reads. */
+/** Seed a bare task row with the columns the structural resolution reads. */
 function seedTask(
   id: string,
   status: string,
   opts: {
     storyId?: string | null;
-    tier?: number;
+    escalated?: number;
     idle?: number;
     paneId?: string | null;
     planPreview?: number;
@@ -62,7 +60,7 @@ function seedTask(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, story_id, responder_tier, plan_preview, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, story_id, escalated_to_user, plan_preview, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -72,93 +70,68 @@ function seedTask(
       opts.idle ?? 0,
       opts.paneId ?? null,
       opts.storyId ?? null,
-      opts.tier ?? 0,
+      opts.escalated ?? 0,
       opts.planPreview ?? 0,
       dbMod.nowIso(),
     );
 }
 
-const tierOf = (id: string) =>
+const escalatedOf = (id: string) =>
   dbMod.db
-    .query<{ responder_tier: number }, [string]>(`SELECT responder_tier FROM tasks WHERE id=?`)
-    .get(id)!.responder_tier;
+    .query<{ escalated_to_user: number }, [string]>(`SELECT escalated_to_user FROM tasks WHERE id=?`)
+    .get(id)!.escalated_to_user;
 
-describe("story-member escalation chain", () => {
-  test("a member task in needs_info resolves 'story' at tier 0, then escalates story→cto→user", () => {
-    const id = "rc-member";
-    seedTask(id, "needs_info", { storyId: STORY });
-
-    // Tier 0 → the story leader.
-    expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("story");
-
-    // escalate → cto (tier 1)
-    let view = tasksMod.escalateTask(id);
-    expect(view.responder_tier).toBe(1);
-    expect(view.pending_responder).toBe("cto");
-    expect(tierOf(id)).toBe(1);
-
-    // escalate → user (tier 2)
-    view = tasksMod.escalateTask(id);
-    expect(view.responder_tier).toBe(2);
-    expect(view.pending_responder).toBe("user");
-    expect(tierOf(id)).toBe(2);
-
-    // escalate again → 409 (already at the last rung) and the tier is unchanged.
-    expect(() => tasksMod.escalateTask(id)).toThrow(/already at the last escalation rung/);
-    expect(tierOf(id)).toBe(2);
-  });
-
-  test("the chain ignores the workspace step_responders config (fixed for story members)", () => {
-    // Even with the answer-question step configured to `user`, a member at tier 0 is `story`.
-    dirsMod.updateWorkspaceStepResponders(DIR, { "answer-question": "user" });
-    const id = "rc-member-fixed";
-    seedTask(id, "needs_info", { storyId: STORY });
-    expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("story");
-    // Reset the config so it doesn't leak into the non-member test below.
-    dirsMod.updateWorkspaceStepResponders(DIR, { "answer-question": "cto" });
-  });
-
-  test("escalate 409s when the task is NOT in a feedback state", () => {
-    const id = "rc-member-nonfeedback";
-    seedTask(id, "in_progress", { storyId: STORY, paneId: "pane-x" });
-    expect(() => tasksMod.escalateTask(id)).toThrow(/not awaiting feedback/);
-  });
-});
-
-describe("non-member tasks are unchanged (resolve via workspace config)", () => {
-  test("a non-member needs_info task resolves via the workspace step config, not the chain", () => {
-    const id = "rc-nonmember";
-    // story_id NULL → ordinary task. responder_tier is ignored even if non-zero.
-    seedTask(id, "needs_info", { storyId: null, tier: 2 });
-
-    // Default config → answer-question is `cto`.
+describe("non-story cto→user boundary (escalateTask)", () => {
+  test("a non-story awaiting task escalates: sets escalated_to_user and resolves 'user'", () => {
+    const id = "rc-nonstory";
+    seedTask(id, "needs_info", { storyId: null });
+    // Before escalation → the CTO.
     expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("cto");
 
-    // Flipping the step config to `user` governs it (proving config still drives non-members).
-    dirsMod.updateWorkspaceStepResponders(DIR, { "answer-question": "user" });
-    expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("user");
-    dirsMod.updateWorkspaceStepResponders(DIR, { "answer-question": "cto" });
+    const view = tasksMod.escalateTask(id);
+    expect(view.escalated_to_user).toBe(1);
+    expect(view.pending_responder).toBe("user");
+    expect(escalatedOf(id)).toBe(1);
   });
 
-  test("escalate 409s on a non-member task (only members have the chain)", () => {
-    const id = "rc-nonmember-escalate";
-    seedTask(id, "needs_info", { storyId: null });
-    expect(() => tasksMod.escalateTask(id)).toThrow(/not a story member/);
+  test("re-escalating an already-escalated non-story task 409s (single boundary)", () => {
+    const id = "rc-nonstory-twice";
+    seedTask(id, "in_review", { storyId: null, escalated: 1 });
+    expect(() => tasksMod.escalateTask(id)).toThrow(/already escalated to the user/);
+    expect(escalatedOf(id)).toBe(1);
+  });
+
+  test("escalate 409s when the task is NOT awaiting feedback", () => {
+    const id = "rc-nonstory-nonfeedback";
+    seedTask(id, "in_progress", { storyId: null, paneId: "pane-nf" }); // in_progress, not idle
+    expect(() => tasksMod.escalateTask(id)).toThrow(/not awaiting feedback/);
+    expect(escalatedOf(id)).toBe(0);
   });
 });
 
-describe("responder_tier resets to 0 on a new feedback event", () => {
-  test("entering the idle-handling feedback surface resets an escalated member back to 'story'", () => {
-    // A live story-member build agent, already escalated to the top rung.
+describe("story members are terminal at the leader (no task escalation)", () => {
+  test("a story member resolves 'story' and escalate 409s", () => {
+    const id = "rc-member";
+    seedTask(id, "needs_info", { storyId: STORY });
+    expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("story");
+    expect(() => tasksMod.escalateTask(id)).toThrow(/terminal at the leader/);
+    // Untouched — a story member never carries escalated_to_user.
+    expect(escalatedOf(id)).toBe(0);
+  });
+});
+
+describe("escalated_to_user resets to 0 on a new feedback event", () => {
+  test("entering the idle feedback surface clears a prior escalation back to 'cto'", () => {
+    // A live NON-STORY build agent that carried escalated_to_user from an earlier cycle.
     const id = "rc-reset";
-    seedTask(id, "in_progress", { storyId: STORY, tier: 2, idle: 0, paneId: "pane-reset" });
-    // Not idle yet → not a feedback surface → no pending responder.
+    seedTask(id, "in_progress", { storyId: null, escalated: 1, idle: 0, paneId: "pane-reset" });
+    // Not idle yet → not awaiting feedback → no pending responder.
     expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBeNull();
 
-    // The 0→1 idle flip ENTERS the idle-handling feedback surface — a new feedback event —
-    // so the escalation resets back to rung 0 (the story leader).
+    // The 0→1 idle flip ENTERS the idle feedback surface — a fresh feedback event — so the
+    // escalation resets and the responder drops back to the CTO (not the user).
     tasksMod.setIdle(id, true);
-    expect(tierOf(id)).toBe(0);
-    expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("story");
+    expect(escalatedOf(id)).toBe(0);
+    expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("cto");
   });
 });

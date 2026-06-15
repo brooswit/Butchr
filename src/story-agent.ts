@@ -20,8 +20,9 @@
 // subtasks. `storyAgentCmd` now mirrors `ctoAgentCmd`'s channel wiring (`--mcp-config` +
 // `--dangerously-load-development-channels server:butchr-cto-channel`), and this module
 // writes a per-story channel MCP config (writeStoryChannelMcpConfig) that scopes the bridge
-// via BUTCHR_CHANNEL_STORY so the leader sees its members' tier-0 feedback + failures (the
-// routing contract lives in src/channel.ts; escalated items go up to the CTO instead).
+// via BUTCHR_CHANNEL_STORY so the leader sees its members' feedback + failures (the routing
+// contract lives in src/channel.ts; subtask feedback is TERMINAL at the leader — to reach the
+// CTO the leader raises a STORY-LEVEL ask via POST /api/stories/:id/ask).
 //
 // PHASE SCOPE / GUARD-RAILS (deliberately NOT wired this phase):
 //   - NO DECOMPOSITION / FEEDBACK ACTIONS. The leader's decompose-the-story and
@@ -187,9 +188,10 @@ subtask OF THIS STORY:
   butchr pins the new task to THIS story + dispatches it like any task.
 - Set **\`blocked_by\`** for REAL ordering dependencies (a subtask that must land after
   another), so dependent work waits rather than racing. Leave it empty for independent work.
-- Each subtask's **questions, specs, and diffs route back to YOU FIRST** (your story
-  channel) — judge each against THIS STORY's intent: answer questions, review specs, and
-  review + merge diffs.
+- Each subtask's **questions, specs, and diffs route back to YOU** (your story channel) and
+  are TERMINAL at you — judge each against THIS STORY's intent: answer questions, review
+  specs, and review + merge diffs. (To reach the CTO, raise a story-level ask — see "Your
+  wider role".)
 
 ## Course-correct your subtasks
 
@@ -223,8 +225,20 @@ the whole story at once):
 
 ## Your wider role
 
-- **Escalate an item to the CTO** (\`POST /api/tasks/:id/escalate\`) when a call is above
-  your scope or is architectural.
+Your subtasks' feedback is **TERMINAL at you** — there is no task-level escalation: a
+subtask's question/spec/diff/idle is yours to resolve, and \`POST /api/tasks/:id/escalate\`
+does NOT apply to a story member (it 409s). When a call is genuinely above your scope —
+architectural, a product/scope decision, your decomposition PLAN needing sign-off, or a
+blocker you can't settle — raise a **STORY-LEVEL ASK** to the CTO:
+
+- **\`POST /api/stories/${story.id}/ask\`** with \`{"question":"…"}\` opens an ask to the CTO
+  and notifies it. 409 if an ask is already open or the story is not \`open\`.
+- The CTO **\`/answer\`s** it (its reply comes back to you on your story channel as a \`story
+  ask answered\` event), or **\`/escalate\`s** it one rung to the USER for a product call.
+  Either way you resume once the ask is answered. Keep ONE ask open at a time.
+
+This story→cto→user seam is also how you get your decomposition plan / design SIGNED OFF
+before fanning out, when the story warrants it.
 
 ## Completing the story
 
@@ -264,8 +278,9 @@ export function writeStoryLeaderBrief(story: StoryRow): string {
  * SAME attention-feed concept the CTO uses, reused so the agent surface stays one channel)
  * that runs the one-way channel bridge (config.ctoChannelCmd) via `bash -lc`, with the SSE
  * URL pointed at this butchr and SCOPED to the STORY via BUTCHR_CHANNEL_STORY — so the bridge
- * pushes only THIS story's subtasks' tier-0 feedback + failures (escalated items bubble up to
- * the workspace/CTO feed instead; the routing contract lives in src/channel.ts). The
+ * pushes only THIS story's subtasks' feedback + failures (subtask feedback is terminal at the
+ * leader; a leader reaches the CTO via a story-level ask; the routing contract lives in
+ * src/channel.ts). The
  * workspace id is passed too (BUTCHR_CHANNEL_WORKSPACE) for SSE filtering / the workspace
  * label. The agent loads it as a development channel via `server:butchr-cto-channel` in
  * config.storyAgentCmd. Mirrors cto-agent.writeChannelMcpConfig. Returns the config path.

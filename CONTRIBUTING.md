@@ -80,12 +80,12 @@ something mechanical):
 
 | state | kind | meaning |
 |-------|------|---------|
-| `idea` | feedback (brief) | a one-line brief **awaiting a spec**; butchr runs no agent — it pushes a `spec requested` channel event and waits for the spec-generation responder to submit a spec (`POST /api/tasks/:id/spec`) → `spec_review` |
+| `idea` | feedback (brief) | a one-line brief **awaiting a spec**; butchr runs no agent — it pushes a `spec requested` channel event and waits for the task's responder (its story leader, else the CTO) to submit a spec (`POST /api/tasks/:id/spec`) → `spec_review` |
 | `spec_review` | feedback | a submitted spec awaiting approval → `inactive`, or request-changes → `idea` |
 | `blocked` | idle | waiting on `blocked_by` dependencies; auto-unblocks to `inactive` |
 | `needs_info` | feedback | an agent asked a question; on answer it resumes (→ `inactive`) |
 | `inactive` | agent (workspace) | **READY** — queued for the dispatcher, no live agent yet |
-| `in_progress` | agent (workspace) | a **LIVE** workspace agent is building the code (the orthogonal `idle` flag marks one that has gone quiet → surfaced as the `idle-handling` feedback condition; see §7) |
+| `in_progress` | agent (workspace) | a **LIVE** workspace agent is building the code (the orthogonal `idle` flag marks one that has gone quiet → surfaced as a feedback condition handled by the task's responder; see §7) |
 | `in_review` | feedback | a diff awaiting approval → mechanical merge, or request-changes → `inactive` |
 | `merged` | idle (terminal) | landed on the default branch |
 | `rolling_back` | idle | a rollback task's revert is being mechanically merged (a rollback happens **after** a merge) |
@@ -407,8 +407,8 @@ login shell** and keeps the agent NAME registered — so `agentExists(taskId)` s
 says "alive" even though claude is dead. The old behavior re-adopted such a task and
 the idle-nudge then typed `continue` into the dead shell forever
 ("continuecontinuecontinue"). butchr now **auto-resumes** instead, with no operator
-action (and idle is no longer auto-nudged at all — it is surfaced to the
-`idle-handling` responder; see §7):
+action (and idle is no longer auto-nudged at all — it is surfaced to the task's
+responder; see §7):
 
 - **Liveness is the OS process, not the pane.** `src/liveness.ts` `claudeAlive(sessionId)`
   scans `/proc` for a live process carrying the session id as a **distinct argv token**
@@ -831,92 +831,82 @@ off the `release_mode` column — no workspace id is ever hardcoded):
 - **The version is butchr's, assigned at merge** (inside the serialized merge lock, after
   the rebase) — you never hand-edit the version file or the version heading.
 
-### Step responders (per-workspace)
+### Feedback responders (structural)
 
-Every pipeline step that needs a **response** has a configurable **responder** — either
-`cto` (the workspace's persistent CTO agent handles it automatically) or `user` (butchr
-waits for a human to act in the webapp). The config is **per-workspace** (an operator
-decision that applies to **all** of that workspace's tasks) and **defaults every step to
-`cto`** — today's full-auto behavior. The six steps:
+Every feedback surface — a task awaiting a spec/approval/answer/review, or a live agent
+gone **idle** — has a **responder**: who is expected to act. WHO that is follows the
+**structure of the work**, never any per-workspace config (there is no step-responder
+config — it was removed in the responder redesign, story st-def561dd):
 
-| Step | Responds to |
-|------|-------------|
-| `spec-generation` | Turning an idea/brief into a spec (the `idea` state). **Wired:** see below. |
-| `spec-approval` | Approving a generated spec before it builds (the `spec_review` state). |
-| `plan-approval` | Approving a plan-preview plan before code is written (the plan-preview gate). |
-| `diff-review` | Reviewing the finished diff before it merges (the `in_review` state). |
-| `answer-question` | Answering a question an agent raised (the `needs_info` state). |
-| `idle-handling` | Handling a live build agent that went **idle** (the `idle` flag on an `in_progress` task). **Wired:** see below. |
+- **A story SUBTASK** (`story_id` set) → its **story LEADER**, always. Subtask feedback is
+  **terminal at the leader** — there is **no** task-level escalation. The leader answers
+  questions, reviews specs/diffs, and handles idle for its own subtasks.
+- **A NON-STORY task** (`story_id` null — a rollback or internal/system task) → the **CTO**,
+  or the **USER** once the CTO escalates it (**`POST /api/tasks/:id/escalate`** sets
+  `escalated_to_user` — the single cto→user boundary; it 409s on a story member, and resets
+  on each fresh feedback state).
+- **A STORY itself** → the **CTO**: a leader's story-level **ask**
+  (**`POST /api/stories/:id/ask`**), story-completion sign-off, and a decomposition-plan
+  sign-off. The CTO may **escalate** a story ask to the user
+  (**`POST /api/stories/:id/escalate`**); either responder **`/answer`s** it.
+- **CTO → USER** is the only escalation boundary above the CTO (for a non-story task or a
+  story ask). There is **never** escalation at the subtask level.
 
-It is stored per workspace as a single JSON column (`workspaces.step_responders`, `NULL`
-= all `cto`), read through `workspaces.responderFor(workspaceId, step)` /
-`resolveStepResponders(workspaceId)`, and set via **`GET`/`PATCH /api/workspaces/:id`**
-(the `GET` returns the **fully-resolved** map — every step present with its effective
-value) or the webapp's **Step responders** panel.
+**This is who's *expected* to act, never a backend gate.** butchr stays
+**responder-agnostic**: every feedback surface is pushed to its responder's channel **and**
+stays actionable by a human in the webapp — the action endpoints (`/spec`, `/approve`,
+`/reject`, `/answer`, `/nudge`) are open regardless. The structural responder drives only
+(a) **channel routing** — which agent's notification feed an item lands on (a story
+leader's vs the CTO's; see `channel.ts` `routeOwns`) — and (b) the **webapp's awaiting-who
+emphasis** (a `user` item shows a prominent "awaiting you" banner; a `cto`/`story` item a
+muted "you can also act").
 
-**The responder routing is `cto`-vs-`user` *emphasis*, never a backend gate.** butchr is
-**responder-agnostic**: every feedback step is surfaced on the CTO channel **and** stays
-actionable by a human in the webapp — the action endpoints (`/spec`, `/approve`,
-`/reject`, `/answer`) are open to both regardless of the configured responder. The
-`step_responders` config drives only two things: (a) the **CTO agent's self-check** — it
-auto-acts on a step **only** when that step's responder is `cto`, and observes (leaves it
-for the human) when it is `user`; and (b) the **webapp's awaiting-who emphasis** — a
-`user` step shows a prominent "awaiting you" badge/banner, a `cto` step a muted "awaiting
-CTO — you can also act". A human can therefore always act, even on a `cto` step.
+**Is a task awaiting feedback?** `tasks.isAwaitingFeedback(row)` — true when its status is
+a feedback state (`idea` / `spec_review` / `in_review` / `needs_info`) **or** it is a live
+build agent gone idle (`in_progress` + the `idle` flag). The resolved responder is
+`tasks.pendingResponder(row)`, surfaced on the task view as the computed
+**`pending_responder`** field (`story` | `cto` | `user` | `null`):
 
-**State → step map (the single mapping both the CTO self-check and the webapp route on),
-in `tasks.feedbackStep(status, planPreview)` — extended by `tasks.pendingResponderStep(row)`
-to cover the orthogonal idle condition:**
+| condition | `pending_responder` |
+|-----------|---------------------|
+| not awaiting feedback | `null` |
+| story member (`story_id` set) | `story` (the leader) — terminal, no tier |
+| non-story, not `escalated_to_user` | `cto` |
+| non-story, `escalated_to_user` | `user` |
 
-| task state | responder step |
-|------------|----------------|
-| `idea` | `spec-generation` |
-| `spec_review` | `spec-approval` |
-| `in_review` | `diff-review` |
-| `needs_info` **with `plan_preview`** | `plan-approval` (a proposed plan from `propose_plan`) |
-| `needs_info` (otherwise) | `answer-question` (a question raised via `raise`) |
-| `in_progress` **+ `idle` flag** | `idle-handling` (a live agent gone quiet — see below) |
-
-`tasks.pendingResponder(row)` composes that map with `responderFor` and is surfaced on
-the task view as the computed **`pending_responder`** field (`cto` | `user` | `null` when
-not in a feedback state), so the webapp and CTO read who-acts directly off the task
-without cross-referencing the workspace config.
+so the webapp and agents read who-acts directly off the task. The `needs_info`
+plan-vs-question distinction stays derivable from `status + plan_preview` (a plan-preview
+task in `needs_info` awaits **plan approval**; any other is a raised **question**) at the
+surfaces that need it.
 
 > **Known simplification — `needs_info` plan-vs-question.** A `needs_info` task holds
 > *either* a proposed plan (`propose_plan`, plan-preview gate) *or* a raised question
 > (`raise`) in the same `question` column; nothing on the row records which, so the only
 > signal is `plan_preview`. A plan-preview task that **raises a question during
-> implementation** therefore maps to `plan-approval` rather than `answer-question`. This
-> affects only which step's config + UI emphasis applies (the backend treats every
-> `needs_info` identically — answerable by a human, pushed to the channel). A future task
-> can add a precise marker (e.g. a `plan_proposed`/`plan_approved` flag) to disambiguate.
+> implementation** therefore reads as a plan rather than a question. This affects only the
+> webapp's emphasis (the backend treats every `needs_info` identically — answerable by a
+> human, pushed to the channel). A future task can add a precise marker (e.g. a
+> `plan_proposed`/`plan_approved` flag) to disambiguate.
 
-**`spec-generation` (the `idea` state) in detail.** When an `idea` task is created it does
+**Spec generation (the `idea` state) in detail.** When an `idea` task is created it does
 **not** fork a spec generator — it parks in `idea` and butchr pushes a `spec requested`
-event on the one-way CTO channel carrying the brief + task id. The responder writes the
-spec and submits it via **`POST /api/tasks/:id/spec { spec }`** (`tasks.submitSpec` → the
-unified feedback path), which rewrites the prompt brief → spec and advances the task to
-`spec_review`. For `cto` the persistent CTO agent reacts to the channel push (it checks
-`responderFor(workspace, 'spec-generation')` and acts only when it is `cto`); for `user`
-the webapp renders a "write the spec" form on the idea task.
+event on the one-way channel carrying the brief + task id. The responder (a story member's
+**leader**, else the **CTO** — or a human in the webapp) writes the spec and submits it via
+**`POST /api/tasks/:id/spec { spec }`** (`tasks.submitSpec` → the unified feedback path),
+which rewrites the prompt brief → spec and advances the task to `spec_review`.
 
-**`idle-handling` (a live agent gone idle) in detail.** Idle is a **flag** on an
+**Idle handling (a live agent gone idle) in detail.** Idle is a **flag** on an
 `in_progress` build agent (claude alive but its CLI quiet past `BUTCHR_IDLE_MS`), **not** a
-13th state — so it stays orthogonal to `status` while still being surfaced as a feedback
-condition. When the dispatcher watcher flags a task idle (`tasks.setIdle`) it captures the
-ANSI-stripped run-log tail into **`idle_context`** (`dispatcher.readRunLogTail`,
-`BUTCHR_IDLE_CONTEXT_LINES` lines) so the responder can see what the agent was doing. The
-one-way CTO channel then pushes an **`agent idle`** event (`meta.state="idle"`) carrying a
-context snippet (`AttentionBridge` tracks the idle flag separately from status, emitting
-only on the 0→1 flip). butchr **no longer auto-types `continue`** — the responder acts
-deliberately:
-
-- **`cto`** → the persistent CTO agent reads `idle_context` and, only when
-  `responderFor(workspace, 'idle-handling')` is `cto`, calls **`POST /api/tasks/:id/nudge
-  { text? }`** (`tasks.nudgeTask`) to steer it with guidance (or a bare `continue`), or
-  `/requeue` / `/abort` if it's wedged or off-track.
-- **`user`** → the webapp's **Idle agent** panel shows `idle_context` + the same action
-  buttons (nudge-with-guidance, re-queue; abort in the header).
+13th state — so it stays orthogonal to `status` while still being a feedback surface. When
+the dispatcher watcher flags a task idle (`tasks.setIdle`) it captures the ANSI-stripped
+run-log tail into **`idle_context`** (`BUTCHR_IDLE_CONTEXT_LINES` lines) so the responder
+can see what the agent was doing. The one-way channel then pushes an **`agent idle`** event
+(`meta.state="idle"`) carrying the snapshot (`AttentionBridge` tracks the idle flag
+separately from status, emitting only on the 0→1 flip). butchr **no longer auto-types
+`continue`** — the responder reads `idle_context` and acts deliberately: **`POST
+/api/tasks/:id/nudge { text? }`** (`tasks.nudgeTask`) to steer with guidance (or a bare
+`continue`), or `/requeue` / `/abort` if it's wedged or off-track. In the webapp the **Idle
+agent** panel shows `idle_context` + the same action buttons.
 
 **Liveness guard (the power-loss incident fix).** A herdr/host restart kills claude but
 leaves the pane as a bare login shell with the agent name still registered, so
@@ -1165,17 +1155,17 @@ sha)` and `headSha(dir)` need **no** signature change — the caller passes the
      its own) and cannot resolve code conflicts. On conflict, abort (story branch
      **and** `main` left untouched), set the story `merge_blocked`, and fire a
      `merge-conflict` story-attention event **directly to the CTO** (`target:'cto'`,
-     **not** the leader — the leader can't act on it, and the story-level ask seam
-     that would let it escalate isn't built yet). **CTO conflict runbook** (carried
-     verbatim in the event `detail`, and the action a human/CTO performs): in the
-     **story worktree** (`<repo>/butchr-story-<storyId>`, on `butchr/story/<storyId>`),
+     **not** the leader — the leader can't act on it: it is an operator with no
+     worktree, and butchr (not the leader) detects the conflict, so it notifies the
+     CTO directly rather than routing through the leader's story-level ask seam).
+     **CTO conflict runbook** (carried verbatim in the event `detail`, and the action
+     a human/CTO performs): in the **story worktree**
+     (`<repo>/butchr-story-<storyId>`, on `butchr/story/<storyId>`),
      `git rebase <default-branch>`, resolve each conflicting file + `git add` it,
      `git rebase --continue` to completion, then **re-PATCH the story `done`**
      (`PATCH /api/stories/:id {"status":"done"}`) to re-attempt the land
      (`merge_blocked → merging → …`). The story does **not** complete (see §11.7).
-     *(Future, not built: an auto-spawned reconcile agent in the story worktree, and
-     a story-level ask seam so the leader can escalate rather than butchr notifying
-     the CTO directly.)*
+     *(Future, not built: an auto-spawned reconcile agent in the story worktree.)*
    - **Global merge queue:** story→`main` moves `main`, so it **must** go through
      `runExclusiveMerge`. For the first cut, **all** merges (subtask→story **and**
      story→`main`) route through the **single existing global queue** — simplest,

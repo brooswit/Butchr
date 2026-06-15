@@ -230,6 +230,16 @@ function ensureColumn(table: string, column: string, decl: string): void {
   }
 }
 
+// DROP a column that a later migration retired. PRAGMA-guarded so it is a no-op when the
+// column is already absent (a fresh DB never created it; an existing DB drops it once),
+// making the migration safe to re-run. Uses ALTER TABLE ... DROP COLUMN (SQLite >= 3.35,
+// which Bun's bundled SQLite supports).
+function dropColumnIfExists(table: string, column: string): void {
+  if (columnExists(db, table, column)) {
+    db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+  }
+}
+
 // All the additive column migrations, in order. Wrapped so the boot MIGRATIONS
 // runner executes them as ONE ordered step (after the baseline schema, before the
 // status-fold migrations). Each ensureColumn is independently idempotent.
@@ -279,22 +289,6 @@ ensureColumn("workspaces", "changelog_path", "TEXT");
 // /api/workspaces/:id/cto/* endpoints still work regardless, so an operator can start
 // one even when boot-auto-start is off.)
 ensureColumn("workspaces", "cto_enabled", "INTEGER");
-
-// PER-WORKSPACE STEP RESPONDERS. The feedback-workflow redesign makes every pipeline
-// step that needs a response carry a configurable RESPONDER — `cto` (the persistent
-// CTO agent handles it automatically) or `user` (butchr waits for a human in the
-// webapp). This column is a JSON object {step: 'cto'|'user'} holding the per-workspace
-// overrides; an unset step (or NULL/empty/garbage value) defaults to `cto` — today's
-// full-auto behavior. The step set + read helper (responderFor / resolveStepResponders)
-// + validation live in src/workspaces.ts; the config is settable via PATCH
-// /api/workspaces/:id and the webapp's step-responder panel. The `spec-generation` step
-// is WIRED: an `idea` task parks awaiting a spec and butchr pushes a `spec requested`
-// channel event; the responder submits the spec via POST /api/tasks/:id/spec (the CTO
-// agent for `cto`, a human in the webapp for `user`). The remaining steps
-// (approval/review/answer, idle-as-feedback) are config-only for now; later tasks consume
-// them. Settable per workspace; NULL (the default every existing row backfills to) means
-// "all steps cto".
-ensureColumn("workspaces", "step_responders", "TEXT");
 
 // PER-WORKSPACE VERSIONED-RELEASES MODE. When 1, butchr treats this workspace as a
 // versioned-release repo: EVERY merged change bumps the version file by the task's
@@ -666,40 +660,32 @@ ensureColumn("tasks", "grounding_fp", "TEXT");
 // `...row` spread so it round-trips.
 ensureColumn("tasks", "story_id", "TEXT");
 
-// RESPONDER ESCALATION TIER (Phase 2 of the STORIES epic). The current escalation RUNG
-// (0-based) for the task's CURRENT pending feedback item. For a STORY-MEMBER task
-// (story_id != null) in a feedback state, the resolved pending_responder walks the FIXED
-// chain ['story','cto','user']: pending_responder = chain[min(responder_tier, len-1)], so
-// 0 = story leader, 1 = CTO, 2 = user. POST /api/tasks/:id/escalate bumps it one rung
-// (tasks.escalateTask), and it RESETS to 0 every time the task ENTERS a new feedback state
-// (a brand-new question/spec/review/idle starts back at the story leader). For a NON-member
-// task (story_id == null) it is IGNORED — pending_responder is computed exactly as today
-// from the workspace step_responders config (workspaces.responderFor). Default 0 (every
-// existing row backfills to it); creation lands at 0 via this default. Resolved by
-// tasks.pendingResponder; surfaced on TaskView via the `...row` spread (no extra plumbing).
-ensureColumn("tasks", "responder_tier", "INTEGER NOT NULL DEFAULT 0");
-
-// RESPONDER-REDESIGN V2 SCHEMA (story st-def561dd, spine subtask 1 — additive + INERT).
-// These three columns realize the V2 data model (design §2): feedback flows UP to the
-// STRUCTURAL parent, so a non-story task gets a single cto→user boundary (a boolean) and a
-// story carries its leader's open story-level ask. They are ADDITIVE and UNUSED until the
-// responder-redesign ACTIVATION subtask — NOTHING reads them yet; the live V1 responder
-// model (responder_tier chain walk + step_responders config) stays in force. The V2 gate
-// (config.responderV2Enabled, default OFF) selects V2 paths once later subtasks wire them.
+// RESPONDER-REDESIGN SCHEMA (story st-def561dd, design §2). Feedback flows UP to the
+// STRUCTURAL parent: a non-story task gets a single cto→user boundary (a boolean), and a
+// story carries its leader's open story-level ask.
 //
 // `escalated_to_user` is set ONLY on a NON-STORY task when the CTO escalates its pending
-// feedback to the user — the single cto→user boundary that REPLACES the 3-rung
-// responder_tier for non-story tasks (a story member's feedback is terminal at its leader,
-// so it never escalates to the user). Resets to 0 whenever the task enters a fresh feedback
-// state (mirrors how responder_tier resets today). Default 0; existing rows backfill to it.
+// feedback to the user — the single cto→user boundary for a task (a story member's feedback
+// is TERMINAL at its leader, so it never escalates to the user). Resets to 0 whenever the
+// task enters a fresh feedback state. Default 0; existing rows backfill to it. Resolved by
+// tasks.pendingResponder; surfaced on TaskView via the `...row` spread (no extra plumbing).
 ensureColumn("tasks", "escalated_to_user", "INTEGER NOT NULL DEFAULT 0");
 
 // `pending_ask` is a story LEADER's open STORY-LEVEL question to the CTO (NULL when none) —
 // the leader's escalation seam (design §4b). `ask_responder` is who currently OWNS that
 // open ask: 'cto' (the leader raised it to the CTO) or 'user' (the CTO escalated it onward),
-// NULL when no ask is open. Both nullable, default NULL; unused until the activation subtask.
+// NULL when no ask is open. Both nullable, default NULL.
 ensureColumn("stories", "pending_ask", "TEXT");
 ensureColumn("stories", "ask_responder", "TEXT");
+
+// RESPONDER-REDESIGN ACTIVATION (story st-def561dd, design §2/§6, Q-D). The V1 responder
+// model is gone, so its two columns are retired: `tasks.responder_tier` (the 3-rung
+// escalation walk, replaced by the structural pending_responder + escalated_to_user) and
+// `workspaces.step_responders` (the per-step responder config, replaced by structural
+// routing). PRAGMA-guarded so a fresh DB (never created them) and an existing DB (drops
+// them once) both succeed. Pre-1.0: no back-compat, the columns are physically dropped.
+dropColumnIfExists("tasks", "responder_tier");
+dropColumnIfExists("workspaces", "step_responders");
 }
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
@@ -889,11 +875,6 @@ export type WorkspaceRow = {
   // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by
   // cto-agent.isCtoEnabled (per-workspace WINS over the global default).
   cto_enabled: number | null;
-  // Per-workspace STEP RESPONDERS (see the step_responders ensureColumn above): raw
-  // JSON-object TEXT of {step: 'cto'|'user'} overrides, or NULL (= all steps cto). An
-  // unset step / NULL / unparseable value falls back to `cto`. Parsed + resolved by
-  // workspaces.responderFor / resolveStepResponders into a full per-step map.
-  step_responders: string | null;
   // Per-workspace VERSIONED-RELEASES MODE (see the release_mode ensureColumn above): 1 =
   // every merge bumps + stamps the changelog with a versioned heading and the changelog
   // gate is strict; 0 (default) = today's opt-in patch-bump behavior. Resolved by
@@ -946,12 +927,11 @@ export type StoryRow = {
   // merge straight to the default branch). Captured ONCE at createStory from the
   // workspace branch_isolation flag, NOT the live flag. LIVE (CONTRIBUTING §11.8).
   isolated: number;
-  // RESPONDER-REDESIGN V2 (story st-def561dd — see the pending_ask/ask_responder ensureColumns
+  // RESPONDER-REDESIGN (story st-def561dd — see the pending_ask/ask_responder ensureColumns
   // above): a story LEADER's open STORY-LEVEL ask to the CTO. `pending_ask` is the question
   // text (NULL when none); `ask_responder` is who owns it — 'cto' | 'user' — or NULL when no
-  // ask is open. ADDITIVE + INERT this phase — nothing reads them until the activation subtask
-  // (the V2 paths gate on config.responderV2Enabled). Surfaced on StoryView via the `...story`
-  // spread (no extra plumbing). See StoryRow's isolated comment for the additive-column pattern.
+  // ask is open. Set/cleared by the story /ask, /escalate, /answer endpoints; surfaced on
+  // StoryView via the `...story` spread (no extra plumbing).
   pending_ask: string | null;
   ask_responder: string | null;
   // STORY-LEVEL MERGE-RANGE shas (see the merge_base_sha/merged_sha ensureColumns above):
@@ -1260,18 +1240,12 @@ export type TaskRow = {
   // task (today's behavior). Assigned only via stories.assignTaskToStory. Surfaced on
   // TaskView via the `...row` spread so it round-trips. Inert this phase.
   story_id: string | null;
-  // RESPONDER ESCALATION TIER (Phase 2 — see the responder_tier ensureColumn above): the
-  // current escalation RUNG (0-based) for the task's pending feedback item. For a story
-  // member in a feedback state, pending_responder walks the FIXED chain ['story','cto',
-  // 'user'] indexed by min(responder_tier, len-1); reset to 0 on each new feedback event.
-  // IGNORED for non-story tasks. Default 0. Surfaced on TaskView via the `...row` spread.
-  responder_tier: number;
-  // RESPONDER-REDESIGN V2 (story st-def561dd — see the escalated_to_user ensureColumn above):
-  // 1 ONLY on a NON-STORY task whose pending feedback the CTO escalated to the user (the single
-  // cto→user boundary that replaces the responder_tier chain for non-story tasks); resets to 0
-  // on each fresh feedback state. ADDITIVE + INERT this phase — nothing reads it until the
-  // activation subtask (V2 paths gate on config.responderV2Enabled). Default 0. Surfaced on
-  // TaskView via the `...row` spread (no extra plumbing).
+  // RESPONDER-REDESIGN (story st-def561dd — see the escalated_to_user ensureColumn above):
+  // 1 ONLY on a NON-STORY task whose pending feedback the CTO escalated to the user (the
+  // single cto→user boundary for a task; a story member's feedback is terminal at its
+  // leader, so it never escalates to the user); resets to 0 on each fresh feedback state.
+  // Default 0. Resolved by tasks.pendingResponder; surfaced on TaskView via the `...row`
+  // spread (no extra plumbing).
   escalated_to_user: number;
   created_at: string;
   started_at: string | null;

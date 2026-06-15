@@ -3,8 +3,8 @@
 // Covers the three pure-ish seams:
 //   - tasks.setIdle: flipping `idle` 0→1 captures the run-log tail into `idle_context`
 //     (via the capture thunk, invoked ONLY on the flip); clearing idle wipes it.
-//   - tasks.pendingResponderStep / pendingResponder: a LIVE in_progress + idle task is
-//     awaiting the `idle-handling` step (idle stays a FLAG, not a 13th state).
+//   - tasks.isAwaitingFeedback / pendingResponder: a LIVE in_progress + idle task is a
+//     feedback surface resolved to its structural responder (idle stays a FLAG, not a state).
 //   - dispatcher.handleIdleAgent: the watcher's idle step NO LONGER auto-types "continue"
 //     for an alive agent (it just self-heals the pane + leaves it flagged); it is a no-op
 //     off the in_progress build phase / before the log exists / under the idle threshold.
@@ -143,18 +143,18 @@ describe("a setStatus transition out of idle clears idle_context", () => {
   });
 });
 
-describe("tasks.pendingResponderStep (idle resolves to idle-handling)", () => {
-  test("a LIVE in_progress + idle task awaits idle-handling", () => {
+describe("idle as a feedback surface (isAwaitingFeedback + pendingResponder)", () => {
+  test("a LIVE in_progress + idle task IS awaiting feedback, resolved to its responder", () => {
     seedLive("pending-idle");
     tasksMod.setIdle("pending-idle", true, () => "ctx");
-    expect(tasksMod.pendingResponderStep(rowOf("pending-idle"))).toBe("idle-handling");
-    // Defaults to the `cto` responder (no per-workspace override set).
+    expect(tasksMod.isAwaitingFeedback(rowOf("pending-idle"))).toBe(true);
+    // A non-story idle agent resolves to the CTO (structural — no per-workspace config).
     expect(tasksMod.pendingResponder(rowOf("pending-idle"))).toBe("cto");
   });
 
   test("a non-idle in_progress task is awaiting nothing (an agent state)", () => {
     seedLive("pending-busy");
-    expect(tasksMod.pendingResponderStep(rowOf("pending-busy"))).toBeNull();
+    expect(tasksMod.isAwaitingFeedback(rowOf("pending-busy"))).toBe(false);
     expect(tasksMod.pendingResponder(rowOf("pending-busy"))).toBeNull();
   });
 });

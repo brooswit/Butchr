@@ -4,7 +4,7 @@
 // drive the bridge's translation logic, the initialize-result shape, the SSE
 // reconnect loop (with an injected `open`), and the malformed-input handling
 // directly — the same seams main() wires to stdin/stdout/fetch at runtime.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   ATTENTION_STATES,
   AttentionBridge,
@@ -16,9 +16,30 @@ import {
   runSseLoop,
 } from "../src/channel.ts";
 
-// Build a serialized task.updated event the way taskView/SSE would emit it.
+// Build a serialized task.updated event the way taskView/SSE would emit it. taskView always
+// carries the server-computed STRUCTURAL `pending_responder`, so when a fixture doesn't set
+// one we fill it exactly as tasks.pendingResponder would (story member → 'story'; non-story
+// awaiting → 'cto', or 'user' once escalated_to_user; null when not awaiting feedback) — the
+// channel bridge routes off this field, so an event missing it would not match reality.
 function taskUpdated(task: Record<string, unknown>) {
-  return { type: "task.updated", task };
+  const t = { ...task };
+  if (!("pending_responder" in t)) {
+    const idle = t.idle === 1 || t.idle === true;
+    const awaiting =
+      t.status === "idea" ||
+      t.status === "spec_review" ||
+      t.status === "in_review" ||
+      t.status === "needs_info" ||
+      (t.status === "in_progress" && idle);
+    t.pending_responder = !awaiting
+      ? null
+      : t.story_id
+      ? "story"
+      : t.escalated_to_user
+      ? "user"
+      : "cto";
+  }
+  return { type: "task.updated", task: t };
 }
 
 // A ReadableStream that emits the given string chunks then closes (one SSE socket).
@@ -142,6 +163,7 @@ describe("channel: attention transitions → notifications", () => {
         workspace_id: "dir-1",
         status: "idea",
         prompt: "wire up SSO",
+        pending_responder: "cto", // a non-story idea resolves to the CTO (as taskView emits)
       },
     });
     expect(note).not.toBeNull();
@@ -301,21 +323,22 @@ describe("channel: per-workspace scope", () => {
   });
 });
 
-describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routing)", () => {
+describe("channel: story scope (story-leader feed + structural routing)", () => {
   // A STORY-LEADER bridge (BUTCHR_CHANNEL_STORY=st-1, in workspace dir-1) and the
   // WORKSPACE/CTO bridge for that same workspace. The leader owns its story's subtasks'
-  // tier-0 feedback + failures; the CTO owns standalone tasks + ESCALATED story items.
+  // feedback + failures (always responder 'story' — terminal at the leader); the CTO owns
+  // non-story tasks. A story member NEVER reaches the CTO feed.
   const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
   const ctoBridge = () => new AttentionBridge("dir-1");
 
-  test("(a) a story member's tier-0 needs_info routes to the LEADER, not the CTO", () => {
+  test("(a) a story member's needs_info routes to the LEADER, not the CTO", () => {
     const task = {
       id: "sm-ask",
       workspace_id: "dir-1",
       status: "needs_info",
       question: "which API?",
       story_id: "st-1",
-      pending_responder: "story", // tier 0 → the leader
+      pending_responder: "story", // terminal at the leader
     };
     const leader = storyBridge().consume(taskUpdated(task));
     expect(leader).not.toBeNull();
@@ -326,29 +349,8 @@ describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routin
       story_id: "st-1", // story members carry story_id in meta
     });
     expect(leader!.content).toContain("which API?");
-    // The CTO feed does NOT see a non-escalated story-member item.
+    // The CTO feed NEVER sees a story-member item.
     expect(ctoBridge().consume(taskUpdated(task))).toBeNull();
-  });
-
-  test("(b) the same item ESCALATED (responder 'cto') routes to the CTO, not the leader", () => {
-    const task = {
-      id: "sm-ask",
-      workspace_id: "dir-1",
-      status: "needs_info",
-      question: "which API?",
-      story_id: "st-1",
-      pending_responder: "cto", // escalated up one rung
-    };
-    const cto = ctoBridge().consume(taskUpdated(task));
-    expect(cto).not.toBeNull();
-    expect(cto!.meta).toEqual({
-      task_id: "sm-ask",
-      workspace: "dir-1",
-      state: "needs_info",
-      story_id: "st-1",
-    });
-    // The leader no longer owns an escalated item.
-    expect(storyBridge().consume(taskUpdated(task))).toBeNull();
   });
 
   test("(c) a story member's failed/aborted routes to the LEADER (a failure has no responder)", () => {
@@ -397,45 +399,29 @@ describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routin
     expect(storyBridge().consume(taskUpdated(task))).toBeNull();
   });
 
-  test("(e) an ESCALATION transition while in-state fires the CTO feed (responder story→cto)", () => {
+  test("(e) a non-story cto→user transition while in-state re-fires the CTO feed once", () => {
     const cto = ctoBridge();
     const base = {
-      id: "sm-esc",
+      id: "ns-esc",
       workspace_id: "dir-1",
-      status: "needs_info",
-      question: "q?",
-      story_id: "st-1",
+      status: "in_review",
+      summary: "standalone change",
+      // no story_id
     };
-    // Tier 0 (responder 'story') — the CTO does NOT own it yet, but it records the responder.
-    expect(cto.consume(taskUpdated({ ...base, pending_responder: "story" }))).toBeNull();
-    // Escalated to 'cto' with the SAME status — a responder transition must FIRE the CTO feed.
+    // Awaiting the CTO ('cto') — the CTO owns + fires it.
+    expect(cto.consume(taskUpdated({ ...base, pending_responder: "cto" }))).not.toBeNull();
+    // Escalated to the user ('user') with the SAME status — a responder transition. The CTO
+    // feed DROPS a 'user' item (the webapp surfaces it), so this does not re-fire here.
+    expect(cto.consume(taskUpdated({ ...base, pending_responder: "user" }))).toBeNull();
+    // Back to 'cto' (a fresh feedback event reset escalated_to_user) → re-fires once.
     const fired = cto.consume(taskUpdated({ ...base, pending_responder: "cto" }));
     expect(fired).not.toBeNull();
-    expect(fired!.meta.state).toBe("needs_info");
-    expect(fired!.meta.story_id).toBe("st-1");
+    expect(fired!.meta.state).toBe("in_review");
     // A further re-render with the SAME responder does not re-fire.
     expect(cto.consume(taskUpdated({ ...base, pending_responder: "cto" }))).toBeNull();
   });
 
-  test("(e) a RESET back to 'story' fires the LEADER feed (a fresh feedback event)", () => {
-    const leader = storyBridge();
-    const base = {
-      id: "sm-reset",
-      workspace_id: "dir-1",
-      status: "needs_info",
-      question: "q?",
-      story_id: "st-1",
-    };
-    // First seen already escalated to the CTO — the leader does NOT own it.
-    expect(leader.consume(taskUpdated({ ...base, pending_responder: "cto" }))).toBeNull();
-    // Reset back to 'story' (a new feedback event) with the SAME status → fires the leader feed.
-    const fired = leader.consume(taskUpdated({ ...base, pending_responder: "story" }));
-    expect(fired).not.toBeNull();
-    expect(fired!.meta.state).toBe("needs_info");
-    expect(fired!.meta.story_id).toBe("st-1");
-  });
-
-  test("a story member's tier-0 IDLE routes to the leader, not the CTO", () => {
+  test("a story member's IDLE routes to the leader, not the CTO", () => {
     const idle = {
       id: "sm-idle",
       workspace_id: "dir-1",
@@ -443,7 +429,7 @@ describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routin
       idle: 1,
       idle_context: "…parked…",
       story_id: "st-1",
-      pending_responder: "story", // idle-handling at tier 0 → the leader
+      pending_responder: "story", // idle on a story member → the leader (terminal)
     };
     const leaderIdle = storyBridge().consume(taskUpdated(idle));
     expect(leaderIdle).not.toBeNull();
@@ -453,25 +439,12 @@ describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routin
   });
 });
 
-describe("channel: routeOwns V2 (responder-redesign §5 — gate FORCED ON)", () => {
-  // The V2 CTO feed owns ONLY non-story tasks: a story member ALWAYS belongs to its leader
+describe("channel: routeOwns (structural — responder-redesign §5)", () => {
+  // The CTO feed owns ONLY non-story tasks: a story member ALWAYS belongs to its leader
   // (never the CTO), and a non-story task is owned only when it is awaiting the CTO
   // ('cto') or has FAILED; a non-story 'user' escalation is DROPPED by the CTO bridge.
-  // The gate is read at CALL TIME (responderV2Enabled), so flipping the env here and
-  // restoring it in afterEach is enough — no module re-import — and CANNOT leak into the
-  // gate-OFF V1 blocks that share this process. The story-leader arm is identical under V1
-  // and V2, so the Phase-4 cases above already cover the leader side with the gate off.
   const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
   const ctoBridge = () => new AttentionBridge("dir-1");
-
-  const priorGate = process.env.BUTCHR_RESPONDER_V2;
-  beforeEach(() => {
-    process.env.BUTCHR_RESPONDER_V2 = "1";
-  });
-  afterEach(() => {
-    if (priorGate === undefined) delete process.env.BUTCHR_RESPONDER_V2;
-    else process.env.BUTCHR_RESPONDER_V2 = priorGate;
-  });
 
   test("a story-member in_review routes to its story-leader bridge, NOT the CTO bridge", () => {
     const task = {
@@ -480,7 +453,7 @@ describe("channel: routeOwns V2 (responder-redesign §5 — gate FORCED ON)", ()
       status: "in_review",
       summary: "implemented subtask",
       story_id: "st-1",
-      pending_responder: "story", // V2: a story member always resolves to its leader
+      pending_responder: "story", // a story member always resolves to its leader
     };
     const leader = storyBridge().consume(taskUpdated(task));
     expect(leader).not.toBeNull();
@@ -490,7 +463,7 @@ describe("channel: routeOwns V2 (responder-redesign §5 — gate FORCED ON)", ()
       state: "in_review",
       story_id: "st-1",
     });
-    // Under V2 the CTO feed NEVER owns a story member.
+    // The CTO feed NEVER owns a story member.
     expect(ctoBridge().consume(taskUpdated(task))).toBeNull();
   });
 
@@ -520,10 +493,9 @@ describe("channel: routeOwns V2 (responder-redesign §5 — gate FORCED ON)", ()
       status: "in_review",
       summary: "escalated to the user",
       // no story_id
-      pending_responder: "user", // escalated_to_user → resolves to 'user' under V2
+      pending_responder: "user", // escalated_to_user → resolves to 'user'
     };
-    // The CTO feed drops it (the webapp surfaces it to the user). This is the gated change
-    // vs V1, where a standalone task is owned regardless of responder.
+    // The CTO feed drops a 'user' item — the webapp/dashboard surfaces it to the user.
     expect(ctoBridge().consume(taskUpdated(task))).toBeNull();
   });
 
@@ -534,13 +506,13 @@ describe("channel: routeOwns V2 (responder-redesign §5 — gate FORCED ON)", ()
       status: "failed",
       last_dispatch_error: "spawn failed",
       story_id: "st-1",
-      // a terminal failure has no responder under V2 — the explicit status check owns it.
+      // a terminal failure has no responder — the explicit status check owns it.
     };
     const leaderFail = storyBridge().consume(taskUpdated(failed));
     expect(leaderFail).not.toBeNull();
     expect(leaderFail!.meta.state).toBe("failed");
     expect(leaderFail!.meta.story_id).toBe("st-1");
-    // storyId != null excludes it from the CTO feed under V2.
+    // storyId != null excludes it from the CTO feed.
     expect(ctoBridge().consume(taskUpdated(failed))).toBeNull();
 
     const aborted = {
