@@ -402,6 +402,119 @@ describe("resetStory aborts all IN-FLIGHT subtasks, leaving the story open", () 
   });
 });
 
+describe("story-level ASK: open / escalate / answer (responder-redesign §4b)", () => {
+  test("openStoryAsk sets pending_ask + ask_responder='cto' and publishes target:cto reason:ask", async () => {
+    const story = storiesMod.createStory(WS_A, "Ask story open");
+    let row!: ReturnType<typeof storiesMod.openStoryAsk>;
+    const events = await captureStoryEvents(story.id, () => {
+      row = storiesMod.openStoryAsk(story.id, "  Which approach: A or B?  ");
+    });
+    // Trimmed question stored; CTO owns the fresh ask.
+    expect(row.pending_ask).toBe("Which approach: A or B?");
+    expect(row.ask_responder).toBe("cto");
+    expect(storiesMod.getStory(story.id)!.pending_ask).toBe("Which approach: A or B?");
+    expect(events).toEqual([
+      {
+        type: "story.attention",
+        story_id: story.id,
+        workspace_id: WS_A,
+        target: "cto",
+        reason: "ask",
+        detail: "Which approach: A or B?",
+      },
+    ]);
+  });
+
+  test("escalateStoryAsk bumps cto→user and re-publishes target:user reason:ask", async () => {
+    const story = storiesMod.createStory(WS_A, "Ask story escalate");
+    storiesMod.openStoryAsk(story.id, "Product call needed?");
+    let row!: ReturnType<typeof storiesMod.escalateStoryAsk>;
+    const events = await captureStoryEvents(story.id, () => {
+      row = storiesMod.escalateStoryAsk(story.id);
+    });
+    expect(row.ask_responder).toBe("user");
+    expect(row.pending_ask).toBe("Product call needed?"); // question unchanged
+    expect(events).toEqual([
+      {
+        type: "story.attention",
+        story_id: story.id,
+        workspace_id: WS_A,
+        target: "user",
+        reason: "ask",
+        detail: "Product call needed?",
+      },
+    ]);
+  });
+
+  test("answerStoryAsk clears the ask and publishes target:story reason:ask-answered", async () => {
+    const story = storiesMod.createStory(WS_A, "Ask story answer");
+    storiesMod.openStoryAsk(story.id, "What now?");
+    let row!: ReturnType<typeof storiesMod.answerStoryAsk>;
+    const events = await captureStoryEvents(story.id, () => {
+      row = storiesMod.answerStoryAsk(story.id, "  Do X.  ");
+    });
+    expect(row.pending_ask).toBeNull();
+    expect(row.ask_responder).toBeNull();
+    expect(events).toEqual([
+      {
+        type: "story.attention",
+        story_id: story.id,
+        workspace_id: WS_A,
+        target: "story",
+        reason: "ask-answered",
+        detail: "Do X.",
+      },
+    ]);
+  });
+
+  test("a user-owned ask can be answered too (whoever owns it)", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story user-answer");
+    storiesMod.openStoryAsk(story.id, "Q?");
+    storiesMod.escalateStoryAsk(story.id);
+    expect(storiesMod.getStory(story.id)!.ask_responder).toBe("user");
+    const row = storiesMod.answerStoryAsk(story.id, "A");
+    expect(row.pending_ask).toBeNull();
+    expect(row.ask_responder).toBeNull();
+  });
+
+  test("openStoryAsk 409s when an ask is already open", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story dup");
+    storiesMod.openStoryAsk(story.id, "first");
+    expect(() => storiesMod.openStoryAsk(story.id, "second")).toThrow(/already open/);
+  });
+
+  test("openStoryAsk 409s on a non-open story", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story closed");
+    storiesMod.updateStory(story.id, { status: "done" });
+    expect(() => storiesMod.openStoryAsk(story.id, "q")).toThrow(/cannot open an ask/);
+  });
+
+  test("openStoryAsk 400s on a blank question, 404s on an unknown story", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story blank");
+    expect(() => storiesMod.openStoryAsk(story.id, "   ")).toThrow(/question is required/);
+    expect(() => storiesMod.openStoryAsk("st-no-such", "q")).toThrow(/story not found/);
+  });
+
+  test("escalateStoryAsk 409s when there is no open ask", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story no-ask-escalate");
+    expect(() => storiesMod.escalateStoryAsk(story.id)).toThrow(/no open CTO-owned ask/);
+  });
+
+  test("escalateStoryAsk 409s when the ask is already user-owned (single boundary)", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story re-escalate");
+    storiesMod.openStoryAsk(story.id, "q");
+    storiesMod.escalateStoryAsk(story.id);
+    expect(() => storiesMod.escalateStoryAsk(story.id)).toThrow(/no open CTO-owned ask/);
+  });
+
+  test("answerStoryAsk 409s when there is no open ask, 400s on a blank answer", () => {
+    const story = storiesMod.createStory(WS_A, "Ask story no-ask-answer");
+    expect(() => storiesMod.answerStoryAsk(story.id, "a")).toThrow(/no open ask/);
+    storiesMod.openStoryAsk(story.id, "q");
+    expect(() => storiesMod.answerStoryAsk(story.id, "  ")).toThrow(/answer is required/);
+  });
+});
+
 describe("workspace deletion cascade-deletes its stories", () => {
   test("removing a workspace removes its stories (FK cascade)", () => {
     const WS_C = "stories-ws-c";

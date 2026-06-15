@@ -21,18 +21,23 @@ export type ButchrEvent =
   // this fans out the SSE stream so the CTO channel + worker connectivity channels push
   // it to live sessions. `restoredAt` = ISO time of recovery; `downMs` = outage length.
   | { type: "connectivity.restored"; restoredAt: string; downMs: number }
-  // A STORY-LEVEL attention event (Phase 6 of the STORIES epic) — a story-scoped
-  // notification that is NOT tied to a single task's status. `target` decides which
-  // channel feed owns it: `story` routes to the story LEADER's feed (reason
-  // `completion-review`: all subtasks merged → verify the goal), `cto` routes to the
-  // WORKSPACE/CTO feed (reason `complete`: the leader marked the story done). `detail`
-  // is a short human hook (e.g. the story brief). See src/channel.ts (AttentionBridge).
+  // A STORY-LEVEL attention event (Phase 6 of the STORIES epic + the responder-redesign
+  // ask seam, §4b) — a story-scoped notification that is NOT tied to a single task's
+  // status. `target` decides which channel feed owns it:
+  //  - `story` routes to the story LEADER's feed: reason `completion-review` (all subtasks
+  //    merged → verify the goal) or `ask-answered` (the leader's open ask was answered).
+  //  - `cto` routes to the WORKSPACE/CTO feed: reason `complete` (the leader marked the
+  //    story done) or `ask` (a leader raised a STORY-LEVEL ask to the CTO).
+  //  - `user` is the CTO ESCALATING an open ask up to the user (reason `ask`). NO channel
+  //    bridge owns `target:user` — consumeStoryAttention DROPS it (the CTO + leader feeds
+  //    stay silent); the dashboard's SSE consumer is what surfaces a user-owned ask.
+  // `detail` is a short human hook (the story brief, or the ask question/answer text).
   | {
       type: "story.attention";
       story_id: string;
       workspace_id: string;
-      target: "story" | "cto";
-      reason: "completion-review" | "complete";
+      target: "story" | "cto" | "user";
+      reason: "completion-review" | "complete" | "ask" | "ask-answered";
       detail: string | null;
     }
   | { type: "hello"; now: string };

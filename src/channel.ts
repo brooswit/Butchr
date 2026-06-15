@@ -94,18 +94,25 @@ const STATE_PHRASE: Record<AttentionState, string> = {
 // `idle-handling` responder to act on gracefully (nudge-with-guidance, requeue, or abort).
 const IDLE_PHRASE = "agent idle — needs idle-handling";
 
-// STORY-LEVEL attention phrases (Phase 6 of the STORIES epic). These are NOT task status
-// transitions but story-scoped notifications routed by `target` (see AttentionBridge.
-// consumeStoryAttention): a `completion-review` is pushed to the story LEADER's feed (all
-// subtasks merged → verify the goal), a `complete` is pushed UP to the WORKSPACE/CTO feed
-// (the leader marked the story done). Each carries its own `meta.state` so a recipient can
-// branch on the surface, mirroring STATE_PHRASE/IDLE_PHRASE for the task surfaces.
+// STORY-LEVEL attention phrases (Phase 6 of the STORIES epic + the responder-redesign ask
+// seam, §4b). These are NOT task status transitions but story-scoped notifications routed
+// by `target` (see AttentionBridge.consumeStoryAttention):
+//  - `completion-review` (target story) → the LEADER's feed: all subtasks merged → verify.
+//  - `complete` (target cto) → the WORKSPACE/CTO feed: the leader marked the story done.
+//  - `ask` (target cto, or user on a cto→user escalation) → the CTO feed: a leader raised
+//    a STORY-LEVEL ask. (A target:user escalation is DROPPED by every bridge — the
+//    dashboard surfaces it; see consumeStoryAttention.)
+//  - `ask-answered` (target story) → the LEADER's feed: its open ask was answered.
+// Each carries its own `meta.state` so a recipient can branch on the surface, mirroring
+// STATE_PHRASE/IDLE_PHRASE for the task surfaces.
 const STORY_ATTENTION: Record<
-  "completion-review" | "complete",
+  "completion-review" | "complete" | "ask" | "ask-answered",
   { phrase: string; state: string }
 > = {
   "completion-review": { phrase: "story ready for completion review", state: "story_completion_review" },
   complete: { phrase: "story complete", state: "story_complete" },
+  ask: { phrase: "story ask awaiting an answer", state: "story_ask" },
+  "ask-answered": { phrase: "story ask answered", state: "story_ask_answered" },
 };
 
 // The human phrase for the GLOBAL connectivity-restored broadcast. Unlike the
@@ -409,19 +416,29 @@ export class AttentionBridge {
    * Translate a STORY-LEVEL attention event into a channel notification, or null when THIS
    * bridge's scope does not own it. Routing by `target` (the story-scoped vs workspace/CTO
    * feed split — the story analog of routeOwns):
-   *  - `target:'story'` (a `completion-review`) is owned ONLY by the STORY-leader bridge whose
-   *    scopeStory === the event's story_id. A WORKSPACE/CTO bridge never sees it.
-   *  - `target:'cto'` (a `complete`) is owned by the WORKSPACE/CTO bridge: NOT a story bridge,
-   *    and (when workspace-scoped) the event's workspace must match scopeDir. A story bridge
+   *  - `target:'story'` (`completion-review` / `ask-answered`) is owned ONLY by the
+   *    STORY-leader bridge whose scopeStory === the event's story_id. A WORKSPACE/CTO bridge
    *    never sees it.
+   *  - `target:'cto'` (`complete` / `ask`) is owned by the WORKSPACE/CTO bridge: NOT a story
+   *    bridge, and (when workspace-scoped) the event's workspace must match scopeDir. A story
+   *    bridge never sees it.
+   *  - `target:'user'` (a CTO→user ask escalation) is owned by NO bridge — `target` only
+   *    parses to {story, cto}, so a user-escalated ask yields null here (the CTO + leader
+   *    feeds stay silent); the dashboard's SSE consumer surfaces it to the human.
    * Resilient: a missing/unknown field yields null rather than throwing.
    */
   private consumeStoryAttention(e: Record<string, unknown>): ChannelNotification | null {
     const storyId = typeof e.story_id === "string" && e.story_id ? e.story_id : null;
     const dirId = typeof e.workspace_id === "string" ? e.workspace_id : "";
+    // `target` parses to story|cto ONLY — a `user`-escalated ask is intentionally dropped.
     const target = e.target === "story" || e.target === "cto" ? e.target : null;
     const reason =
-      e.reason === "completion-review" || e.reason === "complete" ? e.reason : null;
+      e.reason === "completion-review" ||
+      e.reason === "complete" ||
+      e.reason === "ask" ||
+      e.reason === "ask-answered"
+        ? e.reason
+        : null;
     if (!storyId || !target || !reason) return null;
 
     // OWNERSHIP — does this bridge's scope own the event?

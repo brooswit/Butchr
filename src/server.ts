@@ -80,11 +80,14 @@ import {
 } from "./tasks.ts";
 import {
   allStoryViews,
+  answerStoryAsk,
   assignTaskToStory,
   createStory,
   createSubtask,
   deleteStory,
+  escalateStoryAsk,
   listStoryViews,
+  openStoryAsk,
   resetStory,
   storyView,
   updateStory,
@@ -1092,6 +1095,36 @@ route("DELETE", "/api/stories/:id", async (_req, p) => {
 // {ok, story, aborted, failed, skipped}.
 route("POST", "/api/stories/:id/reset", async (_req, p) => {
   return json(await resetStory(p.id!));
+});
+
+// STORY-LEVEL ASK (responder-redesign §4b — the leader<->CTO<->user escalation seam).
+// ADDITIVE/INERT: these endpoints set/clear the story's pending_ask + ask_responder and
+// publish story.attention; nothing calls them until the activation subtask wires the
+// agent docs. Mirrors the other /api/stories/:id routes (HttpError propagation + json).
+
+// OPEN a story-level ask (LEADER → CTO; body {question}). Sets pending_ask +
+// ask_responder='cto' and publishes story.attention {target:cto, reason:ask}. 404 if the
+// story is gone; 400 on a blank question; 409 if the story is not `open` or an ask is
+// already open. Returns the refreshed StoryRow.
+route("POST", "/api/stories/:id/ask", async (req, p) => {
+  const body = await readJson(req);
+  return json(openStoryAsk(p.id!, body.question));
+});
+
+// ESCALATE the open ask (CTO → user) — the single story-level cto→user boundary. Sets
+// ask_responder='user' and re-publishes story.attention {target:user, reason:ask}. 404 if
+// the story is gone; 409 if there is no open CTO-owned ask. Returns the refreshed StoryRow.
+route("POST", "/api/stories/:id/escalate", async (_req, p) => {
+  return json(escalateStoryAsk(p.id!));
+});
+
+// ANSWER the open ask, clearing it (CTO or user — whoever owns it; body {answer}). Clears
+// pending_ask/ask_responder and notifies the leader via story.attention {target:story,
+// reason:ask-answered}. 404 if the story is gone; 400 on a blank answer; 409 if there is no
+// open ask. Returns the refreshed StoryRow.
+route("POST", "/api/stories/:id/answer", async (req, p) => {
+  const body = await readJson(req);
+  return json(answerStoryAsk(p.id!, body.answer));
 });
 
 // Assign a task to a story, or clear it (body {story_id: string|null}). The story must

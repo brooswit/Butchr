@@ -532,6 +532,65 @@ describe("channel: story-level attention (Phase 6 — completion + report-up rou
   });
 });
 
+describe("channel: story-level ASK routing (responder-redesign §4b)", () => {
+  const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
+  const ctoBridge = () => new AttentionBridge("dir-1");
+  const ask = {
+    type: "story.attention",
+    story_id: "st-1",
+    workspace_id: "dir-1",
+    target: "cto",
+    reason: "ask",
+    detail: "Which approach: A or B?",
+  };
+  const askAnswered = {
+    type: "story.attention",
+    story_id: "st-1",
+    workspace_id: "dir-1",
+    target: "story",
+    reason: "ask-answered",
+    detail: "Go with A.",
+  };
+  // A CTO→user ESCALATION of the open ask — re-published toward the user (target:user).
+  const askEscalated = { ...ask, target: "user" };
+
+  test("an `ask` (target cto) routes to the CTO feed, not the leader", () => {
+    const note = ctoBridge().consume(ask);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({ story_id: "st-1", workspace: "dir-1", state: "story_ask" });
+    expect(note!.content).toContain("story ask awaiting an answer");
+    expect(note!.content).toContain("Which approach: A or B?");
+    expect(storyBridge().consume(ask)).toBeNull();
+  });
+
+  test("an `ask-answered` (target story) routes to the LEADER feed, not the CTO", () => {
+    const note = storyBridge().consume(askAnswered);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({
+      story_id: "st-1",
+      workspace: "dir-1",
+      state: "story_ask_answered",
+    });
+    expect(note!.content).toContain("story ask answered");
+    expect(note!.content).toContain("Go with A.");
+    expect(ctoBridge().consume(askAnswered)).toBeNull();
+  });
+
+  test("a CTO→user escalated ask (target user) is DROPPED by BOTH the CTO and leader bridges", () => {
+    // No channel bridge owns target:user — the dashboard's SSE consumer surfaces it.
+    expect(ctoBridge().consume(askEscalated)).toBeNull();
+    expect(storyBridge().consume(askEscalated)).toBeNull();
+    // Even an UNSCOPED (all-workspaces) CTO bridge drops it.
+    expect(new AttentionBridge().consume(askEscalated)).toBeNull();
+  });
+
+  test("the connectivity-only WORKER bridge never sees an ask / ask-answered", () => {
+    const worker = new AttentionBridge("dir-1", /* connectivityOnly */ true, "st-1");
+    expect(worker.consume(ask)).toBeNull();
+    expect(worker.consume(askAnswered)).toBeNull();
+  });
+});
+
 describe("channel: one-way capability (no tools)", () => {
   test("initialize advertises claude/channel and NO tools", () => {
     const res = channelInitializeResult("2025-06-18");

@@ -136,6 +136,105 @@ export function updateStory(
   return getStory(id)!;
 }
 
+// --- STORY-LEVEL ASK: leader <-> CTO <-> user (responder-redesign §4b/§4c) ----
+//
+// The story-level ASK is the leader's escalation seam: a leader raises a STORY-LEVEL
+// question (its decomposition plan, a scope call, etc.) UP to the CTO, the CTO may
+// ESCALATE it once to the user, and whoever owns it ANSWERS to clear it. State lives on
+// the story row: `pending_ask` (the question text, NULL when none) + `ask_responder`
+// ('cto' | 'user', NULL when none). These three helpers are the only writers of that
+// pair. ADDITIVE + INERT: nothing calls them until the activation subtask wires the
+// agent docs — no live behavior changes here.
+
+/**
+ * OPEN a story-level ask (the LEADER → CTO). 404 if the story is gone; 400 if the
+ * question is blank; 409 if the story is not `open` (no asks on a done/aborted story);
+ * 409 if an ask is already open (one ask at a time — answer/escalate the current one
+ * first). Sets `pending_ask`=question, `ask_responder`='cto' and publishes
+ * `story.attention { target:cto, reason:ask, detail:question }` so the CTO feed surfaces
+ * it. Returns the refreshed StoryRow.
+ */
+export function openStoryAsk(id: string, question: unknown): StoryRow {
+  const story = getStory(id);
+  if (!story) throw new HttpError(404, `story not found: ${id}`);
+  if (typeof question !== "string" || !question.trim()) {
+    throw new HttpError(400, "question is required");
+  }
+  if (story.status !== "open") {
+    throw new HttpError(409, `cannot open an ask on a ${story.status} story`);
+  }
+  if (story.pending_ask !== null) {
+    throw new HttpError(409, "an ask is already open on this story");
+  }
+  const q = question.trim();
+  db.query(`UPDATE stories SET pending_ask=?, ask_responder='cto' WHERE id=?`).run(q, id);
+  publish({
+    type: "story.attention",
+    story_id: id,
+    workspace_id: story.workspace_id,
+    target: "cto",
+    reason: "ask",
+    detail: q,
+  });
+  return getStory(id)!;
+}
+
+/**
+ * ESCALATE the open ask (CTO → user) — the single story-level cto→user boundary. 404 if
+ * the story is gone; 409 if there is no open ask OR it is not currently the CTO's
+ * (`ask_responder` !== 'cto', so a re-escalation of a user-owned ask is rejected). Sets
+ * `ask_responder`='user' and RE-PUBLISHES the ask toward the user
+ * (`story.attention { target:user, reason:ask, detail:question }`, §4b). NO channel
+ * bridge owns `target:user` (the CTO + leader feeds drop it); the dashboard's SSE
+ * consumer surfaces it to the human. Returns the refreshed StoryRow.
+ */
+export function escalateStoryAsk(id: string): StoryRow {
+  const story = getStory(id);
+  if (!story) throw new HttpError(404, `story not found: ${id}`);
+  if (story.pending_ask === null || story.ask_responder !== "cto") {
+    throw new HttpError(409, "no open CTO-owned ask to escalate");
+  }
+  db.query(`UPDATE stories SET ask_responder='user' WHERE id=?`).run(id);
+  publish({
+    type: "story.attention",
+    story_id: id,
+    workspace_id: story.workspace_id,
+    target: "user",
+    reason: "ask",
+    detail: story.pending_ask,
+  });
+  return getStory(id)!;
+}
+
+/**
+ * ANSWER the open ask, clearing it (the CTO or the user, whoever owns it — mirroring task
+ * feedback being answerable by either responder). 404 if the story is gone; 400 if the
+ * answer is blank; 409 if there is no open ask. Clears `pending_ask`/`ask_responder` to
+ * NULL and notifies the LEADER (`story.attention { target:story, reason:ask-answered,
+ * detail:answer }`). Returns the refreshed StoryRow.
+ */
+export function answerStoryAsk(id: string, answer: unknown): StoryRow {
+  const story = getStory(id);
+  if (!story) throw new HttpError(404, `story not found: ${id}`);
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new HttpError(400, "answer is required");
+  }
+  if (story.pending_ask === null) {
+    throw new HttpError(409, "no open ask to answer on this story");
+  }
+  const a = answer.trim();
+  db.query(`UPDATE stories SET pending_ask=NULL, ask_responder=NULL WHERE id=?`).run(id);
+  publish({
+    type: "story.attention",
+    story_id: id,
+    workspace_id: story.workspace_id,
+    target: "story",
+    reason: "ask-answered",
+    detail: a,
+  });
+  return getStory(id)!;
+}
+
 /**
  * Delete a story. 404 if it is gone. Member tasks are NOT deleted — their story_id is
  * NULLed out first (tasks are real work; only the grouping goes away), then the story
