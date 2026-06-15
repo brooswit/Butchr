@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.81] - 2026-06-15
+
 ### Added
 - **Stale temp-dir workspace registrations are pruned automatically at startup.** Every
   selftest / integration run registers a throwaway repo under the OS temp dir, and those
