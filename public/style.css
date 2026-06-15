@@ -386,6 +386,48 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   color: var(--muted);
 }
 
+/* STORY-LEVEL ASK panel — an open story ask (pending_ask) surfaced under its story row:
+   the leader's question, who currently owns it (ask_responder), and a freeform answer box
+   that POSTs /api/stories/:id/answer. Styled like the responder-banner / rollup panels:
+   a tinted strip with a left accent. `awaiting-you` (escalated to the user) gets the
+   attention-grabbing needs_info accent; otherwise it reads as a quiet CTO-owned note.
+   Rendered only when an ask is open (inert when pending_ask is null). */
+.story-ask-panel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  background: var(--panel-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.story-ask-panel.awaiting-you {
+  border-color: var(--needs_info);
+  border-left: 3px solid var(--needs_info);
+}
+.story-ask-panel .sa-head {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 600; margin-bottom: 6px;
+}
+.story-ask-panel .sa-owner {
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+  padding: 1px 8px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); color: var(--muted);
+}
+/* escalated-to-you: filled attention pill (mirrors .chip.awaiting-you) */
+.story-ask-panel .sa-owner.you {
+  background: var(--needs_info); border-color: var(--needs_info); color: #fff;
+}
+/* awaiting-the-CTO: muted outlined pill (mirrors .chip.awaiting-cto) */
+.story-ask-panel .sa-owner.cto {
+  background: var(--panel); color: var(--muted);
+}
+.story-ask-panel .sa-question {
+  color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.story-ask-panel .sa-answer { min-height: 64px; }
+
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
   font-size: 11px; color: var(--muted);

@@ -1103,7 +1103,45 @@ function renderStoryRow(s) {
     <div class="path">${esc(s.id)} · <b>${esc(s.status)}</b> · ${total} subtask${total === 1 ? "" : "s"}` +
     ` · ${active} active · ${review} review · ${done} done${failed ? " · " + failed + " failed" : ""}` +
     ` · ${esc(leaderState)}</div>`;
+  // STORY-LEVEL ASK: when the leader has an open ask (pending_ask non-null), surface it under
+  // the row with an answer box. Inert (nothing rendered) when there's no open ask.
+  if (s.pending_ask != null) row.appendChild(storyAskPanel(s));
   return row;
+}
+
+// The open STORY-LEVEL ask on a story row (only when s.pending_ask is non-null — the caller
+// guards): the question text (HTML-escaped), who currently OWNS it (ask_responder), and a
+// freeform answer box that POSTs /api/stories/:id/answer. `cto` is MUTED ("awaiting the CTO" —
+// an agent handles it automatically, a human may still act); `user` is EMPHASIZED ("escalated
+// to you" — it needs a human), mirroring the task-level awaiting-who emphasis. action() owns the
+// disable/toast dance and re-renders on success (clearing the now-answered ask).
+function storyAskPanel(s) {
+  const toUser = s.ask_responder === "user";
+  const owner = toUser
+    ? `<span class="sa-owner you" title="this ask was escalated to YOU — answer it below">escalated to you</span>`
+    : `<span class="sa-owner cto" title="this ask is owned by the CTO agent (handled automatically) — you can also answer">awaiting the CTO</span>`;
+  const panel = el("div", { class: "story-ask-panel" + (toUser ? " awaiting-you" : "") });
+  panel.innerHTML = `
+    <div class="sa-head">Story ask ${owner}</div>
+    <div class="sa-question">${esc(s.pending_ask)}</div>
+    <label class="field" style="margin:8px 0 0">
+      <span class="lbl">your answer</span>
+      <textarea class="sa-answer" placeholder="Answer the story-level ask. It goes back to the story leader, which continues from your response."></textarea>
+    </label>
+    <div class="row" style="margin-top:8px">
+      <button class="btn success sa-submit">Submit answer</button>
+      <div class="spacer"></div>
+    </div>`;
+  const submit = panel.querySelector(".sa-submit");
+  submit.addEventListener("click", () => {
+    const answer = panel.querySelector(".sa-answer").value.trim();
+    if (!answer) return toast("an answer is required", true);
+    // POST the answer; action() disables the button, toasts, and re-renders on success
+    // (the answered ask is cleared server-side, so the panel disappears on the re-render).
+    action(submit, () => api("POST", "/stories/" + s.id + "/answer", { answer }),
+      { success: "answer sent" });
+  });
+  return panel;
 }
 
 function queueLine(tasks) {
