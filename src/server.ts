@@ -92,6 +92,20 @@ import {
   storyView,
   updateStory,
 } from "./stories.ts";
+import {
+  answerWork,
+  approveWork,
+  askWork,
+  createWork,
+  createWorkChild,
+  escalateWork,
+  listWork,
+  patchWork,
+  prioritizeWork,
+  rejectWork,
+  setWorkBlockedBy,
+  workView,
+} from "./work-api.ts";
 import { listTemplates, renderTemplate } from "./templates.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
 import { readSessionActivity, readSessionTranscript } from "./transcript.ts";
@@ -1168,6 +1182,127 @@ route("POST", "/api/stories/:id/tasks", async (req, p) => {
   });
   return json(view, 201);
 });
+
+// ---- WORK (UNIFIED SURFACE) -----------------------------------------------
+// The `/api/work/*` surface unifies TASKS (leaves) and STORIES (nodes) under one "Work"
+// vocabulary — see src/work-api.ts and docs/rfc-work-workspace-unification.md §5. Each
+// route resolves a work id to a leaf/node and DISPATCHES to the same tasks.ts/stories.ts
+// operations the `/api/tasks` + `/api/stories` routes use, so this is a THIRD adapter over
+// the shared ops (those routes stay byte-identical — nothing here touches them). ADDITIVE +
+// non-canonical this step: the data migration + making `/api/work` the sole surface is the
+// gated step-6 cutover. parent_id stays inert (no writes); the responder chain on a leaf
+// view is informational.
+
+// Cross-resource WORK LIST: every leaf (task) + node (story) across all workspaces, each
+// tagged `kind`, newest-first. Optional `?workspace=` / `?status=` / `?q=` mirror the task
+// list's filters (applied to nodes too). Read-only. See work-api.listWork.
+route("GET", "/api/work", async (req) => {
+  const url = new URL(req.url);
+  return json(
+    await listWork({
+      status: url.searchParams.get("status") ?? undefined,
+      workspace: url.searchParams.get("workspace") ?? undefined,
+      q: url.searchParams.get("q") ?? undefined,
+    }),
+  );
+});
+
+// Create a TOP-LEVEL unit of Work in a workspace — a NODE (story/container); body {brief}.
+// Leaves are created as children of a node (see POST /api/work/:id/work). Maps to
+// createStory. 404 if the workspace is gone; 400 if the brief is blank.
+route("POST", "/api/workspaces/:id/work", async (req, p) => {
+  requireWorkspace(p.id!);
+  const body = await readJson(req);
+  return json(createWork(p.id!, body.brief), 201);
+});
+
+// A single unit of Work as a unified WorkView — a leaf carries the full TaskView (+ the
+// informational Work responder/chain), a node the full StoryView. 404 if gone.
+route("GET", "/api/work/:id", async (_req, p) => json(await workView(p.id!)));
+
+// PATCH a unit of Work: a LEAF edits prompt/context ({prompt?, context?}); a NODE updates
+// brief/status ({brief?, status?}). Routed by kind. 404 if gone. See work-api.patchWork.
+route("PATCH", "/api/work/:id", async (req, p) => {
+  const body = await readJson(req);
+  return json(patchWork(p.id!, body));
+});
+
+// Create a CHILD unit of Work under a node — a LEAF (subtask). NODE parent only (409 on a
+// leaf). The body MIRRORS POST /api/stories/:id/tasks (kind/template/prompt/idea/model/
+// tags/priority/plan_preview/version_bump/allowlist). Maps to createSubtask. 404 if the
+// parent is gone; 409 if it is a leaf or not `open`.
+route("POST", "/api/work/:id/work", async (req, p) => {
+  const body = await readJson(req);
+  const kind =
+    body.kind === "rollback" || body.template === "rollback" ? "rollback" : "task";
+  const prompt = body.template ? renderTemplate(body.template, body.vars) : body.prompt;
+  const idea = body.idea === true || body.stage === "idea";
+  const view = await createWorkChild(p.id!, {
+    prompt,
+    context: body.context ?? [],
+    blockedBy: body.blocked_by ?? [],
+    kind,
+    model: body.model ?? null,
+    tags: body.tags ?? [],
+    priority: body.priority ?? 0,
+    planPreview: body.plan_preview ?? false,
+    idea,
+    versionBump: body.version_bump ?? "patch",
+    allowlist: body.allowlist ?? [],
+  });
+  return json(view, 201);
+});
+
+// APPROVE a unit of Work (LEAF-only) — mirrors POST /api/tasks/:id/approve's flag-shaped
+// response (conflict / revert / awaiting-major-confirm). 409 on a node.
+route("POST", "/api/work/:id/approve", async (_req, p) => {
+  const r = await approveWork(p.id!);
+  if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
+  if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
+  if (r.awaitingMajorConfirm) return json({ task: r.task, awaitingMajorConfirm: true });
+  return json(r.task);
+});
+
+// REJECT a unit of Work (LEAF-only) — send it back for rework with {note}. 409 on a node.
+route("POST", "/api/work/:id/reject", async (req, p) => {
+  const body = await readJson(req);
+  return json(await rejectWork(p.id!, body.note));
+});
+
+// ANSWER a unit of Work's open feedback — the UNIFIED answer verb: a LEAF answers its
+// needs_info question, a NODE answers its open story-level ask. Body {answer}. 404 if gone.
+route("POST", "/api/work/:id/answer", async (req, p) => {
+  const body = await readJson(req);
+  return json(await answerWork(p.id!, body.answer));
+});
+
+// ESCALATE a unit of Work's pending feedback to the next responder (the cto→user boundary)
+// — a LEAF escalates its task feedback, a NODE its open ask. Routed by kind. 404 if gone.
+route("POST", "/api/work/:id/escalate", async (_req, p) => {
+  return json(escalateWork(p.id!));
+});
+
+// OPEN an ASK on a unit of Work (NODE-only) — a leader's story-level question up the chain;
+// body {question}. 409 on a leaf. See work-api.askWork.
+route("POST", "/api/work/:id/ask", async (req, p) => {
+  const body = await readJson(req);
+  return json(askWork(p.id!, body.question));
+});
+
+// Update a unit of Work's dispatch PRIORITY (LEAF-only); body {priority}. 409 on a node.
+route("POST", "/api/work/:id/priority", async (req, p) => {
+  const body = await readJson(req);
+  return json(prioritizeWork(p.id!, body.priority));
+});
+
+// Replace a unit of Work's dependency set (LEAF-only this step); body {blocked_by}. Both PUT
+// and POST accepted (mirrors the task blocked_by route). 409 on a node.
+async function workBlockedByHandler(req: Request, p: Record<string, string>): Promise<Response> {
+  const body = await readJson(req);
+  return json(await setWorkBlockedBy(p.id!, body.blocked_by ?? []));
+}
+route("PUT", "/api/work/:id/blocked_by", workBlockedByHandler);
+route("POST", "/api/work/:id/blocked_by", workBlockedByHandler);
 
 // Shared pane-attach: spawn a GUI terminal attached to a herdr AGENT by name (a
 // task's agent name is its id; the managed CTO agent has its own fixed name). Used by
