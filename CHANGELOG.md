@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.95] - 2026-06-15
+
 - docs: add responder-redesign design RFC (story st-def561dd)
 
 ## [0.9.94] - 2026-06-15
