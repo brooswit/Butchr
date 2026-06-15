@@ -218,6 +218,81 @@ function migrateStoryAgentTable(): void {
   `);
 }
 
+// UNIFIED WORKSPACE TABLE (story st-540ba705, step 1 — SCHEMA FOUNDATION, fully inert).
+// The future model unifies the THREE agent surfaces (build agent / story leader / CTO)
+// into ONE "Workspace" = the (agent + directory) EXECUTION CONTEXT in which Work runs —
+// the place and the agent, distinct from Work itself (the WHAT). See
+// docs/rfc-work-workspace-unification.md §2.2. This is the single table that, at the
+// later step-6 cutover, SUPERSEDES the three parallel agent shapes (cto_agent /
+// story_agent / a task's live-agent columns).
+//
+// NAMING: the table is the SINGULAR `workspace`. Today's PLURAL `workspaces` table is
+// really a DIRECTORY + per-repo config and is renamed `directory` at the step-6 cutover
+// (see migrateDirectoryAlias, which introduces that name additively as a read-only view
+// now). The two names do not collide. Likewise the row type is `WorkspaceAgentRow` this
+// step because `WorkspaceRow` is ALREADY the directory row and must not be renamed/broken
+// here; it becomes the canonical Workspace at the cutover.
+//
+// BRAND-NEW (no legacy shape to drop, unlike migrateCtoAgentPerWorkspace) → a plain
+// CREATE-IF-NOT-EXISTS. Runs AFTER createBaselineSchema (its `workspaces`/`tasks` FK
+// targets must already exist). NOTHING reads or writes it yet — purely additive/inert.
+//   - kind: which agent runs here — 'cto' | 'leader' | 'build' (CHECK-pinned).
+//   - directory_id: the DIRECTORY this runs in → today's `workspaces(id)` (FK cascade so
+//     the context dies with its directory). Renamed `directory` at the cutover.
+//   - work_id: the OPTIONAL Work this executes (FK to tasks(id), cascade); NULL for a CTO
+//     workspace (it is not bound to one unit of Work — RFC Q3/Q5).
+//   - session_id / desired / started_at / restarts / last_error: the supervised-session
+//     runtime state, mirroring cto_agent / story_agent.
+//   - has_agent / idle / idle_context: the honest owned-agent + idle markers, generalizing
+//     the per-task columns of the same name across all agent kinds.
+//   - herdr_workspace: the live herdr workspace grouping handle (agents are addressed BY
+//     NAME — story st-a77b050f — so no per-agent pane/tab is stored).
+function migrateWorkspaceTable(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workspace (
+      id              TEXT PRIMARY KEY,
+      name            TEXT,
+      kind            TEXT NOT NULL CHECK (kind IN ('cto','leader','build')),
+      directory_id    TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+      work_id         TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+      session_id      TEXT,
+      desired         INTEGER NOT NULL DEFAULT 0,
+      started_at      TEXT,
+      restarts        INTEGER NOT NULL DEFAULT 0,
+      last_error      TEXT,
+      has_agent       INTEGER NOT NULL DEFAULT 0,
+      idle            INTEGER NOT NULL DEFAULT 0,
+      idle_context    TEXT,
+      herdr_workspace TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_workspace_dir  ON workspace(directory_id);
+    CREATE INDEX IF NOT EXISTS idx_workspace_work ON workspace(work_id);
+  `);
+}
+
+// `directory` READ-ONLY ALIAS (story st-540ba705, step 1 — SCHEMA FOUNDATION, fully inert).
+// The future model frees the word "workspace" to mean the (agent + directory) execution
+// context (the `workspace` table above) and renames today's directory+config table
+// `workspaces` → `directory`. That PHYSICAL rename is the step-6 cutover (a guarded
+// in-place ALTER … RENAME, like migrateDirectoriesToWorkspaces — the sanctioned pre-1.0
+// exception in CONTRIBUTING §5); this step introduces the NAME `directory` ADDITIVELY,
+// WITHOUT renaming or breaking the live table, so later steps can refer to `directory`
+// while `workspaces` stays the sole authoritative table.
+//
+// We do it as a read-only SQLite VIEW that mirrors `workspaces` 1:1. DROP-then-CREATE on
+// every boot is non-destructive (a view holds NO data) and guarantees the alias always
+// reflects the CURRENT `workspaces` column set even after later `ensureColumn`s add more
+// (a `CREATE VIEW … SELECT *` snapshots columns at creation time, so a stale view would
+// otherwise miss newly-added columns). Runs LAST in the boot pass, after ensureForwardColumns
+// has added every `workspaces` column. The view is READ-ONLY — all writes still go to the
+// authoritative `workspaces` table; nothing writes through `directory`.
+function migrateDirectoryAlias(): void {
+  db.exec(`DROP VIEW IF EXISTS directory`);
+  db.exec(`CREATE VIEW directory AS SELECT * FROM workspaces`);
+}
+
 // Lightweight forward migrations: add columns introduced after the initial
 // schema. Guarded so existing databases upgrade in place without data loss.
 function ensureColumn(table: string, column: string, decl: string): void {
@@ -650,6 +725,23 @@ ensureColumn("tasks", "grounding_fp", "TEXT");
 // `...row` spread so it round-trips.
 ensureColumn("tasks", "story_id", "TEXT");
 
+// UNIFIED-WORK PARENT POINTER (story st-540ba705, step 1 — SCHEMA FOUNDATION, fully
+// inert). A nullable SELF-FK to tasks.id: the future `work` model unifies tasks +
+// stories into ONE self-referential resource where a leaf (no children) is today's
+// task and a node (has children) is today's story, with the leaf-vs-node distinction
+// carried STRUCTURALLY by this column (see docs/rfc-work-workspace-unification.md §2.1).
+// NULL (the default every existing row backfills to) = a top-level / standalone unit —
+// today's behavior, entirely unchanged. This column COEXISTS with `story_id` this step
+// (it is NOT a replacement and NOT a rename): story_id stays the authoritative grouping
+// FK and is left fully intact — no read of parent_id, no story_id→parent_id backfill, no
+// drop (that is the step-6 cutover, separately gated). PURELY STORED — nothing in
+// dispatch/review/lifecycle/feedback reads it yet. Unlike `story_id` (a plain TEXT column
+// whose integrity lives in the service layer), this is a real column-level self-FK:
+// SQLite ACCEPTS a `REFERENCES` clause on `ALTER TABLE ... ADD COLUMN` when the column is
+// nullable (default NULL), so the FK is enforced from creation without a destructive
+// table rebuild. Surfaced on TaskView via the `...row` spread so it round-trips.
+ensureColumn("tasks", "parent_id", "TEXT REFERENCES tasks(id)");
+
 // RESPONDER-REDESIGN SCHEMA (story st-def561dd, design §2). Feedback flows UP to the
 // STRUCTURAL parent: a non-story task gets a single cto→user boundary (a boolean), and a
 // story carries its leader's open story-level ask.
@@ -822,6 +914,9 @@ export function migrateReadyRunningSplit(): void {
 //   3b. per-story story_agent table      (CREATE IF NOT EXISTS — after the baseline so
 //                                         its `stories` FK target exists; brand-new, no
 //                                         legacy shape to drop)
+//   3c. unified `workspace` table         (CREATE IF NOT EXISTS — after the baseline so its
+//                                         `workspaces`/`tasks` FK targets exist; brand-new,
+//                                         no legacy shape to drop; inert — nothing reads it)
 //   4. additive forward columns         (ensureColumn ×N + retired-column drops — must
 //                                        precede the folds; this is also where the
 //                                        has_agent seed-then-drop name-only cutover runs,
@@ -829,18 +924,22 @@ export function migrateReadyRunningSplit(): void {
 //   5. fold out the retracted `stage` axis
 //   6. fold the pre-canonical status set into the 12-state model
 //   7. ready/running split + finalizing rescue
-// Every step is independently idempotent (presence-guarded ALTER/UPDATE or
-// IF NOT EXISTS), so the whole pass is a no-op once converged and safe to re-run on
-// every boot.
+//   8. `directory` read-only view alias  (DROP+CREATE VIEW — runs LAST so it mirrors the
+//                                         FULL `workspaces` column set after step 4; inert)
+// Every step is independently idempotent (presence-guarded ALTER/UPDATE, IF NOT EXISTS, or
+// DROP-then-CREATE of a data-less view), so the whole pass is a no-op once converged and
+// safe to re-run on every boot.
 const MIGRATIONS: Array<() => void> = [
   () => migrateDirectoriesToWorkspaces(db),
   createBaselineSchema,
   migrateCtoAgentPerWorkspace,
   migrateStoryAgentTable,
+  migrateWorkspaceTable,
   ensureForwardColumns,
   migrateStageAxisToStatus,
   migrateStatusModel,
   migrateReadyRunningSplit,
+  migrateDirectoryAlias,
 ];
 
 /**
@@ -1293,6 +1392,12 @@ export type TaskRow = {
   // task (today's behavior). Assigned only via stories.assignTaskToStory. Surfaced on
   // TaskView via the `...row` spread so it round-trips. Inert this phase.
   story_id: string | null;
+  // UNIFIED-WORK PARENT POINTER (story st-540ba705, step 1 — see the parent_id ensureColumn
+  // above): the future self-referential `work` model's parent FK (a leaf = today's task, a
+  // node-with-children = today's story). NULL = top-level / standalone. COEXISTS with
+  // `story_id` this step (NOT a replacement) and is PURELY STORED — nothing reads it yet.
+  // Surfaced on TaskView via the `...row` spread so it round-trips. Inert this phase.
+  parent_id: string | null;
   // RESPONDER-REDESIGN (story st-def561dd — see the escalated_to_user ensureColumn above):
   // 1 ONLY on a NON-STORY task whose pending feedback the CTO escalated to the user (the
   // single cto→user boundary for a task; a story member's feedback is terminal at its
@@ -1503,6 +1608,53 @@ export function saveStoryAgentRow(
     next.last_error,
     nowIso(),
   );
+}
+
+// ---- UNIFIED WORKSPACE (agent + directory execution context) --------------
+// The row type for the new `workspace` table (see migrateWorkspaceTable). Step 1 is
+// SCHEMA FOUNDATION only — fully inert: this type + table exist so later steps can build
+// the unified Workspace model, but NOTHING reads or writes the table yet. Named
+// `WorkspaceAgentRow` because `WorkspaceRow` (above) is already the DIRECTORY row and must
+// not be renamed this step; it becomes the canonical Workspace at the step-6 cutover. See
+// docs/rfc-work-workspace-unification.md §2.2.
+export type WorkspaceAgentRow = {
+  id: string;
+  name: string | null;
+  // Which agent runs in this context (CHECK-pinned in the table).
+  kind: "cto" | "leader" | "build";
+  // The DIRECTORY this runs in → today's `workspaces(id)` (renamed `directory` at cutover).
+  directory_id: string | null;
+  // The OPTIONAL Work this executes (tasks(id)); NULL for a CTO workspace (RFC Q3/Q5).
+  work_id: string | null;
+  session_id: string | null;
+  desired: number; // 1 = should be running (supervised), 0 = stopped
+  started_at: string | null;
+  restarts: number;
+  last_error: string | null;
+  has_agent: number; // honest owned-agent marker, generalized across agent kinds
+  idle: number;
+  idle_context: string | null;
+  herdr_workspace: string | null;
+  created_at: string;
+  updated_at: string | null;
+};
+
+// ---- `directory` READ-ONLY ALIAS of `workspaces` --------------------------
+// `directory` is a read-only VIEW mirroring the `workspaces` table 1:1 (see
+// migrateDirectoryAlias) — the additive introduction of the future name for today's
+// directory+config table, BEFORE the physical rename (step-6 cutover). A `DirectoryRow` is
+// therefore exactly a `WorkspaceRow`; this alias lets later steps refer to `directory`
+// while `workspaces` stays the sole authoritative table.
+export type DirectoryRow = WorkspaceRow;
+
+/**
+ * Every directory, read through the `directory` view (== the `workspaces` table). A
+ * thin read-only accessor proving later code can address the directory concept by its
+ * future name without touching the live `workspaces` paths. Reads only — all writes still
+ * go to `workspaces`.
+ */
+export function listDirectories(): DirectoryRow[] {
+  return db.query<DirectoryRow, []>(`SELECT * FROM directory ORDER BY created_at ASC`).all();
 }
 
 // ---- PER-TASK AUDIT TIMELINE ----------------------------------------------

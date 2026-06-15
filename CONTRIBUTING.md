@@ -706,6 +706,18 @@ already-migrated or fresh DB. This is a rename, not the routine additive path
 above; reach for it only for a deliberate model rename, never for ordinary schema
 evolution.
 
+During the in-progress WORK + WORKSPACE unification (story st-540ba705,
+`docs/rfc-work-workspace-unification.md`), the next such rename — today's
+`workspaces` (directory + config) table → `directory` — is **deferred to the gated
+step-6 cutover**. Until then, `directory` exists ADDITIVELY as a **read-only view**
+(`migrateDirectoryAlias` drops + recreates `CREATE VIEW directory AS SELECT * FROM
+workspaces` last in the boot pass, so it always mirrors the full current column set):
+`directory` (view) **== `workspaces` (table)**, and `workspaces` stays the sole
+authoritative, writable table. Read via `directory`/`listDirectories()` if you want
+the future name; write only via `workspaces`. (Likewise the new singular `workspace`
+table — the unified agent+directory execution context — is added inert this step;
+nothing reads or writes it yet.)
+
 **Serialization — `taskView`.** `taskView(id)` in `src/tasks.ts` is the
 canonical task projection returned by the API and emitted over SSE: it merges the
 DB row with the on-disk `task.md` (prompt, context, review notes) and computes
