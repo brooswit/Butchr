@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.100] - 2026-06-15
+
 - **Responder-redesign V2 channel routing (story st-def561dd, spine subtask 4 — additive + INERT behind the `responderV2Enabled()` gate; design §5).** Gated the WORKSPACE/CTO arm of `channel.ts` `AttentionBridge.routeOwns`: when `BUTCHR_RESPONDER_V2` is ON, the CTO feed owns ONLY NON-STORY tasks — a story member ALWAYS belongs to its leader (the CTO bridge never owns one), and a non-story task is owned when it is awaiting the CTO (`responder==='cto'`) OR has FAILED (failed/aborted — a terminal failure carries no responder, hence the explicit status check); a non-story task escalated to the user (`responder==='user'` from `escalated_to_user`) is DROPPED here (the webapp/dashboard surfaces it). The STORY-leader arm is identical under V1 and V2, so it is unchanged. The gate stays OFF by default, so the live V1 routing (`storyId == null || responder === 'cto'`, which keeps the now-unreachable-under-V2 story-member→'cto' arm) is byte-for-byte intact for this story and the concurrent st-bbca649e — gated, not deleted. Added gate-forced-ON channel tests (story member in_review → leader not CTO; non-story 'cto' → CTO; non-story 'user' → dropped; story-member failure → leader not CTO); existing channel tests stay gate-OFF and green.
 
 ## [0.9.99] - 2026-06-15
