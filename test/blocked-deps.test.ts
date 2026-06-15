@@ -5,7 +5,7 @@
 // Mostly pure / in-process: no real claude or herdr is spawned. As in the other
 // test files, BUTCHR_HERDR_BIN points at `true` so every herdr probe
 // (teardownTask et al.) is a harmless no-op — so the kill-on-block test asserts
-// the OBSERVABLE effect (agent torn down → pane/tab cleared, status=blocked,
+// the OBSERVABLE effect (agent torn down → has_agent=0, status=blocked,
 // session_id KEPT) rather than spying on the no-op teardown call.
 //
 // createTask exercises the REAL function (worktree + task.md + DB row), so we set
@@ -75,16 +75,15 @@ function seed(opts: {
   status: string;
   sessionId?: string | null;
   blockedBy?: string[];
-  paneId?: string | null;
-  tabId?: string | null;
+  hasAgent?: boolean;
   attempts?: number;
 }): string {
   const created = dbMod.nowIso();
   dbMod.db
     .query(
       `INSERT INTO tasks (id, workspace_id, status, session_id, blocked_by,
-         herdr_pane_id, herdr_tab_id, dispatch_attempts, started_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         has_agent, dispatch_attempts, started_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       opts.id,
@@ -92,8 +91,7 @@ function seed(opts: {
       opts.status,
       opts.sessionId ?? null,
       opts.blockedBy ? JSON.stringify(opts.blockedBy) : null,
-      opts.paneId ?? null,
-      opts.tabId ?? null,
+      opts.hasAgent ? 1 : 0,
       opts.attempts ?? 0,
       // started_at set when it has ever run (in_progress/in_review), so resume rules hold.
       opts.status === "in_progress" || opts.status === "in_review" ? created : null,
@@ -251,8 +249,7 @@ describe("kill-on-block", () => {
       id: "kob-running",
       status: "in_progress",
       sessionId: SESSION,
-      paneId: "pane-9",
-      tabId: "tab-9",
+      hasAgent: true,
       attempts: 0,
     });
     const startedAtBefore = row(t).started_at;
@@ -261,10 +258,9 @@ describe("kill-on-block", () => {
 
     expect(view.status).toBe("blocked");
     const r = row(t);
-    // Agent torn down: herdr pane/tab cleared (teardownTask ran — a no-op under the
+    // Agent torn down: has_agent cleared (teardownTask ran — a no-op under the
     // `true` herdr stub — and the running fields were cleared like a clean re-queue).
-    expect(r.herdr_pane_id).toBeNull();
-    expect(r.herdr_tab_id).toBeNull();
+    expect(r.has_agent).toBe(0);
     // KEEP session_id + the worktree context (started_at) so it resumes on unblock.
     expect(r.session_id).toBe(SESSION);
     expect(r.started_at).toBe(startedAtBefore);

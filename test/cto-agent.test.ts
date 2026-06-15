@@ -101,7 +101,7 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     tabClose: [] as Array<string | null | undefined>,
     agentDeregister: 0,
     teardownTask: 0,
-    teardownArgs: [] as Array<{ tab: string | null | undefined; name: string; pane: string | null | undefined }>,
+    teardownArgs: [] as Array<{ name: string }>,
     paneClose: [] as string[],
     // Ordered log of lifecycle calls (additive) so a test can assert teardown ran
     // BEFORE the relaunch in the reboot case.
@@ -127,19 +127,13 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     async paneTerminalId() { return "rootterm"; },
     async paneList(): Promise<PaneInfo[]> { return []; },
     async resolveAgentPane() { return resolvedPane; },
-    async reconcilePane(name, stored) {
-      // Per-name (mirrors agentPaneId): a started name reports its resolved pane, a
-      // pre-seeded live name reports "pane-live", a dead name has none.
-      const paneId = live(name) ? (started.has(name) ? resolvedPane : "pane-live") : undefined;
-      return { paneId, drifted: !!paneId && !!stored && paneId !== stored };
-    },
     isAgentNameTaken() { return false; },
     async agentRead() { return ""; }, // no startup prompt → auto-confirm exits at once
     async send() {},
     async paneClose(target) { calls.paneClose.push(target); },
-    async teardownTask(tab, name, pane) {
+    async teardownTask(name) {
       calls.teardownTask++;
-      calls.teardownArgs.push({ tab, name, pane });
+      calls.teardownArgs.push({ name });
       calls.order.push("teardownTask");
       if (name) started.delete(name);
     },
@@ -191,15 +185,12 @@ describe("CTO agent lifecycle (per workspace)", () => {
     const r = row()!;
     expect(r.workspace_id).toBe(DIR);
     expect(r.session_id).toBe(SEED);
-    expect(r.herdr_pane_id).toBe("pane-final");
-    expect(r.herdr_tab_id).toBe("cto-tab");
     expect(r.desired).toBe(1);
     expect(r.restarts).toBe(0);
     expect(status.workspaceId).toBe(DIR);
-    expect(status.running).toBe(true);
+    expect(status.running).toBe(true); // attachable BY NAME (no stored pane)
     expect(status.enabled).toBe(true); // cto_enabled=1 wins over the global default off
     expect(status.sessionId).toBe(SEED);
-    expect(status.paneId).toBe("pane-final");
   });
 
   test("a start while already live ADOPTS (single instance — no second launch)", async () => {
@@ -211,7 +202,6 @@ describe("CTO agent lifecycle (per workspace)", () => {
     expect(calls.agentStart.length).toBe(0); // adopted, not relaunched
     expect(status.running).toBe(true);
     expect(row()!.desired).toBe(1);
-    expect(row()!.herdr_pane_id).toBe("pane-live");
   });
 
   test("stop tears the agent down and marks it desired-down", async () => {
@@ -227,7 +217,6 @@ describe("CTO agent lifecycle (per workspace)", () => {
     expect(status.desired).toBe(false);
     const r = row()!;
     expect(r.desired).toBe(0);
-    expect(r.herdr_pane_id).toBeNull();
   });
 
   test("restart RESUMES the same session; restart(fresh) cold-starts a NEW one", async () => {
@@ -286,7 +275,8 @@ describe("CTO agent boot reconcile (per workspace)", () => {
 
     expect(res.action).toBe("adopted");
     expect(calls.agentStart.length).toBe(0);
-    expect(row()!.herdr_pane_id).toBe("pane-live");
+    expect(row()!.desired).toBe(1); // adoption marks it desired-up
+    expect(await cto.ctoAgentStatus(DIR).then((s) => s.running)).toBe(true);
   });
 
   test("(re)launches when no live agent exists", async () => {
@@ -297,7 +287,7 @@ describe("CTO agent boot reconcile (per workspace)", () => {
 
     expect(res.action).toBe("launched");
     expect(calls.agentStart.length).toBe(1);
-    expect(row()!.herdr_pane_id).toBe("pane-final");
+    expect(row()!.desired).toBe(1); // launched + recorded desired-up
   });
 
   test("respects an operator stop (desired=0) across a restart", async () => {
@@ -351,7 +341,7 @@ describe("CTO agent reboot auto-recovery (adopt requires a LIVE claude process)"
   });
 
   test("pane-exists + claude ALIVE → ADOPTS (no relaunch)", async () => {
-    dbMod.saveCtoAgentRow(DIR, { session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1 });
+    dbMod.saveCtoAgentRow(DIR, { session_id: SID, desired: 1 });
     // A live process carries the session id as a distinct argv token → "alive".
     livenessMod.setCmdlineLister(() => [["claude", "--resume", SID, "--mcp-config", "x"]]);
     const { runner, calls } = makeFake({ alive: true });
@@ -365,7 +355,7 @@ describe("CTO agent reboot auto-recovery (adopt requires a LIVE claude process)"
   });
 
   test("pane-exists + claude DEAD → RELAUNCHES via --resume, tearing down the stale pane FIRST (THE REBOOT CASE)", async () => {
-    dbMod.saveCtoAgentRow(DIR, { session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1 });
+    dbMod.saveCtoAgentRow(DIR, { session_id: SID, desired: 1 });
     // /proc is readable (non-empty) but NO process carries the session id → "dead".
     livenessMod.setCmdlineLister(() => [["bash", "-lc", "sleep"], ["systemd"]]);
     const { runner, calls } = makeFake({ alive: true }); // pane/name still registered (husk shell)
@@ -377,9 +367,9 @@ describe("CTO agent reboot auto-recovery (adopt requires a LIVE claude process)"
     expect(calls.agentStart.length).toBe(1);
     // Context preserved: the relaunch RESUMES the persisted session.
     expect(calls.agentStart[0]!.argv.join(" ")).toContain(`--resume ${SID}`);
-    // The stale pane/tab was torn down + the name freed BEFORE the relaunch.
+    // The stale husk was torn down (BY NAME) + the name freed BEFORE the relaunch.
     expect(calls.teardownTask).toBe(1);
-    expect(calls.teardownArgs[0]).toEqual({ tab: "tab-stale", name: cto.ctoAgentName(DIR), pane: "pane-stale" });
+    expect(calls.teardownArgs[0]).toEqual({ name: cto.ctoAgentName(DIR) });
     expect(calls.agentDeregister).toBeGreaterThanOrEqual(1);
     const firstStart = calls.order.indexOf("agentStart");
     expect(calls.order.indexOf("teardownTask")).toBeLessThan(firstStart);
@@ -388,7 +378,7 @@ describe("CTO agent reboot auto-recovery (adopt requires a LIVE claude process)"
   });
 
   test("pane-exists but the probe CANNOT run (empty lister / no /proc) → ADOPTS (indeterminate, never double-launch)", async () => {
-    dbMod.saveCtoAgentRow(DIR, { session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1 });
+    dbMod.saveCtoAgentRow(DIR, { session_id: SID, desired: 1 });
     livenessMod.setCmdlineLister(() => []); // can't prove anything → "unknown"
     const { runner, calls } = makeFake({ alive: true });
     harnessMod.setRunner(runner);
@@ -468,7 +458,6 @@ describe("CTO agent status (the /api/workspaces/:id/cto payload)", () => {
     expect(s.running).toBe(true);
     expect(s.sessionId).toBe(SEED);
     expect(typeof s.restarts).toBe("number");
-    expect(s.paneId).toBe("pane-final");
   });
 });
 

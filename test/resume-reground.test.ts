@@ -160,9 +160,6 @@ function fakeRunner(): AgentRunner {
     async resolveAgentPane() {
       return "pane-final";
     },
-    async reconcilePane() {
-      return { paneId: "pane-final", drifted: false };
-    },
     isAgentNameTaken() {
       return false;
     },

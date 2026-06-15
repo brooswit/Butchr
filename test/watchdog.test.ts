@@ -10,7 +10,7 @@
 //   1. runawayExceeded — the elapsed>maxRunMs decision, including the disabled
 //      (maxRunMs<=0) case and the exact boundary. This is the watchdog's trip
 //      condition, factored out so it's testable without mocking the clock.
-//   2. The rescue itself: a LIVE `in_progress` task (herdr_pane_id set) past maxRunMs
+//   2. The rescue itself: a LIVE `in_progress` task (has_agent=1) past maxRunMs
 //      is force-moved to `in_review` (via markInReview, the same controlled rescue the
 //      dead-agent path uses) with a time-exceeded snapshot — NOT aborted/killed.
 //   3. Composition guards: an `aborted` task is NOT resurrected to in_review, and an
@@ -65,20 +65,20 @@ afterAll(() => {
 // Seed a task row + its on-disk task.md. `startedAt` lets a test plant a task
 // that has been LIVE `in_progress` for an arbitrary (simulated) duration — the
 // watchdog's input — without waiting real wall-clock or launching an agent.
-// For "was running" tasks (LIVE = in_progress + pane set), pass herdrPaneId.
+// For "was running" tasks (LIVE = in_progress + has_agent=1), pass hasAgent.
 function seedTask(opts: {
   id: string;
   status: string;
   startedAt?: string | null;
-  herdrPaneId?: string | null;
+  hasAgent?: boolean;
 }): string {
   const created = dbMod.nowIso();
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, started_at, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, has_agent, started_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(opts.id, DIR_ID, opts.status, opts.herdrPaneId ?? null, opts.startedAt ?? null, created);
+    .run(opts.id, DIR_ID, opts.status, opts.hasAgent ? 1 : 0, opts.startedAt ?? null, created);
   taskmdMod.writeTaskMd(
     REPO_ROOT,
     { id: opts.id, created, status: opts.status as any, context: [] },
@@ -112,7 +112,7 @@ describe("runawayExceeded (the watchdog trip decision)", () => {
       id: "stuck-running",
       status: "in_progress",
       startedAt,
-      herdrPaneId: "pane-stuck",
+      hasAgent: true,
     });
     const row = dbRow(id);
     const elapsed = Date.now() - new Date(row.started_at).getTime();
@@ -123,7 +123,7 @@ describe("runawayExceeded (the watchdog trip decision)", () => {
       id: "fresh-running",
       status: "in_progress",
       startedAt: new Date().toISOString(),
-      herdrPaneId: "pane-fresh",
+      hasAgent: true,
     });
     const freshElapsed =
       Date.now() - new Date(dbRow(fresh).started_at).getTime();
@@ -138,11 +138,11 @@ describe("runawayExceeded (the watchdog trip decision)", () => {
 
 describe("watchdog rescue → in_review", () => {
   test("a stuck LIVE in_progress task is force-moved to in_review with a time-exceeded note (not aborted)", () => {
-    // LIVE `in_progress`: herdr_pane_id set (agent is running).
+    // LIVE `in_progress`: has_agent=1 (agent is running).
     const id = seedTask({
       id: "rescue-running",
       status: "in_progress",
-      herdrPaneId: "pane-rescue",
+      hasAgent: true,
       startedAt: new Date(Date.now() - cfg.maxRunMs * 2).toISOString(),
     });
     // The controlled rescue the watcher performs once runawayExceeded trips: the
@@ -156,8 +156,7 @@ describe("watchdog rescue → in_review", () => {
     const row = dbRow(id);
     expect(row.status).toBe("in_review"); // surfaced to a human, NOT aborted/killed
     expect(row.output_snapshot).toContain("stuck/runaway");
-    expect(row.herdr_pane_id).toBeNull(); // tab/pane released
-    expect(row.herdr_tab_id).toBeNull();
+    expect(row.has_agent).toBe(0); // agent torn down (no longer live)
     // task.md reflects the transition too.
     expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("in_review");
   });

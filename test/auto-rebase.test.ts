@@ -89,11 +89,11 @@ const wtOf = (id: string) => join(REPO_ROOT, id);
 describe("auto-rebase: a blocked task promoted to inactive ends up on the current tip", () => {
   test("a fresh blocked task created on a stale base is reset onto the tip at dispatch", async () => {
     // Blocker seeded as a plain DB row (no worktree needed to satisfy createTask).
-    // In the new model, a LIVE agent task is `in_progress` with herdr_pane_id set.
+    // In the new model, a LIVE agent task is `in_progress` with has_agent=1.
     const blocker = "ar-blocker";
     dbMod.db
-      .query(`INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(blocker, DIR_ID, "in_progress", "pane-blocker", dbMod.nowIso());
+      .query(`INSERT INTO tasks (id, workspace_id, status, has_agent, created_at) VALUES (?, ?, ?, 1, ?)`)
+      .run(blocker, DIR_ID, "in_progress", dbMod.nowIso());
 
     // Dependent task: its worktree branches from the CURRENT (soon-to-be stale) tip.
     const dep = (await tasksMod.createTask(DIR_ID, "dependent work", [], [blocker])).id;

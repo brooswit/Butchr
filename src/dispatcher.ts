@@ -28,7 +28,7 @@ import { startAgentInFreshTab } from "./herdr.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, repairPaneId, requeueForResume, resolveBase, setIdle } from "./tasks.ts";
+import { getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, requeueForResume, resolveBase, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -297,17 +297,12 @@ export async function reconcileRunningTasks(
       nameAlive && procAlive ? await harness.resolveAgentPane(row.id) : undefined;
 
     if (livePane) {
-      // Live agent — re-adopt at its CURRENT name-resolved pane + tab (both may have
-      // moved while butchr was down). The drift compare still reads the stored id to
-      // decide whether to RE-RECORD it, but what we attach/watch against is always the
-      // name-resolved pane, never the stored column.
-      const tabId = await harness.agentTabId(row.id);
-      if (livePane !== row.herdr_pane_id || tabId !== row.herdr_tab_id) {
-        adoptPane(row.id, livePane, tabId);
-      }
+      // Live agent — re-adopt by attaching the watcher to its CURRENT name-resolved pane
+      // (it may have moved while butchr was down). Nothing is persisted: agents are
+      // addressed BY NAME, so there is no stored pane/tab to re-record.
       spawnWatcher(dir, row.id, livePane, logFile, doneFile);
       adopted++;
-      console.log(`[butchr] re-adopted running task ${row.id} (pane ${livePane}, tab ${tabId})`);
+      console.log(`[butchr] re-adopted running task ${row.id} (pane ${livePane})`);
     } else if (row.status === "in_progress" && !existsSync(doneFile)) {
       // The build agent's claude is NOT actually alive AND it did not exit on its own
       // (no `.done` exit-code file) — i.e. it was KILLED mid-work by a power loss /
@@ -324,8 +319,8 @@ export async function reconcileRunningTasks(
     } else {
       // Agent gone — the build (in_progress) agent ended on its own (`.done` present)
       // while butchr was offline. Rescue it to in_review for a human. Close its (now
-      // husk) tab defensively.
-      await harness.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
+      // husk) tab defensively BY NAME.
+      await harness.teardownTask(row.id);
       const snapshot = readRunLogSnapshot(row.id);
       markInReview(
         row.id,
@@ -829,35 +824,6 @@ function refreshIdle(taskId: string, logFile: string): number | null {
 }
 
 /**
- * Resolve a live task's CURRENT herdr pane BY AGENT NAME and SELF-HEAL the stored
- * `herdr_pane_id` when herdr has renumbered it out from under us (a sibling tab/pane
- * closed). This is the single use-time reconciliation every pane-touching path runs
- * so they all act on the LIVE pane — never the launch-time id that can now point at a
- * dead sibling shell (the bug that mis-aimed the idle nudge and terminal-attach).
- *
- * Returns the current pane id, or — if herdr can't resolve a live pane this instant
- * (a transient read, or the agent just exited) — falls back to the stored id so a
- * momentary hiccup never erases a still-valid pane. Best-effort: a thrown herdr
- * error degrades to the stored id rather than propagating into the watcher loop.
- */
-export async function currentPaneRepairing(taskId: string): Promise<string | undefined> {
-  const stored = getTask(taskId)?.herdr_pane_id ?? null;
-  let resolved: { paneId: string | undefined; drifted: boolean } | undefined;
-  try {
-    resolved = await harness.reconcilePane(taskId, stored);
-  } catch {
-    return stored ?? undefined; // herdr hiccup — keep what we had
-  }
-  const paneId = resolved?.paneId;
-  if (paneId && resolved?.drifted && repairPaneId(taskId, paneId)) {
-    console.log(
-      `[butchr] task ${taskId} herdr pane drifted (${stored} → ${paneId}, renumbered); repaired stored id`,
-    );
-  }
-  return paneId ?? stored ?? undefined;
-}
-
-/**
  * IDLE-HANDLING — one poll-tick step for a single watched task. A WORKSPACE build
  * agent can sit idle-but-alive on a transient API error (e.g. a 529 Overloaded),
  * parked at an empty prompt, or finished-but-unsubmitted. butchr NO LONGER blindly
@@ -867,18 +833,16 @@ export async function currentPaneRepairing(taskId: string): Promise<string | und
  * who acts deliberately — nudge-with-guidance (tasks.nudgeTask), requeue, or abort. The
  * plain "continue" nudge is now just ONE of those responder choices, never automatic.
  *
- * This step's ONLY job is the two things that must happen WITHOUT a responder:
- *  1. LIVENESS GUARD (the "continuecontinuecontinue into a dead shell" incident fix):
- *     a herdr/host restart kills claude but leaves the pane as a bare login shell with
- *     the agent NAME still registered, so `agentExists` lies "alive". The process is the
- *     ground truth: if claude is NOT in /proc for this session, the pane is DEAD — do
- *     NOT surface it as a nudgeable idle agent; AUTO-RESUME instead (requeueForResume
- *     tears down the husk pane and re-dispatches the same session via `--resume`).
- *     requeueForResume clears the pane, so the watcher's loop-top hands off next tick.
- *  2. PANE SELF-HEAL: an alive-but-quiet agent is exactly when its stored pane id may
- *     have been renumbered out from under us (a sibling tab closed) AND when a responder
- *     (or a human attaching) is about to act on the pane — re-resolve it by name so the
- *     stored id stays truthful for the nudge/attach/teardown paths.
+ * This step's ONLY job is the one thing that must happen WITHOUT a responder:
+ *  - LIVENESS GUARD (the "continuecontinuecontinue into a dead shell" incident fix):
+ *    a herdr/host restart kills claude but leaves the pane as a bare login shell with
+ *    the agent NAME still registered, so `agentExists` lies "alive". The process is the
+ *    ground truth: if claude is NOT in /proc for this session, the pane is DEAD — do
+ *    NOT surface it as a nudgeable idle agent; AUTO-RESUME instead (requeueForResume
+ *    tears down the husk pane and re-dispatches the same session via `--resume`).
+ *    requeueForResume clears has_agent, so the watcher's loop-top hands off next tick.
+ *    (No stored pane to self-heal: nudge/attach/teardown all resolve the live pane BY
+ *    NAME at action time.)
  *
  * SCOPE — fires ONLY for a live `in_progress` workspace build agent (the managed CTO
  * agent is event-driven/idle-by-design and never runs under a task watcher). A
@@ -904,10 +868,9 @@ export async function handleIdleAgent(
     );
     return;
   }
-  // Alive but quiet — a genuine idle agent. Keep its stored pane id truthful so the
-  // responder's nudge (or a human's attach) lands on the live pane, then leave it
-  // flagged `idle` (with context) for the idle-handling responder to act on.
-  await currentPaneRepairing(taskId);
+  // Alive but quiet — a genuine idle agent. Nothing to do here: nudge/attach resolve the
+  // live pane BY NAME at action time, so we just leave it flagged `idle` (with context)
+  // for the idle-handling responder to act on.
 }
 
 /**
@@ -952,7 +915,7 @@ export function isExecFailure(exitCode: string, hasOutput: boolean): boolean {
 function spawnWatcher(
   _dir: WorkspaceRow,
   taskId: string,
-  paneId: string,
+  _paneId: string,
   logFile: string,
   doneFile: string,
 ): void {
@@ -1133,10 +1096,9 @@ function spawnWatcher(
       `Output captured as-is.\n\n` +
       snapshot;
 
-    // The process is gone; close the whole tab defensively in case a husk pane
-    // remains, so the dead task's tab doesn't linger. (markReview clears the
-    // stored tab id, so close it now while we still have it.)
-    await harness.teardownTask(getTask(taskId)?.herdr_tab_id, taskId, paneId);
+    // The process is gone; close the whole tab defensively BY NAME in case a husk pane
+    // remains, so the dead task's tab doesn't linger.
+    await harness.teardownTask(taskId);
 
     // Last-moment abort (signalled while we captured output): bail without
     // moving to review so abortTask's terminal state stands.

@@ -228,22 +228,12 @@ function livenessChip(lv) {
   return `<span class="chip ${cls}">${esc(lv.state)}</span>`;
 }
 
-// The agent is live (attachable) whenever it has a herdr pane: a running/idle
-// `in_progress` build agent until butchr closes the pane. Gating on herdr_pane_id
-// mirrors the /terminal endpoint exactly — the button shows iff the attach would succeed.
+// The agent is live (attachable) whenever butchr owns a launched agent for it
+// (has_agent): a running/idle `in_progress` build agent until butchr tears it down.
+// Gating on has_agent mirrors the /terminal endpoint exactly — the button shows iff the
+// attach would succeed. (Agents are addressed BY NAME; no pane id is stored.)
 function isLive(t) {
-  return !!t.herdr_pane_id;
-}
-// Compact monospace readout of a task's herdr pane/tab ids, for surfacing next to
-// the Open-terminal control. Returns "" when no pane is allocated (task not yet
-// dispatched or already torn down) — same gate as isLive, so the ids
-// appear exactly when the terminal button does.
-function herdrIds(t) {
-  if (!t.herdr_pane_id) return "";
-  const pane = `<span class="herdr-id" title="herdr pane id">pane ${esc(t.herdr_pane_id)}</span>`;
-  const tab = t.herdr_tab_id
-    ? `<span class="herdr-id" title="herdr tab id">tab ${esc(t.herdr_tab_id)}</span>` : "";
-  return `<span class="herdr-ids">${pane}${tab}</span>`;
+  return !!t.has_agent;
 }
 
 // ---------- collapsible panel ----------
@@ -408,7 +398,7 @@ async function ctoPanel(dirId) {
     });
     return b;
   };
-  if (s.running && s.paneId) {
+  if (s.running) {
     controls.appendChild(btn("Open CTO terminal", "", async () => {
       const r = await api("POST", base + "/terminal");
       terminalToast(r);
@@ -1485,8 +1475,7 @@ function tasksTable(tasks) {
       <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
       <td>${taskChips(t, { kind: feedback, responder: true })}${tagChips(t)}</td>
       <td class="when">${esc(fmtTime(t.created_at))}</td>
-      <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a>${
-        herdrIds(t) ? `<div class="herdr-ids-row">${herdrIds(t)}</div>` : ""}</td>`;
+      <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
     wireTermLink(tr, t.id);
     tb.appendChild(tr);
   }
@@ -2334,8 +2323,6 @@ async function renderTask(id) {
     <div class="k">model</div><div class="v">${esc(modelLabel(t))}</div>
     <div class="k">tokens</div><div class="v">${tokensLabel(t)}</div>
     <div class="k">cost</div><div class="v">${esc(costLabel(t))}</div>
-    ${t.herdr_pane_id ? `<div class="k">herdr pane</div><div class="v">${esc(t.herdr_pane_id)}</div>` : ""}
-    ${t.herdr_tab_id ? `<div class="k">herdr tab</div><div class="v">${esc(t.herdr_tab_id)}</div>` : ""}
   </div>`;
   wrap.appendChild(meta);
 

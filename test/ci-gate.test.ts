@@ -208,8 +208,8 @@ describe("review-transition trigger", () => {
 
   test("markInReview (dead-agent rescue path) kicks off CI", () => {
     const id = seed({ id: "trig-rescue", status: "in_progress", worktree: true });
-    // markInReview requires in_progress + a pane set (simulates a live agent that ended).
-    dbMod.db.query(`UPDATE tasks SET herdr_pane_id='rescue-pane' WHERE id=?`).run(id);
+    // markInReview requires in_progress + a live agent (simulates a live agent that ended).
+    dbMod.db.query(`UPDATE tasks SET has_agent=1 WHERE id=?`).run(id);
     const calls: string[] = [];
     tasksMod.setCiRunner((_dir, taskId) => {
       calls.push(taskId);

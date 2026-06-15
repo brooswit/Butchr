@@ -1,11 +1,20 @@
 // Test the ORDERED BOOT MIGRATION RUNNER (db.ts MIGRATIONS / runMigrations). The five
 // forward migrations + the baseline schema + the additive column set are run by ONE
-// ordered loop on every boot, so two properties must hold:
+// ordered loop on every boot, so three properties must hold:
 //   1. CONVERGENCE — a seeded LEGACY DB (pre-rename `directories`, an old singleton
 //      `cto_agent`, the retracted `stage` axis, and pre-canonical statuses) is migrated
 //      forward to the current 12-state shape in a single pass.
 //   2. IDEMPOTENCE — running the FULL pass AGAIN is a clean no-op: identical schema,
 //      identical rows, never throwing (it runs against a live DB on every boot).
+//   3. NAME-ONLY CUTOVER SAFETY (story st-a77b050f) — the legacy DB here is at the
+//      PRE-has_agent schema (no has_agent column; an `in_progress`/`running` row WITH a
+//      `herdr_pane_id` = a LIVE agent, one WITHOUT = ready). The boot pass must SEED
+//      has_agent from the legacy pane signal BEFORE dropping the pane column, so a live
+//      agent ends has_agent=1 (NOT demoted to `inactive`) while a ready row ends
+//      `inactive`; and herdr_pane_id/herdr_tab_id must be physically GONE afterward. This
+//      is the load-bearing ordering the cutover added (backfill in ensureForwardColumns,
+//      immediately before dropColumnIfExists). The legacy seed below references the old
+//      pane/tab columns deliberately — that IS the pre-cutover schema under test.
 //
 // db.ts is a module-level SINGLETON whose connection is bound (and the boot pass runs)
 // at import time, and bun shares that module across the test process — so we exercise
@@ -38,18 +47,20 @@ old.exec(\`
     id TEXT PRIMARY KEY,
     directory_id TEXT NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
     status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'build',
-    herdr_pane_id TEXT, created_at TEXT NOT NULL
+    herdr_pane_id TEXT, herdr_tab_id TEXT, created_at TEXT NOT NULL
   );
   CREATE INDEX idx_tasks_dir ON tasks(directory_id);
   CREATE TABLE cto_agent (id TEXT PRIMARY KEY, session_id TEXT, desired INTEGER NOT NULL DEFAULT 0);
 \`);
 old.query("INSERT INTO directories (id, path, created_at) VALUES ('dir-1', '/tmp/ws-1', '2026-06-01T00:00:00.000Z')").run();
 old.query("INSERT INTO cto_agent (id, session_id, desired) VALUES ('singleton', 'old', 1)").run();
+// PRE-has_agent legacy seed: a non-null pane (+tab) marks a LIVE agent; NULL = ready. The
+// boot pass must backfill has_agent from this pane signal BEFORE dropping the pane column.
 const seed = (id, status, stage, pane) =>
-  old.query("INSERT INTO tasks (id, directory_id, status, stage, herdr_pane_id, created_at) VALUES (?, 'dir-1', ?, ?, ?, '2026-06-01T00:00:00.000Z')").run(id, status, stage, pane);
+  old.query("INSERT INTO tasks (id, directory_id, status, stage, herdr_pane_id, herdr_tab_id, created_at) VALUES (?, 'dir-1', ?, ?, ?, ?, '2026-06-01T00:00:00.000Z')").run(id, status, stage, pane, pane ? "t-" + id : null);
 seed("t-idea", "queued", "idea", null);       // stage idea         -> status 'idea'
-seed("t-queued", "queued", "build", null);    // queued->in_progress-> inactive (no pane)
-seed("t-running", "running", "build", "px");  // running            -> in_progress (pane)
+seed("t-queued", "queued", "build", null);    // queued->in_progress-> inactive (no pane = ready)
+seed("t-running", "running", "build", "px");  // running            -> in_progress (pane = LIVE → has_agent=1)
 seed("t-review", "review", "build", null);    // review             -> in_review
 seed("t-await", "awaiting_input", "build", null); // awaiting_input -> needs_info
 seed("t-rejected", "rejected", "build", null);// rejected           -> aborted
@@ -61,11 +72,12 @@ old.close();
 const m = await import(process.env.DB_TS);
 const snap = () => ({
   schema: m.db.query("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(),
-  tasks: m.db.query("SELECT id, status, herdr_pane_id FROM tasks ORDER BY id").all(),
+  tasks: m.db.query("SELECT id, status, has_agent FROM tasks ORDER BY id").all(),
   workspaces: m.db.query("SELECT id FROM workspaces ORDER BY id").all().map((r) => r.id),
   hasDirectories: m.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='directories'").all().length > 0,
   ctoCols: m.db.query("PRAGMA table_info(cto_agent)").all().map((c) => c.name),
   ctoRows: m.db.query("SELECT COUNT(*) AS n FROM cto_agent").get().n,
+  taskCols: m.db.query("PRAGMA table_info(tasks)").all().map((c) => c.name),
 });
 const snapA = snap();
 m.runMigrations();
@@ -116,6 +128,26 @@ describe("boot migration runner — convergence", () => {
       "t-merged": "merged",
       "t-failed": "failed",
     });
+  });
+});
+
+describe("boot migration runner — name-only cutover safety (st-a77b050f)", () => {
+  test("the dropped pane/tab columns are physically gone from tasks", () => {
+    expect(out.snapA.taskCols).not.toContain("herdr_pane_id");
+    expect(out.snapA.taskCols).not.toContain("herdr_tab_id");
+    // has_agent (the honest replacement) is present.
+    expect(out.snapA.taskCols).toContain("has_agent");
+  });
+
+  test("has_agent is backfilled from the legacy pane signal BEFORE the drop — a live agent is NOT demoted", () => {
+    const hasAgent = Object.fromEntries(out.snapA.tasks.map((t: any) => [t.id, t.has_agent]));
+    // t-running had a pane (LIVE): it must end has_agent=1 AND stay in_progress — NOT
+    // re-bucketed to `inactive` (that demotion would orphan a running claude). This is the
+    // load-bearing ordering: seed has_agent in ensureForwardColumns, then drop the column.
+    expect(hasAgent["t-running"]).toBe(1);
+    // t-queued had NO pane (ready): has_agent=0 and re-bucketed to `inactive` (asserted in
+    // convergence above).
+    expect(hasAgent["t-queued"]).toBe(0);
   });
 });
 

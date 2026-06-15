@@ -18,7 +18,7 @@ import {
   sumStatuses,
 } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
-import { currentPaneRepairing, dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
+import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
   dashboard,
@@ -1191,17 +1191,12 @@ async function attachAgentTerminal(agentName: string): Promise<Response> {
 route("POST", "/api/tasks/:id/terminal", async (_req, p) => {
   const t = requireTask(p.id!);
   // Gate on the honest agent-ownership marker rather than a specific status — only a
-  // task butchr launched an agent for (has_agent=1) has something to attach to; the
-  // attach itself targets the pane BY NAME (currentPaneRepairing/attachAgentTerminal).
+  // task butchr launched an agent for (has_agent=1) has something to attach to. The
+  // attach targets the agent's live pane BY NAME (attachAgentTerminal), so a herdr
+  // renumber since launch is handled at the seam — there is no stored id to self-heal.
   if (!t.has_agent) {
     throw new HttpError(409, `task has no live agent to attach to (status=${t.status})`);
   }
-  // herdr may have RENUMBERED the pane since launch (a sibling tab closed), so the
-  // stored id can now point at a dead sibling shell. Re-resolve the CURRENT pane by
-  // name and self-heal the stored id. (`agent attach` already targets by name, so the
-  // attach itself is correct regardless — this keeps the recorded id truthful and is
-  // the use-time reconciliation the spec mandates for every pane-touching path.)
-  await currentPaneRepairing(p.id!);
   return attachAgentTerminal(p.id!);
 });
 
@@ -1237,7 +1232,7 @@ route("POST", "/api/workspaces/:id/cto/restart", async (req, p) => {
 route("POST", "/api/workspaces/:id/cto/terminal", async (_req, p) => {
   requireWorkspace(p.id!);
   const s = await ctoAgentStatus(p.id!);
-  if (!s.running || !s.paneId) {
+  if (!s.running) {
     throw new HttpError(409, "CTO agent has no live pane (not running)");
   }
   return attachAgentTerminal(ctoAgentName(p.id!));

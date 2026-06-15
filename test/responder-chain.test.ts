@@ -54,23 +54,22 @@ function seedTask(
     storyId?: string | null;
     escalated?: number;
     idle?: number;
-    paneId?: string | null;
+    hasAgent?: number;
     planPreview?: number;
   } = {},
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, has_agent, story_id, escalated_to_user, plan_preview, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, story_id, escalated_to_user, plan_preview, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       DIR,
       status,
       opts.idle ?? 0,
-      opts.paneId ?? null,
-      // has_agent mirrors the old pane-as-liveness: a launched live agent has a pane.
-      opts.paneId ? 1 : 0,
+      // has_agent = a LIVE launched agent for this task.
+      opts.hasAgent ?? 0,
       opts.storyId ?? null,
       opts.escalated ?? 0,
       opts.planPreview ?? 0,
@@ -105,7 +104,7 @@ describe("non-story cto→user boundary (escalateTask)", () => {
 
   test("escalate 409s when the task is NOT awaiting feedback", () => {
     const id = "rc-nonstory-nonfeedback";
-    seedTask(id, "in_progress", { storyId: null, paneId: "pane-nf" }); // in_progress, not idle
+    seedTask(id, "in_progress", { storyId: null, hasAgent: 1 }); // in_progress, not idle
     expect(() => tasksMod.escalateTask(id)).toThrow(/not awaiting feedback/);
     expect(escalatedOf(id)).toBe(0);
   });
@@ -126,7 +125,7 @@ describe("escalated_to_user resets to 0 on a new feedback event", () => {
   test("entering the idle feedback surface clears a prior escalation back to 'cto'", () => {
     // A live NON-STORY build agent that carried escalated_to_user from an earlier cycle.
     const id = "rc-reset";
-    seedTask(id, "in_progress", { storyId: null, escalated: 1, idle: 0, paneId: "pane-reset" });
+    seedTask(id, "in_progress", { storyId: null, escalated: 1, idle: 0, hasAgent: 1 });
     // Not idle yet → not awaiting feedback → no pending responder.
     expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBeNull();
 

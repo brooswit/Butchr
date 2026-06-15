@@ -50,13 +50,13 @@ afterAll(() => {
   rmSync(REPO_ROOT, { recursive: true, force: true });
 });
 
-/** Seed a bare task row in a workspace with a given status (+ optional idle flag + optional pane id). */
-function seedTask(id: string, dir: string, status: string, idle = 0, paneId: string | null = null) {
+/** Seed a bare task row in a workspace with a given status (+ optional idle flag + optional live-agent marker). */
+function seedTask(id: string, dir: string, status: string, idle = 0, hasAgent = 0) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, dir, status, idle, paneId, dbMod.nowIso());
+    .run(id, dir, status, idle, hasAgent, dbMod.nowIso());
 }
 
 describe("workspaceGateCmd resolution", () => {
@@ -143,10 +143,10 @@ describe("dashboard aggregation", () => {
     dbMod.db
       .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(DIR_C, join(REPO_ROOT, DIR_C), "Dash C", dbMod.nowIso());
-    seedTask("dc-q", DIR_C, "inactive");             // ready (no pane) → inactive bucket
+    seedTask("dc-q", DIR_C, "inactive");             // ready (no agent) → inactive bucket
     seedTask("dc-b", DIR_C, "blocked");              // blocked bucket
-    seedTask("dc-r", DIR_C, "in_progress", 0, "pane-dc-r"); // live agent (non-idle) → in_progress
-    seedTask("dc-i", DIR_C, "in_progress", 1, "pane-dc-i"); // idle (in_progress + pane + idle flag)
+    seedTask("dc-r", DIR_C, "in_progress", 0, 1);    // live agent (non-idle) → in_progress
+    seedTask("dc-i", DIR_C, "in_progress", 1, 1);    // idle (in_progress + live agent + idle flag)
     seedTask("dc-rb", DIR_C, "rolling_back");        // rolling_back bucket (mechanical revert merge)
     seedTask("dc-rev", DIR_C, "in_review");          // review/feedback bucket
     seedTask("dc-failed", DIR_C, "failed");          // terminal execution failure → failed bucket

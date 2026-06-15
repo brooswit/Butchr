@@ -79,10 +79,10 @@ function seedRunning(id: string, sessionId: string, status = "in_progress"): voi
   // process (claudeAlive) for true liveness.
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, herdr_tab_id, has_agent, session_id, started_at, created_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, has_agent, session_id, started_at, created_at)
+       VALUES (?, ?, ?, 1, ?, ?, ?)`,
     )
-    .run(id, WS_ID, status, "pane-" + id, "tab-" + id, sessionId, dbMod.nowIso(), dbMod.nowIso());
+    .run(id, WS_ID, status, sessionId, dbMod.nowIso(), dbMod.nowIso());
 }
 
 // Drop a transcript so findTranscript() resolves it (scan-by-session-id finds any dir).
@@ -176,9 +176,9 @@ describe("requeueForResume (the bounded auto-resume transition)", () => {
     expect(r).toBe("resumed");
     const row = tasksMod.getTask("resume-ok")!;
     expect(row.status).toBe("in_progress");
-    expect(row.herdr_pane_id).toBeNull(); // READY again → dispatcher relaunches it
-    // The killed agent is gone: the honest marker drops to 0 even though the task STAYS
-    // in_progress (the one in_progress→in_progress transition that clears has_agent), so
+    // READY again → dispatcher relaunches it. The killed agent is gone: the honest
+    // marker drops to 0 even though the task STAYS in_progress (the one
+    // in_progress→in_progress transition that clears has_agent), so
     // reconcile/reaper/setIdle/nudge all correctly read it as "no owned live agent".
     expect(row.has_agent).toBe(0);
     expect(row.session_id).toBe("sid-resume-ok"); // kept → resolveLaunchCommand uses --resume
@@ -191,7 +191,7 @@ describe("requeueForResume (the bounded auto-resume transition)", () => {
     expect(r).toBe("fresh");
     const row = tasksMod.getTask("resume-fresh")!;
     expect(row.status).toBe("in_progress");
-    expect(row.herdr_pane_id).toBeNull();
+    expect(row.has_agent).toBe(0);
     expect(row.session_id).toBeNull(); // cleared → relaunch is a fresh run from the prompt
     expect(row.resume_attempts).toBe(1);
   });
@@ -224,7 +224,7 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
 
     const killed = tasksMod.getTask("recon-killed")!;
     expect(killed.status).toBe("in_progress");
-    expect(killed.herdr_pane_id).toBeNull(); // auto-resumed (READY for --resume)
+    expect(killed.has_agent).toBe(0); // auto-resumed (READY for --resume)
     expect(killed.resume_attempts).toBe(1);
 
     expect(tasksMod.getTask("recon-exited")!.status).toBe("in_review"); // rescued, not resumed
@@ -240,20 +240,17 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
     // The decisive assertion: a LIVE agent is left completely untouched (not resumed).
     const row = tasksMod.getTask("recon-alive")!;
     expect(row.status).toBe("in_progress");
-    expect(row.herdr_pane_id).not.toBeNull(); // pane intact — left running
+    expect(row.has_agent).toBe(1); // agent intact — left running
     expect(row.resume_attempts).toBe(0); // not resumed / not rescued
     dispatchMod.signalAbort("recon-alive"); // stop the re-adopted watcher this spawned
   });
 
   test("re-adopts a live agent at its CURRENT name-resolved pane, ignoring a STALE stored column (renumber)", async () => {
-    // ADDRESSING = NAME ONLY. Model a herdr renumber: the row's STORED pane/tab are
-    // stale (a sibling tab closed and shifted the positional ids while butchr was down),
-    // but the agent resolves BY NAME to a DIFFERENT, live pane. Re-adoption must record
-    // the name-resolved pane — never the stale stored column.
+    // ADDRESSING = NAME ONLY. Model a herdr renumber: the live agent resolves BY NAME
+    // to its current pane even after a sibling tab closed and shifted positional ids
+    // while butchr was down. Re-adoption resolves the agent by name; butchr no longer
+    // records any stored pane/tab — the honest LIVE marker (has_agent) stays set.
     seedRunning("recon-renum", "sid-renum");
-    dbMod.db
-      .query(`UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=? WHERE id=?`)
-      .run("pane-STALE", "tab-STALE", "recon-renum");
     resolvePane = (name) => (name === "recon-renum" ? "pane-LIVE-recon-renum" : "pane-" + name);
     resolveTab = (name) => (name === "recon-renum" ? "tab-LIVE-recon-renum" : "tab-" + name);
     liveMod.setCmdlineLister(liveSessions("sid-renum")); // claude IS alive
@@ -262,17 +259,15 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
     expect(res.adopted).toBeGreaterThanOrEqual(1);
 
     const row = tasksMod.getTask("recon-renum")!;
-    // Re-recorded at the NAME-resolved pane — NOT the stale stored column ("pane-STALE")
-    // and NOT a pane literally named the task id (both were the dropped fallbacks).
-    expect(row.herdr_pane_id).toBe("pane-LIVE-recon-renum");
-    expect(row.herdr_tab_id).toBe("tab-LIVE-recon-renum");
+    // Re-adopted BY NAME — left running, never resumed/rescued.
     expect(row.status).toBe("in_progress");
+    expect(row.has_agent).toBe(1);
     expect(row.resume_attempts).toBe(0); // adopted, never resumed/rescued
     dispatchMod.signalAbort("recon-renum"); // stop the re-adopted watcher this spawned
   });
 
   test("a live agent whose NAME resolves NO live pane is auto-resumed, never re-adopted at an invented pane", async () => {
-    // The OLD code fell back to `row.herdr_pane_id ?? row.id` when the name lookup came
+    // The OLD code fell back to a stored pane (or `row.id`) when the name lookup came
     // up empty — inventing a pane named the task id and re-adopting a husk shell. With
     // name-only addressing, an unresolvable name means the agent isn't attachable, so it
     // must fall through to the auto-resume branch instead.
@@ -288,7 +283,7 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
     // Auto-resumed (READY for --resume): pane cleared, attempt counted — NOT adopted at
     // a bogus "pane-recon-nopane"/task-id pane.
     expect(row.status).toBe("in_progress");
-    expect(row.herdr_pane_id).toBeNull();
+    expect(row.has_agent).toBe(0);
     expect(row.resume_attempts).toBe(1);
   });
 });
@@ -299,9 +294,9 @@ describe("dispatcher.handleIdleAgent (the idle liveness guard — no more auto-n
     liveMod.setCmdlineLister(() => []); // dead
     await dispatchMod.handleIdleAgent("idle-dead", "in_progress", cfg.idleMs + 1);
     expect(sends).toEqual([]); // NOT typed into a dead shell
-    // The task was auto-resumed instead (pane cleared → the watcher hands off).
+    // The task was auto-resumed instead (agent cleared → the watcher hands off).
     const row = tasksMod.getTask("idle-dead")!;
-    expect(row.herdr_pane_id).toBeNull();
+    expect(row.has_agent).toBe(0);
     expect(row.resume_attempts).toBe(1);
     const notes = dbMod.listTaskEvents("idle-dead").map((e) => e.note ?? "");
     expect(notes.some((n) => /auto-resume|FRESH/.test(n))).toBe(true);
@@ -312,7 +307,7 @@ describe("dispatcher.handleIdleAgent (the idle liveness guard — no more auto-n
     liveMod.setCmdlineLister(liveSessions("sid-idle-alive")); // alive
     await dispatchMod.handleIdleAgent("idle-alive", "in_progress", cfg.idleMs + 1);
     expect(sends).toEqual([]); // the dispatcher no longer auto-types "continue"
-    expect(tasksMod.getTask("idle-alive")!.herdr_pane_id).not.toBeNull(); // left running
+    expect(tasksMod.getTask("idle-alive")!.has_agent).toBe(1); // left running
   });
 });
 
@@ -323,7 +318,7 @@ describe("tasks.nudgeTask (the responder's nudge — re-checks liveness)", () =>
     liveMod.setCmdlineLister(liveSessions("sid-nudge-alive")); // alive
     await tasksMod.nudgeTask("nudge-alive");
     expect(sends).toEqual([["nudge-alive", { text: "continue", enter: true }]]);
-    expect(tasksMod.getTask("nudge-alive")!.herdr_pane_id).not.toBeNull(); // left running
+    expect(tasksMod.getTask("nudge-alive")!.has_agent).toBe(1); // left running
   });
 
   test("guidance text is sent verbatim instead of a bare continue", async () => {
@@ -341,7 +336,7 @@ describe("tasks.nudgeTask (the responder's nudge — re-checks liveness)", () =>
     await tasksMod.nudgeTask("nudge-dead");
     expect(sends).toEqual([]); // NEVER poke a dead shell
     const row = tasksMod.getTask("nudge-dead")!;
-    expect(row.herdr_pane_id).toBeNull(); // auto-resumed (pane cleared)
+    expect(row.has_agent).toBe(0); // auto-resumed (agent cleared)
     expect(row.resume_attempts).toBe(1);
     const notes = dbMod.listTaskEvents("nudge-dead").map((e) => e.note ?? "");
     expect(notes.some((n) => /auto-resume|FRESH/.test(n))).toBe(true);

@@ -109,7 +109,7 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     tabClose: [] as Array<string | null | undefined>,
     agentDeregister: 0,
     teardownTask: 0,
-    teardownArgs: [] as Array<{ tab: string | null | undefined; name: string; pane: string | null | undefined }>,
+    teardownArgs: [] as Array<{ name: string }>,
     paneClose: [] as string[],
     order: [] as string[],
   };
@@ -133,17 +133,13 @@ function makeFake(opts: { alive?: boolean; resolvedPane?: string } = {}) {
     async paneTerminalId() { return "rootterm"; },
     async paneList(): Promise<PaneInfo[]> { return []; },
     async resolveAgentPane() { return resolvedPane; },
-    async reconcilePane(name, stored) {
-      const paneId = live(name) ? (started.has(name) ? resolvedPane : "pane-live") : undefined;
-      return { paneId, drifted: !!paneId && !!stored && paneId !== stored };
-    },
     isAgentNameTaken() { return false; },
     async agentRead() { return ""; }, // no startup prompt → auto-confirm exits at once
     async send() {},
     async paneClose(target) { calls.paneClose.push(target); },
-    async teardownTask(tab, name, pane) {
+    async teardownTask(name) {
       calls.teardownTask++;
-      calls.teardownArgs.push({ tab, name, pane });
+      calls.teardownArgs.push({ name });
       calls.order.push("teardownTask");
       if (name) started.delete(name);
     },
@@ -201,12 +197,10 @@ describe("story-leader lifecycle (per story)", () => {
 
     const r = row("st-launch")!;
     expect(r.story_id).toBe("st-launch");
-    expect(r.herdr_pane_id).toBe("pane-final");
-    expect(r.herdr_tab_id).toBe("story-tab");
     expect(r.desired).toBe(1);
     expect(r.restarts).toBe(0);
     expect(status.storyId).toBe("st-launch");
-    expect(status.running).toBe(true);
+    expect(status.running).toBe(true); // attachable BY NAME (no stored pane)
     expect(status.desired).toBe(true);
   });
 
@@ -220,7 +214,6 @@ describe("story-leader lifecycle (per story)", () => {
     expect(calls.agentStart.length).toBe(0); // adopted, not relaunched
     expect(status.running).toBe(true);
     expect(row("st-adopt")!.desired).toBe(1);
-    expect(row("st-adopt")!.herdr_pane_id).toBe("pane-live");
   });
 
   test("stop tears the leader down and marks it desired-down", async () => {
@@ -237,7 +230,6 @@ describe("story-leader lifecycle (per story)", () => {
     expect(status.desired).toBe(false);
     const r = row("st-stop")!;
     expect(r.desired).toBe(0);
-    expect(r.herdr_pane_id).toBeNull();
   });
 
   test("restart RESUMES the same session; restart(fresh) cold-starts a NEW one", async () => {
@@ -275,7 +267,8 @@ describe("story-leader boot reconcile (per story)", () => {
 
     expect(res.action).toBe("adopted");
     expect(calls.agentStart.length).toBe(0);
-    expect(row("st-rec-adopt")!.herdr_pane_id).toBe("pane-live");
+    expect(row("st-rec-adopt")!.desired).toBe(1); // adoption marks it desired-up
+    expect(await sa.storyAgentStatus("st-rec-adopt").then((s) => s.running)).toBe(true);
   });
 
   test("(re)launches when no live agent exists", async () => {
@@ -287,7 +280,7 @@ describe("story-leader boot reconcile (per story)", () => {
 
     expect(res.action).toBe("launched");
     expect(calls.agentStart.length).toBe(1);
-    expect(row("st-rec-launch")!.herdr_pane_id).toBe("pane-final");
+    expect(row("st-rec-launch")!.desired).toBe(1); // launched + recorded desired-up
   });
 
   test("respects an operator stop (desired=0) across a restart", async () => {
@@ -340,9 +333,7 @@ describe("story-leader reboot auto-recovery (adopt requires a LIVE claude proces
 
   test("pane-exists + claude DEAD → RELAUNCHES via --resume, tearing down the stale pane FIRST", async () => {
     insertStory("st-reboot", WS);
-    dbMod.saveStoryAgentRow("st-reboot", {
-      session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1,
-    });
+    dbMod.saveStoryAgentRow("st-reboot", { session_id: SID, desired: 1 });
     livenessMod.setCmdlineLister(() => [["bash", "-lc", "sleep"], ["systemd"]]); // no session → dead
     const { runner, calls } = makeFake({ alive: true }); // pane/name still registered (husk shell)
     harnessMod.setRunner(runner);
@@ -353,7 +344,7 @@ describe("story-leader reboot auto-recovery (adopt requires a LIVE claude proces
     expect(calls.agentStart.length).toBe(1);
     expect(calls.agentStart[0]!.argv.join(" ")).toContain(`--resume ${SID}`);
     expect(calls.teardownTask).toBe(1);
-    expect(calls.teardownArgs[0]).toEqual({ tab: "tab-stale", name: sa.storyAgentName("st-reboot"), pane: "pane-stale" });
+    expect(calls.teardownArgs[0]).toEqual({ name: sa.storyAgentName("st-reboot") });
     const firstStart = calls.order.indexOf("agentStart");
     expect(calls.order.indexOf("teardownTask")).toBeLessThan(firstStart);
     expect(row("st-reboot")!.session_id).toBe(SID);
@@ -361,9 +352,7 @@ describe("story-leader reboot auto-recovery (adopt requires a LIVE claude proces
 
   test("pane-exists + claude ALIVE → ADOPTS (no relaunch)", async () => {
     insertStory("st-reboot-alive", WS);
-    dbMod.saveStoryAgentRow("st-reboot-alive", {
-      session_id: SID, herdr_pane_id: "pane-stale", herdr_tab_id: "tab-stale", desired: 1,
-    });
+    dbMod.saveStoryAgentRow("st-reboot-alive", { session_id: SID, desired: 1 });
     livenessMod.setCmdlineLister(() => [["claude", "--resume", SID, "--", "x"]]);
     const { runner, calls } = makeFake({ alive: true });
     harnessMod.setRunner(runner);

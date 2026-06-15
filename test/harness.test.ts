@@ -159,10 +159,6 @@ function makeFake(opts: { resolvedPane: string | undefined }): {
       calls.resolveAgentPane.push([name, closedTerminalId]);
       return opts.resolvedPane;
     },
-    async reconcilePane(_name, stored) {
-      const paneId = opts.resolvedPane;
-      return { paneId, drifted: !!paneId && !!stored && paneId !== stored };
-    },
     isAgentNameTaken() {
       return false;
     },
@@ -201,7 +197,7 @@ describe("dispatcher against a fake AgentRunner backend", () => {
     // exact ready-to-launch state selectQueuedForDispatch picks up.
     const view = await tasksMod.createTask(DIR_ID, "do the thing");
     expect(dbRow(view.id).status).toBe("inactive");
-    expect(dbRow(view.id).herdr_pane_id).toBeNull();
+    expect(dbRow(view.id).has_agent).toBe(0);
 
     await dispatchMod.dispatch(dirRow(), dbRow(view.id));
 
@@ -226,8 +222,7 @@ describe("dispatcher against a fake AgentRunner backend", () => {
     // and a fresh session id; started_at is stamped.
     const row = dbRow(view.id);
     expect(row.status).toBe("in_progress");
-    expect(row.herdr_pane_id).toBe("pane-final");
-    expect(row.herdr_tab_id).toBe("tab-1");
+    expect(row.has_agent).toBe(1);
     expect(typeof row.session_id).toBe("string");
     expect(row.session_id.length).toBeGreaterThan(0);
     expect(row.started_at).not.toBeNull();
@@ -252,7 +247,7 @@ describe("dispatcher against a fake AgentRunner backend", () => {
 
     const row = dbRow(view.id);
     expect(row.status).toBe("inactive"); // re-armed READY (under the attempt cap)
-    expect(row.herdr_pane_id).toBeNull(); // NO phantom pane recorded
+    expect(row.has_agent).toBe(0); // NO phantom agent recorded
     expect(row.dispatch_attempts).toBe(1); // a bounded retry was counted
     expect(row.next_dispatch_at).not.toBeNull(); // backoff scheduled
   });

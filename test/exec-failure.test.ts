@@ -139,14 +139,14 @@ describe("isExecFailure (the launch-failure decision)", () => {
 describe("an immediate exec failure routes to the dispatch-failure path, not in_review", () => {
   test("markDispatchFailure on a LIVE in_progress task re-arms with backoff (never in_review)", async () => {
     // Plant a task as if it had just been markRunning'd (the state the watcher
-    // sees when the agent exec-fails immediately): LIVE `in_progress` (herdr_pane_id
-    // and herdr_tab_id set), with a session id, attempts reset to 0.
+    // sees when the agent exec-fails immediately): LIVE `in_progress` (has_agent=1),
+    // with a session id, attempts reset to 0.
     const id = "execfail-route";
     const created = dbMod.nowIso();
     dbMod.db
       .query(
-        `INSERT INTO tasks (id, workspace_id, status, session_id, herdr_pane_id, herdr_tab_id, started_at, dispatch_attempts, created_at)
-         VALUES (?, ?, 'in_progress', 'sess-x', 'pane-1', 'tab-1', ?, 0, ?)`,
+        `INSERT INTO tasks (id, workspace_id, status, session_id, has_agent, started_at, dispatch_attempts, created_at)
+         VALUES (?, ?, 'in_progress', 'sess-x', 1, ?, 0, ?)`,
       )
       .run(id, DIR_ID, created, created);
     taskmdMod.writeTaskMd(
@@ -172,8 +172,7 @@ describe("an immediate exec failure routes to the dispatch-failure path, not in_
     expect(row.dispatch_attempts).toBe(1);
     expect(row.next_dispatch_at).toBeTruthy();
     expect(row.last_dispatch_error).toContain("failed to launch");
-    // The herdr pane/tab were torn down by markDispatchFailure.
-    expect(row.herdr_pane_id).toBeNull();
-    expect(row.herdr_tab_id).toBeNull();
+    // The agent was torn down by markDispatchFailure.
+    expect(row.has_agent).toBe(0);
   });
 });

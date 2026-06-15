@@ -137,12 +137,12 @@ describe("T1 — task.md mirror stays in lockstep on the migrated transitions", 
   });
 });
 
-describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column set", () => {
-  // markInReview (dead-agent rescue) clears BOTH herdr_pane_id AND herdr_tab_id (the
-  // caller is tearing the tab down); the two agent-tool paths clear ONLY herdr_pane_id.
-  // This locks that per-caller difference so the extraction can't silently drop the tab
-  // clear again.
-  async function runningWithPaneAndTab(prompt: string): Promise<string> {
+describe("T2 — every agent-exit transition clears the honest has_agent marker", () => {
+  // markRunning sets has_agent=1 atomically with status. markInReview (dead-agent rescue)
+  // and the two agent-tool paths (markReviewFromAgent / markNeedsInfoFromAgent) all move
+  // the task off in_progress, and setStatus's exit rule clears has_agent back to 0. This
+  // locks that the launched-agent marker is honestly dropped on every exit.
+  async function runningWithAgent(prompt: string): Promise<string> {
     const v = await tasksMod.createTask(DIR_ID, prompt);
     tasksMod.markRunning(v.id, `pane-${v.id}`, `sess-${v.id}`, `tab-${v.id}`);
     // Leave a real worktree change so a request_review submission is non-empty
@@ -150,40 +150,32 @@ describe("T2 — parkExitingAgent reproduces each caller's exact herdr id column
     writeFileSync(join(REPO_ROOT, v.id, "work.txt"), `work for ${v.id}\n`);
     const r = row(v.id);
     expect(r.status).toBe("in_progress");
-    expect(r.herdr_pane_id).toBe(`pane-${v.id}`);
-    expect(r.herdr_tab_id).toBe(`tab-${v.id}`);
-    // markRunning sets the honest agent-ownership marker atomically with status + pane.
+    // markRunning sets the honest agent-ownership marker atomically with status.
     expect(r.has_agent).toBe(1);
     return v.id;
   }
 
-  test("markInReview clears herdr_pane_id AND herdr_tab_id", async () => {
-    const id = await runningWithPaneAndTab("rescue clears both ids");
+  test("markInReview clears has_agent", async () => {
+    const id = await runningWithAgent("rescue clears the marker");
     tasksMod.markInReview(id, "run-log snapshot");
     const r = row(id);
     expect(r.status).toBe("in_review");
-    expect(r.herdr_pane_id).toBeNull();
-    expect(r.herdr_tab_id).toBeNull(); // the regression the reviewer caught
     expect(r.has_agent).toBe(0); // honest marker cleared by setStatus's exit rule
   });
 
-  test("markReviewFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
-    const id = await runningWithPaneAndTab("request_review leaves tab id");
+  test("markReviewFromAgent clears has_agent", async () => {
+    const id = await runningWithAgent("request_review clears the marker");
     expect(await tasksMod.markReviewFromAgent(id, "done")).toBe("ok");
     const r = row(id);
     expect(r.status).toBe("in_review");
-    expect(r.herdr_pane_id).toBeNull();
-    expect(r.herdr_tab_id).toBe(`tab-${id}`); // NOT cleared (matches pre-refactor)
     expect(r.has_agent).toBe(0); // honest marker cleared on the exit to in_review
   });
 
-  test("markNeedsInfoFromAgent clears herdr_pane_id but LEAVES herdr_tab_id", async () => {
-    const id = await runningWithPaneAndTab("raise leaves tab id");
+  test("markNeedsInfoFromAgent clears has_agent", async () => {
+    const id = await runningWithAgent("raise clears the marker");
     expect(tasksMod.markNeedsInfoFromAgent(id, "which approach?")).toBe("ok");
     const r = row(id);
     expect(r.status).toBe("needs_info");
-    expect(r.herdr_pane_id).toBeNull();
-    expect(r.herdr_tab_id).toBe(`tab-${id}`); // NOT cleared (matches pre-refactor)
     expect(r.has_agent).toBe(0); // honest marker cleared on the exit to needs_info
   });
 

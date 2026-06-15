@@ -72,12 +72,12 @@ function seedTask(opts: {
   id: string;
   status: string;
   sessionId?: string | null;
-  paneId?: string | null;
+  hasAgent?: boolean;
 }): string {
   const created = dbMod.nowIso();
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, session_id, herdr_pane_id, started_at, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, session_id, has_agent, started_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -85,7 +85,7 @@ function seedTask(opts: {
       DIR_ID,
       opts.status,
       opts.sessionId ?? null,
-      opts.paneId ?? null,
+      opts.hasAgent ? 1 : 0,
       created,
       created,
     );
@@ -110,7 +110,7 @@ describe("markNeedsInfoFromAgent (the `raise` tool core)", () => {
       id: "ask-ok",
       status: "in_progress",
       sessionId: "sess-ask-1",
-      paneId: "pane-7",
+      hasAgent: true,
     });
     const question = "Should the cache be per-user or global?";
 
@@ -120,8 +120,8 @@ describe("markNeedsInfoFromAgent (the `raise` tool core)", () => {
     const row = dbRow(id);
     expect(row.status).toBe("needs_info");
     expect(row.question).toBe(question);
-    // The agent is exiting — no live pane is held for a needs_info task.
-    expect(row.herdr_pane_id).toBeNull();
+    // The agent is exiting — no live agent is held for a needs_info task.
+    expect(row.has_agent).toBe(0);
     // Session id is untouched (it's what the answer-resume will `--resume`).
     expect(row.session_id).toBe("sess-ask-1");
 

@@ -632,10 +632,10 @@ export async function unregisterWorkspace(id: string): Promise<void> {
     .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE workspace_id=?`)
     .all(id);
   for (const t of tasks) {
-    // Close the task's dedicated tab (kills its agent + removes the tab); the
+    // Close the task's dedicated tab BY NAME (kills its agent + removes the tab); the
     // workspace close below is a backstop, but per-tab teardown keeps things tidy
     // even if the workspace outlives this workspace.
-    await herdr.teardownTask(t.herdr_tab_id, t.id, t.herdr_pane_id);
+    await herdr.teardownTask(t.id);
     if (t.status !== "merged") {
       await git.cleanup(dir.path, t.id).catch(() => {});
     }

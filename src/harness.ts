@@ -136,15 +136,6 @@ export interface AgentRunner {
   paneList(workspaceId?: string): Promise<PaneInfo[]>;
   /** Resolve the agent's CURRENT pane id, surviving positional-id renumbering. */
   resolveAgentPane(name: string, closedTerminalId?: string): Promise<string | undefined>;
-  /**
-   * Resolve the agent's CURRENT pane BY NAME and report whether the `stored` id has
-   * drifted (herdr renumbered it). The caller targets `.paneId` and repairs its
-   * stored copy when `.drifted`. `.paneId` is undefined when no live pane exists.
-   */
-  reconcilePane(
-    name: string,
-    stored?: string | null,
-  ): Promise<{ paneId: string | undefined; drifted: boolean }>;
   /** Does this thrown error mean the agent NAME is already in use? */
   isAgentNameTaken(e: unknown): boolean;
   /** Best-effort recent output of the agent named `name` (for the live panel). "" on failure. */
@@ -158,12 +149,8 @@ export interface AgentRunner {
   send(name: string, input: SendInput): Promise<void>;
   /** Close a pane / terminate the agent terminal. */
   paneClose(target: string): Promise<void>;
-  /** Tear down a task's session (close its dedicated tab). Best-effort. */
-  teardownTask(
-    tabId: string | null | undefined,
-    agentName: string,
-    paneId?: string | null,
-  ): Promise<void>;
+  /** Tear down an agent's session by NAME (resolve + close its dedicated tab). Best-effort. */
+  teardownTask(agentName: string): Promise<void>;
   /** Definitively free an agent NAME so a fresh start can reuse it. Best-effort. */
   agentDeregister(name: string): Promise<void>;
 

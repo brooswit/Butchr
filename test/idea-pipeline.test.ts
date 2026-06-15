@@ -115,8 +115,8 @@ describe("an idea task is created in the 'idea' front state (a waiting/feedback 
     expect(row(view.id).status).toBe("idea");
     // The brief is stored as the initial prompt (it becomes the spec input).
     expect(view.prompt).toBe(BRIEF);
-    // It is a WAITING state — no live agent / pane / session was created.
-    expect(row(view.id).herdr_pane_id).toBeNull();
+    // It is a WAITING state — no live agent / session was created.
+    expect(row(view.id).has_agent).toBe(0);
     expect(row(view.id).session_id).toBeNull();
     expect(row(view.id).started_at).toBeNull();
     // The creation audit event records it as an idea task.
@@ -223,12 +223,12 @@ describe("the full idea → spec_review → inactive → in_progress → in_revi
     // spec_review → inactive: operator approves the spec.
     await tasksMod.approveTask(t.id);
     expect(row(t.id).status).toBe("inactive");
-    expect(row(t.id).herdr_pane_id).toBeNull();
+    expect(row(t.id).has_agent).toBe(0);
 
     // inactive → in_progress: simulate the dispatcher launching the build agent.
     tasksMod.markRunning(t.id, "pane-x", "idea-session-1234", "tab-x");
     expect(row(t.id).status).toBe("in_progress");
-    expect(row(t.id).herdr_pane_id).toBe("pane-x");
+    expect(row(t.id).has_agent).toBe(1);
 
     // The "agent" does the work in its worktree and commits a file.
     const wt = join(REPO_ROOT, t.id);
@@ -267,15 +267,15 @@ describe("a parked idea is inert to the resilience code (no pane/session to resu
       DIR_ID, "a brief that must survive a restart untouched", [], [], "task", null, [], 0, false, true,
     );
     // The dispatch loop, the startup reconcile, the reaper's dead-agent sweep, and the
-    // stalled-agent auto-nudge ALL act ONLY on `in_progress` tasks that hold a herdr pane
-    // (reconcile/reaper select `status='in_progress' AND herdr_pane_id IS NOT NULL`; the
-    // nudge requires `phase==='in_progress'`). A parked idea is a feedback/waiting state
-    // with NO pane, NO session, and never-started — so it matches NONE of those paths and
-    // can never be "resumed", rescued, or nudged. (Asserted purely off the row markers so
-    // this stays side-effect-free in the shared-process test DB.)
+    // stalled-agent auto-nudge ALL act ONLY on `in_progress` tasks that hold a live agent
+    // (reconcile/reaper select `status='in_progress' AND has_agent=1`; the nudge requires
+    // `phase==='in_progress'`). A parked idea is a feedback/waiting state with NO agent, NO
+    // session, and never-started — so it matches NONE of those paths and can never be
+    // "resumed", rescued, or nudged. (Asserted purely off the row markers so this stays
+    // side-effect-free in the shared-process test DB.)
     const r = row(idea.id);
     expect(r.status).toBe("idea");
-    expect(r.herdr_pane_id).toBeNull();
+    expect(r.has_agent).toBe(0);
     expect(r.session_id).toBeNull();
     expect(r.started_at).toBeNull();
     // The dispatcher's queued gate (a pure read) never returns it.

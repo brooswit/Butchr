@@ -126,11 +126,10 @@ export type StoryAgentStatus = {
   storyId: string;
   /** The leader is DESIRED up (the story is open — supervisor relaunches on death). */
   desired: boolean;
-  /** A live herdr agent is registered under this story's leader name (async-probed). */
+  /** A live herdr agent is registered under this story's leader name (async-probed).
+   *  This — NOT a stored pane — is the honest "is it attachable" signal; the attach
+   *  targets the agent BY NAME. */
   running: boolean;
-  /** The current herdr pane/tab backing it. */
-  paneId: string | null;
-  tabId: string | null;
   /** The Claude session id butchr resumes on every relaunch. */
   sessionId: string | null;
   /** When the current run was (re)launched. */
@@ -373,7 +372,7 @@ async function performLaunch(storyId: string, fresh: boolean): Promise<void> {
   const herdrWorkspaceId = await ensureStoryWorkspace(story.workspace_id, cwd);
   rmSync(logFile(storyId), { force: true });
 
-  const { paneId, tabId } = await startAgentInFreshTab(harness, {
+  const { paneId } = await startAgentInFreshTab(harness, {
     name,
     cwd,
     argv,
@@ -384,8 +383,6 @@ async function performLaunch(storyId: string, fresh: boolean): Promise<void> {
 
   saveRow(storyId, {
     session_id: sessionId,
-    herdr_pane_id: paneId,
-    herdr_tab_id: tabId ?? null,
     herdr_workspace: herdrWorkspaceId ?? null,
     desired: 1,
     started_at: nowIso(),
@@ -408,23 +405,18 @@ async function performLaunch(storyId: string, fresh: boolean): Promise<void> {
   }).catch(() => {});
 }
 
-/** Adopt an already-live story leader (re-record its pane/tab; no relaunch). */
+/** Adopt an already-live story leader (mark it desired-up; no relaunch). */
 async function adoptStoryAgent(storyId: string): Promise<void> {
-  const name = storyAgentName(storyId);
   const row = getStoryAgentRow(storyId);
-  // Resolve the live pane/tab STRICTLY BY NAME — never fall back to the stored id,
-  // which goes stale after a herdr/host restart. If the name doesn't resolve, record
-  // null (no live addressable pane) rather than a stale column value.
-  const paneId = (await harness.agentPaneId(name)) ?? null;
-  const tabId = (await harness.agentTabId(name)) ?? null;
+  // Name-only addressing: there is no pane/tab to record — adoption just marks the
+  // leader desired-up and clears any stale last_error. The agent is reached BY NAME at
+  // action time (attach / teardown), so a herdr/host restart needs no re-recording here.
   saveRow(storyId, {
-    herdr_pane_id: paneId,
-    herdr_tab_id: tabId,
     desired: 1,
     started_at: row?.started_at ?? nowIso(),
     last_error: null,
   });
-  console.log(`[butchr] adopted live story leader for ${storyId} (pane ${paneId})`);
+  console.log(`[butchr] adopted live story leader for ${storyId}`);
 }
 
 /** Serialize a lifecycle op for a story behind its launchInFlight (single-instance). */
@@ -458,7 +450,7 @@ async function adoptOrLaunch(storyId: string, fresh: boolean): Promise<"adopted"
     console.log(
       `[butchr] story leader for ${storyId} has a registered pane but a DEAD claude (host reboot suspected) — tearing down the stale pane and relaunching (--resume)`,
     );
-    await harness.teardownTask(row?.herdr_tab_id, name, row?.herdr_pane_id).catch(() => {});
+    await harness.teardownTask(name).catch(() => {});
     await harness.agentDeregister(name).catch(() => {});
   }
   await performLaunch(storyId, fresh);
@@ -516,11 +508,10 @@ export function stopStoryAgent(storyId: string): Promise<StoryAgentStatus> {
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
     const name = storyAgentName(storyId);
-    const row = getStoryAgentRow(storyId);
-    await harness.teardownTask(row?.herdr_tab_id, name, row?.herdr_pane_id).catch(() => {});
+    await harness.teardownTask(name).catch(() => {});
     await harness.agentDeregister(name).catch(() => {});
     if (getStoryRow(storyId)) {
-      saveRow(storyId, { herdr_pane_id: null, herdr_tab_id: null, started_at: null });
+      saveRow(storyId, { started_at: null });
     }
     console.log(`[butchr] stopped story leader for ${storyId}`);
     return storyAgentStatus(storyId);
@@ -547,8 +538,6 @@ export async function storyAgentStatus(storyId: string): Promise<StoryAgentStatu
     storyId,
     desired: !!(row && row.desired === 1),
     running,
-    paneId: row?.herdr_pane_id ?? null,
-    tabId: row?.herdr_tab_id ?? null,
     sessionId: row?.session_id ?? null,
     since: row?.started_at ?? null,
     restarts: row?.restarts ?? 0,

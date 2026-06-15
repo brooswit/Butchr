@@ -44,13 +44,13 @@ beforeAll(async () => {
     )
     .run(DIR_ID, REPO_ROOT, "test", dbMod.nowIso());
 
-  // One plain, immediately-eligible READY `inactive` task (herdr_pane_id NULL,
+  // One plain, immediately-eligible READY `inactive` task (has_agent=0,
   // no dispatch backoff). This is the new dispatchable state (was `queued`).
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, has_agent, created_at) VALUES (?, ?, ?, ?, ?)`,
     )
-    .run("pause-q1", DIR_ID, "inactive", null, dbMod.nowIso());
+    .run("pause-q1", DIR_ID, "inactive", 0, dbMod.nowIso());
 });
 
 afterAll(() => {

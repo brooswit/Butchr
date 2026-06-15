@@ -97,8 +97,8 @@ describe("empty-submission guard (markReviewFromAgent)", () => {
     expect(r.review_note).toContain("EMPTY");
     // No CI verdict was produced for the (non-existent) empty diff.
     expect(r.ci_status ?? null).toBeNull();
-    // The live pane was torn down on the bounce (same as a normal changes-request).
-    expect(r.herdr_pane_id).toBeNull();
+    // The live agent was torn down on the bounce (same as a normal changes-request).
+    expect(r.has_agent).toBe(0);
   });
 
   test("a COMMITTED change enters review normally (unaffected)", async () => {

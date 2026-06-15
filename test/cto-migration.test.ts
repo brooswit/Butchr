@@ -20,12 +20,14 @@ beforeAll(async () => {
 
   // 1) Hand-build the OLD singleton-shape cto_agent table + a singleton row, then close.
   const old = new Database(DB_PATH, { create: true });
+  // The legacy singleton shape (its exact non-key columns don't matter — the migration
+  // DROPS this table wholesale because it lacks `workspace_id` — so we model just the
+  // PK + a couple of columns; the dropped per-agent pane/tab handles are intentionally
+  // omitted to match the post-cutover schema).
   old.exec(`
     CREATE TABLE cto_agent (
       id              TEXT PRIMARY KEY,
       session_id      TEXT,
-      herdr_pane_id   TEXT,
-      herdr_tab_id    TEXT,
       herdr_workspace TEXT,
       desired         INTEGER NOT NULL DEFAULT 0,
       started_at      TEXT,

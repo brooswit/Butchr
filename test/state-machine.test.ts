@@ -177,8 +177,8 @@ describe("2. the idea/spec_review gates (idea waits for a spec, then spec_review
     const SPEC = "Add a spec_review.txt file containing the word reviewed.";
     const idea = await tasksMod.createTask(DIR_ID, "make a spec_review file", [], [], "task", null, [], 0, false, true);
     expect(row(idea.id).status).toBe("idea");
-    // It is a WAITING state — no agent was launched (no pane/session).
-    expect(row(idea.id).herdr_pane_id).toBeNull();
+    // It is a WAITING state — no agent was launched (no live agent/session).
+    expect(row(idea.id).has_agent).toBe(0);
     expect(row(idea.id).session_id).toBeNull();
 
     await tasksMod.submitSpec(idea.id, SPEC);
@@ -200,7 +200,7 @@ describe("2. the idea/spec_review gates (idea waits for a spec, then spec_review
     const out = await tasksMod.approveTask(idea.id);
     expect(out.task.status).toBe("inactive");
     // Ready — no live agent yet (the dispatcher will launch it).
-    expect(row(idea.id).herdr_pane_id).toBeNull();
+    expect(row(idea.id).has_agent).toBe(0);
   });
 
   test("requesting spec changes sends it BACK to idea to await a revised spec (note preserved)", async () => {
@@ -286,7 +286,7 @@ describe("4. needs_info round-trip (any agent stage → ask → answer → resum
     expect(state).toBe("ok");
     expect(row(id).status).toBe("needs_info");
     expect(row(id).question).toBe("Per-user or global cache?");
-    expect(row(id).herdr_pane_id).toBeNull();
+    expect(row(id).has_agent).toBe(0);
 
     // Answering resumes the SAME session: back to inactive (ready), answer stored,
     // question cleared, session_id preserved.

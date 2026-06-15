@@ -1,10 +1,17 @@
 // Tests for the READY/RUNNING SPLIT boot migration (db.migrateReadyRunningSplit) — the
 // CRITICAL correctness point on the restart that activates the 12-state model. Under the
-// OLD model `in_progress` + a NULL `herdr_pane_id` meant READY (the dispatcher relaunched
-// it) and a pane meant a LIVE agent. The new model carries that distinction in the STATUS
-// itself: `inactive` = ready (the dispatcher keys on it), `in_progress` = a live agent. So
-// on the activating restart we MUST re-bucket every existing row, or a ready task would be
-// orphaned (the dispatcher no longer looks at `in_progress`+null-pane).
+// OLD model `in_progress` + a NULL pane meant READY (the dispatcher relaunched it) and a
+// pane meant a LIVE agent. The new model carries that distinction in the STATUS itself:
+// `inactive` = ready (the dispatcher keys on it), `in_progress` = a live agent. So on the
+// activating restart we MUST re-bucket every existing row, or a ready task would be
+// orphaned (the dispatcher no longer looks at a ready `in_progress` row).
+//
+// Post name-only cutover (story st-a77b050f): the legacy pane column is gone, so the
+// re-bucket keys off the honest `has_agent` marker (1 = a live launched agent). The
+// pane→has_agent BACKFILL that seeds has_agent on the activating boot now lives in
+// db.ensureForwardColumns (it runs once, before the pane column is dropped) — see
+// test/db-migrations.test.ts for the end-to-end backfill-then-drop safety test. Here we
+// test migrateReadyRunningSplit in isolation: it re-buckets purely off has_agent.
 //
 // This protects the live system: it asserts the migration maps legacy rows correctly AND
 // that the dispatcher's REAL selection (selectQueuedForDispatch) then picks up the migrated
@@ -25,15 +32,17 @@ function row(id: string) {
   return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;
 }
 
-// Seed a task row directly with an explicit status + pane (bypassing createTask) so we can
-// reproduce the OLD-model shapes the migration must re-bucket.
-function seed(id: string, status: string, paneId: string | null): void {
+// Seed a task row directly with an explicit status + honest ownership marker (bypassing
+// createTask) so we can reproduce the shapes the migration must re-bucket. `live` ⇔
+// has_agent=1 (a launched agent — the new model's RUNNING signal); !live ⇔ has_agent=0
+// (READY/no agent — what the migration re-buckets to `inactive`).
+function seed(id: string, status: string, live: boolean): void {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, herdr_tab_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, has_agent, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
     )
-    .run(id, DIR_ID, status, paneId, paneId ? `tab-${id}` : null, dbMod.nowIso());
+    .run(id, DIR_ID, status, live ? 1 : 0, dbMod.nowIso());
 }
 
 beforeAll(async () => {
@@ -59,46 +68,42 @@ afterAll(() => {
 });
 
 describe("migrateReadyRunningSplit (the restart that activates the 12-state model)", () => {
-  test("an in_progress+null-pane row (legacy READY) becomes inactive; a +pane row stays in_progress", () => {
-    // Legacy READY: in_progress with no live pane — the dispatcher used to relaunch it.
-    seed("rr-ready", "in_progress", null);
-    // Legacy RUNNING: in_progress with a live pane — a re-adopted agent.
-    seed("rr-running", "in_progress", "pane-running");
+  test("an in_progress row with NO agent (legacy READY) becomes inactive; one WITH an agent stays in_progress", () => {
+    // Legacy READY: in_progress with no live agent — the dispatcher used to relaunch it.
+    seed("rr-ready", "in_progress", false);
+    // Legacy RUNNING: in_progress with a live agent — a re-adopted agent.
+    seed("rr-running", "in_progress", true);
 
     dbMod.migrateReadyRunningSplit();
 
     // The ready row is re-bucketed to `inactive` so the dispatcher (now keying on
-    // `inactive`) can pick it up — NOT stranded as in_progress+null-pane.
+    // `inactive`) can pick it up — NOT stranded as a ready `in_progress`.
     expect(row("rr-ready").status).toBe("inactive");
     // The running row is left as-is so reconcileRunningTasks re-adopts its live agent.
     expect(row("rr-running").status).toBe("in_progress");
-    expect(row("rr-running").herdr_pane_id).toBe("pane-running");
-    // HONEST SIGNAL (story st-a77b050f): the migration BACKFILLS has_agent from the legacy
-    // pane signal and re-buckets off it (not the doomed pane column). The live row now
-    // carries has_agent=1; the re-bucketed ready row has has_agent=0.
+    // HONEST SIGNAL (story st-a77b050f): the migration re-buckets off has_agent. The live
+    // row keeps has_agent=1; the re-bucketed ready row still reads has_agent=0.
     expect(row("rr-running").has_agent).toBe(1);
     expect(row("rr-ready").has_agent).toBe(0);
   });
 
-  test("a lingering finalizing row is routed to in_review (pane cleared) — no agent stranded", () => {
+  test("a lingering finalizing row is routed to in_review — no agent stranded", () => {
     // finalizing is a REMOVED state; an approve-time merge is now mechanical. A row left
     // mid-finalize must not strand: route it to in_review for the operator to re-approve.
-    seed("rr-fin-pane", "finalizing", "pane-fin");
-    seed("rr-fin-null", "finalizing", null);
+    seed("rr-fin-live", "finalizing", true);
+    seed("rr-fin-dead", "finalizing", false);
 
     dbMod.migrateReadyRunningSplit();
 
-    for (const id of ["rr-fin-pane", "rr-fin-null"]) {
+    for (const id of ["rr-fin-live", "rr-fin-dead"]) {
       expect(row(id).status).toBe("in_review");
-      expect(row(id).herdr_pane_id).toBeNull();
-      expect(row(id).herdr_tab_id).toBeNull();
     }
   });
 
   test("after the migration the dispatcher SELECTS the migrated-ready task (not orphaned)", () => {
     // The whole point: a legacy ready row must be dispatchable again post-migration. Use
     // the REAL selection the tick calls so the wiring is exercised, not a replica.
-    seed("rr-select", "in_progress", null);
+    seed("rr-select", "in_progress", false);
     dbMod.migrateReadyRunningSplit();
     expect(row("rr-select").status).toBe("inactive");
 
@@ -107,12 +112,12 @@ describe("migrateReadyRunningSplit (the restart that activates the 12-state mode
   });
 
   test("idempotent: re-running it is a no-op once converged (a live in_progress is untouched)", () => {
-    // In the new model a running in_progress ALWAYS has a pane, so re-running the migration
-    // never wrongly demotes a live agent.
-    seed("rr-idem", "in_progress", "pane-idem");
+    // In the new model a running in_progress ALWAYS has has_agent=1, so re-running the
+    // migration never wrongly demotes a live agent.
+    seed("rr-idem", "in_progress", true);
     dbMod.migrateReadyRunningSplit();
     dbMod.migrateReadyRunningSplit();
     expect(row("rr-idem").status).toBe("in_progress");
-    expect(row("rr-idem").herdr_pane_id).toBe("pane-idem");
+    expect(row("rr-idem").has_agent).toBe(1);
   });
 });

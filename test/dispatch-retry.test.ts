@@ -7,7 +7,7 @@
 // What this exercises:
 //   1. markDispatchFailure — increments dispatch_attempts, records the error, and
 //      schedules a FUTURE next_dispatch_at backoff while under the cap (re-armed as
-//      READY `inactive` with herdr_pane_id NULL), then GIVES UP to `failed`
+//      READY `inactive` with has_agent=0), then GIVES UP to `failed`
 //      (clearing next_dispatch_at) at the cap. The dispatcher then stops retrying.
 //   2. dispatchBackoffMs — exponential growth capped at the configured cap.
 //   3. markRunning — flips inactive→in_progress and RESETS the retry state.
@@ -74,12 +74,12 @@ function seedTask(opts: {
   sessionId?: string | null;
   attempts?: number;
   nextAt?: string | null;
-  herdrPaneId?: string | null;
+  hasAgent?: boolean;
 }): string {
   const created = dbMod.nowIso();
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, session_id, dispatch_attempts, next_dispatch_at, herdr_pane_id, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, session_id, dispatch_attempts, next_dispatch_at, has_agent, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -89,7 +89,7 @@ function seedTask(opts: {
       opts.sessionId ?? null,
       opts.attempts ?? 0,
       opts.nextAt ?? null,
-      opts.herdrPaneId ?? null,
+      opts.hasAgent ? 1 : 0,
       created,
     );
   taskmdMod.writeTaskMd(
@@ -231,9 +231,9 @@ describe("markRunning resets retry state", () => {
     tasksMod.markRunning(id, "pane-1", "11111111-2222-3333-4444-555555555555", "tab-1");
 
     const row = dbRow(id);
-    // Flipped inactive→in_progress — it's now LIVE (pane is set).
+    // Flipped inactive→in_progress — it's now LIVE (has_agent set).
     expect(row.status).toBe("in_progress");
-    expect(row.herdr_pane_id).toBe("pane-1"); // pane now set → LIVE agent
+    expect(row.has_agent).toBe(1); // now LIVE agent
     expect(row.dispatch_attempts).toBe(0);
     expect(row.last_dispatch_error).toBeNull();
     expect(row.next_dispatch_at).toBeNull();
@@ -267,11 +267,11 @@ describe("reject / re-queue do NOT count as dispatch failures", () => {
   });
 
   test("backToQueued (clean re-queue, e.g. reconcile) resets retry state too", async () => {
-    // Seed as LIVE `in_progress` (herdr_pane_id set — this was the old `running`).
+    // Seed as LIVE `in_progress` (has_agent=1 — this was the old `running`).
     const id = seedTask({
       id: "backqueue-reset",
       status: "in_progress",
-      herdrPaneId: "pane-stale",
+      hasAgent: true,
       attempts: 2,
       nextAt: new Date(Date.now() + 5000).toISOString(),
     });
@@ -282,8 +282,8 @@ describe("reject / re-queue do NOT count as dispatch failures", () => {
     await tasksMod.backToQueued(id);
 
     const row = dbRow(id);
-    expect(row.status).toBe("inactive"); // READY again (pane cleared)
-    expect(row.herdr_pane_id).toBeNull();
+    expect(row.status).toBe("inactive"); // READY again (agent cleared)
+    expect(row.has_agent).toBe(0);
     expect(row.dispatch_attempts).toBe(0);
     expect(row.next_dispatch_at).toBeNull();
     expect(row.last_dispatch_error).toBeNull();
@@ -292,7 +292,7 @@ describe("reject / re-queue do NOT count as dispatch failures", () => {
 
 describe("requeueTask (operator escape hatch)", () => {
   test("revives a backoff'd inactive task to inactive with a clean retry state", async () => {
-    // Seed an `inactive` task stuck in backoff (herdr_pane_id NULL, future next_dispatch_at).
+    // Seed an `inactive` task stuck in backoff (has_agent=0, future next_dispatch_at).
     const id = seedTask({
       id: "requeue-backoff",
       status: "inactive",

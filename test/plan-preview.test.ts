@@ -172,9 +172,9 @@ describe("plan -> needs_info -> approve -> resume (mock the agent)", () => {
     // exactly as markRunning would after the first dispatch.
     dbMod.db
       .query(
-        `UPDATE tasks SET status='in_progress', session_id=?, herdr_pane_id=?, started_at=? WHERE id=?`,
+        `UPDATE tasks SET status='in_progress', session_id=?, has_agent=1, started_at=? WHERE id=?`,
       )
-      .run(SESSION, "pane-9", dbMod.nowIso(), pp.id);
+      .run(SESSION, dbMod.nowIso(), pp.id);
 
     // The agent (mocked) calls propose_plan with its implementation plan.
     const PLAN =
@@ -193,7 +193,7 @@ describe("plan -> needs_info -> approve -> resume (mock the agent)", () => {
     const parked = row(pp.id);
     expect(parked.status).toBe("needs_info");
     expect(parked.question).toBe(PLAN);
-    expect(parked.herdr_pane_id).toBeNull();
+    expect(parked.has_agent).toBe(0);
     expect(parked.session_id).toBe(SESSION);
 
     // The operator approves with a 'proceed' decision.

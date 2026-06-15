@@ -109,11 +109,10 @@ export type CtoStatus = {
   enabled: boolean;
   /** The operator/boot WANTS it up (supervisor relaunches on death). */
   desired: boolean;
-  /** A live herdr agent is registered under this workspace's CTO name (async-probed). */
+  /** A live herdr agent is registered under this workspace's CTO name (async-probed).
+   *  This — NOT a stored pane — is the honest "is it attachable" signal; the attach
+   *  targets the agent BY NAME. */
   running: boolean;
-  /** The current herdr pane backing it (for the 'Open CTO terminal' attach). */
-  paneId: string | null;
-  tabId: string | null;
   /** The Claude session id butchr resumes on every relaunch. */
   sessionId: string | null;
   /** When the current run was (re)launched. */
@@ -417,7 +416,7 @@ async function performLaunch(workspaceId: string, fresh: boolean): Promise<void>
   // close the husk root pane, and re-resolve the agent's real pane surviving herdr's
   // positional renumber — the same sequence the dispatcher runs (it wraps this in its
   // per-workspace pane lock; the single-instance CTO launch needs no such lock).
-  const { paneId, tabId } = await startAgentInFreshTab(harness, {
+  const { paneId } = await startAgentInFreshTab(harness, {
     name,
     cwd,
     argv,
@@ -428,8 +427,6 @@ async function performLaunch(workspaceId: string, fresh: boolean): Promise<void>
 
   saveCtoAgentRow(workspaceId, {
     session_id: sessionId,
-    herdr_pane_id: paneId,
-    herdr_tab_id: tabId ?? null,
     herdr_workspace: herdrWorkspaceId ?? null,
     desired: 1,
     started_at: nowIso(),
@@ -452,23 +449,18 @@ async function performLaunch(workspaceId: string, fresh: boolean): Promise<void>
   }).catch(() => {});
 }
 
-/** Adopt an already-live CTO agent for a workspace (re-record its pane/tab; no relaunch). */
+/** Adopt an already-live CTO agent for a workspace (mark it desired-up; no relaunch). */
 async function adoptCtoAgent(workspaceId: string): Promise<void> {
-  const name = ctoAgentName(workspaceId);
   const row = getCtoAgentRow(workspaceId);
-  // Resolve the live pane/tab STRICTLY BY NAME — never fall back to the stored id,
-  // which goes stale after a herdr/host restart. If the name doesn't resolve, record
-  // null (no live addressable pane) rather than a stale column value.
-  const paneId = (await harness.agentPaneId(name)) ?? null;
-  const tabId = (await harness.agentTabId(name)) ?? null;
+  // Name-only addressing: there is no pane/tab to record — adoption just marks the
+  // agent desired-up and clears any stale last_error. The agent is reached BY NAME at
+  // action time (attach / teardown), so a herdr/host restart needs no re-recording here.
   saveCtoAgentRow(workspaceId, {
-    herdr_pane_id: paneId,
-    herdr_tab_id: tabId,
     desired: 1,
     started_at: row?.started_at ?? nowIso(),
     last_error: null,
   });
-  console.log(`[butchr] adopted live CTO agent for ${workspaceId} (pane ${paneId})`);
+  console.log(`[butchr] adopted live CTO agent for ${workspaceId}`);
 }
 
 /** Serialize a lifecycle op for a workspace behind its launchInFlight (single-instance). */
@@ -524,7 +516,7 @@ async function adoptOrLaunch(workspaceId: string, fresh: boolean): Promise<"adop
     console.log(
       `[butchr] CTO agent for ${workspaceId} has a registered pane but a DEAD claude (host reboot suspected) — tearing down the stale pane and relaunching (--resume)`,
     );
-    await harness.teardownTask(row?.herdr_tab_id, name, row?.herdr_pane_id).catch(() => {});
+    await harness.teardownTask(name).catch(() => {});
     await harness.agentDeregister(name).catch(() => {});
   }
   await performLaunch(workspaceId, fresh);
@@ -583,12 +575,9 @@ export function stopCtoAgent(workspaceId: string): Promise<CtoStatus> {
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
     const name = ctoAgentName(workspaceId);
-    const row = getCtoAgentRow(workspaceId);
-    await harness
-      .teardownTask(row?.herdr_tab_id, name, row?.herdr_pane_id)
-      .catch(() => {});
+    await harness.teardownTask(name).catch(() => {});
     await harness.agentDeregister(name).catch(() => {});
-    saveCtoAgentRow(workspaceId, { herdr_pane_id: null, herdr_tab_id: null, started_at: null });
+    saveCtoAgentRow(workspaceId, { started_at: null });
     console.log(`[butchr] stopped CTO agent for ${workspaceId}`);
     return publishStatus(workspaceId);
   });
@@ -616,8 +605,6 @@ export async function ctoAgentStatus(workspaceId: string): Promise<CtoStatus> {
     enabled: isCtoEnabled(workspaceId),
     desired: !!(row && row.desired === 1),
     running,
-    paneId: row?.herdr_pane_id ?? null,
-    tabId: row?.herdr_tab_id ?? null,
     sessionId: row?.session_id ?? null,
     since: row?.started_at ?? null,
     restarts: row?.restarts ?? 0,

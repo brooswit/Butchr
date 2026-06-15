@@ -31,7 +31,7 @@ import {
   workspaceReleaseMode,
   workspaceVersionFile,
 } from "./workspaces.ts";
-import { currentPaneRepairing, readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
+import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
 import { publish } from "./events.ts";
@@ -1019,11 +1019,11 @@ async function teardownAndDiscard(
   if (captureUsage) captureSessionUsage(row.id);
   if (background) {
     void (async () => {
-      await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id).catch(() => {});
+      await herdr.teardownTask(row.id).catch(() => {});
       await git.cleanup(dir.path, row.id).catch(() => {});
     })();
   } else {
-    await herdr.teardownTask(row.herdr_tab_id, row.id, row.herdr_pane_id);
+    await herdr.teardownTask(row.id);
     await git.cleanup(dir.path, row.id).catch(() => {});
   }
 }
@@ -1610,17 +1610,16 @@ export async function setBlockedBy(
   }
 
   // Transitioning INTO blocked from inactive/in_progress/in_review.
-  if (row.herdr_pane_id || row.herdr_tab_id) {
-    // KILL-ON-BLOCK: a live agent (running/idle) — tear it down so nothing keeps
-    // running, then clear the running/herdr fields (mirrors backToQueued) while
-    // KEEPING session_id + worktree for a later --resume. NOT a dispatch failure.
-    await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  if (row.has_agent) {
+    // KILL-ON-BLOCK: a live agent (running/idle) — tear it down BY NAME so nothing
+    // keeps running, then clear the running fields (mirrors backToQueued) while KEEPING
+    // session_id + worktree for a later --resume. NOT a dispatch failure. setStatus's
+    // exit rule clears has_agent on the move off in_progress.
+    await herdr.teardownTask(id);
   }
   setStatus(id, "blocked", {
     note: "blocked on new dependencies (operator)",
     set: {
-      herdr_pane_id: null,
-      herdr_tab_id: null,
       output_snapshot: null,
       conflict: 0,
       idle: 0,
@@ -1694,19 +1693,17 @@ export type ApproveOutcome = {
 async function requestChanges(
   id: string,
   note: string,
-  paneId: string | null,
-  tabId: string | null,
   eventNote: string,
 ): Promise<void> {
   // RESUME the workspace agent: move the task back to `inactive` (ready — pane NULL)
   // so the dispatcher re-launches the SAME Claude session via `--resume` with the
   // notes, flipping it to in_progress on launch. The agent already exited after the
   // non-blocking request_review, so there is no live call to resolve; tear down any
-  // lingering tab defensively (a misbehaving agent that didn't exit would otherwise
-  // strand an orphan that collides on `agent_name_taken`), and clear the stored tab id
-  // since the re-dispatch spins up a fresh one. Shared by the in_review request-changes
-  // path and the approve-time merge-conflict kick-back.
-  await herdr.teardownTask(tabId, id, paneId);
+  // lingering tab defensively BY NAME (a misbehaving agent that didn't exit would
+  // otherwise strand an orphan that collides on `agent_name_taken`); the re-dispatch
+  // spins up a fresh one. Shared by the in_review request-changes path and the
+  // approve-time merge-conflict kick-back.
+  await herdr.teardownTask(id);
   // This is a REWORK re-queue (a request-changes or a conflict kick-back), NOT a
   // dispatch failure — it's a fresh intent to run, so clear the dispatch retry
   // state (attempts / last error / backoff) so prior dispatch failures don't
@@ -1717,8 +1714,6 @@ async function requestChanges(
     note: eventNote,
     set: {
       review_note: note,
-      herdr_pane_id: null,
-      herdr_tab_id: null,
       output_snapshot: null,
       summary: null,
       conflict: 0,
@@ -2045,13 +2040,7 @@ export async function respondToFeedback(
       return { task: taskView(id)! };
     }
     // in_review REQUEST CHANGES → RESUME the workspace agent with the notes.
-    await requestChanges(
-      id,
-      note,
-      row.herdr_pane_id,
-      row.herdr_tab_id,
-      "changes requested by reviewer",
-    );
+    await requestChanges(id, note, "changes requested by reviewer");
     emitUpdated(id);
     return { task: taskView(id)! };
   }
@@ -2132,12 +2121,12 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   const landed: TaskStatus = isRollback ? "rolled_back" : "merged";
   // Enter the rollback lifecycle tail before the mechanical merge (idempotent on a
   // recovery re-entry where the task is already `rolling_back`). The agent has exited,
-  // so clear its pane/note.
+  // so clear its note.
   if (isRollback && row.status === "in_review") {
     setStatus(id, "rolling_back", {
       from: "in_review",
       note: "approved — rolling back (mechanical revert merge)",
-      set: { review_note: null, herdr_pane_id: null, herdr_tab_id: null, idle: 0, conflict: 0 },
+      set: { review_note: null, idle: 0, conflict: 0 },
     });
   }
 
@@ -2226,13 +2215,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       // Same channel as reject: into the live agent if blocked, else re-queue
       // (requestChanges tears down any lingering tab in the fallback). requestChanges
       // persists review_note + emits via setStatus, so we DON'T write/emit it again here.
-      await requestChanges(
-        id,
-        notes,
-        row.herdr_pane_id,
-        row.herdr_tab_id,
-        "merge conflict — sent back to agent",
-      );
+      await requestChanges(id, notes, "merge conflict — sent back to agent");
       return { task: taskView(id)!, conflictSentBack: true };
     }
     // Non-conflict merge failure — genuinely unusual/unsafe; surface to the human.
@@ -2252,7 +2235,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // the failing build/test output in `revert_reason` (surfaced by the webapp).
   if (gate.reverted) {
     const snapshot = readRunLogSnapshot(id);
-    await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+    await herdr.teardownTask(id);
     const reason = gate.verify?.output?.trim() || "(no verify output captured)";
     console.error(
       `[butchr] task ${id} merge AUTO-REVERTED: post-merge verify failed on the ` +
@@ -2270,8 +2253,6 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         set: {
           conflict: 0,
           idle: 0,
-          herdr_pane_id: null,
-          herdr_tab_id: null,
           output_snapshot: setIfPresent(snapshot || null),
           revert_reason: reason,
           last_dispatch_error: reason,
@@ -2307,8 +2288,6 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         review_note: null,
         conflict: 0,
         idle: 0,
-        herdr_pane_id: null,
-        herdr_tab_id: null,
         output_snapshot: snapshot || null,
         merge_base_sha: result.baseSha ?? null,
         merged_sha: result.mergedSha ?? null,
@@ -2435,8 +2414,6 @@ export async function abortTask(id: string): Promise<TaskView> {
       idle: 0,
       review_note: null,
       output_snapshot: null,
-      herdr_pane_id: null,
-      herdr_tab_id: null,
       completed_at: nowIso(),
     },
   });
@@ -2668,11 +2645,10 @@ export function markRunning(
       from: "inactive",
       note: row.started_at ? "agent resumed" : "agent launched",
       set: {
-        herdr_pane_id: paneId,
-        herdr_tab_id: tabId ?? null,
         // The honest "butchr owns a launched agent" marker — set atomically with
-        // status=in_progress + pane. Cleared on every exit (setStatus rule) / resume
-        // (requeueForResume). The truthful replacement for pane-as-liveness.
+        // status=in_progress. Cleared on every exit (setStatus rule) / resume
+        // (requeueForResume). The truthful replacement for the old pane-as-liveness
+        // proxy. Agents are addressed BY NAME, so no pane/tab id is persisted.
         has_agent: 1,
         session_id: keep(sessionId),
         started_at: keep(nowIso()),
@@ -2686,45 +2662,6 @@ export function markRunning(
   ) {
     return; // aborted / already running / moved under us
   }
-}
-
-/**
- * Record a re-adopted agent task's current herdr pane + tab id. Used by the startup
- * reconcile (dispatcher.reconcileRunningTasks) when an agent it re-adopts now lives on
- * a different pane/tab than the one stored before butchr restarted. Guarded on the live
- * agent state (`in_progress`) so a concurrent transition isn't clobbered. A missing
- * tabId leaves the stored value untouched (COALESCE) rather than nulling a still-valid tab.
- */
-export function adoptPane(id: string, paneId: string, tabId?: string): void {
-  const res = db.query(
-    `UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=COALESCE(?, herdr_tab_id) WHERE id=? AND status='in_progress'`,
-  ).run(paneId, tabId ?? null, id);
-  if (res.changes === 0) return;
-  emitUpdated(id);
-}
-
-/**
- * Repair a live task's STORED herdr_pane_id after herdr RENUMBERED it (a sibling
- * tab/pane closed shifted the positional ids). `livePaneId` is the CURRENT pane
- * resolved by agent name; we re-point the row to it so every reader of the stored
- * id (the UI's has-a-pane gate, teardown's husk defense, the live-output panel)
- * stops pointing at a now-dead sibling shell.
- *
- * Guarded so it only ever heals a genuine drift: the task must still be a LIVE build
- * agent (`in_progress`), already have a non-null pane id, and that id must actually
- * differ — so a no-drift tick is a silent no-op and we never resurrect a pane on a task
- * whose agent has exited (its id is NULL by then).
- * Returns true when it repaired (and emits an update so dashboards refresh).
- */
-export function repairPaneId(id: string, livePaneId: string): boolean {
-  if (!livePaneId) return false;
-  const res = db.query(
-    `UPDATE tasks SET herdr_pane_id=? WHERE id=? AND status='in_progress'
-       AND herdr_pane_id IS NOT NULL AND herdr_pane_id<>?`,
-  ).run(livePaneId, id, livePaneId);
-  if (res.changes === 0) return false;
-  emitUpdated(id);
-  return true;
 }
 
 /**
@@ -2852,14 +2789,14 @@ function parkExitingAgent(
 
   // Flip status. setStatus records the audit event ONLY on a genuine change (a duplicate
   // already-parked call is status-unchanged, so no event) — matching the old per-call
-  // guards. Clears the pane (the agent is exiting; the state holds no live process).
+  // guards. setStatus's exit rule clears has_agent (the agent is exiting; the state holds
+  // no live process).
   if (
     !setStatus(id, to, {
       from: opts.from ?? ["in_progress", to],
       note: opts.note,
       set: {
         idle: 0,
-        herdr_pane_id: null,
         output_snapshot: snapshot || null,
         ...extraSet,
       },
@@ -2886,23 +2823,19 @@ function parkExitingAgent(
  * DEAD-AGENT FALLBACK: move an `in_progress` task to `in_review` because its agent
  * ended WITHOUT calling request_review (the watcher / startup reconcile rescue path;
  * the live path is markReviewFromAgent). Guarded on the build phase being live
- * (in_progress + a pane) so a task aborted while its agent was finishing isn't
- * resurrected. The caller is already tearing down the tab — we clear the ids.
+ * (in_progress) so a task aborted while its agent was finishing isn't resurrected. The
+ * caller tears the agent down BY NAME; setStatus's exit rule clears has_agent.
  */
 export function markInReview(id: string, snapshot: string): void {
   // Rescue from in_progress ONLY (narrower than the request_review path's array `from`),
   // using the caller-supplied snapshot. completed_at is stamped plain (not keep) and
-  // output_snapshot written raw, preserving this path's exact columns. Unlike the two
-  // agent-tool paths (which clear only herdr_pane_id), this rescue ALSO clears
-  // herdr_tab_id — the caller is tearing the tab down — so it's carried in extraSet to
-  // reproduce this path's original column set exactly. Return ignored.
+  // output_snapshot written raw, preserving this path's exact columns. Return ignored.
   parkExitingAgent(
     id,
     "in_review",
     {
       completed_at: nowIso(),
       output_snapshot: snapshot,
-      herdr_tab_id: null,
       // Reaching review IS progress — clear the auto-resume streak.
       resume_attempts: 0,
       // A fresh review cycle starts the major double-confirm streak at 0 (re-review reset).
@@ -2940,7 +2873,7 @@ function emptySubmissionNote(id: string, base: string): string {
  * agent — approval merges MECHANICALLY, see finalizeMerge):
  *  - in_progress → in_review: the build is done; surface the diff for operator review
  *    (runs the CI + conformance gates + footprint, non-blocking). The agent EXITS
- *    right after, so we clear herdr_pane_id (its pane is about to close).
+ *    right after, so setStatus's exit rule clears has_agent (its pane is about to close).
  *  - in_review (duplicate call) → no-op ok.
  *
  * EMPTY-SUBMISSION GUARD (FIRST): an in_progress submission carrying NO work — zero
@@ -2986,8 +2919,6 @@ export async function markReviewFromAgent(
         await requestChanges(
           id,
           emptySubmissionNote(id, base),
-          row.herdr_pane_id,
-          row.herdr_tab_id,
           "empty review submission bounced — no changes vs base",
         );
         return "empty";
@@ -3020,9 +2951,9 @@ export async function markReviewFromAgent(
  * Park the live build agent's task in `needs_info` because the agent called the MCP
  * `raise` tool (the ad-hoc feedback stage the `in_progress` agent can enter). Mirrors
  * markReviewFromAgent's non-blocking shape: the agent EXITS right after this returns,
- * so needs_info is pure DB state with no live process (we clear herdr_pane_id — its
- * pane is about to close). Stores what the agent raised in `question` (surfaced in
- * /health + the webapp) and the run-log snapshot for the answerer.
+ * so needs_info is pure DB state with no live process (setStatus's exit rule clears
+ * has_agent). Stores what the agent raised in `question` (surfaced in /health + the
+ * webapp) and the run-log snapshot for the answerer.
  *
  * Returns:
  *  - "ok"        → parked in needs_info (or already there — a duplicate ask).
@@ -3051,8 +2982,8 @@ export function markNeedsInfoFromAgent(
  * answer half of the unified feedback mechanism). Logs the Q&A to task.md, stores the
  * `answer` (which dispatcher.dispatch injects into the `--resume` prompt and markRunning
  * consumes), clears the pending question, resets the dispatch retry state, and re-arms
- * the task as a READY `inactive` (pane NULL) KEEPING session_id + worktree so the
- * dispatcher resumes the SAME Claude session with full prior context.
+ * the task as a READY `inactive` KEEPING session_id + worktree so the dispatcher resumes
+ * the SAME Claude session with full prior context.
  */
 async function resumeWithAnswer(
   id: string,
@@ -3061,7 +2992,7 @@ async function resumeWithAnswer(
   answer: string,
 ): Promise<void> {
   appendAnswer(dirPath, id, row.question ?? "", answer, nowIso());
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  await herdr.teardownTask(id);
   // The caller (respondToFeedback) only routes a needs_info task here, so the
   // unconditional re-arm to inactive records the needs_info → inactive event.
   setStatus(id, "inactive", {
@@ -3069,8 +3000,6 @@ async function resumeWithAnswer(
     set: {
       answer,
       question: null,
-      herdr_pane_id: null,
-      herdr_tab_id: null,
       output_snapshot: null,
       idle: 0,
       dispatch_attempts: 0,
@@ -3623,9 +3552,8 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
  *    NOT poke it — route to requeueForResume (tear down the husk + re-dispatch the same
  *    session via `--resume`) and return that task view. A dead pane is always RECOVERED,
  *    never poked — the same guard the dispatcher's handleIdleAgent applies.
- * On the live path: self-heal the stored pane id (currentPaneRepairing) so the send lands
- * on the agent's CURRENT pane (herdr may have renumbered it), send text+Enter, and record
- * an audit event.
+ * On the live path: send text+Enter (harness.send resolves the agent's CURRENT pane BY
+ * NAME, so a herdr renumber is handled at the seam), and record an audit event.
  */
 export async function nudgeTask(id: string, text?: string): Promise<TaskView> {
   const row = getTask(id);
@@ -3642,9 +3570,9 @@ export async function nudgeTask(id: string, text?: string): Promise<TaskView> {
     );
     return taskView(id)!;
   }
-  // Alive — self-heal the pane id so the send targets the agent's current pane, then send
-  // the steering line + Enter exactly as a human would (via the swappable harness seam).
-  await currentPaneRepairing(id);
+  // Alive — send the steering line + Enter exactly as a human would. harness.send
+  // resolves the agent's current pane BY NAME (the swappable harness seam), so a herdr
+  // renumber needs no stored-id self-heal.
   await harness.send(id, { text: line, enter: true });
   const note =
     line === "continue"
@@ -3662,11 +3590,10 @@ export async function backToQueued(id: string): Promise<void> {
   // failed dispatch never strands an orphan agent (or its tab) that would later
   // collide on `agent_name_taken`. Re-dispatch creates a fresh tab.
   //
-  // This is a CLEAN re-queue (fresh intent) → READY `inactive` (pane NULL), so the
-  // dispatcher relaunches it. It clears the dispatch retry state so it never counts as
-  // a dispatch failure. A genuine dispatch failure goes through markDispatchFailure.
-  const row = getTask(id);
-  await herdr.teardownTask(row?.herdr_tab_id, id, row?.herdr_pane_id);
+  // This is a CLEAN re-queue (fresh intent) → READY `inactive`, so the dispatcher
+  // relaunches it. It clears the dispatch retry state so it never counts as a dispatch
+  // failure. A genuine dispatch failure goes through markDispatchFailure.
+  await herdr.teardownTask(id);
   // Routed through setStatus so the re-queue keeps the task.md mirror in lockstep — the
   // raw write it replaced skipped it. No `from` guard (unconditional, as before); the
   // → inactive event fires only on a genuine change (setStatus skips it when already
@@ -3675,8 +3602,6 @@ export async function backToQueued(id: string): Promise<void> {
   setStatus(id, "inactive", {
     note: "re-queued",
     set: {
-      herdr_pane_id: null,
-      herdr_tab_id: null,
       idle: 0,
       dispatch_attempts: 0,
       last_dispatch_error: null,
@@ -3719,7 +3644,7 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
   if (!row) return;
   // Free any orphaned herdr agent/tab from the failed start so a retry doesn't
   // collide on `agent_name_taken`.
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  await herdr.teardownTask(id);
 
   const attempts = (row.dispatch_attempts ?? 0) + 1;
 
@@ -3730,8 +3655,6 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
         dispatch_attempts: attempts,
         last_dispatch_error: err,
         next_dispatch_at: null,
-        herdr_pane_id: null,
-        herdr_tab_id: null,
         completed_at: keep(nowIso()),
       },
     });
@@ -3755,8 +3678,6 @@ export async function markDispatchFailure(id: string, err: string): Promise<void
       dispatch_attempts: attempts,
       last_dispatch_error: err,
       next_dispatch_at: nextAt,
-      herdr_pane_id: null,
-      herdr_tab_id: null,
     },
   });
   console.warn(
@@ -3779,15 +3700,13 @@ export async function requeueTask(id: string): Promise<TaskView> {
     throw new HttpError(409, `task is ${row.status}; cannot re-queue`);
   }
   // Tear down any lingering agent/tab defensively before a fresh dispatch.
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  await herdr.teardownTask(id);
   setStatus(id, "inactive", {
     note: "manually re-queued by operator",
     set: {
       dispatch_attempts: 0,
       last_dispatch_error: null,
       next_dispatch_at: null,
-      herdr_pane_id: null,
-      herdr_tab_id: null,
       // Re-queuing an IDLE agent is a valid idle-handling action — clear the idle flag
       // (and, via setStatus, the captured idle_context) so nothing stale lingers.
       idle: 0,
@@ -3808,9 +3727,9 @@ export async function requeueTask(id: string): Promise<TaskView> {
  * (the `.done` exit-code file is the caller's separate discriminator), this resets the
  * task so the dispatcher re-launches it EXACTLY where it left off:
  *
- *  - Tears down the dead husk tab/pane so the re-dispatch starts a fresh tab and
+ *  - Tears down the dead husk tab/pane BY NAME so the re-dispatch starts a fresh tab and
  *    nothing collides on `agent_name_taken`.
- *  - Clears `herdr_pane_id` → the task is READY again; the normal dispatch tick relaunches
+ *  - Clears `has_agent` → the task is READY again; the normal dispatch tick relaunches
  *    it. Because `started_at` is set and (usually) `session_id` is kept, the dispatcher's
  *    resolveLaunchCommand picks `claude --resume <session_id>` — full prior context.
  *  - If the session TRANSCRIPT is gone (nothing to resume into), clears `session_id` so
@@ -3830,9 +3749,9 @@ export async function requeueForResume(
   const row = getTask(id);
   if (!row || row.status !== "in_progress") return "noop";
 
-  // Tear down the dead husk tab/pane (a fallen-to-shell pane, or a gone agent) so the
-  // re-dispatch spins up a fresh tab and the agent name is free. Best-effort.
-  await herdr.teardownTask(row.herdr_tab_id, id, row.herdr_pane_id);
+  // Tear down the dead husk tab/pane (a fallen-to-shell pane, or a gone agent) BY NAME so
+  // the re-dispatch spins up a fresh tab and the agent name is free. Best-effort.
+  await herdr.teardownTask(id);
 
   const attempts = (row.resume_attempts ?? 0) + 1;
 
@@ -3867,8 +3786,6 @@ export async function requeueForResume(
     !setStatus(id, "in_progress", {
       from: "in_progress",
       set: {
-        herdr_pane_id: null,
-        herdr_tab_id: null,
         // The killed agent is gone — clear the ownership marker even though the task
         // STAYS in_progress (awaiting the dispatcher's --resume relaunch). This is the
         // one in_progress→in_progress transition where has_agent must drop to 0, so it

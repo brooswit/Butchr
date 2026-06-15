@@ -162,21 +162,21 @@ describe("deleteStory NULLs out member tasks (does not delete them)", () => {
 
 // --- PHASE 6: COMPLETION DETECTION + SURFACING ------------------------------
 
-/** Seed a member task pinned to a story (with optional idle/pane for the idle peel-out). */
+/** Seed a member task pinned to a story (with optional idle/live-agent for the idle peel-out). */
 function seedMember(
   id: string,
   ws: string,
   storyId: string,
   status: string,
-  opts: { idle?: boolean; pane?: string } = {},
+  opts: { idle?: boolean; hasAgent?: boolean } = {},
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, story_id, herdr_pane_id, has_agent, idle, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, story_id, has_agent, idle, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    // has_agent mirrors the old pane-as-liveness (storyCounts' idle gate keys on it).
-    .run(id, ws, status, storyId, opts.pane ?? null, opts.pane ? 1 : 0, opts.idle ? 1 : 0, dbMod.nowIso());
+    // has_agent = a LIVE launched agent (storyCounts' idle gate keys on it).
+    .run(id, ws, status, storyId, opts.hasAgent ? 1 : 0, opts.idle ? 1 : 0, dbMod.nowIso());
 }
 
 /** Capture every `story.attention` event for a given story while `fn` runs. */
@@ -286,8 +286,8 @@ describe("Phase 6: member-task rollup + leader status surfacing", () => {
 
   test("storyCounts peels idle out of in_progress (mirrors workspace counts)", () => {
     const story = storiesMod.createStory(WS_A, "Idle rollup story");
-    seedMember("st6-ip-1", WS_A, story.id, "in_progress", { idle: true, pane: "pane-x" });
-    seedMember("st6-ip-2", WS_A, story.id, "in_progress", { pane: "pane-y" });
+    seedMember("st6-ip-1", WS_A, story.id, "in_progress", { idle: true, hasAgent: true });
+    seedMember("st6-ip-2", WS_A, story.id, "in_progress", { hasAgent: true });
     const counts = storiesMod.storyCounts(story.id);
     expect(counts.idle).toBe(1);
     expect(counts.in_progress).toBe(1); // the busy (non-idle) agent only
@@ -361,7 +361,7 @@ describe("resetStory aborts all IN-FLIGHT subtasks, leaving the story open", () 
   test("aborts non-terminal members; skips terminal + rolling_back; story stays open", async () => {
     const story = storiesMod.createStory(WS_A, "Reset me");
     seedMember("st-reset-inactive", WS_A, story.id, "inactive");
-    seedMember("st-reset-inprog", WS_A, story.id, "in_progress", { pane: "pane-r" });
+    seedMember("st-reset-inprog", WS_A, story.id, "in_progress", { hasAgent: true });
     seedMember("st-reset-merged", WS_A, story.id, "merged");
     seedMember("st-reset-rollingback", WS_A, story.id, "rolling_back");
 

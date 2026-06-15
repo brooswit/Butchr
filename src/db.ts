@@ -103,7 +103,6 @@ CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   status          TEXT NOT NULL,            -- CANONICAL 12-state model: idea | spec_review | blocked | needs_info | inactive | in_progress | in_review | merged | rolling_back | rolled_back | failed | aborted (see TaskStatus / STATE_META)
-  herdr_pane_id   TEXT,
   output_snapshot TEXT,
   conflict        INTEGER NOT NULL DEFAULT 0,
   review_note     TEXT,
@@ -156,8 +155,8 @@ CREATE TABLE IF NOT EXISTS settings (
 // singleton row is fine.)
 //   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
 //     supervised relaunch + boot-adopt so the CTO never cold-starts (see src/cto-agent.ts).
-//   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the
-//     pane backs the Open-CTO-terminal attach; positional pane ids may renumber).
+//   - herdr_workspace: its live herdr workspace grouping handle (per-butchr-workspace,
+//     stable). The CTO is addressed/torn-down BY NAME — no per-agent pane/tab is stored.
 //   - desired: 1 when the operator/boot wants it UP (supervisor relaunches on death),
 //     0 when explicitly stopped (supervisor leaves it down -- survives a restart).
 //   - restarts: count of supervised relaunches since the last fresh start.
@@ -176,8 +175,6 @@ function migrateCtoAgentPerWorkspace(): void {
     CREATE TABLE IF NOT EXISTS cto_agent (
       workspace_id    TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
       session_id      TEXT,
-      herdr_pane_id   TEXT,
-      herdr_tab_id    TEXT,
       herdr_workspace TEXT,
       desired         INTEGER NOT NULL DEFAULT 0,
       started_at      TEXT,
@@ -199,8 +196,9 @@ function migrateCtoAgentPerWorkspace(): void {
 // Runs AFTER createBaselineSchema (which creates `stories`) so the FK target exists.
 //   - session_id: the Claude Code session UUID, RESUMED (--resume) on every supervised
 //     relaunch + boot-adopt so the leader never cold-starts (see src/story-agent.ts).
-//   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the leader
-//     shares its workspace's herdr workspace, like the CTO agent).
+//   - herdr_workspace: its live herdr workspace grouping handle (the leader shares its
+//     workspace's herdr workspace, like the CTO agent). Addressed/torn-down BY NAME — no
+//     per-agent pane/tab is stored.
 //   - desired: 1 when butchr wants it UP (supervisor relaunches on death — a story is
 //     desired-up while it is `open`), 0 when explicitly stopped (done/aborted/deleted).
 //   - restarts: count of supervised relaunches since the last fresh start.
@@ -210,8 +208,6 @@ function migrateStoryAgentTable(): void {
     CREATE TABLE IF NOT EXISTS story_agent (
       story_id        TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
       session_id      TEXT,
-      herdr_pane_id   TEXT,
-      herdr_tab_id    TEXT,
       herdr_workspace TEXT,
       desired         INTEGER NOT NULL DEFAULT 0,
       started_at      TEXT,
@@ -361,12 +357,6 @@ ensureColumn("tasks", "idle_context", "TEXT");
 // the agent without holding a live, blocking process open. Persisted so it
 // survives a butchr restart while a task waits in `review`.
 ensureColumn("tasks", "session_id", "TEXT");
-
-// `herdr_tab_id` is the dedicated herdr tab the task's agent runs in (one tab per
-// task — see herdr.ts/dispatcher.ts). Unlike herdr_pane_id (positional, renumbers
-// when sibling panes close), the tab id is a stable handle: teardown closes the
-// whole tab so the agent dies and the tab disappears regardless of pane churn.
-ensureColumn("tasks", "herdr_tab_id", "TEXT");
 
 // Dispatch retry/backoff bookkeeping. A task whose dispatch() keeps throwing used
 // to re-queue and hot-loop every tick forever, silently. These columns make the
@@ -695,11 +685,44 @@ dropColumnIfExists("workspaces", "step_responders");
 // honest about what it IS — an OWNED-agent record, not a liveness claim — and is used
 // ONLY as the cheap SQL/JS pre-filter; the TRUE liveness signal at the recovery/nudge
 // sites stays the /proc probe (claudeAlive/agentExists). Default 0 (the value every
-// existing row backfills to); migrateReadyRunningSplit backfills 1 from the legacy pane
-// signal before re-bucketing. Standalone additive column (no surrounding edits) to keep
-// the merge-conflict surface minimal. Maintained in markRunning (=1), setStatus's exit
-// rule (=0 on any transition off in_progress), and requeueForResume (=0).
+// existing row backfills to); the one-shot backfill below seeds 1 from the legacy pane
+// signal BEFORE the pane column is dropped. Maintained in markRunning (=1), setStatus's
+// exit rule (=0 on any transition off in_progress), and requeueForResume (=0).
 ensureColumn("tasks", "has_agent", "INTEGER NOT NULL DEFAULT 0");
+
+// NAME-ONLY CUTOVER (story st-a77b050f, step 3 — final). Drop the per-agent EPHEMERAL
+// herdr handles `herdr_pane_id`/`herdr_tab_id` from tasks/cto_agent/story_agent: agents
+// are now addressed, torn down, and liveness-checked BY NAME (steps 1+2), so these
+// columns are dead persistence. (herdr_workspace — the stable per-butchr-workspace
+// grouping handle — is a DIFFERENT, out-of-scope column and stays.)
+//
+// MIGRATION SAFETY (load-bearing ORDER): the has_agent backfill that used to live in
+// migrateReadyRunningSplit (step 7) MUST run BEFORE we drop herdr_pane_id, and the whole
+// pass re-runs every boot. On the FIRST cutover boot of a DB at the pre-has_agent schema
+// (older non-self-hosted repos), the additive ensureColumn above defaults has_agent=0;
+// without this seed the step-7 re-bucket (`status='inactive' WHERE in_progress AND
+// has_agent=0`) would DEMOTE a genuinely-live agent to ready and orphan its claude. So we
+// seed has_agent=1 from the legacy pane signal HERE, guarded on the source column still
+// existing, immediately before the drop. Idempotent + self-disabling (the guard fails
+// once the column is gone), so it is NOT a lingering legacy migration.
+//
+// CRUCIAL: this runs in step 4 — BEFORE the `running`→`in_progress` status fold (step 6,
+// migrateStatusModel). So a pre-canonical legacy LIVE agent is still `status='running'`
+// (not yet `in_progress`) at this point; we MUST match BOTH live shapes — the pre-fold
+// `running` and an already-folded `in_progress` — or the still-`running` live agent would
+// backfill has_agent=0 and then be demoted to `inactive` by step 7. (Pre-canonical
+// `queued`/terminal rows never carried a live pane, so the pane signal is unambiguous.)
+if (columnExists(db, "tasks", "herdr_pane_id")) {
+  db.exec(
+    `UPDATE tasks SET has_agent=1 WHERE status IN ('in_progress','running') AND herdr_pane_id IS NOT NULL`,
+  );
+}
+dropColumnIfExists("tasks", "herdr_pane_id");
+dropColumnIfExists("tasks", "herdr_tab_id");
+dropColumnIfExists("cto_agent", "herdr_pane_id");
+dropColumnIfExists("cto_agent", "herdr_tab_id");
+dropColumnIfExists("story_agent", "herdr_pane_id");
+dropColumnIfExists("story_agent", "herdr_tab_id");
 }
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
@@ -761,41 +784,29 @@ export function migrateStatusModel(): void {
 // distinction in the STATUS itself: `inactive` = ready/queued (dispatcher keys on it),
 // `in_progress` = a live workspace agent. So on this boot we MUST re-bucket every
 // existing row or a ready task would be stranded (the dispatcher no longer looks at a
-// ready `in_progress` row). The re-bucket now keys off the honest `has_agent` marker
-// (backfilled from the legacy pane signal in the first statement below) rather than the
-// doomed `herdr_pane_id` column:
+// ready `in_progress` row). The re-bucket keys off the honest `has_agent` marker (seeded
+// from the legacy pane signal in ensureForwardColumns, immediately before the pane column
+// is dropped — see the name-only cutover block there):
 //   in_progress + no owned agent → inactive   (ready — the dispatcher will pick it up)
 //   in_progress + an owned agent → in_progress (running — reconcileRunningTasks re-adopts)
 // Lingering `finalizing` rows (a removed state — the post-approval merge is now
-// MECHANICAL, no finalize agent): route to `in_review` and clear the pane so the
-// operator re-approves into the new mechanical-merge-on-approve path rather than us
-// auto-merging stale work at boot without a fresh gate. Any orphaned finalize pane is
-// reaped (reapOrphans). Idempotent: in the new model a running `in_progress` ALWAYS has
-// has_agent=1 (markRunning sets status+marker atomically; a dispatch failure clears the
-// marker AND moves to `inactive`), so no steady-state `in_progress`+has_agent=0 lingers
-// and re-running this is a no-op once converged.
+// MECHANICAL, no finalize agent): route to `in_review` so the operator re-approves into
+// the new mechanical-merge-on-approve path rather than us auto-merging stale work at boot
+// without a fresh gate. Any orphaned finalize agent is reaped (reapOrphans). Idempotent:
+// in the new model a running `in_progress` ALWAYS has has_agent=1 (markRunning sets
+// status+marker atomically; a dispatch failure clears the marker AND moves to `inactive`),
+// so no steady-state `in_progress`+has_agent=0 lingers and re-running this is a no-op once
+// converged.
 export function migrateReadyRunningSplit(): void {
-  // BACKFILL the honest agent-ownership marker (has_agent) from the LEGACY pane-as-
-  // liveness signal, ONCE, BEFORE the re-bucket below reads it. Runs here (not in the
-  // additive-column step) so it follows migrateStatusModel's `running`→`in_progress`
-  // fold — at this point every legacy live agent is `in_progress` with its pane intact,
-  // so this is the single moment the pane truthfully marks "butchr owns a launched
-  // agent". Idempotent (sets 1→1 for steady-state running tasks markRunning already set).
-  // NOTE TO THE CUTOVER SUBTASK (st-a77b050f step 3): when you drop herdr_pane_id, REMOVE
-  // this one backfill line — it is the ONLY remaining dependency of this migration on the
-  // doomed column; the re-bucket below already keys off has_agent.
-  db.exec(
-    `UPDATE tasks SET has_agent=1 WHERE status='in_progress' AND herdr_pane_id IS NOT NULL`,
-  );
   // Re-bucket legacy READY rows — `in_progress` with NO owned agent — to `inactive` so the
   // dispatcher (which keys on `inactive`) picks them up instead of stranding them. Keyed
-  // on has_agent (NOT the doomed pane column): equivalent to the old pane-IS-NULL test
-  // after the backfill above, but it no longer references a column the cutover deletes.
+  // on has_agent (seeded from the legacy pane signal in ensureForwardColumns before the
+  // pane column was dropped): equivalent to the old pane-IS-NULL test.
   db.exec(
     `UPDATE tasks SET status='inactive' WHERE status='in_progress' AND has_agent=0`,
   );
   db.exec(
-    `UPDATE tasks SET status='in_review', herdr_pane_id=NULL, herdr_tab_id=NULL WHERE status='finalizing'`,
+    `UPDATE tasks SET status='in_review' WHERE status='finalizing'`,
   );
 }
 
@@ -811,8 +822,10 @@ export function migrateReadyRunningSplit(): void {
 //   3b. per-story story_agent table      (CREATE IF NOT EXISTS — after the baseline so
 //                                         its `stories` FK target exists; brand-new, no
 //                                         legacy shape to drop)
-//   4. additive forward columns         (ensureColumn ×N — must precede the folds,
-//                                        e.g. readyRunningSplit reads herdr_tab_id)
+//   4. additive forward columns         (ensureColumn ×N + retired-column drops — must
+//                                        precede the folds; this is also where the
+//                                        has_agent seed-then-drop name-only cutover runs,
+//                                        so readyRunningSplit can key purely on has_agent)
 //   5. fold out the retracted `stage` axis
 //   6. fold the pre-canonical status set into the 12-state model
 //   7. ready/running split + finalizing rescue
@@ -1152,18 +1165,16 @@ export type TaskRow = {
   id: string;
   workspace_id: string;
   status: TaskStatus;
-  herdr_pane_id: string | null;
   session_id: string | null;
-  herdr_tab_id: string | null;
   // HONEST AGENT-OWNERSHIP MARKER (story st-a77b050f): 1 ⇔ butchr LAUNCHED an agent for
   // this `in_progress` task and has not torn it down. It is the truthful replacement for
   // the old `herdr_pane_id IS NOT NULL`-as-liveness proxy — an OWNED-agent record, NOT a
   // process-liveness claim (it survives a herdr/host restart exactly like the pane did, so
   // TRUE liveness still comes from the /proc probe, claudeAlive in src/liveness.ts). Set
-  // once in markRunning (atomic with status=in_progress + pane), cleared centrally in
-  // setStatus on every exit from in_progress, and cleared explicitly in requeueForResume
-  // (which keeps status=in_progress while the agent is gone, awaiting --resume). See
-  // db.migrateReadyRunningSplit (backfill from the legacy pane signal).
+  // once in markRunning (atomic with status=in_progress), cleared centrally in setStatus
+  // on every exit from in_progress, and cleared explicitly in requeueForResume (which
+  // keeps status=in_progress while the agent is gone, awaiting --resume). Seeded from the
+  // legacy pane signal in db.ensureForwardColumns just before the pane column was dropped.
   has_agent: number;
   output_snapshot: string | null;
   conflict: number;
@@ -1340,8 +1351,6 @@ export function setSetting(key: string, value: string): void {
 export type CtoAgentRow = {
   workspace_id: string;
   session_id: string | null;
-  herdr_pane_id: string | null;
-  herdr_tab_id: string | null;
   herdr_workspace: string | null;
   desired: number; // 1 = should be running (supervised), 0 = stopped
   started_at: string | null;
@@ -1383,8 +1392,6 @@ export function saveCtoAgentRow(
   const next: CtoAgentRow = {
     workspace_id: workspaceId,
     session_id: cur?.session_id ?? null,
-    herdr_pane_id: cur?.herdr_pane_id ?? null,
-    herdr_tab_id: cur?.herdr_tab_id ?? null,
     herdr_workspace: cur?.herdr_workspace ?? null,
     desired: cur?.desired ?? 0,
     started_at: cur?.started_at ?? null,
@@ -1395,13 +1402,11 @@ export function saveCtoAgentRow(
   };
   db.query(
     `INSERT INTO cto_agent
-       (workspace_id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
+       (workspace_id, session_id, herdr_workspace,
         desired, started_at, restarts, last_error, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id) DO UPDATE SET
        session_id=excluded.session_id,
-       herdr_pane_id=excluded.herdr_pane_id,
-       herdr_tab_id=excluded.herdr_tab_id,
        herdr_workspace=excluded.herdr_workspace,
        desired=excluded.desired,
        started_at=excluded.started_at,
@@ -1411,8 +1416,6 @@ export function saveCtoAgentRow(
   ).run(
     next.workspace_id,
     next.session_id,
-    next.herdr_pane_id,
-    next.herdr_tab_id,
     next.herdr_workspace,
     next.desired,
     next.started_at,
@@ -1429,8 +1432,6 @@ export function saveCtoAgentRow(
 export type StoryAgentRow = {
   story_id: string;
   session_id: string | null;
-  herdr_pane_id: string | null;
-  herdr_tab_id: string | null;
   herdr_workspace: string | null;
   desired: number; // 1 = should be running (supervised), 0 = stopped
   started_at: string | null;
@@ -1471,8 +1472,6 @@ export function saveStoryAgentRow(
   const next: StoryAgentRow = {
     story_id: storyId,
     session_id: cur?.session_id ?? null,
-    herdr_pane_id: cur?.herdr_pane_id ?? null,
-    herdr_tab_id: cur?.herdr_tab_id ?? null,
     herdr_workspace: cur?.herdr_workspace ?? null,
     desired: cur?.desired ?? 0,
     started_at: cur?.started_at ?? null,
@@ -1483,13 +1482,11 @@ export function saveStoryAgentRow(
   };
   db.query(
     `INSERT INTO story_agent
-       (story_id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
+       (story_id, session_id, herdr_workspace,
         desired, started_at, restarts, last_error, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(story_id) DO UPDATE SET
        session_id=excluded.session_id,
-       herdr_pane_id=excluded.herdr_pane_id,
-       herdr_tab_id=excluded.herdr_tab_id,
        herdr_workspace=excluded.herdr_workspace,
        desired=excluded.desired,
        started_at=excluded.started_at,
@@ -1499,8 +1496,6 @@ export function saveStoryAgentRow(
   ).run(
     next.story_id,
     next.session_id,
-    next.herdr_pane_id,
-    next.herdr_tab_id,
     next.herdr_workspace,
     next.desired,
     next.started_at,

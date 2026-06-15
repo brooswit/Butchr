@@ -40,28 +40,21 @@ function makeFakeRunner(): AgentRunner {
           sends.push([name, input]);
         };
       }
-      // currentPaneRepairing → reconcilePane: report the stored pane, never drifted.
-      if (prop === "reconcilePane") {
-        return async (_name: string, stored?: string | null) => ({
-          paneId: stored ?? undefined,
-          drifted: false,
-        });
-      }
       return noop;
     },
   });
 }
 
-// A LIVE build agent: in_progress with a pane (the precondition setIdle/idle guards on).
+// A LIVE build agent: in_progress with has_agent=1 (the precondition setIdle/idle guards on).
 function seedLive(id: string, sessionId = "sess-" + id): void {
-  // A LIVE launched build agent: in_progress + pane + has_agent=1 (the honest ownership
+  // A LIVE launched build agent: in_progress + has_agent=1 (the honest ownership
   // marker markRunning sets; setIdle/nudge now gate on it instead of pane-as-liveness).
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, herdr_pane_id, has_agent, session_id, created_at)
-       VALUES (?, ?, 'in_progress', ?, 1, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, has_agent, session_id, created_at)
+       VALUES (?, ?, 'in_progress', 1, ?, ?)`,
     )
-    .run(id, DIR_ID, "pane-" + id, sessionId, dbMod.nowIso());
+    .run(id, DIR_ID, sessionId, dbMod.nowIso());
 }
 
 function rowOf(id: string) {
@@ -168,7 +161,7 @@ describe("dispatcher.handleIdleAgent (no more auto-nudge)", () => {
     liveMod.setCmdlineLister(() => [["claude", "--session-id", "sess-handle-alive"]]);
     await dispatchMod.handleIdleAgent("handle-alive", "in_progress", cfg.idleMs + 1);
     expect(sends).toEqual([]); // the blind "continue" is gone — left for the responder
-    expect(rowOf("handle-alive").herdr_pane_id).not.toBeNull(); // not torn down
+    expect(rowOf("handle-alive").has_agent).toBe(1); // not torn down
   });
 
   test("no-op off the in_progress build phase, before the log, or under the idle threshold", async () => {
