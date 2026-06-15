@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **3-level branch isolation (stories) — approved DESIGN.** New `CONTRIBUTING.md` §11
+  specifies the merge model for the next epic: `main` = trunk, each STORY gets a branch off
+  `main`, each SUBTASK merges into its STORY branch, and the completed story is re-gated and
+  merged into `main` so `main` only ever sees whole, verified stories. Documents the explicit
+  `base?` param threaded into the `git.ts` merge spine (keeping `git.ts` DB-free), the
+  story-worktree-mirrors-`dir` model (every merge/verify/reset invariant holds at both levels
+  with no special cases), lazy `butchr/story/<id>` branch creation, both-level CI/verify wiring
+  with story-level RED as a **hard block** (a red story never reaches `main`), per-level
+  rollback/sha semantics, the new `merging`/`merge_blocked` story states so `done` always means
+  "landed on `main`", and the per-story `isolated`-bit-captured-at-create guard (default OFF) so
+  the build never disturbs in-flight stories or standalone task→`main` merges. Design only — no
+  code; the merge-spine subtasks build against it phase by phase, additive and inert.
+
 ## [0.9.90] - 2026-06-15
 
 ### Added

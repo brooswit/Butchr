@@ -1053,3 +1053,252 @@ tool. However a change is authored, the gates are the same:
 - **Set test env before importing modules.** The `config`/`db` singletons read
   env at import time. In tests, set `BUTCHR_*` env **then** `await import(...)` —
   importing first locks in the wrong paths.
+
+---
+
+## 11. 3-level branch isolation (stories) — DESIGN
+
+> **Status: APPROVED DESIGN, not yet built.** This section is the signed-off
+> merge-model spec the *later* code subtasks build against. Every new path is
+> **guarded OFF by default**, so until the final activation subtask flips the
+> guard, butchr behaves **exactly** as documented in §1 (every task merges
+> straight to the default branch). Build it **phase by phase, additive and
+> inert**, mirroring how the stories epic landed.
+
+### 11.1 Goal & the core insight
+
+`main` is the trunk. Each **story** gets its own branch off `main`; each
+**subtask** merges into its **story branch**, not `main`; the completed story is
+**re-gated** and merged into `main`. So `main` only ever sees whole, verified
+stories. The CI/verify gate runs at **both** levels — subtask→story-branch (as
+tasks are gated today) **and** the whole story before story→`main`.
+
+The whole design rests on one mirroring insight: **a story worktree is to its
+subtasks exactly what the repo root `dir` is to standalone tasks today.** The
+repo root has `main` checked out; standalone tasks fast-forward into it and the
+post-merge verify runs there. We reproduce that one level down — an isolated open
+story gets a **story worktree** (a checkout on the story branch); subtasks
+fast-forward into it and the subtask post-merge verify runs in it. Because the
+ff-target is always a real checkout, every existing invariant (ff into a
+checkout, verify in that checkout, reset-on-red resets that checkout) holds at
+both levels with **no special cases**.
+
+Worktree layout for an isolated story (`<repo>` = the registered repo root):
+
+```
+<repo>/                          # main checked out — standalone tasks ff here (today)
+<repo>/butchr-story-<storyId>/   # NEW: story worktree, on butchr/story/<storyId>
+                                 #      subtasks ff here; subtask verify runs here
+<repo>/<subtaskId>/              # per-subtask worktree, branched FROM the story branch
+```
+
+### 11.2 Base resolution (git.ts stays DB-free)
+
+`git.ts` is DB-free and its functions resolve the merge target by calling
+`defaultBranch(dir)` internally. To retarget a subtask onto its story branch we
+thread an explicit **`base?: string`** (merge-target ref) param into every
+`git.ts` function that consumes the base, **defaulting to `defaultBranch(dir)`
+when absent** — so behavior is byte-for-byte unchanged wherever the param is not
+supplied. `tasks.ts` (which has story/DB access) resolves the per-task base via a
+new `resolveBase(row)` helper and passes it down. We deliberately **reject** a
+resolver-callback: it would punch DB access back into `git.ts` (breaking its
+DB-free purity), make the data-flow implicit, and be harder to unit-test than a
+plain string param.
+
+`git.ts` functions that gain the `base` param:
+
+| function | how it uses `base` |
+|----------|--------------------|
+| `createWorktree` | branch the new worktree **from** the base tip: `worktree add -b <taskId> <path> <base>` |
+| `worktreeIsReusable` | its stale-base probes (`branchContainsBase` / `branchOwnCommitCount`) measure vs `base` |
+| `commitsBehind` | `taskId..base` |
+| `hasChanges` | `branchOwnCommitCount` `base..taskId` |
+| `diff` | `base...taskId` |
+| `diffStat` | `base...taskId` |
+| `isBehindDefault` | `branchContainsBase(base)` |
+| `rebaseOntoDefault` | rebase the branch onto `base` (pre-dispatch) |
+| `merge` | rebase onto `base`; **plus** an ff-target (see §11.4), default `{dir, defaultBranch}` |
+
+`taskDiffIsDocsOnly` and `bumpVersionFile` already take `base`. `resetHard(dir,
+sha)` and `headSha(dir)` need **no** signature change — the caller passes the
+**story worktree path** instead of `dir` for a subtask. `cleanup` needs no base.
+
+### 11.3 Story branch — naming, creation, idempotency
+
+- **Name:** `butchr/story/<storyId>` (pure `storyBranchName` helper). The
+  `butchr/story/` prefix can't collide with task branches (named by task id) or
+  `main`.
+- **Created lazily** off the **current `main` tip** the first time an isolated
+  story actually needs it — right before its first subtask worktree is branched
+  (an `ensureStoryBranch(dir, storyBranch)` runs in the base-resolution path
+  before `createWorktree`). Lazy beats eager-on-open: a story opened but never
+  decomposed never leaves an orphan branch, and `createStory` stays
+  side-effect-light.
+- **Idempotent / restart-safe:** `ensureStoryBranch` mirrors `createWorktree`'s
+  validate-or-rebuild — reuse a valid story branch + worktree, rebuild a
+  broken/missing one; the story-worktree dir is added to `.git/info/exclude` like
+  task worktrees.
+- **"`main` moved since open" is a non-issue at creation** (the cut point is
+  whenever the branch is lazily made). `main`'s later drift is reconciled at
+  completion by the rebase-onto-`main` (§11.4).
+
+### 11.4 The 3-level rebase strategy
+
+1. **subtask → story branch** (today's flow, retargeted). The pre-dispatch
+   `rebaseOntoDefault` uses `base = story branch`. `merge()` rebases the subtask
+   onto the story-branch tip in the subtask worktree, then fast-forwards the
+   **story worktree** to it (`git -C <storyWt> merge --ff-only <subtaskBranch>`)
+   — identical ff mechanics to `main` today, just a different checkout. In-flight
+   sibling subtasks **are kept current with the advancing story branch**: the
+   pre-dispatch rebase retargets `base = story branch`, exactly as it tracks
+   `main` today.
+2. **story → `main`** (on completion). The story branch was cut from `main` and
+   `main` has since moved, so rebase the story branch onto current `main`
+   **in the story worktree**, then ff `main` at `dir`. This is exactly today's
+   `merge()` flow with task = story-branch and base = `main`, so we generalize /
+   reuse `merge()`.
+   - **story ↔ `main` conflict:** the leader is an **operator** (no worktree of
+     its own) and cannot resolve code conflicts. On conflict, abort (story branch
+     **and** `main` left untouched) and fire a `story-merge-conflict` attention
+     event **up the existing escalation chain** (leader → CTO → user). Resolution
+     is a CTO/human action performed **in the story worktree** (rebase the story
+     branch onto `main`, resolve, then re-trigger the story→`main` merge). The
+     story does **not** complete (see §11.7). *(Future, not built: an
+     auto-spawned reconcile agent in the story worktree.)*
+   - **Global merge queue:** story→`main` moves `main`, so it **must** go through
+     `runExclusiveMerge`. For the first cut, **all** merges (subtask→story **and**
+     story→`main`) route through the **single existing global queue** — simplest,
+     proven, and it guarantees a story→`main` merge never races a subtask→story
+     merge of the same story. *(Per-story queues for cross-story parallelism = a
+     noted future optimization.)*
+
+### 11.5 Both-level CI/verify wiring
+
+- **Subtask CI at review** (`triggerCi`): the build/test command runs in the
+  subtask worktree — **base-agnostic, unchanged**. But `triggerCi`'s
+  changelog-gate and allowlist-gate call `git.diffStat` (`base...taskId`), so
+  thread `base = story branch` there, so a member's diff is measured against the
+  story branch, not `main`.
+- **Subtask post-merge verify** (`finalizeMerge`): today the
+  `priorTip`-capture / `verifyDefaultBranch` / reset-on-red target `dir`
+  (`main`). For an isolated member, retarget them to the **story** worktree /
+  branch: capture the story-branch tip before the ff, ff into the story worktree,
+  run `verifyDefaultBranch` in the **story** worktree, and on RED `resetHard` the
+  **story** worktree to the captured story-branch `priorTip`. This is driven by a
+  `resolveMergeContext(row)` → `{ ffWorktree, targetBranch, base }`: standalone =
+  `{ dir, main, main }`; isolated member = `{ storyWt, storyBranch, storyBranch }`.
+- **Story-level re-gate** (before story→`main`, on the completion path): re-run
+  the gate on the **story-branch tip in the story worktree** (already checked out
+  there at the story tip). Then the story→`main` merge; **after** the `main` ff,
+  run the post-merge verify in `dir` and `resetHard` `dir` to the captured
+  `main` `priorTip` on RED — exactly today's `main`-level flow.
+
+**Story-level RED is a HARD BLOCK (refinement #1).** This is **not** merely the
+`main`-level reset-on-red. If the story-level re-gate (CI on the story-branch tip
+**before** story→`main`) comes back RED, then: the story→`main` merge **does not
+run**, the story **does not complete**, `main` is **never touched**, and the
+leader is **notified** (a `story-gate-red` attention event up the chain) to fix
+it via **more subtasks**. A red story must **never** reach `main`. (The post-merge
+verify in `dir` *after* a green re-gate + ff still follows the ordinary
+reset-`main`-on-red path as a final backstop.)
+
+### 11.6 Rollback / revert + sha semantics per level
+
+- **Subtask merge:** `baseSha` / `mergedSha` (→ `merge_base_sha` / `merged_sha`
+  on the task row) are **story-branch** shas (story tip before/after the ff). A
+  subtask rollback reverts **within the story branch** and is itself a story
+  member — symmetric with standalone tasks today.
+- **Story merge:** the story→`main` merge yields `baseSha` / `mergedSha` against
+  **`main`** = the whole story's commit range on `main`. Store these at **story
+  level** (new `stories.merge_base_sha` / `merged_sha` columns) so a whole-story
+  rollback reverts `main` to the pre-story tip.
+- **Caveat to surface in the UI/docs:** the story→`main` rebase **rewrites** the
+  story's commits, so a subtask's story-branch shas are meaningless against
+  `main` afterward. A subtask "Roll back" is only valid **while the story is
+  open** (it reverts within the story branch); once the story lands on `main`, the
+  **story-level** revert is the unit.
+
+### 11.7 Story states — "`done`" means "landed on `main`" (refinement #2)
+
+Today a story is `open | done | aborted`, and the leader's "goal met" action
+PATCHes `done` directly (which tears the leader down and reports complete up).
+Under branch isolation that is unsafe: a story is only **truly** done once its
+branch is merged to `main` **and** the post-merge verify in `dir` is green. The
+leader's PATCH-`done` therefore becomes a **request to land**, and butchr owns
+the window between that request and the merge actually succeeding. Phase E adds
+two story states so a story whose work is **not on `main`** can **never** read as
+`done`:
+
+| story status | meaning | leader |
+|--------------|---------|--------|
+| `open` | accepting subtasks | up |
+| `merging` | completion requested; story-level re-gate + story→`main` merge in flight (transient; serialized through the global merge queue) | up |
+| `merge_blocked` | re-gate RED **or** story↔`main` conflict — the story did **not** land, `main` untouched, escalation fired; a **visible merge-failed surface**, **not** `done` | up |
+| `done` | branch merged to `main` **and** post-merge verify in `dir` green; **only now** the leader is torn down and `story complete` reports up to the CTO | torn down |
+| `aborted` | deliberate operator cancel (unchanged) | torn down |
+
+Transitions on a completion request:
+`open → merging → done` (landed) **or** `open → merging → merge_blocked`
+(re-gate RED / conflict). From `merge_blocked` the leader fixes a RED gate with
+**more subtasks**, or a CTO/human resolves a conflict in the story worktree;
+either way it **re-attempts** (`merge_blocked → merging → …`). Only `done` and
+`aborted` tear the leader down — `merging` and `merge_blocked` keep it up
+(extend `onStoryStatusChanged` accordingly). `merging` is transient and
+restart-recoverable, re-driven on boot exactly like a `rolling_back` task
+(`finalizeMerge` recovery). **No story is ever silently `done` with work that
+isn't on `main`.**
+
+### 11.8 Feature guard & inertness (incl. the bootstrapping cut)
+
+- **Guard:** a per-workspace `branch_isolation` column (mirrors `release_mode`;
+  default `0` = OFF). While OFF, `resolveBase` / `resolveMergeContext` return
+  `main` / `{ dir, main }` for **everyone** (including story members) — today's
+  exact behavior — and **no** story branch is ever created.
+- **The critical bootstrapping cut:** capture a per-**story** `isolated` bit **at
+  `createStory` time** from the workspace flag. Base/merge-context isolation keys
+  off the **story's captured bit**, *not* the live flag. So flipping the
+  workspace flag **never** retroactively changes an already-open story. **This
+  build story** (and all of its own subtasks) was opened with the flag OFF →
+  `isolated = 0` → its subtasks keep merging to `main` via the existing path for
+  the story's whole life. Only stories **opened after** the final activation
+  subtask capture `isolated = 1` and get a story branch. That is exactly the
+  "activate only for stories opened after the flag" guarantee, with **zero** risk
+  to any not-yet-merged subtask of this story.
+- **All** new paths (story-branch create/merge/cleanup, subtask retarget,
+  story re-gate, the new story states) are guarded behind `isolated = 1`; the
+  standalone task→`main` merge is untouched throughout the build.
+
+### 11.9 Phased, additive, inert build plan
+
+Each merge-spine subtask below uses the **plan-preview** gate, lands **one**
+`[Unreleased]` CHANGELOG entry, and makes **no** `package.json` edits
+(release_mode does the version stamp at merge). Any further architectural fork is
+escalated to the CTO/operator.
+
+1. **B-plumb (inert).** Add the `base?` params to the `git.ts` consumers in
+   §11.2 (defaulting to `defaultBranch`/`dir` → byte-for-byte unchanged) + the
+   `merge` ff-target params; add `storyBranchName`; add `resolveBase` /
+   `resolveMergeContext` in `tasks.ts` (return `main` / `{ dir, main }` for all,
+   for now); add the `branch_isolation` workspace column + per-story `isolated`
+   bit (both default `0`). No behavior change.
+2. **C-lifecycle (guarded / unused).** `ensureStoryBranch` (validate-or-rebuild
+   create off `main` + story worktree) + `removeStoryBranch` + the generalized
+   story→`main` merge; capture `isolated` at `createStory` when the flag is on;
+   lazy `ensureStoryBranch` wiring. Still OFF → unused.
+3. **D-subtask-merge (behind guard).** `resolveBase` returns the story branch for
+   an isolated member; retarget `createWorktree` / `rebaseOntoDefault` / `diff` /
+   `diffStat` / `commitsBehind` + `triggerCi`'s gate diffStats; `finalizeMerge`
+   uses `resolveMergeContext` to ff into / verify in / reset the story worktree;
+   subtask shas vs the story branch.
+4. **E-story-merge (behind guard).** On the Phase-6 completion path for an
+   isolated story: add the `merging` / `merge_blocked` states; re-gate the
+   story-branch tip in the story worktree (**RED = hard block + notify**);
+   story→`main` via `runExclusiveMerge` (rebase onto `main`, ff `main` at `dir`,
+   post-merge verify in `dir`, reset `main` on red); store story-level shas;
+   `removeStoryBranch`; story↔`main` conflict → escalation up the chain. Only a
+   landed-and-green story reaches `done`.
+5. **F-activate.** Flip the workspace `branch_isolation` guard on (new stories
+   capture `isolated = 1`), remove scaffolding, and e2e: open a story → decompose
+   → subtasks merge to the story branch + both gates → complete → re-gate +
+   story→`main` + post-verify + cleanup; confirm existing (`isolated = 0`)
+   stories and standalone tasks are unchanged.
