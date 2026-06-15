@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.98] - 2026-06-15
+
 - **Responder-redesign V2 task resolution (story st-def561dd, spine subtask 2 — additive + INERT behind the `responderV2Enabled()` gate; design §3/§4/§4a).** Added the structural feedback predicate `tasks.isAwaitingFeedback(row)` (status in {idea, spec_review, in_review, needs_info} OR in_progress+idle — the idle arm kept identical to V1 `pendingResponderStep`). Gated `tasks.pendingResponder`: when `BUTCHR_RESPONDER_V2` is ON it resolves STRUCTURALLY — not awaiting feedback → null, story member (`story_id != null`) → `story` ALWAYS (no tier), non-story → `cto`, non-story + `escalated_to_user` → `user`. Gated `tasks.escalateTask`: under V2 it is the single cto→user boundary for a NON-story awaiting task (sets `escalated_to_user=1`), with 409s for a story member (terminal at the leader), an already-escalated task, or a task not awaiting feedback. Every fresh-feedback entry that resets `responder_tier` now also clears `escalated_to_user` (no-op under V1). The gate stays OFF by default, so the live V1 model (responder_tier chain + step_responders) is byte-for-byte unchanged; V1's `feedbackStep`/`pendingResponderStep` remain in place until the activation subtask.
 
 ## [0.9.97] - 2026-06-15
