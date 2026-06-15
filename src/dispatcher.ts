@@ -28,7 +28,7 @@ import { startAgentInFreshTab } from "./herdr.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, repairPaneId, requeueForResume, setIdle } from "./tasks.ts";
+import { adoptPane, getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, repairPaneId, requeueForResume, resolveBase, setIdle } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -598,8 +598,11 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
     // Heal a missing workspace (herdr restart / manual close).
     const workspaceId = await ensureWorkspace(dir);
 
-    // Ensure the worktree exists (idempotent — handles rejected re-runs).
-    const worktree = await git.createWorktree(dir.path, task.id);
+    // Ensure the worktree exists (idempotent — handles rejected re-runs). Branch it from
+    // the resolved base: the STORY branch for an isolated member (resolveBase also lazily
+    // ensures the story branch + worktree exist first), else the default branch
+    // (resolveBase → defaultBranch, so non-isolated dispatch is unchanged).
+    const worktree = await git.createWorktree(dir.path, task.id, await resolveBase(task));
 
     // AUTO-REBASE onto the current default tip BEFORE the agent runs, so a branch
     // cut from a stale default HEAD (a chained/blocked task created before its

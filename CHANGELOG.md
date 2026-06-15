@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Branch isolation (stories) phase D-subtask-merge, behind the `isolated=1` guard (CONTRIBUTING §11.4/§11.5/§11.6 — inert until activation, so standalone tasks + non-isolated story members are byte-for-byte unchanged): for an ISOLATED story member `tasks.resolveBase` now returns the story branch and `resolveMergeContext` returns `{ storyWt, storyBranch, storyBranch }`. Every subtask-facing git call is threaded through the resolved base — `createWorktree` (branch off the story branch, dispatch + create paths), pre-dispatch `rebaseOntoDefault`/`isBehindDefault`, `diff`, the readiness `commitsBehind`/`diffStat`, `triggerCi`'s changelog + allowlist gate diffStats, and the auto-merge + estimate footprint diffStats — so a member branches off and is measured against the story branch, not main. `finalizeMerge` uses `resolveMergeContext` so an isolated member fast-forwards into the STORY worktree, runs the post-merge verify there, and on RED resets the STORY worktree to the captured story-branch tip (main never touched); its `merge_base_sha`/`merged_sha` are story-branch shas. The story→main path is unchanged (phase E).
+
 ## [0.9.95] - 2026-06-15
 
 - docs: add responder-redesign design RFC (story st-def561dd)

@@ -923,8 +923,11 @@ export async function taskReadiness(id: string): Promise<TaskReadiness> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
 
-  const behindBy = await git.commitsBehind(dir.path, id);
-  const { files: changedFiles } = await git.diffStat(dir.path, id);
+  // Measure the branch against its resolved base: the STORY branch for an isolated member,
+  // else the default branch (resolveBase → defaultBranch, so non-isolated is unchanged).
+  const base = await resolveBase(row);
+  const behindBy = await git.commitsBehind(dir.path, id, base);
+  const { files: changedFiles } = await git.diffStat(dir.path, id, base);
 
   const changelogPath = workspaceChangelogPath(row.workspace_id).trim();
   const changelogOk = changelogPath
@@ -949,26 +952,28 @@ function emitUpdated(id: string): void {
   if (v) publish({ type: "task.updated", task: v });
 }
 
-// ---- BRANCH-ISOLATION BASE RESOLUTION (Phase B-PLUMB — INERT) --------------
+// ---- BRANCH-ISOLATION BASE RESOLUTION (Phase D-SUBTASK-MERGE) --------------
 //
 // git.ts is DB-free: its functions take an explicit `base?` (merge-target ref) and an
 // ff-target, defaulting to the repo default branch / root. tasks.ts has story + DB
 // access, so it owns RESOLVING the per-task base + merge-context and threading them
-// down (CONTRIBUTING §11.2/§11.8). This phase is DELIBERATELY INERT: both resolvers
-// return today's single-level values for EVERY task (default branch / { dir, default
-// branch }), so nothing changes. Phase D makes them return the story branch / story
-// worktree for an isolated story member (keyed off the story's captured `isolated` bit,
-// guarded by the workspace `branch_isolation` flag). The live merge path is NOT wired to
-// these yet — finalizeMerge keeps its current main-level flow until Phase D.
+// down (CONTRIBUTING §11.2/§11.8). For an ISOLATED story member both resolvers now return
+// the STORY branch / story worktree; for every other task they return today's single-level
+// values (default branch / { dir, default branch }). The whole isolated path is GATED by
+// isolatedStoryBranch (workspace branch_isolation ON AND the story's captured `isolated`
+// bit = 1) — OFF everywhere this phase, so non-isolated members + standalone tasks are
+// byte-for-byte unchanged. The live subtask merge path (finalizeMerge) is wired to
+// resolveMergeContext below; the story→main path stays single-level until Phase E.
 
 /**
  * GUARDED (CONTRIBUTING §11.8) — the story branch an isolated story member retargets onto,
  * or null. Returns git.storyBranchName(story_id) iff the task is a story member AND its
  * workspace has branch_isolation ON AND the story's CAPTURED `isolated` bit is 1; else null.
  * Reads the story's isolated bit via a DIRECT db query (not stories.ts) to avoid a
- * tasks↔stories import cycle. UNREACHABLE this phase: the flag is OFF everywhere and every
- * story captures isolated=0, so it always returns null. Phase D makes resolveBase RETURN
- * this branch; here it only gates the lazy ensureStoryBranch side effect.
+ * tasks↔stories import cycle. GATES the whole isolated subtask path (resolveBase /
+ * resolveMergeContext / every threaded base): it returns null whenever the flag is OFF or
+ * the story captured isolated=0, so the path is inert until activation (Phase F flips the
+ * flag) — non-isolated members + standalone tasks always resolve to null here.
  */
 function isolatedStoryBranch(row: TaskRow): string | null {
   if (!row.story_id) return null;
@@ -982,20 +987,25 @@ function isolatedStoryBranch(row: TaskRow): string | null {
 
 /**
  * Resolve a task's REBASE/MERGE BASE — the ref its branch is measured/rebased against.
- * INERT this phase: returns the workspace default branch for EVERY task (today's value).
+ * For an ISOLATED story member (isolatedStoryBranch != null) this is the STORY BRANCH; for
+ * every other task it is the workspace default branch (today's value). The guard keeps it
+ * INERT until activation: isolatedStoryBranch returns null whenever the workspace flag is
+ * OFF or the story's captured isolated bit is 0, so non-isolated members + standalone tasks
+ * resolve to defaultBranch — byte-for-byte today's behavior (CONTRIBUTING §11.2/§11.8).
  *
- * The one Phase-C side effect (GUARDED/UNREACHABLE): for an isolated story member it
- * lazily ensures the story branch + its worktree exist BEFORE the subtask worktree is
- * branched off it (§11.3). The flag is OFF everywhere and every story captures isolated=0,
- * so isolatedStoryBranch always returns null and ensureStoryBranch never runs. Phase D
- * flips the RETURN to the story branch (and owns the activation tests). Throws 404 if the
- * task's workspace is gone (same contract as the other git-probe reads here).
+ * The Phase-C side effect (now also load-bearing): for an isolated member it lazily ensures
+ * the story branch + its worktree exist BEFORE the subtask worktree is branched off it
+ * (§11.3) — so the returned story branch is always a real ref. Throws 404 if the task's
+ * workspace is gone (same contract as the other git-probe reads here).
  */
 export async function resolveBase(row: TaskRow): Promise<string> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
   const storyBranch = isolatedStoryBranch(row);
-  if (storyBranch) await git.ensureStoryBranch(dir.path, storyBranch);
+  if (storyBranch) {
+    await git.ensureStoryBranch(dir.path, storyBranch);
+    return storyBranch;
+  }
   return git.defaultBranch(dir.path);
 }
 
@@ -1011,15 +1021,26 @@ export type MergeContext = {
 };
 
 /**
- * Resolve a task's MERGE CONTEXT — the ff-target + base finalizeMerge would use.
- * INERT this phase: returns `{ ffWorktree: dir.path, targetBranch: <default>, base:
- * <default> }` for EVERY task — exactly today's single-level main flow. Phase D returns
- * `{ storyWt, storyBranch, storyBranch }` for an isolated story member (CONTRIBUTING
- * §11.4/§11.5). Throws 404 if the task's workspace is gone.
+ * Resolve a task's MERGE CONTEXT — the ff-target + base finalizeMerge uses. For an ISOLATED
+ * story member it returns `{ ffWorktree: storyWt, targetBranch: storyBranch, base:
+ * storyBranch }` so the subtask fast-forwards INTO the story worktree, the post-merge verify
+ * runs THERE, and reset-on-red resets THAT checkout (CONTRIBUTING §11.4/§11.5). For every
+ * other task it returns `{ ffWorktree: dir.path, targetBranch: <default>, base: <default> }`
+ * — exactly today's single-level main flow. The guard (isolatedStoryBranch) keeps it INERT
+ * until activation, so standalone tasks + non-isolated members are byte-for-byte unchanged.
+ *
+ * For an isolated member it ensures the story branch + worktree exist FIRST (idempotent), so
+ * the ff-target checkout provably exists even on a restart-recovery merge. Throws 404 if the
+ * task's workspace is gone.
  */
 export async function resolveMergeContext(row: TaskRow): Promise<MergeContext> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
+  const storyBranch = isolatedStoryBranch(row);
+  if (storyBranch) {
+    const storyWt = await git.ensureStoryBranch(dir.path, storyBranch);
+    return { ffWorktree: storyWt, targetBranch: storyBranch, base: storyBranch };
+  }
   const def = await git.defaultBranch(dir.path);
   return { ffWorktree: dir.path, targetBranch: def, base: def };
 }
@@ -1354,8 +1375,15 @@ export async function createTask(
       ? "inactive"
       : "blocked";
 
-  // Filesystem artifact first: worktree + task.md. If either fails, no DB row.
-  await git.createWorktree(dir.path, id);
+  // Filesystem artifact first: worktree + task.md. If either fails, no DB row. Branch the
+  // worktree from the resolved base — the STORY branch for an isolated member (resolveBase
+  // lazily ensures the story branch + worktree exist FIRST, the §11.3 "ensureStoryBranch
+  // runs right before the first subtask worktree is branched" cut), else the default branch
+  // (resolveBase → defaultBranch, so a standalone/non-isolated task is unchanged). The DB
+  // row does not exist yet, so resolveBase is fed a minimal row carrying only the two fields
+  // isolatedStoryBranch reads (story_id + workspace_id).
+  const base = await resolveBase({ story_id: storyId, workspace_id: workspaceId } as TaskRow);
+  await git.createWorktree(dir.path, id, base);
   writeTaskMd(
     dir.path,
     {
@@ -1643,13 +1671,15 @@ export async function setBlockedBy(
   return taskView(id)!;
 }
 
-/** Compute the diff of a task branch vs its workspace's default branch. */
+/** Compute the diff of a task branch vs its resolved base — the STORY branch for an isolated
+ * member, else the workspace default branch (resolveBase → defaultBranch, so non-isolated is
+ * unchanged). */
 export async function taskDiff(id: string): Promise<string> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
-  return git.diff(dir.path, id);
+  return git.diff(dir.path, id, await resolveBase(row));
 }
 
 /**
@@ -1843,9 +1873,14 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   const dir = getWorkspace(row.workspace_id);
   if (!dir) return { ok: true, rebased: false, conflict: false };
 
+  // Resolve the branch's base: the STORY branch for an isolated member (keeping it current
+  // with the advancing story branch), else the default branch (resolveBase → defaultBranch,
+  // so non-isolated is unchanged).
+  const base = await resolveBase(row);
+
   // Cheap, lock-free gate: a freshly-created worktree already contains the tip, so
   // skip the merge queue entirely for it (the common case).
-  if (!(await git.isBehindDefault(dir.path, id))) {
+  if (!(await git.isBehindDefault(dir.path, id, base))) {
     return { ok: true, rebased: false, conflict: false };
   }
 
@@ -1853,7 +1888,7 @@ export async function prepareBranchForDispatch(id: string): Promise<BranchPrep> 
   // a concurrent merge advancing the default ref (rebaseOntoDefault re-checks the
   // ancestor relationship inside, since the tip may have advanced before we ran).
   const res = await runExclusiveMerge(() =>
-    git.rebaseOntoDefault(dir.path, id, workspaceChangelogPath(dir.id)),
+    git.rebaseOntoDefault(dir.path, id, workspaceChangelogPath(dir.id), base),
   );
 
   if (res.conflict) {
@@ -2144,14 +2179,23 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     });
   }
 
+  // Resolve the MERGE CONTEXT — the ff-target (worktree to fast-forward in + the branch it
+  // advances) and the rebase base. For an ISOLATED story member this is the STORY worktree /
+  // story branch (the subtask ff's into the story worktree, the post-merge verify runs THERE,
+  // and reset-on-red resets THAT checkout — CONTRIBUTING §11.4/§11.5); for every other task
+  // it is today's `{ dir.path, default, default }`, so the standalone/non-isolated flow below
+  // is byte-for-byte unchanged. (The subtask still rebases in ITS OWN worktree — git.merge's
+  // sourceWorktree stays defaulted; only the ff-target + base come from the context.)
+  const mctx = await resolveMergeContext(row);
+
   // Serialize through the global merge queue so concurrent approvals rebase+ff
   // one-at-a-time against an up-to-date base tip instead of racing in parallel.
   //
   // The verify gate + its auto-revert run INSIDE this same exclusive section: a
-  // merge fast-forwards the default branch, then (if it stuck) we build+test the
-  // NEW tip and, on RED, reset the default branch back to the captured pre-merge
-  // tip — all before the next queued merge runs, so a revert can never interleave
-  // with another merge moving the same branch.
+  // merge fast-forwards the ff-target branch, then (if it stuck) we build+test the
+  // NEW tip and, on RED, reset that branch back to the captured pre-merge tip — all
+  // before the next queued merge runs, so a revert can never interleave with another
+  // merge moving the same branch.
   type Gate = {
     mr: git.MergeResult;
     verify?: { ok: boolean; output: string };
@@ -2159,40 +2203,50 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     priorTip?: string | null;
   };
   const gate: Gate = await runExclusiveMerge<Gate>(async () => {
-    // Capture the default-branch tip BEFORE the ff so we can restore it on RED.
-    const priorTip = await git.headSha(dir.path).catch(() => null);
+    // Capture the ff-target tip (story branch for an isolated member, else main) in the
+    // ff-target worktree BEFORE the ff so we can restore it on RED.
+    const priorTip = await git.headSha(mctx.ffWorktree).catch(() => null);
     // Pass the workspace's resolved version file so git.merge bumps it itself (inside
     // this merge lock, after the rebase) when the workspace opted in — EMPTY disables the
     // bump (the default). In release_mode, also pass the declared bump level + changelog
     // path so git.merge bumps by that level AND stamps the changelog with a versioned
     // heading in the SAME commit (promoteUnreleased); outside release_mode the task owns
-    // its `[Unreleased]` entry and the CI gate enforces it. See git.bumpVersionFile.
+    // its `[Unreleased]` entry and the CI gate enforces it. See git.bumpVersionFile. The
+    // base / ff-target come from mctx so an isolated member rebases onto + ff's into the
+    // story branch (its baseSha/mergedSha — and thus merge_base_sha/merged_sha — are
+    // story-branch shas); for everyone else mctx = today's main flow.
     const mr = await git.merge(dir.path, id, {
       versionFile: workspaceVersionFile(dir.id),
       releaseMode,
       bumpLevel: row.version_bump,
       changelogPath: workspaceChangelogPath(dir.id),
       dateISO: nowIso().slice(0, 10),
+      base: mctx.base,
+      ffWorktree: mctx.ffWorktree,
+      ffTargetBranch: mctx.targetBranch,
     });
     if (!mr.ok) return { mr };
-    // Merge stuck (ff'd into main). Gate the new tip: the workspace's build/test
-    // gate command must be GREEN (its own gate_cmd, or the default config.verifyCmd).
-    const verify = await verifyDefaultBranch(dir.path, workspaceGateCmd(dir.id));
+    // Merge stuck (ff'd into the ff-target branch). Gate the new tip in the ff-target
+    // worktree (the story worktree for an isolated member, else the repo root): the
+    // workspace's build/test gate command must be GREEN (its own gate_cmd, or the default
+    // config.verifyCmd).
+    const verify = await verifyDefaultBranch(mctx.ffWorktree, workspaceGateCmd(dir.id));
     if (verify.ok) return { mr, verify };
-    // RED — undo the ff so a broken commit never sits on main. We need the prior
-    // tip to reset to; if we somehow failed to capture it, we can't safely revert,
-    // so surface that loudly and let the merge stand (flagged) rather than guess.
+    // RED — undo the ff so a broken commit never sits on the ff-target branch. Reset the
+    // ff-target worktree (story worktree for an isolated member, else the repo root) to the
+    // captured pre-merge tip. We need that tip; if we somehow failed to capture it, we can't
+    // safely revert, so surface that loudly and let the merge stand (flagged) rather than guess.
     if (priorTip) {
-      await git.resetHard(dir.path, priorTip).catch((e) => {
+      await git.resetHard(mctx.ffWorktree, priorTip).catch((e) => {
         console.error(
           `[butchr] CRITICAL: verify FAILED for ${id} but the auto-revert to ` +
-            `${priorTip} ALSO failed: ${e}. The default branch may hold a broken commit.`,
+            `${priorTip} ALSO failed: ${e}. The ${mctx.targetBranch} branch may hold a broken commit.`,
         );
       });
     } else {
       console.error(
         `[butchr] CRITICAL: verify FAILED for ${id} but the pre-merge tip was not ` +
-          `captured, so the merge could not be auto-reverted. Inspect main.`,
+          `captured, so the merge could not be auto-reverted. Inspect ${mctx.targetBranch}.`,
       );
     }
     return { mr, verify, reverted: true, priorTip };
@@ -2240,7 +2294,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     const reason = gate.verify?.output?.trim() || "(no verify output captured)";
     console.error(
       `[butchr] task ${id} merge AUTO-REVERTED: post-merge verify failed on the ` +
-        `default branch; main restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
+        `${mctx.targetBranch} branch; ${mctx.targetBranch} restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
     );
     // Pure DRY collapse of the UPDATE→event→task.md mirror→emit tail into setStatus
     // (this transition already mirrored task.md, so it's not a desync fix). output_snapshot
@@ -2652,7 +2706,10 @@ export async function captureDiffFootprint(id: string): Promise<void> {
   if (!existsSync(git.worktreePath(dir.path, id))) return;
   let stat: git.DiffStat;
   try {
-    stat = await git.diffStat(dir.path, id);
+    // Measure the footprint vs the resolved base — the STORY branch for an isolated member
+    // (so a member's own change isn't inflated by sibling work already on the story branch),
+    // else the default branch (resolveBase → defaultBranch, so non-isolated is unchanged).
+    stat = await git.diffStat(dir.path, id, await resolveBase(row));
   } catch {
     return; // best-effort — leave the columns as they were
   }
@@ -3132,6 +3189,14 @@ export async function triggerCi(id: string): Promise<void> {
     // Resolve the workspace's effective gate command ONCE for this CI run (own
     // gate_cmd or the default) and thread it through every (re)run.
     const gateCmd = workspaceGateCmd(dir.id);
+    // The base the changelog/allowlist GATE diffs measure against (`base...taskId`): the
+    // STORY branch for an isolated member, else the default branch (resolveBase →
+    // defaultBranch, so non-isolated is unchanged). Resolved LAZILY + memoized only when a
+    // gate that needs it runs — NEVER before runCiOnce, which must stay the FIRST await so an
+    // injected (test) runner is invoked synchronously. The build/test command itself runs in
+    // the subtask worktree and is base-AGNOSTIC, so runCiOnce is untouched.
+    let gateBase: string | null = null;
+    const baseForGate = async (): Promise<string> => (gateBase ??= await resolveBase(row));
     let result = await runCiOnce(dir.path, id, gateCmd);
     // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
     const retries = Math.max(0, config.ciRetries);
@@ -3162,7 +3227,7 @@ export async function triggerCi(id: string): Promise<void> {
     if (result.status === "pass") {
       const changelogPath = workspaceChangelogPath(dir.id);
       if (changelogPath.trim()) {
-        const { files } = await git.diffStat(dir.path, id);
+        const { files } = await git.diffStat(dir.path, id, await baseForGate());
         // In release_mode the gate is STRICT: every non-empty diff (incl. docs-only)
         // must carry a changelog entry, since every change bumps + stamps a versioned
         // heading. Outside release_mode the docs-only exemption stands.
@@ -3185,7 +3250,7 @@ export async function triggerCi(id: string): Promise<void> {
     if (result.status === "pass") {
       const allowlist = parseAllowlist(row.allowlist);
       if (allowlist.length) {
-        const { files } = await git.diffStat(dir.path, id);
+        const { files } = await git.diffStat(dir.path, id, await baseForGate());
         const stray = files.filter((f) => !fileAllowed(f, allowlist));
         if (stray.length) {
           result = {
@@ -3367,10 +3432,14 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
   // version is assigned/stamped inside finalizeMerge.)
   if (row.version_bump === "major" && workspaceReleaseMode(dir.id)) return false;
 
-  // Footprint check (a + b). On any git error, bail safely (leave for a human).
+  // Footprint check (a + b). Measured vs the resolved base — the STORY branch for an
+  // isolated member (so sibling work already on the story branch can't over-count a
+  // genuinely small member change and wrongly block its auto-merge), else the default
+  // branch (resolveBase → defaultBranch, so non-isolated is unchanged). On any git error,
+  // bail safely (leave for a human).
   let stat: git.DiffStat;
   try {
-    stat = await git.diffStat(dir.path, id);
+    stat = await git.diffStat(dir.path, id, await resolveBase(row));
   } catch (e) {
     console.warn(`[butchr] auto-merge: diffStat failed for ${id}: ${(e as Error).message}`);
     return false;
