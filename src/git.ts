@@ -78,9 +78,17 @@ async function branchOwnCommitCount(dir: string, base: string, taskId: string): 
  * behind-count sibling of the private branchOwnCommitCount (which counts the branch's
  * OWN commits, the `base..taskId` range). Best-effort: 0 on any git error (fail closed
  * — treat as not-behind). Used by the read-only readiness view (tasks.taskReadiness).
+ *
+ * `base` is the merge-target ref the branch is measured behind; it DEFAULTS to
+ * defaultBranch(dir) when omitted, so today's callers are byte-for-byte unchanged.
+ * Threaded so a story member can be measured against its story branch (CONTRIBUTING §11.2).
  */
-export async function commitsBehind(dir: string, taskId: string): Promise<number> {
-  const base = await defaultBranch(dir);
+export async function commitsBehind(
+  dir: string,
+  taskId: string,
+  base?: string,
+): Promise<number> {
+  base ??= await defaultBranch(dir);
   const count = await run([
     git, "-C", dir, "rev-list", "--count", `${taskId}..${base}`,
   ]);
@@ -108,6 +116,16 @@ export async function branchExists(dir: string, taskId: string): Promise<boolean
  */
 export function worktreePath(dir: string, taskId: string): string {
   return join(dir, taskId);
+}
+
+/**
+ * The branch name for a STORY's branch: `butchr/story/<storyId>`. Pure (no git I/O).
+ * The `butchr/story/` prefix can't collide with task branches (named by the
+ * `adjective-noun-4hex` task id) or the default branch (CONTRIBUTING §11.3). Used by
+ * the branch-isolation merge model to cut/merge a story branch off the default branch.
+ */
+export function storyBranchName(storyId: string): string {
+  return `butchr/story/${storyId}`;
 }
 
 /**
@@ -156,12 +174,18 @@ export async function listWorktrees(dir: string): Promise<string[]> {
  *
  * Best-effort: every probe is a plain `run` (no throw); a git error fails closed
  * (returns false → rebuild), never throwing on a recoverable stale state.
+ *
+ * `base` is the merge-target ref the stale-base probes (branchContainsBase /
+ * branchOwnCommitCount) measure against; it DEFAULTS to defaultBranch(dir) when omitted
+ * (today's behavior). A story member passes its story branch (CONTRIBUTING §11.2).
  */
 async function worktreeIsReusable(
   dir: string,
   taskId: string,
   path: string,
+  base?: string,
 ): Promise<boolean> {
+  base ??= await defaultBranch(dir);
   // (1) Live linked worktree: recognized from inside AND present in the admin list.
   const gitDir = await run([git, "-C", path, "rev-parse", "--git-dir"]);
   if (!gitDir.ok) return false;
@@ -175,7 +199,6 @@ async function worktreeIsReusable(
   // (3) Not a never-worked leftover on a stale base. Current tip already contained
   // → current. Behind the tip → reusable only if the branch has its own commits
   // (real work the rebase replays onto the tip; discarding it is the bug to avoid).
-  const base = await defaultBranch(dir);
   if (await branchContainsBase(dir, base, taskId)) return true;
   return (await branchOwnCommitCount(dir, base, taskId)) > 0;
 }
@@ -210,21 +233,29 @@ async function removeStaleWorktree(
  * stale-base leftover is REBUILT — removed and recreated fresh on the current
  * default tip — never silently reused (the root cause of two production
  * near-misses). The normal no-leftover path is unchanged: `worktree add -b`.
+ *
+ * `base` is the ref the new branch is cut FROM (`worktree add -b <taskId> <path>
+ * <base>`) and the ref the reuse/stale probes measure against. It DEFAULTS to
+ * defaultBranch(dir) when omitted, so today's behavior is byte-for-byte unchanged
+ * (a fresh worktree branches off the default tip). A story member passes its story
+ * branch so its worktree is cut from the story branch (CONTRIBUTING §11.2/§11.4).
  */
 export async function createWorktree(
   dir: string,
   taskId: string,
+  base?: string,
 ): Promise<string> {
+  base ??= await defaultBranch(dir);
   const path = worktreePath(dir, taskId);
   // Locally ignore the worktree dir so it never shows as an untracked/embedded
   // repo (and can't be accidentally `git add`-ed). Uses .git/info/exclude, which
   // is local-only — we never touch the user's tracked .gitignore for this.
   await addLocalExclude(dir, `/${taskId}/`);
   if (existsSync(path)) {
-    if (await worktreeIsReusable(dir, taskId, path)) return path; // idempotent reuse
+    if (await worktreeIsReusable(dir, taskId, path, base)) return path; // idempotent reuse
     await removeStaleWorktree(dir, taskId, path); // stale/broken/stale-base → rebuild
   }
-  await runOrThrow([git, "-C", dir, "worktree", "add", "-b", taskId, path]);
+  await runOrThrow([git, "-C", dir, "worktree", "add", "-b", taskId, path, base]);
   return path;
 }
 
@@ -241,9 +272,17 @@ async function addLocalExclude(dir: string, pattern: string): Promise<void> {
   writeFileSync(excludePath, text + pattern + "\n", "utf8");
 }
 
-/** Whether the task branch has any changes vs the default branch. */
-export async function hasChanges(dir: string, taskId: string): Promise<boolean> {
-  const base = await defaultBranch(dir);
+/**
+ * Whether the task branch has any changes vs `base` (committed commits OR a dirty
+ * worktree). `base` DEFAULTS to defaultBranch(dir) when omitted (today's behavior);
+ * a story member passes its story branch (CONTRIBUTING §11.2).
+ */
+export async function hasChanges(
+  dir: string,
+  taskId: string,
+  base?: string,
+): Promise<boolean> {
+  base ??= await defaultBranch(dir);
   if ((await branchOwnCommitCount(dir, base, taskId)) > 0) return true;
   // Also count uncommitted changes in the worktree (agent may not have committed).
   const wt = worktreePath(dir, taskId);
@@ -254,9 +293,16 @@ export async function hasChanges(dir: string, taskId: string): Promise<boolean> 
   return false;
 }
 
-/** Diff of the task branch vs the default branch, for review. */
-export async function diff(dir: string, taskId: string): Promise<string> {
-  const base = await defaultBranch(dir);
+/**
+ * Diff of the task branch vs `base`, for review. `base` DEFAULTS to defaultBranch(dir)
+ * when omitted (today's behavior); a story member passes its story branch (CONTRIBUTING §11.2).
+ */
+export async function diff(
+  dir: string,
+  taskId: string,
+  base?: string,
+): Promise<string> {
+  base ??= await defaultBranch(dir);
   // Commit diff against merge base.
   const committed = await run([
     git, "-C", dir, "diff", `${base}...${taskId}`,
@@ -313,9 +359,17 @@ function accumulateNumstat(
  * low-risk gate sees exactly what would merge. Files are deduped across the two
  * sources; line counts are summed (a file edited in a commit and again uncommitted
  * counts both, which only ever OVER-estimates size — safe for a low-risk ceiling).
+ *
+ * `base` DEFAULTS to defaultBranch(dir) when omitted (today's behavior); a story
+ * member passes its story branch so its footprint is measured against the story
+ * branch (CONTRIBUTING §11.2/§11.5).
  */
-export async function diffStat(dir: string, taskId: string): Promise<DiffStat> {
-  const base = await defaultBranch(dir);
+export async function diffStat(
+  dir: string,
+  taskId: string,
+  base?: string,
+): Promise<DiffStat> {
+  base ??= await defaultBranch(dir);
   const files = new Set<string>();
   const counts = { lines: 0 };
 
@@ -681,6 +735,14 @@ async function bumpVersionFile(
  *  - `changelogPath` — the changelog to stamp (release_mode only).
  *  - `dateISO` — the date for the stamped heading (defaults to today; passed in so the
  *    caller controls it).
+ *  - `base` — the ref the task branch is REBASED onto. DEFAULTS to defaultBranch(dir)
+ *    when omitted (today's behavior). A story member passes its story branch.
+ *  - `ffWorktree` / `ffTargetBranch` — the FF-TARGET: the worktree to fast-forward in
+ *    and the branch it advances. DEFAULT to `{ dir, defaultBranch(dir) }` when omitted
+ *    (today: ff `main` in the repo root). A story member passes its story worktree +
+ *    story branch so the subtask fast-forwards into the story checkout (CONTRIBUTING
+ *    §11.2/§11.4). With the defaults the git commands + captured shas are identical to
+ *    today's single-level merge.
  */
 export type MergeOptions = {
   versionFile?: string;
@@ -688,6 +750,9 @@ export type MergeOptions = {
   bumpLevel?: VersionBumpLevel;
   changelogPath?: string;
   dateISO?: string;
+  base?: string;
+  ffWorktree?: string;
+  ffTargetBranch?: string;
 };
 
 export async function merge(
@@ -695,7 +760,13 @@ export async function merge(
   taskId: string,
   opts: MergeOptions = {},
 ): Promise<MergeResult> {
-  const base = await defaultBranch(dir);
+  // Resolve the rebase base + the ff-target (worktree to ff in + branch it advances).
+  // All default to the single-level main flow ({ base: main, ffWorktree: dir,
+  // ffTargetBranch: main }), so an omitted opts is byte-for-byte today's merge.
+  const def = await defaultBranch(dir);
+  const base = opts.base ?? def;
+  const ffWorktree = opts.ffWorktree ?? dir;
+  const ffTargetBranch = opts.ffTargetBranch ?? def;
   const wt = worktreePath(dir, taskId);
 
   // Auto-commit any dangling worktree changes so they're part of the rebase.
@@ -760,16 +831,19 @@ export async function merge(
     });
   }
 
-  // Capture the base tip BEFORE the fast-forward: it's the exclusive lower bound of
-  // the commits this task is about to land, recorded so the merge can be reverted
-  // later (this range now also covers the changelog/version commit above).
-  const baseBefore = await run([git, "-C", dir, "rev-parse", base]);
-  // Fast-forward base to it (no merge commit). This cannot conflict; it can only
-  // fail if base moved between the rebase and here (callers serialize merges to
-  // prevent that).
-  const ff = await run([git, "-C", dir, "merge", "--ff-only", taskId]);
+  // Capture the ff-target branch tip BEFORE the fast-forward: it's the exclusive lower
+  // bound of the commits this task is about to land, recorded so the merge can be
+  // reverted later (this range now also covers the changelog/version commit above).
+  // Read in the ff-worktree against the target branch — with the defaults this is
+  // `git -C dir rev-parse main`, identical to before.
+  const baseBefore = await run([git, "-C", ffWorktree, "rev-parse", ffTargetBranch]);
+  // Fast-forward the ff-target branch to it (no merge commit). `git merge --ff-only`
+  // advances whatever branch is checked out in ffWorktree (the target branch). This
+  // cannot conflict; it can only fail if the target moved between the rebase and here
+  // (callers serialize merges to prevent that).
+  const ff = await run([git, "-C", ffWorktree, "merge", "--ff-only", taskId]);
   if (ff.ok) {
-    const after = await run([git, "-C", dir, "rev-parse", base]);
+    const after = await run([git, "-C", ffWorktree, "rev-parse", ffTargetBranch]);
     return {
       ok: true,
       conflict: false,
@@ -783,7 +857,7 @@ export async function merge(
   return {
     ok: false,
     conflict: false,
-    message: (ff.stderr || ff.stdout).trim() || `fast-forward into ${base} failed`,
+    message: (ff.stderr || ff.stdout).trim() || `fast-forward into ${ffTargetBranch} failed`,
     conflictFiles: [],
   };
 }
@@ -796,9 +870,16 @@ export async function merge(
  * default tip (e.g. a chained/blocked task whose worktree was created before its
  * blockers merged). Used as the cheap, lock-free gate in front of the (serialized)
  * pre-dispatch rebase so up-to-date branches never pay for the merge queue.
+ *
+ * `base` is the ref the branch is measured behind; it DEFAULTS to defaultBranch(dir)
+ * when omitted (today's behavior). A story member passes its story branch (CONTRIBUTING §11.2).
  */
-export async function isBehindDefault(dir: string, taskId: string): Promise<boolean> {
-  const base = await defaultBranch(dir);
+export async function isBehindDefault(
+  dir: string,
+  taskId: string,
+  base?: string,
+): Promise<boolean> {
+  base ??= await defaultBranch(dir);
   // The branch already contains the tip → not behind. branchContainsBase wraps the
   // `merge-base --is-ancestor` probe.
   return !(await branchContainsBase(dir, base, taskId));
@@ -841,13 +922,19 @@ export type RebaseResult = {
  *
  * Reads the default branch but never moves it; callers serialize this through the
  * merge queue so it can't race a concurrent merge advancing the default ref.
+ *
+ * `base` is the ref the branch is rebased/reset onto; it DEFAULTS to defaultBranch(dir)
+ * when omitted (today's behavior). A story member passes its story branch so an
+ * in-flight member tracks the advancing story branch (CONTRIBUTING §11.2/§11.4). It is
+ * the LAST param so the existing `(dir, taskId, changelogPath)` callers are unchanged.
  */
 export async function rebaseOntoDefault(
   dir: string,
   taskId: string,
   changelogPath = "",
+  base?: string,
 ): Promise<RebaseResult> {
-  const base = await defaultBranch(dir);
+  base ??= await defaultBranch(dir);
   const wt = worktreePath(dir, taskId);
   const noop = (over: Partial<RebaseResult> = {}): RebaseResult => ({
     ok: true,

@@ -948,6 +948,55 @@ function emitUpdated(id: string): void {
   if (v) publish({ type: "task.updated", task: v });
 }
 
+// ---- BRANCH-ISOLATION BASE RESOLUTION (Phase B-PLUMB — INERT) --------------
+//
+// git.ts is DB-free: its functions take an explicit `base?` (merge-target ref) and an
+// ff-target, defaulting to the repo default branch / root. tasks.ts has story + DB
+// access, so it owns RESOLVING the per-task base + merge-context and threading them
+// down (CONTRIBUTING §11.2/§11.8). This phase is DELIBERATELY INERT: both resolvers
+// return today's single-level values for EVERY task (default branch / { dir, default
+// branch }), so nothing changes. Phase D makes them return the story branch / story
+// worktree for an isolated story member (keyed off the story's captured `isolated` bit,
+// guarded by the workspace `branch_isolation` flag). The live merge path is NOT wired to
+// these yet — finalizeMerge keeps its current main-level flow until Phase D.
+
+/**
+ * Resolve a task's REBASE/MERGE BASE — the ref its branch is measured/rebased against.
+ * INERT this phase: returns the workspace default branch for EVERY task (today's value).
+ * Phase D returns the story branch for an isolated story member. Throws 404 if the task's
+ * workspace is gone (same contract as the other git-probe reads here).
+ */
+export async function resolveBase(row: TaskRow): Promise<string> {
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+  return git.defaultBranch(dir.path);
+}
+
+/** The resolved MERGE CONTEXT for a task: where its branch fast-forwards in (ffWorktree),
+ * the branch that advances (targetBranch), and the rebase base. See resolveMergeContext. */
+export type MergeContext = {
+  /** The worktree the merge fast-forwards in (and the post-merge verify runs in). */
+  ffWorktree: string;
+  /** The branch the fast-forward advances. */
+  targetBranch: string;
+  /** The ref the task branch is rebased onto. */
+  base: string;
+};
+
+/**
+ * Resolve a task's MERGE CONTEXT — the ff-target + base finalizeMerge would use.
+ * INERT this phase: returns `{ ffWorktree: dir.path, targetBranch: <default>, base:
+ * <default> }` for EVERY task — exactly today's single-level main flow. Phase D returns
+ * `{ storyWt, storyBranch, storyBranch }` for an isolated story member (CONTRIBUTING
+ * §11.4/§11.5). Throws 404 if the task's workspace is gone.
+ */
+export async function resolveMergeContext(row: TaskRow): Promise<MergeContext> {
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+  const def = await git.defaultBranch(dir.path);
+  return { ffWorktree: dir.path, targetBranch: def, base: def };
+}
+
 /**
  * TEARDOWN + DISCARD the agent's worktree, in the ONE correct order: (optionally)
  * capture the session's token usage FIRST — it reads the transcript while the

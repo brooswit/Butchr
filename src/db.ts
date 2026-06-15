@@ -307,6 +307,29 @@ ensureColumn("workspaces", "step_responders", "TEXT");
 // hardcoded workspace id). Settable via PATCH /api/workspaces/:id.
 ensureColumn("workspaces", "release_mode", "INTEGER NOT NULL DEFAULT 0");
 
+// PER-WORKSPACE 3-LEVEL BRANCH-ISOLATION GUARD (the stories merge model — CONTRIBUTING
+// §11). When 1, stories OPENED AFTER the flag is set are ISOLATED: each gets its own
+// branch off the default branch, its subtasks merge into the STORY branch (not the
+// default), and the completed story is re-gated + merged into the default branch — so the
+// default branch only ever sees whole, verified stories. Mirrors release_mode exactly:
+// default 0 (OFF — today's behavior, every task merges straight to the default branch).
+// Phase B-PLUMB (this column) is INERT — nothing reads it yet; later phases gate every
+// new isolation path behind it. Critically, isolation keys off a story's CAPTURED
+// `isolated` bit (see stories.isolated), NOT this live flag, so flipping it NEVER
+// retroactively changes an already-open story (§11.8). Settable via PATCH /api/workspaces/:id.
+ensureColumn("workspaces", "branch_isolation", "INTEGER NOT NULL DEFAULT 0");
+
+// PER-STORY ISOLATION BIT (the bootstrapping cut — CONTRIBUTING §11.8). Captured ONCE at
+// createStory time from the workspace `branch_isolation` flag: 1 = this story is isolated
+// (its own branch; subtasks merge into the story branch; re-gate + merge to the default
+// branch on completion), 0 = standalone (its subtasks merge straight to the default
+// branch — today's behavior). Base/merge-context resolution keys off THIS captured bit,
+// NOT the live workspace flag, so flipping the flag never retroactively changes an
+// already-open story. Default 0 (every existing row + every story opened while the flag is
+// OFF). Phase B-PLUMB is INERT — nothing reads it yet (Phase C captures it at createStory;
+// Phase D consumes it). Additive nullable-with-default column, mirroring release_mode.
+ensureColumn("stories", "isolated", "INTEGER NOT NULL DEFAULT 0");
+
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
 
@@ -841,6 +864,11 @@ export type WorkspaceRow = {
   // gate is strict; 0 (default) = today's opt-in patch-bump behavior. Resolved by
   // workspaces.workspaceReleaseMode.
   release_mode: number;
+  // Per-workspace 3-LEVEL BRANCH-ISOLATION guard (see the branch_isolation ensureColumn
+  // above): 1 = stories opened after the flag is set are isolated (own branch; subtasks
+  // merge into the story branch; re-gate + merge to the default branch on completion);
+  // 0 (default) = today's behavior. INERT this phase — nothing reads it yet (CONTRIBUTING §11).
+  branch_isolation: number;
   created_at: string;
 };
 
@@ -866,6 +894,11 @@ export type StoryRow = {
   // The story's goal/description.
   brief: string | null;
   status: StoryStatus;
+  // PER-STORY ISOLATION BIT (see the isolated ensureColumn above): 1 = isolated (own
+  // branch; subtasks merge into the story branch), 0 (default) = standalone (subtasks
+  // merge straight to the default branch). Captured ONCE at createStory from the
+  // workspace branch_isolation flag, NOT the live flag. INERT this phase (CONTRIBUTING §11.8).
+  isolated: number;
   created_at: string;
 };
 
