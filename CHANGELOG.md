@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.97] - 2026-06-15
+
 - **Responder-redesign V2 schema + gate scaffold (story st-def561dd, spine subtask 1 — additive + INERT).** Added the V2 data-model columns (design §2), all unused this phase: `tasks.escalated_to_user` (INTEGER NOT NULL DEFAULT 0 — the single cto→user boundary for a non-story task) and `stories.pending_ask` / `stories.ask_responder` (TEXT, nullable — a story leader's open story-level ask + its owner), surfaced on `TaskRow`/`StoryRow` (and thus `TaskView`/`StoryView` via the existing spreads). Added the SINGLE V2 gate `config.responderV2Enabled()`, reading `BUTCHR_RESPONDER_V2` at call time (default OFF) via the shared `envBool` parsing. Nothing reads the columns or calls the gate yet — the live V1 responder model (responder_tier chain + step_responders) stays in force; later spine subtasks wire the gated V2 paths and the final activation subtask flips the default and removes the gate.
 
 ## [0.9.96] - 2026-06-15
