@@ -1,6 +1,7 @@
 // Workspace service: register/list/unregister workspaces. Each workspace is a
 // git repo that maps 1:1 to a herdr workspace.
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import {
   existsSync,
   mkdirSync,
@@ -270,6 +271,54 @@ export function listWorkspaces(): WorkspaceView[] {
     .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
     .all();
   return rows.map((d) => ({ ...d, counts: counts(d.id) }));
+}
+
+/**
+ * PATH-BOUNDARY containment: true if `path` resolves to, or strictly under, `base`.
+ * Both sides are resolved/normalized first, then compared on a separator boundary so
+ * `/tmp/foo` matches base `/tmp` but `/tmproom/foo` does NOT (a bare string-prefix check
+ * would wrongly match the latter).
+ */
+function isUnder(path: string, base: string): boolean {
+  const p = resolve(path);
+  const b = resolve(base);
+  return p === b || p.startsWith(b.endsWith(sep) ? b : b + sep);
+}
+
+/**
+ * Whether a workspace path lives under the OS temp dir. `os.tmpdir()` is the source of
+ * truth; we ALSO treat a literal `/tmp` prefix as temp so Linux CI repos under `/tmp`
+ * are caught on platforms where `tmpdir()` differs (e.g. macOS `/var/folders/...`).
+ */
+function isTempPath(path: string): boolean {
+  return isUnder(path, tmpdir()) || isUnder(path, "/tmp");
+}
+
+/**
+ * Boot-time housekeeping: unregister every workspace whose path lives under the OS temp
+ * dir (see isTempPath). These are leftovers from selftest/integration runs whose tmp dirs
+ * are long gone — they clutter the dashboard + CTO channel with dead `test` workspaces and
+ * orphaned tasks. Each prune reuses the EXISTING unregisterWorkspace() so the removal
+ * CASCADES to the workspace's tasks and tears down its panes/worktrees/CTO agent — no
+ * hand-rolled DB delete. A workspace under a real path (e.g. /home/...) is NEVER touched.
+ *
+ * Best-effort PER WORKSPACE: a failure pruning one tmp workspace is logged and skipped so
+ * it can't abort boot or block the rest of the sweep. Returns the count actually pruned.
+ */
+export async function pruneTempWorkspaces(): Promise<number> {
+  let pruned = 0;
+  for (const ws of listWorkspaces()) {
+    if (!isTempPath(ws.path)) continue;
+    try {
+      await unregisterWorkspace(ws.id);
+      pruned++;
+    } catch (e) {
+      console.error(
+        `[butchr] failed to prune temp workspace ${ws.path}: ${(e as Error).message}`,
+      );
+    }
+  }
+  return pruned;
 }
 
 /**

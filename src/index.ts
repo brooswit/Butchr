@@ -11,7 +11,7 @@ import { reapDeadRunningAgents, reapOrphans, reapStuckGates } from "./reaper.ts"
 import { startServer } from "./server.ts";
 import { recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
-import { listWorkspaces } from "./workspaces.ts";
+import { listWorkspaces, pruneTempWorkspaces } from "./workspaces.ts";
 
 async function main(): Promise<void> {
   // Install the persistent log sink before anything else so all startup output
@@ -25,6 +25,18 @@ async function main(): Promise<void> {
       "[butchr] warning: herdr server not reachable. Start it with `herdr server` " +
         "(or launch the herdr TUI). Dispatch will resume automatically once it's up.",
     );
+  }
+
+  // HOUSEKEEPING — runs FIRST (before any reconcile/recovery): drop stale workspace
+  // registrations whose path lives under the OS temp dir (leftovers from selftest /
+  // integration runs whose tmp dirs are long gone). Pruning EARLY — before
+  // reconcileRunningTasks and reconcileCtoAgents — means butchr doesn't waste work
+  // re-adopting agents or launching CTO sessions for workspaces it's about to delete.
+  // unregisterWorkspace cascades to tasks + tears down panes/worktrees/CTO agent; real
+  // (/home/...) workspaces are never touched. Best-effort per workspace (never aborts boot).
+  const prunedTmp = await pruneTempWorkspaces();
+  if (prunedTmp > 0) {
+    console.log(`[butchr] pruned ${prunedTmp} stale temp workspace(s)`);
   }
 
   // Re-adopt the agents launched before this restart instead of orphaning them.
