@@ -7,8 +7,8 @@
 // story or a task's story_id yet. Later phases add a story-leader agent (a mini-CTO that
 // decomposes / feedbacks / merges) + a responder-escalation chain that consume it. This
 // module mirrors the shape of src/workspaces.ts (a thin CRUD service over the DB).
-import { ALL_STATUSES, db, nowIso } from "./db.ts";
-import type { StoryRow, StoryStatus, TaskKind, TaskRow } from "./db.ts";
+import { ALL_STATUSES, db, isTerminal, nowIso } from "./db.ts";
+import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
 import { generateStoryId } from "./ids.ts";
 import {
@@ -18,7 +18,7 @@ import {
   stopStoryAgent,
 } from "./story-agent.ts";
 import type { StoryAgentStatus } from "./story-agent.ts";
-import { createTask, getTask, taskView } from "./tasks.ts";
+import { abortTask, createTask, getTask, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
 import { HttpError, getWorkspace, listWorkspaces } from "./workspaces.ts";
 
@@ -290,4 +290,61 @@ export async function allStoryViews(): Promise<StoryView[]> {
   const out = lists.flat();
   out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
   return out;
+}
+
+// --- RESET A STORY: abort all in-flight subtasks (additive convenience) ------
+
+/** The result of resetStory: the refreshed StoryView plus the per-member outcome — which
+ *  subtasks were aborted, which failed to abort (best-effort), and which were left untouched
+ *  (already terminal, or mid-rollback) with their status. */
+export type StoryResetResult = {
+  ok: true;
+  story: StoryView | null;
+  aborted: string[];
+  failed: string[];
+  skipped: Array<{ id: string; status: TaskStatus }>;
+};
+
+/**
+ * RESET A STORY: abort ALL of a story's IN-FLIGHT subtasks in one call, so a story leader can
+ * 'throw it all away and start over' and then re-decompose. ADDITIVE — it reuses tasks.abortTask
+ * verbatim (signalAbort + worktree teardown + the `aborted` transition + task.updated SSE) and
+ * does NOT touch the story row: the story stays `open` for the leader to re-decompose.
+ *
+ * A member is RESETTABLE iff it is neither terminal (isTerminal — merged/aborted/failed/
+ * rolled_back) nor `rolling_back` (mid-rollback-pipeline work that reset must NOT yank). Those
+ * non-resettable members are left exactly as they are and reported in `skipped` (with status).
+ * Aborting is best-effort PER member — a teardown failure on one is collected in `failed` and
+ * never strands the rest. 404 if the story is gone. Returns the per-member outcome + a fresh
+ * StoryView. (Aborting members can never trip isStoryComplete — aborted ≠ merged/rolled_back —
+ * so no spurious story-completion event fires.)
+ */
+export async function resetStory(storyId: string): Promise<StoryResetResult> {
+  if (!getStory(storyId)) throw new HttpError(404, `story not found: ${storyId}`);
+
+  const members = db
+    .query<{ id: string; status: TaskStatus }, [string]>(
+      `SELECT id, status FROM tasks WHERE story_id=?`,
+    )
+    .all(storyId);
+
+  const aborted: string[] = [];
+  const failed: string[] = [];
+  const skipped: Array<{ id: string; status: TaskStatus }> = [];
+  for (const m of members) {
+    // Leave terminal AND mid-rollback members untouched — reset only yanks in-flight work.
+    if (isTerminal(m.status) || m.status === "rolling_back") {
+      skipped.push({ id: m.id, status: m.status });
+      continue;
+    }
+    try {
+      await abortTask(m.id);
+      aborted.push(m.id);
+    } catch {
+      // Best-effort: one teardown failure must not strand the rest of the reset.
+      failed.push(m.id);
+    }
+  }
+
+  return { ok: true, story: await storyView(storyId), aborted, failed, skipped };
 }

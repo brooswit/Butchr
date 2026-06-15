@@ -84,6 +84,7 @@ import {
   createSubtask,
   deleteStory,
   listStoryViews,
+  resetStory,
   storyView,
   updateStory,
 } from "./stories.ts";
@@ -1062,6 +1063,15 @@ route("PATCH", "/api/stories/:id", async (req, p) => {
 route("DELETE", "/api/stories/:id", async (_req, p) => {
   deleteStory(p.id!);
   return json({ ok: true });
+});
+
+// RESET a story: abort ALL of its IN-FLIGHT subtasks in one call so the leader can 'throw it
+// all away and start over' and re-decompose. ADDITIVE — reuses tasks.abortTask per member and
+// leaves the story `open`. Members already terminal OR mid-rollback (`rolling_back`) are left
+// untouched and reported under `skipped`. 404 if the story is gone. Returns
+// {ok, story, aborted, failed, skipped}.
+route("POST", "/api/stories/:id/reset", async (_req, p) => {
+  return json(await resetStory(p.id!));
 });
 
 // Assign a task to a story, or clear it (body {story_id: string|null}). The story must

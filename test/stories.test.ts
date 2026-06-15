@@ -356,6 +356,52 @@ describe("Phase 6: marking a story done reports up + tears the leader down", () 
   });
 });
 
+describe("resetStory aborts all IN-FLIGHT subtasks, leaving the story open", () => {
+  test("aborts non-terminal members; skips terminal + rolling_back; story stays open", async () => {
+    const story = storiesMod.createStory(WS_A, "Reset me");
+    seedMember("st-reset-inactive", WS_A, story.id, "inactive");
+    seedMember("st-reset-inprog", WS_A, story.id, "in_progress", { pane: "pane-r" });
+    seedMember("st-reset-merged", WS_A, story.id, "merged");
+    seedMember("st-reset-rollingback", WS_A, story.id, "rolling_back");
+
+    const res = await storiesMod.resetStory(story.id);
+
+    // The two in-flight members were aborted (status flipped to aborted).
+    expect(res.aborted.sort()).toEqual(["st-reset-inactive", "st-reset-inprog"]);
+    expect(res.failed).toEqual([]);
+    expect(tasksMod.getTask("st-reset-inactive")!.status).toBe("aborted");
+    expect(tasksMod.getTask("st-reset-inprog")!.status).toBe("aborted");
+
+    // Terminal + mid-rollback members were left untouched (reported under skipped).
+    const skippedById = Object.fromEntries(res.skipped.map((s) => [s.id, s.status]));
+    expect(skippedById["st-reset-merged"]).toBe("merged");
+    expect(skippedById["st-reset-rollingback"]).toBe("rolling_back");
+    expect(res.aborted).not.toContain("st-reset-merged");
+    expect(res.aborted).not.toContain("st-reset-rollingback");
+    expect(tasksMod.getTask("st-reset-merged")!.status).toBe("merged");
+    expect(tasksMod.getTask("st-reset-rollingback")!.status).toBe("rolling_back");
+
+    // The story itself is untouched — still open for re-decomposition.
+    expect(storiesMod.getStory(story.id)!.status).toBe("open");
+    expect(res.story!.id).toBe(story.id);
+  });
+
+  test("a story with only terminal/rolling_back members is a no-op reset", async () => {
+    const story = storiesMod.createStory(WS_A, "Nothing to reset");
+    seedMember("st-reset-noop-1", WS_A, story.id, "merged");
+    seedMember("st-reset-noop-2", WS_A, story.id, "rolling_back");
+
+    const res = await storiesMod.resetStory(story.id);
+    expect(res.aborted).toEqual([]);
+    expect(res.failed).toEqual([]);
+    expect(res.skipped.map((s) => s.id).sort()).toEqual(["st-reset-noop-1", "st-reset-noop-2"]);
+  });
+
+  test("resetStory 404s on an unknown story", async () => {
+    await expect(storiesMod.resetStory("st-no-such-story")).rejects.toThrow(/story not found/);
+  });
+});
+
 describe("workspace deletion cascade-deletes its stories", () => {
   test("removing a workspace removes its stories (FK cascade)", () => {
     const WS_C = "stories-ws-c";

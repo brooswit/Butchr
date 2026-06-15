@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Reset a story.** New `POST /api/stories/:id/reset` convenience endpoint aborts ALL of a
+  story's IN-FLIGHT subtasks in one call, so a story leader can "throw it all away and start
+  over" and then re-decompose. Additive: it reuses `tasks.abortTask` per member and leaves the
+  story `open`. Members that are already terminal (merged/aborted/failed/rolled_back) OR mid-
+  rollback (`rolling_back`) are left untouched and reported under `skipped`; aborting is
+  best-effort per member (`{ok, story, aborted, failed, skipped}`). See `stories.resetStory`.
+
 ## [0.9.88] - 2026-06-15
 
 ### Changed
