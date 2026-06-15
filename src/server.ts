@@ -58,6 +58,7 @@ import {
   attentionList,
   confirmMajor,
   createTask,
+  escalateTask,
   getTask,
   nudgeTask,
   rejectPlan,
@@ -952,6 +953,15 @@ route("POST", "/api/tasks/:id/spec", async (req, p) => {
 
 route("POST", "/api/tasks/:id/abort", async (_req, p) => {
   return json(await abortTask(p.id!));
+});
+
+// ESCALATE a story-member task's pending feedback item UP one rung of the fixed escalation
+// chain ['story','cto','user'] (Phase 2 of the STORIES epic). Bumps responder_tier so
+// pending_responder resolves to the next tier and that tier's notification fires. 404 if
+// gone; 409 if the task is not awaiting feedback, is not a story member, or is already at
+// the last rung ('user'). See tasks.escalateTask.
+route("POST", "/api/tasks/:id/escalate", async (_req, p) => {
+  return json(escalateTask(p.id!));
 });
 
 // IDLE-HANDLING ACTION: nudge a live build agent that has gone `idle` (the graceful

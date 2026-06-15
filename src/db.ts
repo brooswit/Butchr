@@ -595,6 +595,19 @@ ensureColumn("tasks", "grounding_fp", "TEXT");
 // by a retroactive table-level FK an ALTER can't add). Surfaced on TaskView via the
 // `...row` spread so it round-trips.
 ensureColumn("tasks", "story_id", "TEXT");
+
+// RESPONDER ESCALATION TIER (Phase 2 of the STORIES epic). The current escalation RUNG
+// (0-based) for the task's CURRENT pending feedback item. For a STORY-MEMBER task
+// (story_id != null) in a feedback state, the resolved pending_responder walks the FIXED
+// chain ['story','cto','user']: pending_responder = chain[min(responder_tier, len-1)], so
+// 0 = story leader, 1 = CTO, 2 = user. POST /api/tasks/:id/escalate bumps it one rung
+// (tasks.escalateTask), and it RESETS to 0 every time the task ENTERS a new feedback state
+// (a brand-new question/spec/review/idle starts back at the story leader). For a NON-member
+// task (story_id == null) it is IGNORED — pending_responder is computed exactly as today
+// from the workspace step_responders config (workspaces.responderFor). Default 0 (every
+// existing row backfills to it); creation lands at 0 via this default. Resolved by
+// tasks.pendingResponder; surfaced on TaskView via the `...row` spread (no extra plumbing).
+ensureColumn("tasks", "responder_tier", "INTEGER NOT NULL DEFAULT 0");
 }
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
@@ -1116,6 +1129,12 @@ export type TaskRow = {
   // task (today's behavior). Assigned only via stories.assignTaskToStory. Surfaced on
   // TaskView via the `...row` spread so it round-trips. Inert this phase.
   story_id: string | null;
+  // RESPONDER ESCALATION TIER (Phase 2 — see the responder_tier ensureColumn above): the
+  // current escalation RUNG (0-based) for the task's pending feedback item. For a story
+  // member in a feedback state, pending_responder walks the FIXED chain ['story','cto',
+  // 'user'] indexed by min(responder_tier, len-1); reset to 0 on each new feedback event.
+  // IGNORED for non-story tasks. Default 0. Surfaced on TaskView via the `...row` spread.
+  responder_tier: number;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stories epic, Phase 2 — responder escalation chain.** A story-member task's feedback
+  now resolves up a fixed chain `story → cto → user`: a new `tasks.responder_tier` column
+  tracks the current rung, `pending_responder` walks `['story','cto','user']` for story
+  members (independent of the workspace step-responder config) while non-story tasks are
+  unchanged, and a new `POST /api/tasks/:id/escalate` bumps a task up one rung. The tier
+  resets to 0 whenever a task enters a new feedback state (spec/review/question/idle), so
+  each fresh item starts back at the story leader. Inert until the story-leader agent
+  (Phase 3) and story channel (Phase 4) land — the CTO agent already defers on the `story`
+  rung.
+
 ## [0.9.82] - 2026-06-15
 
 ### Added
