@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.91] - 2026-06-15
+
 ### Added
 - **3-level branch isolation (stories) — approved DESIGN.** New `CONTRIBUTING.md` §11
   specifies the merge model for the next epic: `main` = trunk, each STORY gets a branch off
