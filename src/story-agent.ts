@@ -155,8 +155,9 @@ let superviseTimer: ReturnType<typeof setInterval> | null = null;
 /**
  * The per-story leader brief — generated GENERICALLY off the story row (id + brief), not
  * hardcoded. Mirrors how the CTO brief primes the CTO agent, but per-story. Documents the
- * leader's (later-phase) responsibilities so the seeded session knows its role; the actual
- * channel feed + decompose/feedback actions arrive in Phases 4/5/6.
+ * leader's responsibilities so the seeded session knows its role. Phase 5 wires the FIRST
+ * concrete action — DECOMPOSITION (creating subtasks); the feedback/merge actions arrive in
+ * Phase 6.
  */
 export function buildStoryLeaderBrief(story: StoryRow): string {
   const brief = (story.brief ?? "").trim();
@@ -168,11 +169,23 @@ You are a persistent, butchr-managed Claude Code session — a "mini-CTO" scoped
 ONE story — running in this project's repo root. butchr launched and supervises you and
 keeps your full context across relaunches (it \`--resume\`s your session).
 
-## Your role (later phases wire the mechanics)
+## Your job: decompose this story into subtasks
 
-- You **decompose this story into subtasks**.
-- Your subtasks' **questions, specs, and diffs route to YOU FIRST** — judge each against
-  THIS STORY's intent: answer questions, review specs, and review + merge diffs.
+Break this story down into the SUBTASKS needed to deliver it, and create each one as a
+subtask OF THIS STORY:
+
+- Create each subtask with **\`POST /api/stories/${story.id}/tasks\`** (or \`bin/butchr\`).
+  The body is the same as ordinary task creation (\`prompt\`, \`context\`, \`plan_preview\`,
+  \`model\`, \`tags\`, \`priority\`, \`allowlist\`, \`version_bump\`, \`idea\`/\`template\`);
+  butchr pins the new task to THIS story + dispatches it like any task.
+- Set **\`blocked_by\`** for REAL ordering dependencies (a subtask that must land after
+  another), so dependent work waits rather than racing. Leave it empty for independent work.
+- Each subtask's **questions, specs, and diffs route back to YOU FIRST** (your story
+  channel) — judge each against THIS STORY's intent: answer questions, review specs, and
+  review + merge diffs.
+
+## Your wider role
+
 - **Escalate an item to the CTO** (\`POST /api/tasks/:id/escalate\`) when a call is above
   your scope or is architectural.
 - When **all your subtasks merge**, verify the story's goal is met and **report the story
@@ -183,10 +196,6 @@ keeps your full context across relaunches (it \`--resume\`s your session).
 - You are an OPERATOR, not a builder: you have no worktree, branch, review, or merge of
   your own. All code changes go through your subtasks.
 - Keep your own context lean: when this session grows large, run \`/compact\`.
-
-> NOTE: this phase (the story-leader lifecycle) brings you UP and supervises you, but your
-> subtask attention feed is not wired yet — you will not receive subtask events until a
-> later phase. Stand by.
 `;
 }
 

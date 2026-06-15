@@ -8,11 +8,11 @@
 // decomposes / feedbacks / merges) + a responder-escalation chain that consume it. This
 // module mirrors the shape of src/workspaces.ts (a thin CRUD service over the DB).
 import { db, nowIso } from "./db.ts";
-import type { StoryRow, StoryStatus, TaskRow } from "./db.ts";
+import type { StoryRow, StoryStatus, TaskKind, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import { generateStoryId } from "./ids.ts";
 import { onStoryCreated, onStoryStatusChanged, stopStoryAgent } from "./story-agent.ts";
-import { getTask, taskView } from "./tasks.ts";
+import { createTask, getTask, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
 import { HttpError, getWorkspace } from "./workspaces.ts";
 
@@ -152,4 +152,51 @@ export function assignTaskToStory(taskId: string, storyId: string | null): TaskV
   const view = taskView(taskId)!;
   publish({ type: "task.updated", task: view });
   return view;
+}
+
+/**
+ * Create a SUBTASK belonging to a story (Phase 5 — the surface the story LEADER uses to
+ * decompose its story). 404 if the story is gone; 409 if the story is not `open` (no work
+ * can be added to a done/aborted story). Otherwise delegates to tasks.createTask, pinning
+ * the new task to the story's OWN workspace and passing story_id — so the subtask is
+ * dispatched exactly like any task, and its feedback then routes to the leader via the
+ * escalation chain (Phase 2) + story channel (Phase 4). The delegation is ONE-WAY
+ * (stories.ts → tasks.ts); createTask re-validates the same-workspace integrity itself.
+ */
+export async function createSubtask(
+  storyId: string,
+  args: {
+    prompt: string;
+    context?: string[];
+    blockedBy?: string[];
+    kind?: TaskKind;
+    model?: string | null;
+    tags?: string[];
+    priority?: number | string | null;
+    planPreview?: boolean;
+    idea?: boolean;
+    versionBump?: unknown;
+    allowlist?: string[];
+  },
+): Promise<TaskView> {
+  const story = getStory(storyId);
+  if (!story) throw new HttpError(404, `story not found: ${storyId}`);
+  if (story.status !== "open") {
+    throw new HttpError(409, `cannot add a subtask to a ${story.status} story`);
+  }
+  return createTask(
+    story.workspace_id,
+    args.prompt,
+    args.context ?? [],
+    args.blockedBy ?? [],
+    args.kind ?? "task",
+    args.model ?? null,
+    args.tags ?? [],
+    args.priority ?? 0,
+    args.planPreview ?? false,
+    args.idea ?? false,
+    args.versionBump ?? "patch",
+    args.allowlist ?? [],
+    story.id,
+  );
 }

@@ -79,6 +79,7 @@ import {
 import {
   assignTaskToStory,
   createStory,
+  createSubtask,
   deleteStory,
   getStory,
   listStories,
@@ -1055,6 +1056,36 @@ route("POST", "/api/tasks/:id/story", async (req, p) => {
   requireTask(p.id!);
   const body = await readJson(req);
   return json(assignTaskToStory(p.id!, body.story_id ?? null));
+});
+
+// Create a SUBTASK belonging to a story (Phase 5 — the surface the story LEADER uses to
+// decompose its story). The body MIRRORS POST /api/workspaces/:id/tasks: the same
+// kind/template/prompt/idea/model/tags/priority/plan_preview/version_bump/allowlist fields
+// are parsed identically here, then handed to createSubtask, which pins the new task to the
+// story's OWN workspace + sets story_id. 404 if the story is gone; 409 if it is not `open`.
+route("POST", "/api/stories/:id/tasks", async (req, p) => {
+  const body = await readJson(req);
+  // Parsed EXACTLY as the workspace task-creation route (kept in sync deliberately): the
+  // built-in `rollback` template/kind, prompt-or-template (renderTemplate), and the `idea`
+  // front-state flag incl. the legacy `stage: 'idea'` alias.
+  const kind =
+    body.kind === "rollback" || body.template === "rollback" ? "rollback" : "task";
+  const prompt = body.template ? renderTemplate(body.template, body.vars) : body.prompt;
+  const idea = body.idea === true || body.stage === "idea";
+  const view = await createSubtask(p.id!, {
+    prompt,
+    context: body.context ?? [],
+    blockedBy: body.blocked_by ?? [],
+    kind,
+    model: body.model ?? null,
+    tags: body.tags ?? [],
+    priority: body.priority ?? 0,
+    planPreview: body.plan_preview ?? false,
+    idea,
+    versionBump: body.version_bump ?? "patch",
+    allowlist: body.allowlist ?? [],
+  });
+  return json(view, 201);
 });
 
 // Shared pane-attach: spawn a GUI terminal attached to a herdr AGENT by name (a

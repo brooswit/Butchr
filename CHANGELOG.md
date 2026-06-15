@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stories epic, Phase 5 — leader decomposition (subtask creation).** A story leader can
+  now break its story into subtasks: a new `POST /api/stories/:id/tasks` endpoint creates a
+  task pinned to the story (`story_id` + the story's workspace) and dispatches it like any
+  task — its body mirrors workspace task creation. `createTask` gained an optional `story_id`
+  param, validated (404 if gone, 400 cross-workspace) before the worktree is created. The
+  story-leader brief now instructs decomposition (create each subtask via the endpoint, set
+  `blocked_by` for ordering deps, expect each subtask's feedback to route back to the leader).
+
 ## [0.9.85] - 2026-06-15
 
 ### Added

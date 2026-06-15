@@ -1173,11 +1173,26 @@ export async function createTask(
   idea: boolean = false,
   versionBump: unknown = "patch",
   allowlist: string[] = [],
+  storyId: string | null = null,
 ): Promise<TaskView> {
   const dir = getWorkspace(workspaceId);
   if (!dir) throw new HttpError(404, `workspace not found: ${workspaceId}`);
   if (!prompt || !prompt.trim()) {
     throw new HttpError(400, "prompt is required");
+  }
+  // STORY MEMBERSHIP (Phase 5): an optional story_id grouping this task as a SUBTASK of a
+  // story. Validated by a DIRECT db read of the stories table (NOT importing stories.ts —
+  // that would close an import cycle, the same reason story-agent.ts reads story rows
+  // directly): the story must exist (404) and live in THIS task's workspace (400). Checked
+  // here, BEFORE the worktree is created, so a bad story never strands an orphaned worktree.
+  if (storyId != null) {
+    const storyWs = db
+      .query<{ workspace_id: string }, [string]>(`SELECT workspace_id FROM stories WHERE id=?`)
+      .get(storyId)?.workspace_id;
+    if (storyWs == null) throw new HttpError(404, `story not found: ${storyId}`);
+    if (storyWs !== workspaceId) {
+      throw new HttpError(400, "story belongs to a different workspace than the task");
+    }
   }
   const taskModel = validateModel(model);
   // Validate + normalize the organizational labels (trim/dedupe/length-cap).
@@ -1240,8 +1255,8 @@ export async function createTask(
   );
 
   db.query(
-    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, story_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     workspaceId,
@@ -1254,6 +1269,7 @@ export async function createTask(
     taskPriority,
     taskPlanPreview ? 1 : 0,
     taskVersionBump,
+    storyId,
     created,
   );
   recordTaskEvent(
