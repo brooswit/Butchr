@@ -456,8 +456,11 @@ async function performLaunch(workspaceId: string, fresh: boolean): Promise<void>
 async function adoptCtoAgent(workspaceId: string): Promise<void> {
   const name = ctoAgentName(workspaceId);
   const row = getCtoAgentRow(workspaceId);
-  const paneId = (await harness.agentPaneId(name)) ?? row?.herdr_pane_id ?? null;
-  const tabId = (await harness.agentTabId(name)) ?? row?.herdr_tab_id ?? null;
+  // Resolve the live pane/tab STRICTLY BY NAME — never fall back to the stored id,
+  // which goes stale after a herdr/host restart. If the name doesn't resolve, record
+  // null (no live addressable pane) rather than a stale column value.
+  const paneId = (await harness.agentPaneId(name)) ?? null;
+  const tabId = (await harness.agentTabId(name)) ?? null;
   saveCtoAgentRow(workspaceId, {
     herdr_pane_id: paneId,
     herdr_tab_id: tabId,

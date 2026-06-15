@@ -41,6 +41,13 @@ let originalRunner: AgentRunner;
 // Recorded `send` calls (the nudge path) — everything else is a benign no-op.
 let sends: Array<[string, SendInput]> = [];
 
+// Per-test overridable NAME→pane/tab resolvers so a test can model a herdr RENUMBER
+// (the stored column is stale; the live pane resolves BY NAME to a different id) or a
+// name that resolves NO live pane at all. Default: every name resolves to its
+// canonical pane/tab. Reset in beforeEach.
+let resolvePane: (name: string) => string | undefined = (name) => "pane-" + name;
+let resolveTab: (name: string) => string | undefined = (name) => "tab-" + name;
+
 function makeFakeRunner(): AgentRunner {
   const noop = async () => undefined as never;
   return new Proxy({} as AgentRunner, {
@@ -53,8 +60,8 @@ function makeFakeRunner(): AgentRunner {
       // The pane SURVIVED the restart — herdr still knows the agent name (the bug this
       // fixes). Liveness is decided by the /proc probe, not this.
       if (prop === "agentExists") return async () => true;
-      if (prop === "resolveAgentPane") return async (name: string) => "pane-" + name;
-      if (prop === "agentTabId") return async (name: string) => "tab-" + name;
+      if (prop === "resolveAgentPane") return async (name: string) => resolvePane(name);
+      if (prop === "agentTabId") return async (name: string) => resolveTab(name);
       return noop;
     },
   });
@@ -131,6 +138,8 @@ afterAll(() => {
 beforeEach(() => {
   sends = [];
   liveMod.setCmdlineLister(() => []); // default: nothing alive (dead)
+  resolvePane = (name) => "pane-" + name; // default: name resolves to its canonical pane
+  resolveTab = (name) => "tab-" + name;
 });
 
 describe("claudeAlive (the /proc liveness probe)", () => {
@@ -227,6 +236,53 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
     expect(row.herdr_pane_id).not.toBeNull(); // pane intact — left running
     expect(row.resume_attempts).toBe(0); // not resumed / not rescued
     dispatchMod.signalAbort("recon-alive"); // stop the re-adopted watcher this spawned
+  });
+
+  test("re-adopts a live agent at its CURRENT name-resolved pane, ignoring a STALE stored column (renumber)", async () => {
+    // ADDRESSING = NAME ONLY. Model a herdr renumber: the row's STORED pane/tab are
+    // stale (a sibling tab closed and shifted the positional ids while butchr was down),
+    // but the agent resolves BY NAME to a DIFFERENT, live pane. Re-adoption must record
+    // the name-resolved pane — never the stale stored column.
+    seedRunning("recon-renum", "sid-renum");
+    dbMod.db
+      .query(`UPDATE tasks SET herdr_pane_id=?, herdr_tab_id=? WHERE id=?`)
+      .run("pane-STALE", "tab-STALE", "recon-renum");
+    resolvePane = (name) => (name === "recon-renum" ? "pane-LIVE-recon-renum" : "pane-" + name);
+    resolveTab = (name) => (name === "recon-renum" ? "tab-LIVE-recon-renum" : "tab-" + name);
+    liveMod.setCmdlineLister(liveSessions("sid-renum")); // claude IS alive
+
+    const res = await dispatchMod.reconcileRunningTasks(true);
+    expect(res.adopted).toBeGreaterThanOrEqual(1);
+
+    const row = tasksMod.getTask("recon-renum")!;
+    // Re-recorded at the NAME-resolved pane — NOT the stale stored column ("pane-STALE")
+    // and NOT a pane literally named the task id (both were the dropped fallbacks).
+    expect(row.herdr_pane_id).toBe("pane-LIVE-recon-renum");
+    expect(row.herdr_tab_id).toBe("tab-LIVE-recon-renum");
+    expect(row.status).toBe("in_progress");
+    expect(row.resume_attempts).toBe(0); // adopted, never resumed/rescued
+    dispatchMod.signalAbort("recon-renum"); // stop the re-adopted watcher this spawned
+  });
+
+  test("a live agent whose NAME resolves NO live pane is auto-resumed, never re-adopted at an invented pane", async () => {
+    // The OLD code fell back to `row.herdr_pane_id ?? row.id` when the name lookup came
+    // up empty — inventing a pane named the task id and re-adopting a husk shell. With
+    // name-only addressing, an unresolvable name means the agent isn't attachable, so it
+    // must fall through to the auto-resume branch instead.
+    seedRunning("recon-nopane", "sid-nopane");
+    writeTranscript("sid-nopane");
+    resolvePane = (name) => (name === "recon-nopane" ? undefined : "pane-" + name);
+    liveMod.setCmdlineLister(liveSessions("sid-nopane")); // process IS alive…
+
+    const res = await dispatchMod.reconcileRunningTasks(true);
+    expect(res.resumed).toBeGreaterThanOrEqual(1);
+
+    const row = tasksMod.getTask("recon-nopane")!;
+    // Auto-resumed (READY for --resume): pane cleared, attempt counted — NOT adopted at
+    // a bogus "pane-recon-nopane"/task-id pane.
+    expect(row.status).toBe("in_progress");
+    expect(row.herdr_pane_id).toBeNull();
+    expect(row.resume_attempts).toBe(1);
   });
 });
 

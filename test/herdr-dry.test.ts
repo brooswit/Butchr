@@ -124,6 +124,21 @@ describe("H1 — agentDeregister resolves tab+pane from ONE `agent get` (was two
   });
 });
 
+describe("teardownTask closes the LIVE tab BY NAME, ignoring its stored id params", () => {
+  test("re-resolves the tab from the agent NAME and never touches the (stale) stored tab/pane args", async () => {
+    // ADDRESSING = NAME ONLY: the stored tab/pane args are deliberately STALE. teardown
+    // must NOT close them — it re-resolves the live tab from the NAME (`agent get`) and
+    // closes THAT, so a renumbered/stale stored id can never close a sibling's tab.
+    await herdrMod.teardownTask("tab-STALE", "a", "pane-STALE");
+    const calls = callsSince();
+    expect(agentGetCount()).toBe(1); // resolved the live tab by name
+    expect(calls).toContainEqual(["tab", "close", "tab-X"]); // closed the NAME-resolved tab
+    // The stale stored ids were never the target of a close.
+    expect(calls).not.toContainEqual(["tab", "close", "tab-STALE"]);
+    expect(calls).not.toContainEqual(["pane", "close", "pane-STALE"]);
+  });
+});
+
 describe("H3 — existsByGet keeps the res.ok guard", () => {
   test("present entity → true for both nouns", async () => {
     expect(await herdrMod.agentExists("a")).toBe(true);

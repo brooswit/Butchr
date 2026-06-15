@@ -284,20 +284,27 @@ export async function reconcileRunningTasks(
     const nameAlive = await harness.agentExists(row.id);
     const procAlive = claudeAlive(row.session_id);
 
-    if (nameAlive && procAlive) {
-      // Live agent — re-adopt. Record its current pane + tab (both may have moved
-      // while butchr was down — herdr renumbers positional ids when sibling tabs
-      // close). Resolve the pane BY NAME via the renumber-stable resolver, not the
-      // stored id, so we re-attach against the agent's CURRENT pane.
-      const paneId =
-        (await harness.resolveAgentPane(row.id)) ?? row.herdr_pane_id ?? row.id;
-      const tabId = (await harness.agentTabId(row.id)) ?? row.herdr_tab_id ?? undefined;
-      if (paneId !== row.herdr_pane_id || tabId !== row.herdr_tab_id) {
-        adoptPane(row.id, paneId, tabId);
+    // Resolve the agent's CURRENT pane + tab STRICTLY BY NAME (herdr renumbers
+    // positional ids when sibling tabs close, so the stored id can be stale). Only
+    // probe for a genuinely-live agent. If the name resolves NO live pane the agent
+    // isn't actually attachable — treat it as not-live and fall through to the
+    // auto-resume / rescue branch rather than inventing a bogus pane (the stored id,
+    // or a pane literally named the task id, both of which can point at a dead shell).
+    const livePane =
+      nameAlive && procAlive ? await harness.resolveAgentPane(row.id) : undefined;
+
+    if (livePane) {
+      // Live agent — re-adopt at its CURRENT name-resolved pane + tab (both may have
+      // moved while butchr was down). The drift compare still reads the stored id to
+      // decide whether to RE-RECORD it, but what we attach/watch against is always the
+      // name-resolved pane, never the stored column.
+      const tabId = await harness.agentTabId(row.id);
+      if (livePane !== row.herdr_pane_id || tabId !== row.herdr_tab_id) {
+        adoptPane(row.id, livePane, tabId);
       }
-      spawnWatcher(dir, row.id, paneId, logFile, doneFile);
+      spawnWatcher(dir, row.id, livePane, logFile, doneFile);
       adopted++;
-      console.log(`[butchr] re-adopted running task ${row.id} (pane ${paneId}, tab ${tabId})`);
+      console.log(`[butchr] re-adopted running task ${row.id} (pane ${livePane}, tab ${tabId})`);
     } else if (row.status === "in_progress" && !existsSync(doneFile)) {
       // The build agent's claude is NOT actually alive AND it did not exit on its own
       // (no `.done` exit-code file) — i.e. it was KILLED mid-work by a power loss /
