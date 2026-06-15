@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.105] - 2026-06-15
+
 - **Webapp surface to DISPLAY + ANSWER an open story-level ask (story st-def561dd follow-up — completes the user-as-escalation-target surface).** The story rollup already carries `pending_ask` + `ask_responder` and `POST /api/stories/:id/answer` already clears+answers an open ask; this adds the missing UI. Each story row now renders a `.story-ask-panel` whenever `pending_ask` is non-null: the HTML-escaped question, who currently owns it (`ask_responder` — `cto` reads as a muted "awaiting the CTO" since an agent handles it automatically, `user` as an emphasized "escalated to you" since it needs a human, mirroring the task-level awaiting-who emphasis), and a freeform answer box whose Submit POSTs the answer via the shared `api()`/`action()` helper and re-renders on success (the answered ask clears server-side, so the panel disappears). Renders nothing when `pending_ask` is null (inert). Webapp-only (`public/app.js` + `public/style.css`); no backend/DB/test changes.
 
 ## [0.9.104] - 2026-06-15
