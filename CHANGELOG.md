@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.90] - 2026-06-15
+
 ### Added
 - **In-place task prompt/context edit.** New `PATCH /api/tasks/:id` (body `{ prompt?, context? }`,
   key-presence based) lets an operator REFINE a paused subtask's prompt and/or context-file list
