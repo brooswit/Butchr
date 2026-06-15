@@ -75,6 +75,14 @@ import {
   taskReadiness,
   taskView,
 } from "./tasks.ts";
+import {
+  assignTaskToStory,
+  createStory,
+  deleteStory,
+  getStory,
+  listStories,
+  updateStory,
+} from "./stories.ts";
 import { listTemplates, renderTemplate } from "./templates.ts";
 import { attachArgv, openTerminal } from "./terminal.ts";
 import { readSessionActivity, readSessionTranscript } from "./transcript.ts";
@@ -985,6 +993,58 @@ route("POST", "/api/tasks/:id/priority", async (req, p) => {
 // re-queuing it for a fresh dispatch.
 route("POST", "/api/tasks/:id/requeue", async (_req, p) => {
   return json(await requeueTask(p.id!));
+});
+
+// ---- STORIES (Phase 1: DATA MODEL + CRUD only — fully inert) ----------------
+// A STORY is a CONTAINER that GROUPS subtasks (tasks carry a nullable story_id FK).
+// These are pure CRUD endpoints over the `stories` table + a task↔story assignment;
+// NOTHING in the dispatch/review/lifecycle/responder/channel machinery reads them yet
+// (later phases add a story-leader agent + escalation chain). See src/stories.ts.
+
+// Create a story in a workspace (body {brief}). 404 if the workspace is gone; 400 if the
+// brief is blank. Lands `open`.
+route("POST", "/api/workspaces/:id/stories", async (req, p) => {
+  requireWorkspace(p.id!);
+  const body = await readJson(req);
+  return json(createStory(p.id!, body.brief), 201);
+});
+
+// List a workspace's stories (newest-first). 404 if the workspace is gone.
+route("GET", "/api/workspaces/:id/stories", async (_req, p) => {
+  requireWorkspace(p.id!);
+  return json(listStories(p.id!));
+});
+
+// A single story. 404 if gone.
+route("GET", "/api/stories/:id", async (_req, p) => {
+  const story = getStory(p.id!);
+  if (!story) throw new HttpError(404, "story not found");
+  return json(story);
+});
+
+// Update a story's brief and/or status (body {brief?, status?}; status ∈
+// open|done|aborted). Key-presence based so updating one field never clobbers the other.
+// 404 if gone; 400 on a bad brief/status.
+route("PATCH", "/api/stories/:id", async (req, p) => {
+  const body = await readJson(req);
+  return json(updateStory(p.id!, { brief: body.brief, status: body.status }));
+});
+
+// Delete a story. Member tasks are NOT deleted — their story_id is NULLed out (only the
+// grouping goes away). 404 if gone.
+route("DELETE", "/api/stories/:id", async (_req, p) => {
+  deleteStory(p.id!);
+  return json({ ok: true });
+});
+
+// Assign a task to a story, or clear it (body {story_id: string|null}). The story must
+// exist and belong to the SAME workspace as the task (cross-workspace assignment is
+// rejected). Returns the refreshed TaskView (story_id round-trips on it). Mirrors the
+// blocked_by assignment route's shape.
+route("POST", "/api/tasks/:id/story", async (req, p) => {
+  requireTask(p.id!);
+  const body = await readJson(req);
+  return json(assignTaskToStory(p.id!, body.story_id ?? null));
 });
 
 // Shared pane-attach: spawn a GUI terminal attached to a herdr AGENT by name (a

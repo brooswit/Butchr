@@ -86,3 +86,11 @@ export function uniqueTaskId(exists: (id: string) => boolean): string {
 export function generateWorkspaceId(): string {
   return `ws-${hex4()}${hex4()}`;
 }
+
+/**
+ * Story IDs: a stable short slug carrying the `st-` prefix (mirrors the workspace id
+ * shape). Caller should verify uniqueness against existing rows. See src/stories.ts.
+ */
+export function generateStoryId(): string {
+  return `st-${hex4()}${hex4()}`;
+}

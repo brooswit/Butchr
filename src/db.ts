@@ -79,6 +79,26 @@ CREATE TABLE IF NOT EXISTS workspaces (
   created_at      TEXT NOT NULL
 );
 
+-- STORIES (Phase 1: DATA MODEL ONLY — fully inert). A story is a CONTAINER that
+-- GROUPS subtasks (tasks carry a nullable story_id FK — see the tasks.story_id column
+-- migration below). Later phases add a story-leader agent + a responder-escalation
+-- chain; NOTHING reads this table to drive behavior yet. Cascade-deletes with its
+-- workspace exactly like tasks do (unregistering a workspace removes its stories);
+-- deleting a STORY does NOT delete its member tasks — the service NULLs out their
+-- story_id (tasks are real work; only the grouping goes away — see stories.deleteStory).
+--   - brief   the story's goal/description.
+--   - status  one of 'open' | 'done' | 'aborted' (default 'open'; see StoryStatus).
+-- Created in the baseline (before the tasks.story_id ALTER below) so the referenced
+-- table always exists by the time that column is added.
+CREATE TABLE IF NOT EXISTS stories (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  brief           TEXT,
+  status          TEXT NOT NULL DEFAULT 'open',   -- open | done | aborted (see StoryStatus)
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stories_ws ON stories(workspace_id);
+
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -561,6 +581,20 @@ ensureColumn("tasks", "released_version", "TEXT");
 // never grounded (or paused before this column existed) — treated as a mismatch, so the
 // next resume re-grounds once, which is safe. Orthogonal to `status`.
 ensureColumn("tasks", "grounding_fp", "TEXT");
+
+// STORY MEMBERSHIP (Phase 1: DATA MODEL ONLY — fully inert). A nullable FK to
+// stories.id grouping this task under a STORY (a container of subtasks — see the
+// `stories` table above). NULL (the default every existing row backfills to) means an
+// ORDINARY STANDALONE task — today's behavior, entirely unchanged. Assigned/cleared
+// ONLY via POST /api/tasks/:id/story (stories.assignTaskToStory), validated to
+// reference a story IN THE SAME workspace; createTask deliberately takes no story_id
+// param this phase so the task-creation spine is untouched. PURELY STORED this phase —
+// nothing in dispatch/review/lifecycle reads it yet (later phases consume it).
+// Following the same additive nullable-id-column pattern as `blocked_by` (the cross-
+// workspace integrity is enforced in the service layer, like the guards elsewhere, not
+// by a retroactive table-level FK an ALTER can't add). Surfaced on TaskView via the
+// `...row` spread so it round-trips.
+ensureColumn("tasks", "story_id", "TEXT");
 }
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
@@ -765,6 +799,24 @@ export type WorkspaceRow = {
 // instead of `merged` (see tasks.finalizeMerge). The old 'plan' kind was retired (see
 // the `kind` column comment above).
 export type TaskKind = "task" | "rollback";
+
+// A STORY's lifecycle status (see the `stories` table above). `open` (the default) — the
+// story is active; `done` — its work is complete; `aborted` — it was cancelled. Phase 1
+// data-model only: nothing transitions these automatically yet (a later phase's story-
+// leader agent will); they are set by the operator via PATCH /api/stories/:id.
+export type StoryStatus = "open" | "done" | "aborted";
+
+// A STORY row (see the `stories` table above): a CONTAINER grouping member tasks (which
+// carry a nullable story_id FK). Phase 1 is data-model only — fully inert; later phases
+// add the story-leader agent + escalation chain. See src/stories.ts for the CRUD service.
+export type StoryRow = {
+  id: string;
+  workspace_id: string;
+  // The story's goal/description.
+  brief: string | null;
+  status: StoryStatus;
+  created_at: string;
+};
 
 // ===========================================================================
 // THE CANONICAL TASK STATE MACHINE (the CEO's exact model).
@@ -1059,6 +1111,11 @@ export type TaskRow = {
   // detect a prompt/context edit made while the task was paused (needs_info / in_review),
   // which triggers a re-ground (taskmd.renderRegroundBlock). NULL until first grounded.
   grounding_fp: string | null;
+  // STORY MEMBERSHIP (Phase 1: DATA MODEL ONLY — see the story_id ensureColumn above):
+  // the id of the STORY this task is grouped under, or NULL for an ordinary standalone
+  // task (today's behavior). Assigned only via stories.assignTaskToStory. Surfaced on
+  // TaskView via the `...row` spread so it round-trips. Inert this phase.
+  story_id: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

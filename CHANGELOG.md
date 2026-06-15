@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stories data model + CRUD foundation (Phase 1 — inert).** Added a `stories` table (a
+  container that groups subtasks) with `createStory` / `getStory` / `listStories` /
+  `updateStory` / `deleteStory` / `assignTaskToStory` in the new `src/stories.ts`, plus a
+  nullable `tasks.story_id` FK and matching REST routes (`POST`/`GET
+  /api/workspaces/:id/stories`, `GET`/`PATCH`/`DELETE /api/stories/:id`, `POST
+  /api/tasks/:id/story`). A story belongs to one workspace and cascade-deletes with it;
+  deleting a story keeps its member tasks (only their `story_id` is cleared); a task may
+  only join a story in its own workspace. Purely persistence this phase — nothing in the
+  dispatch/review/lifecycle machinery reads it yet (a later phase adds the story-leader
+  agent + escalation chain).
+
 ## [0.9.81] - 2026-06-15
 
 ### Added
