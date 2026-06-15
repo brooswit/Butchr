@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.102] - 2026-06-15
+
 - **3-level branch isolation is now activatable per workspace.** A new
   `branch_isolation` workspace flag (set via `PATCH /api/workspaces/:id
   {"branch_isolation": true}`, mirroring `release_mode`) turns on the story-branch merge
