@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.109] - 2026-06-15
+
 - **Design RFC recorded in-repo: `docs/rfc-work-workspace-unification.md` (story st-540ba705).** Captures the CTO-signed-off design for the WORK + WORKSPACE unification — the biggest change to butchr's core model. WORK unifies `tasks` + `stories` into one self-referential resource (`parent_id`: leaf = task, node-with-children = story) with feedback bubbling recursively to the parent (leaf → node → … → CTO → user, `needs_user_input` short-circuiting to the user); WORKSPACE unifies the build/leader/CTO agent surfaces into one (agent + directory) execution context, with today's misnamed `workspaces` table renamed `directory`. The doc records the model, all nine design questions with the CTO's resolutions (Q1 rename → `directory`; Q2 single `work` table in place; Q3 1:N one-live; Q4 unified kind-conditioned status enum; Q5 CTO is a Workspace; Q6 top-level Work's parent is the CTO; Q7 unify to `/api/work/*` with `/api/tasks` + `/api/stories` as identical adapters until cutover, then delete; Q8 arbitrary nesting depth; Q9 build recursive branch isolation but keep it gated/INERT), how the three merged stories (B 3-level branches, C parent feedback, D name-only identity) generalize as single-level instances of the recursive rules, and the additive → inert → flip phasing whose only destructive step (step 6: migration + API swap + activation) is GATED behind explicit CTO go-ahead while `/api/tasks` + `/api/stories` stay byte-identical throughout. Docs only — no source code or runtime behavior changed.
 
 ## [0.9.108] - 2026-06-15
