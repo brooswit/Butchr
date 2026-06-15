@@ -643,21 +643,26 @@ export const config = {
   ),
 
   /**
-   * Command template that LAUNCHES a STORY-LEADER agent (Phase 3 of the STORIES epic;
-   * run via `bash -lc`, wrapped under `script` for a PTY + log, cwd = the story's
-   * workspace repo root). Mirrors `ctoAgentCmd` but DELIBERATELY OMITS the channel
-   * wiring (`--mcp-config` + `--dangerously-load-development-channels`): the leader's
-   * one-way attention feed is PHASE 4, so this phase the leader launches and is
-   * supervised but receives NO work feed yet. Placeholders (substituted by
+   * Command template that LAUNCHES a STORY-LEADER agent (run via `bash -lc`, wrapped under
+   * `script` for a PTY + log, cwd = the story's workspace repo root). Mirrors `ctoAgentCmd`,
+   * INCLUDING the channel wiring (Phase 4 of the STORIES epic): the leader gets a one-way
+   * attention feed SCOPED to its story's subtasks via the same `butchr-cto-channel` stdio
+   * server, just with BUTCHR_CHANNEL_STORY set. Placeholders (substituted by
    * src/story-agent.ts):
    *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (reuses `ctoAgentModel`).
    *  - `{{SESSION_FLAG}}` → `--session-id <uuid>` fresh, or `--resume <id>` on every
    *    supervised relaunch / boot-adopt (session continuity; see src/story-agent.ts).
+   *  - `{{MCP_CONFIG}}`   → the generated per-story MCP config registering the channel
+   *    server (scoped to the story via BUTCHR_CHANNEL_STORY).
    *  - `{{PROMPT_FILE}}`  → the per-story generated leader brief file.
+   * `--dangerously-load-development-channels server:butchr-cto-channel` attaches the custom
+   * channel (a research-preview flag — custom channels aren't allowlisted yet).
    */
   storyAgentCmd: env(
     "BUTCHR_STORY_AGENT_CMD",
     "claude --dangerously-skip-permissions {{MODEL_FLAG}} {{SESSION_FLAG}} " +
+      "--mcp-config {{MCP_CONFIG}} " +
+      "--dangerously-load-development-channels server:butchr-cto-channel " +
       '-- "$(cat {{PROMPT_FILE}})"',
   ),
 

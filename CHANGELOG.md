@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stories epic, Phase 4 — story-scoped attention channel + bubble-up routing.** Each
+  story-leader agent now gets its own one-way attention feed, scoped to ITS story's subtasks
+  via a new `BUTCHR_CHANNEL_STORY` env on the `butchr-cto-channel` bridge (`storyAgentCmd`
+  re-enables the `--mcp-config` + dev-channels wiring it omitted in Phase 3, and
+  `src/story-agent.ts` writes a per-story channel MCP config). The bridge reads
+  `pending_responder`/`story_id` straight off the serialized TaskView SSE event (staying
+  DB-free) and routes the escalation chain: a story member's tier-0 feedback + failures go to
+  its LEADER, while only items ESCALATED up (`pending_responder` `cto`) reach the CTO; a
+  STANDALONE task's CTO feed is unchanged. The bridge also emits on a responder TRANSITION
+  while already in a feedback state (an escalation `story`→`cto`, or a reset back to `story`),
+  not just on a status change.
+
 ## [0.9.84] - 2026-06-15
 
 ### Added

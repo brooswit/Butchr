@@ -16,14 +16,17 @@
 //   - SUPERVISION: a single poll loop relaunches each desired-up-but-dead leader with
 //     bounded exponential backoff, giving up after a cap.
 //
+// PHASE 4 (THIS PHASE): the leader gets a one-way attention feed SCOPED to ITS story's
+// subtasks. `storyAgentCmd` now mirrors `ctoAgentCmd`'s channel wiring (`--mcp-config` +
+// `--dangerously-load-development-channels server:butchr-cto-channel`), and this module
+// writes a per-story channel MCP config (writeStoryChannelMcpConfig) that scopes the bridge
+// via BUTCHR_CHANNEL_STORY so the leader sees its members' tier-0 feedback + failures (the
+// routing contract lives in src/channel.ts; escalated items go up to the CTO instead).
+//
 // PHASE SCOPE / GUARD-RAILS (deliberately NOT wired this phase):
-//   - NO CHANNEL/NOTIFICATION FEED. The leader's one-way attention feed (its subtasks'
-//     questions/specs/diffs/idle events routed to it) is PHASE 4. So `storyAgentCmd`
-//     OMITS the `--mcp-config` + `--dangerously-load-development-channels` wiring the CTO
-//     uses, and this module writes NO channel MCP config. The leader launches and is
-//     supervised but RECEIVES NO WORK FEED YET this phase — acceptable + documented.
 //   - NO DECOMPOSITION / FEEDBACK ACTIONS. The leader's decompose-the-story and
-//     feedback/merge actions are PHASES 5/6 — not here.
+//     feedback/merge actions are PHASES 5/6 — not here. This phase is the notification
+//     ROUTING only; the leader receives its feed but its ACTIONS arrive later.
 //
 // MAINTENANCE NOTE: the reconcile + supervisor logic here DUPLICATES cto-agent.ts (a
 // deliberate mirror-not-extract per the epic plan — keep the CTO path byte-for-byte
@@ -31,6 +34,7 @@
 // must land in BOTH files.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { config } from "./config.ts";
 import {
   type StoryAgentRow,
@@ -55,6 +59,9 @@ function storyDir(storyId: string): string {
 }
 function briefFile(storyId: string): string {
   return join(storyDir(storyId), "brief.md");
+}
+function mcpConfigFile(storyId: string): string {
+  return join(storyDir(storyId), "mcp.json");
 }
 function logFile(storyId: string): string {
   return join(storyDir(storyId), "agent.log");
@@ -195,6 +202,37 @@ export function writeStoryLeaderBrief(story: StoryRow): string {
 }
 
 /**
+ * Write a story's leader MCP config: a single STDIO server named `butchr-cto-channel` (the
+ * SAME attention-feed concept the CTO uses, reused so the agent surface stays one channel)
+ * that runs the one-way channel bridge (config.ctoChannelCmd) via `bash -lc`, with the SSE
+ * URL pointed at this butchr and SCOPED to the STORY via BUTCHR_CHANNEL_STORY — so the bridge
+ * pushes only THIS story's subtasks' tier-0 feedback + failures (escalated items bubble up to
+ * the workspace/CTO feed instead; the routing contract lives in src/channel.ts). The
+ * workspace id is passed too (BUTCHR_CHANNEL_WORKSPACE) for SSE filtering / the workspace
+ * label. The agent loads it as a development channel via `server:butchr-cto-channel` in
+ * config.storyAgentCmd. Mirrors cto-agent.writeChannelMcpConfig. Returns the config path.
+ */
+export function writeStoryChannelMcpConfig(story: StoryRow): string {
+  mkdirSync(storyDir(story.id), { recursive: true });
+  const cfg = {
+    mcpServers: {
+      [CHANNEL_SERVER_NAME]: {
+        command: "bash",
+        args: ["-lc", config.ctoChannelCmd],
+        env: {
+          BUTCHR_CHANNEL_SSE_URL: `http://${config.loopbackHost}:${config.port}/api/events`,
+          BUTCHR_CHANNEL_STORY: story.id,
+          BUTCHR_CHANNEL_WORKSPACE: story.workspace_id,
+        },
+      },
+    },
+  };
+  const file = mcpConfigFile(story.id);
+  writeFileSync(file, JSON.stringify(cfg), "utf8");
+  return file;
+}
+
+/**
  * Decide the session id + flag for a story leader's launch. FRESH → a brand-new
  * `--session-id`. Otherwise RESUME the persisted active session, else a fresh id. Mirrors
  * resolveCtoSession (story leaders have no operator-seeded session map). Pure + exported
@@ -216,6 +254,7 @@ export function buildStoryArgv(sessionFlag: string, storyId: string): string[] {
   const agentCmd = config.storyAgentCmd
     .replaceAll("{{MODEL_FLAG}}", modelFlag(config.ctoAgentModel))
     .replaceAll("{{SESSION_FLAG}}", sessionFlag)
+    .replaceAll("{{MCP_CONFIG}}", mcpConfigFile(storyId))
     .replaceAll("{{PROMPT_FILE}}", briefFile(storyId));
   return buildScriptArgv({ agentCmd, logFile: logFile(storyId) });
 }
@@ -255,6 +294,7 @@ async function performLaunch(storyId: string, fresh: boolean): Promise<void> {
   const { sessionId, isResume } = resolveStorySession(storyId, getStoryAgentRow(storyId), fresh);
   const sessionFlag = isResume ? `--resume ${sessionId}` : `--session-id ${sessionId}`;
   writeStoryLeaderBrief(story);
+  writeStoryChannelMcpConfig(story);
   const argv = buildStoryArgv(sessionFlag, storyId);
 
   const herdrWorkspaceId = await ensureStoryWorkspace(story.workspace_id, cwd);

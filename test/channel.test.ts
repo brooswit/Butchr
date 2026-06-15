@@ -301,6 +301,158 @@ describe("channel: per-workspace scope", () => {
   });
 });
 
+describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routing)", () => {
+  // A STORY-LEADER bridge (BUTCHR_CHANNEL_STORY=st-1, in workspace dir-1) and the
+  // WORKSPACE/CTO bridge for that same workspace. The leader owns its story's subtasks'
+  // tier-0 feedback + failures; the CTO owns standalone tasks + ESCALATED story items.
+  const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
+  const ctoBridge = () => new AttentionBridge("dir-1");
+
+  test("(a) a story member's tier-0 needs_info routes to the LEADER, not the CTO", () => {
+    const task = {
+      id: "sm-ask",
+      workspace_id: "dir-1",
+      status: "needs_info",
+      question: "which API?",
+      story_id: "st-1",
+      pending_responder: "story", // tier 0 → the leader
+    };
+    const leader = storyBridge().consume(taskUpdated(task));
+    expect(leader).not.toBeNull();
+    expect(leader!.meta).toEqual({
+      task_id: "sm-ask",
+      workspace: "dir-1",
+      state: "needs_info",
+      story_id: "st-1", // story members carry story_id in meta
+    });
+    expect(leader!.content).toContain("which API?");
+    // The CTO feed does NOT see a non-escalated story-member item.
+    expect(ctoBridge().consume(taskUpdated(task))).toBeNull();
+  });
+
+  test("(b) the same item ESCALATED (responder 'cto') routes to the CTO, not the leader", () => {
+    const task = {
+      id: "sm-ask",
+      workspace_id: "dir-1",
+      status: "needs_info",
+      question: "which API?",
+      story_id: "st-1",
+      pending_responder: "cto", // escalated up one rung
+    };
+    const cto = ctoBridge().consume(taskUpdated(task));
+    expect(cto).not.toBeNull();
+    expect(cto!.meta).toEqual({
+      task_id: "sm-ask",
+      workspace: "dir-1",
+      state: "needs_info",
+      story_id: "st-1",
+    });
+    // The leader no longer owns an escalated item.
+    expect(storyBridge().consume(taskUpdated(task))).toBeNull();
+  });
+
+  test("(c) a story member's failed/aborted routes to the LEADER (a failure has no responder)", () => {
+    const failed = {
+      id: "sm-fail",
+      workspace_id: "dir-1",
+      status: "failed",
+      last_dispatch_error: "spawn failed",
+      story_id: "st-1",
+      // pending_responder is null on a terminal failure (not a feedback state).
+    };
+    const leaderFail = storyBridge().consume(taskUpdated(failed));
+    expect(leaderFail).not.toBeNull();
+    expect(leaderFail!.meta.state).toBe("failed");
+    expect(leaderFail!.meta.story_id).toBe("st-1");
+    expect(ctoBridge().consume(taskUpdated(failed))).toBeNull();
+
+    const aborted = {
+      id: "sm-abort",
+      workspace_id: "dir-1",
+      status: "aborted",
+      revert_reason: "operator aborted",
+      story_id: "st-1",
+    };
+    expect(storyBridge().consume(taskUpdated(aborted))).not.toBeNull();
+    expect(ctoBridge().consume(taskUpdated(aborted))).toBeNull();
+  });
+
+  test("(d) a STANDALONE task routes to the CTO exactly as today (regression guard)", () => {
+    const task = {
+      id: "standalone",
+      workspace_id: "dir-1",
+      status: "in_review",
+      summary: "implemented the widget",
+      // no story_id, no pending_responder
+    };
+    const cto = ctoBridge().consume(taskUpdated(task));
+    expect(cto).not.toBeNull();
+    // Byte-for-byte today's meta shape — NO story_id key on a standalone task.
+    expect(cto!.meta).toEqual({
+      task_id: "standalone",
+      workspace: "dir-1",
+      state: "in_review",
+    });
+    // A standalone task is not part of any story → the leader bridge drops it.
+    expect(storyBridge().consume(taskUpdated(task))).toBeNull();
+  });
+
+  test("(e) an ESCALATION transition while in-state fires the CTO feed (responder story→cto)", () => {
+    const cto = ctoBridge();
+    const base = {
+      id: "sm-esc",
+      workspace_id: "dir-1",
+      status: "needs_info",
+      question: "q?",
+      story_id: "st-1",
+    };
+    // Tier 0 (responder 'story') — the CTO does NOT own it yet, but it records the responder.
+    expect(cto.consume(taskUpdated({ ...base, pending_responder: "story" }))).toBeNull();
+    // Escalated to 'cto' with the SAME status — a responder transition must FIRE the CTO feed.
+    const fired = cto.consume(taskUpdated({ ...base, pending_responder: "cto" }));
+    expect(fired).not.toBeNull();
+    expect(fired!.meta.state).toBe("needs_info");
+    expect(fired!.meta.story_id).toBe("st-1");
+    // A further re-render with the SAME responder does not re-fire.
+    expect(cto.consume(taskUpdated({ ...base, pending_responder: "cto" }))).toBeNull();
+  });
+
+  test("(e) a RESET back to 'story' fires the LEADER feed (a fresh feedback event)", () => {
+    const leader = storyBridge();
+    const base = {
+      id: "sm-reset",
+      workspace_id: "dir-1",
+      status: "needs_info",
+      question: "q?",
+      story_id: "st-1",
+    };
+    // First seen already escalated to the CTO — the leader does NOT own it.
+    expect(leader.consume(taskUpdated({ ...base, pending_responder: "cto" }))).toBeNull();
+    // Reset back to 'story' (a new feedback event) with the SAME status → fires the leader feed.
+    const fired = leader.consume(taskUpdated({ ...base, pending_responder: "story" }));
+    expect(fired).not.toBeNull();
+    expect(fired!.meta.state).toBe("needs_info");
+    expect(fired!.meta.story_id).toBe("st-1");
+  });
+
+  test("a story member's tier-0 IDLE routes to the leader, not the CTO", () => {
+    const idle = {
+      id: "sm-idle",
+      workspace_id: "dir-1",
+      status: "in_progress",
+      idle: 1,
+      idle_context: "…parked…",
+      story_id: "st-1",
+      pending_responder: "story", // idle-handling at tier 0 → the leader
+    };
+    const leaderIdle = storyBridge().consume(taskUpdated(idle));
+    expect(leaderIdle).not.toBeNull();
+    expect(leaderIdle!.meta.state).toBe("idle");
+    expect(leaderIdle!.meta.story_id).toBe("st-1");
+    expect(ctoBridge().consume(taskUpdated(idle))).toBeNull();
+  });
+});
+
 describe("channel: one-way capability (no tools)", () => {
   test("initialize advertises claude/channel and NO tools", () => {
     const res = channelInitializeResult("2025-06-18");

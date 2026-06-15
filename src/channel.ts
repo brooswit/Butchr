@@ -196,6 +196,14 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
  * when the status CHANGED into an attention state, so a task.updated that merely
  * touches a task already in (say) in_review does not re-notify, and a reconnect
  * (which replays no history) cannot re-fire a transition we already saw this run.
+ *
+ * It ALSO emits on a RESPONDER transition while the task is already on an attention
+ * surface — an escalation 'story'→'cto' or a reset back to 'story' — by remembering each
+ * task's last-seen resolved responder alongside its status (see lastResponder). Which
+ * channel a given event flows to is decided by SCOPE: a STORY-leader bridge
+ * (BUTCHR_CHANNEL_STORY) gets its story's subtasks' tier-0 feedback + failures, while a
+ * WORKSPACE/CTO bridge (BUTCHR_CHANNEL_WORKSPACE, or unscoped) gets standalone tasks
+ * (today's behavior) plus story items escalated up to the CTO. See routeOwns.
  */
 export class AttentionBridge {
   private lastStatus = new Map<string, string>();
@@ -204,6 +212,12 @@ export class AttentionBridge {
   // 0→1 flip (mirrors the lastStatus "entering" logic, so a re-render of an
   // already-idle task does not re-notify).
   private lastIdle = new Map<string, boolean>();
+  // Per-task last-seen RESOLVED RESPONDER ('story'|'cto'|'user'|null), tracked alongside
+  // status/idle so a RESPONDER TRANSITION fires even when the status itself did not change:
+  // an escalation 'story'→'cto' must (re)notify the CTO feed, and a reset back to 'story' (a
+  // fresh feedback event) must (re)notify the leader feed. We emit only on an ACTUAL change
+  // (prev !== current), so a same-status re-render with an unchanged responder never re-fires.
+  private lastResponder = new Map<string, string | null>();
   // workspace_id -> human label, populated from workspace.* events on the same
   // stream (and optionally seeded once at startup). Used only for the content line;
   // meta.workspace is always the stable workspace_id.
@@ -214,6 +228,14 @@ export class AttentionBridge {
   // events. Unset (empty/undefined) → unscoped: every workspace's events flow (the
   // legacy global feed).
   private readonly scopeDir: string;
+  // PER-STORY SCOPE (the story-leader feed; from BUTCHR_CHANNEL_STORY). When set, the bridge
+  // runs in STORY mode: it emits an attention event for a task IFF the task belongs to THIS
+  // story (story_id === scopeStory) AND the item is the leader's to own — its tier-0 feedback
+  // (resolved responder 'story', incl. a reset-back-to-story) OR a failure (failed/aborted).
+  // A story member's items that ESCALATE up to the CTO (responder 'cto') are NOT emitted here
+  // — they go to the workspace/CTO feed instead. Unset → the bridge runs in WORKSPACE/CTO mode
+  // (the scopeDir feed below). See routeOwns.
+  private readonly scopeStory: string;
   // CONNECTIVITY-ONLY mode. When true (the WORKER bridge), consume() emits ONLY the
   // global `connectivity.restored` broadcast and SUPPRESSES every attention/idle
   // notification — a live build agent must NEVER see another task's review/idle/
@@ -221,9 +243,10 @@ export class AttentionBridge {
   // and gets the full attention feed PLUS connectivity.
   private readonly connectivityOnly: boolean;
 
-  constructor(scopeDir?: string, connectivityOnly = false) {
+  constructor(scopeDir?: string, connectivityOnly = false, scopeStory?: string) {
     this.scopeDir = (scopeDir ?? "").trim();
     this.connectivityOnly = connectivityOnly;
+    this.scopeStory = (scopeStory ?? "").trim();
   }
 
   /** Seed the workspace-label cache (best-effort, e.g. from GET /api/workspaces). */
@@ -278,6 +301,7 @@ export class AttentionBridge {
     if (e.type === "task.deleted" && typeof e.id === "string") {
       this.lastStatus.delete(e.id);
       this.lastIdle.delete(e.id);
+      this.lastResponder.delete(e.id);
       return null;
     }
     if (e.type !== "task.updated" && e.type !== "task.created") return null;
@@ -289,42 +313,102 @@ export class AttentionBridge {
     const status = t.status;
     if (typeof id !== "string" || !id || typeof status !== "string") return null;
 
-    const prev = this.lastStatus.get(id);
+    const prevStatus = this.lastStatus.get(id);
     this.lastStatus.set(id, status);
 
     const dirId = typeof t.workspace_id === "string" ? t.workspace_id : "";
+    // STORY MEMBERSHIP + RESOLVED RESPONDER, read straight off the serialized TaskView the
+    // SSE event carries: taskView already computes `pending_responder` (the Phase-2
+    // escalation chain → 'story'|'cto'|'user' for a story member, the workspace responder
+    // for a standalone task, or null when not in a feedback state). Reading these fields
+    // keeps the bridge a light, DB-free process — it never imports tasks.ts / touches the db.
+    const storyId = typeof t.story_id === "string" && t.story_id ? t.story_id : null;
+    const responder =
+      typeof t.pending_responder === "string" ? t.pending_responder : null;
+    const prevResponder = this.lastResponder.get(id) ?? null;
+    this.lastResponder.set(id, responder);
 
-    // IDLE SURFACE (orthogonal to status). A LIVE in_progress build agent that flips
-    // `idle` is a feedback CONDITION awaiting the `idle-handling` responder — but
-    // in_progress is not an attention STATUS, so we detect it here, BEFORE the
-    // attention-status check, and emit only on the 0→1 flip (tracked via lastIdle, like
-    // the status "entering" logic). The notification carries the captured `idle_context`
-    // so the responder can see what the agent was doing and act gracefully.
+    // The IDLE flag is orthogonal to status (a flag on a LIVE in_progress agent, not a 13th
+    // state — see FW-4), so it is tracked separately. We still set lastIdle every event so a
+    // re-render of an already-idle task is not a fresh flip.
     const idleNow = status === "in_progress" && (t.idle === 1 || t.idle === true);
     const idlePrev = this.lastIdle.get(id) ?? false;
     this.lastIdle.set(id, idleNow);
-    if (idleNow && !idlePrev) {
-      // PER-WORKSPACE SCOPE: a workspace's CTO agent only sees its own events.
-      if (this.scopeDir && dirId !== this.scopeDir) return null;
-      const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
+
+    // The ATTENTION SURFACE the task is currently on: an attention STATUS, or the IDLE
+    // condition on a live agent, or neither. The two surfaces share ONE emit path (below) so
+    // a RESPONDER transition fires even when the status itself did not change.
+    const surface: "status" | "idle" | null = isAttentionState(status)
+      ? "status"
+      : idleNow
+        ? "idle"
+        : null;
+    if (!surface) return null;
+
+    // EMIT TRIGGER: emit when the task newly ENTERED this surface (status changed into an
+    // attention state, or idle flipped 0→1), OR when its resolved responder CHANGED while
+    // already on the surface (an escalation 'story'→'cto', or a reset back to 'story' on a
+    // fresh feedback event). Both maps are updated above, so a same-status/already-idle
+    // re-render with an unchanged responder never re-notifies, and a real change fires once.
+    const enteredSurface =
+      surface === "status" ? prevStatus !== status : idleNow && !idlePrev;
+    const responderChanged = prevResponder !== responder;
+    if (!enteredSurface && !responderChanged) return null;
+
+    // OWNERSHIP: does THIS bridge's scope own the item right now (STORY-leader feed vs
+    // WORKSPACE/CTO feed)? A non-owning bridge drops it — and we still updated the tracking
+    // maps above, so the OTHER bridge's de-dup stays correct.
+    if (!this.routeOwns(storyId, responder, status, dirId)) return null;
+
+    const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
+    // ADD story_id to meta ONLY when the task has one, so a STANDALONE task's meta stays
+    // byte-for-byte { task_id, workspace, state } (the CTO feed must not regress).
+    const storyMeta = storyId ? { story_id: storyId } : {};
+    if (surface === "idle") {
       const ctx = tidy(t.idle_context);
       const content = `[${id}] ${label} — ${IDLE_PHRASE}` + (ctx ? `: ${ctx}` : "");
-      return { content, meta: { task_id: id, workspace: dirId, state: "idle" } };
+      return {
+        content,
+        meta: { task_id: id, workspace: dirId, state: "idle", ...storyMeta },
+      };
     }
-
-    if (!isAttentionState(status)) return null;
-    if (prev === status) return null; // already in this state — not a fresh transition
-
-    // PER-WORKSPACE SCOPE: drop transitions for OTHER workspaces (a workspace's CTO
-    // agent only ever sees its own workspace's attention events). We still update
-    // lastStatus above so an unscoped re-fire is suppressed identically.
-    if (this.scopeDir && dirId !== this.scopeDir) return null;
-    const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
-    const text = attentionText(t, status);
+    const attentionStatus = status as AttentionState;
+    const text = attentionText(t, attentionStatus);
     const content =
-      `[${id}] ${label} — ${STATE_PHRASE[status]}` + (text ? `: ${text}` : "");
+      `[${id}] ${label} — ${STATE_PHRASE[attentionStatus]}` + (text ? `: ${text}` : "");
+    return {
+      content,
+      meta: { task_id: id, workspace: dirId, state: status, ...storyMeta },
+    };
+  }
 
-    return { content, meta: { task_id: id, workspace: dirId, state: status } };
+  /**
+   * Does THIS bridge's scope OWN a task's current attention item — i.e. should it emit?
+   * The crux of the Phase-4 routing contract:
+   *  - STORY scope (BUTCHR_CHANNEL_STORY): the leader owns its OWN story's subtasks' tier-0
+   *    feedback (resolved responder 'story', which includes a reset-back-to-story on a fresh
+   *    feedback event) AND their failures (failed/aborted — a terminal failure has no
+   *    responder, but the leader still owns its subtasks' failures). Items that ESCALATE up
+   *    to the CTO (responder 'cto') are NOT owned here.
+   *  - WORKSPACE/CTO scope (BUTCHR_CHANNEL_WORKSPACE, or unscoped legacy): a task in this
+   *    workspace that is either STANDALONE (story_id == null — TODAY'S EXACT behavior: the
+   *    CTO is notified and self-selects cto-vs-user) OR a story item ESCALATED to the CTO
+   *    (responder 'cto'). A story member's tier-0 / failed items go to its LEADER, never here.
+   */
+  private routeOwns(
+    storyId: string | null,
+    responder: string | null,
+    status: string,
+    dirId: string,
+  ): boolean {
+    if (this.scopeStory) {
+      return (
+        storyId === this.scopeStory &&
+        (responder === "story" || status === "failed" || status === "aborted")
+      );
+    }
+    if (this.scopeDir && dirId !== this.scopeDir) return false;
+    return storyId == null || responder === "cto";
   }
 }
 
@@ -505,6 +589,12 @@ export async function main(): Promise<void> {
   // agent and passes that workspace_id via BUTCHR_CHANNEL_WORKSPACE, so the bridge pushes
   // only that workspace's attention events. Unset → an unscoped (all-workspaces) feed.
   const scopeDir = (process.env.BUTCHR_CHANNEL_WORKSPACE ?? "").trim();
+  // PER-STORY SCOPE (the story-leader bridge): butchr launches one bridge per OPEN story's
+  // leader and passes that story_id via BUTCHR_CHANNEL_STORY, so the bridge pushes only that
+  // story's subtasks' tier-0 feedback + failures (the WORKSPACE scope above is also set, for
+  // SSE filtering / the workspace label, but STORY scope drives the routing). Unset → the
+  // bridge runs in WORKSPACE/CTO mode.
+  const scopeStory = (process.env.BUTCHR_CHANNEL_STORY ?? "").trim();
   // CONNECTIVITY-ONLY (the WORKER bridge): deliver ONLY the global connectivity-restored
   // broadcast, suppressing every attention/idle event. Set by the dispatcher on the
   // per-task channel server (BUTCHR_CHANNEL_CONNECTIVITY_ONLY=1) so a build agent hears
@@ -512,8 +602,9 @@ export async function main(): Promise<void> {
   const connectivityOnly = /^(1|true|yes|on)$/i.test(
     (process.env.BUTCHR_CHANNEL_CONNECTIVITY_ONLY ?? "").trim(),
   );
-  const bridge = new AttentionBridge(scopeDir, connectivityOnly);
-  if (scopeDir) elog(`scoped to workspace ${scopeDir}`);
+  const bridge = new AttentionBridge(scopeDir, connectivityOnly, scopeStory);
+  if (scopeStory) elog(`scoped to story ${scopeStory}`);
+  else if (scopeDir) elog(`scoped to workspace ${scopeDir}`);
   if (connectivityOnly) elog("connectivity-only mode (worker channel)");
   let stopped = false;
 

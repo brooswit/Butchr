@@ -7,9 +7,10 @@
 //
 // What this exercises:
 //   - LIFECYCLE (scoped to a story): launch launches through the harness with cwd = the
-//     workspace repo root, NO channel wiring (Phase 4 — no --mcp-config / no dev-channels
-//     flag), fresh session on first launch; stop tears it down; restart resumes the SAME
-//     session; restart(fresh) cold-starts a new one.
+//     workspace repo root, the Phase-4 story-scoped channel wiring (--mcp-config +
+//     dev-channels flag, the per-story MCP config scoped via BUTCHR_CHANNEL_STORY), fresh
+//     session on first launch; stop tears it down; restart resumes the SAME session;
+//     restart(fresh) cold-starts a new one.
 //   - SINGLE INSTANCE PER STORY: a launch when one is already live ADOPTS it.
 //   - BOOT RECONCILE: adopt a live pane vs (re)launch a dead one; honor a prior stop;
 //     disabled (story not open); herdr-down skip.
@@ -22,7 +23,7 @@
 // config fields are set DIRECTLY on the imported config object (deterministic regardless of
 // bun's shared-config import order).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRunner, PaneInfo, StartedAgent } from "../src/harness.ts";
@@ -164,7 +165,7 @@ beforeEach(() => {
 });
 
 describe("story-leader lifecycle (per story)", () => {
-  test("launch launches through the harness with cwd = the repo root + NO channel wiring", async () => {
+  test("launch launches through the harness with cwd = the repo root + the story-scoped channel", async () => {
     insertStory("st-launch", WS);
     const { runner, calls } = makeFake({ alive: false });
     harnessMod.setRunner(runner);
@@ -181,9 +182,19 @@ describe("story-leader lifecycle (per story)", () => {
     // First launch with no persisted/seeded session → a FRESH --session-id.
     expect(launched).toContain("--session-id");
     expect(launched).not.toContain("--resume");
-    // PHASE-4 GUARD-RAIL: NO channel feed this phase.
-    expect(launched).not.toContain("--dangerously-load-development-channels");
-    expect(launched).not.toContain("--mcp-config");
+    // PHASE 4: the channel feed is now wired — the development-channel flag + the per-story
+    // MCP config (mirrors the CTO agent's channel wiring).
+    expect(launched).toContain("--dangerously-load-development-channels server:butchr-cto-channel");
+    expect(launched).toContain("--mcp-config");
+    // The MCP config registers the channel stdio server SCOPED to THIS story (and carries the
+    // workspace id for SSE filtering / the workspace label).
+    const mcp = JSON.parse(
+      readFileSync(join(cfgMod.config.dataDir, "story", "st-launch", "mcp.json"), "utf8"),
+    );
+    expect(mcp.mcpServers["butchr-cto-channel"]).toBeTruthy();
+    expect(mcp.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_SSE_URL).toContain("/api/events");
+    expect(mcp.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_STORY).toBe("st-launch");
+    expect(mcp.mcpServers["butchr-cto-channel"].env.BUTCHR_CHANNEL_WORKSPACE).toBe(WS);
     // Placed in the dedicated tab; husk root pane closed.
     expect(start.tabId).toBe("story-tab");
     expect(calls.paneClose).toContain("rp-1");
