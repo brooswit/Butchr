@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.92] - 2026-06-15
+
 ### Changed
 - **Story-leader brief documents the course-correction mutation tools.** The generated
   per-story leader brief (`buildStoryLeaderBrief`, `src/story-agent.ts`) gained a
