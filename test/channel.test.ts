@@ -4,7 +4,7 @@
 // drive the bridge's translation logic, the initialize-result shape, the SSE
 // reconnect loop (with an injected `open`), and the malformed-input handling
 // directly — the same seams main() wires to stdin/stdout/fetch at runtime.
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   ATTENTION_STATES,
   AttentionBridge,
@@ -450,6 +450,108 @@ describe("channel: story scope (Phase 4 — story-leader feed + bubble-up routin
     expect(leaderIdle!.meta.state).toBe("idle");
     expect(leaderIdle!.meta.story_id).toBe("st-1");
     expect(ctoBridge().consume(taskUpdated(idle))).toBeNull();
+  });
+});
+
+describe("channel: routeOwns V2 (responder-redesign §5 — gate FORCED ON)", () => {
+  // The V2 CTO feed owns ONLY non-story tasks: a story member ALWAYS belongs to its leader
+  // (never the CTO), and a non-story task is owned only when it is awaiting the CTO
+  // ('cto') or has FAILED; a non-story 'user' escalation is DROPPED by the CTO bridge.
+  // The gate is read at CALL TIME (responderV2Enabled), so flipping the env here and
+  // restoring it in afterEach is enough — no module re-import — and CANNOT leak into the
+  // gate-OFF V1 blocks that share this process. The story-leader arm is identical under V1
+  // and V2, so the Phase-4 cases above already cover the leader side with the gate off.
+  const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
+  const ctoBridge = () => new AttentionBridge("dir-1");
+
+  const priorGate = process.env.BUTCHR_RESPONDER_V2;
+  beforeEach(() => {
+    process.env.BUTCHR_RESPONDER_V2 = "1";
+  });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.BUTCHR_RESPONDER_V2;
+    else process.env.BUTCHR_RESPONDER_V2 = priorGate;
+  });
+
+  test("a story-member in_review routes to its story-leader bridge, NOT the CTO bridge", () => {
+    const task = {
+      id: "v2-sm-review",
+      workspace_id: "dir-1",
+      status: "in_review",
+      summary: "implemented subtask",
+      story_id: "st-1",
+      pending_responder: "story", // V2: a story member always resolves to its leader
+    };
+    const leader = storyBridge().consume(taskUpdated(task));
+    expect(leader).not.toBeNull();
+    expect(leader!.meta).toEqual({
+      task_id: "v2-sm-review",
+      workspace: "dir-1",
+      state: "in_review",
+      story_id: "st-1",
+    });
+    // Under V2 the CTO feed NEVER owns a story member.
+    expect(ctoBridge().consume(taskUpdated(task))).toBeNull();
+  });
+
+  test("a NON-STORY 'cto' task routes to the CTO bridge", () => {
+    const task = {
+      id: "v2-cto-review",
+      workspace_id: "dir-1",
+      status: "in_review",
+      summary: "standalone change",
+      // no story_id
+      pending_responder: "cto",
+    };
+    const cto = ctoBridge().consume(taskUpdated(task));
+    expect(cto).not.toBeNull();
+    // Standalone meta stays byte-for-byte today's shape — no story_id key.
+    expect(cto!.meta).toEqual({
+      task_id: "v2-cto-review",
+      workspace: "dir-1",
+      state: "in_review",
+    });
+  });
+
+  test("a NON-STORY escalated_to_user task ('user') is DROPPED by the CTO bridge", () => {
+    const task = {
+      id: "v2-user-review",
+      workspace_id: "dir-1",
+      status: "in_review",
+      summary: "escalated to the user",
+      // no story_id
+      pending_responder: "user", // escalated_to_user → resolves to 'user' under V2
+    };
+    // The CTO feed drops it (the webapp surfaces it to the user). This is the gated change
+    // vs V1, where a standalone task is owned regardless of responder.
+    expect(ctoBridge().consume(taskUpdated(task))).toBeNull();
+  });
+
+  test("a story-member FAILURE is owned by the STORY-leader bridge, NOT the CTO bridge", () => {
+    const failed = {
+      id: "v2-sm-fail",
+      workspace_id: "dir-1",
+      status: "failed",
+      last_dispatch_error: "spawn failed",
+      story_id: "st-1",
+      // a terminal failure has no responder under V2 — the explicit status check owns it.
+    };
+    const leaderFail = storyBridge().consume(taskUpdated(failed));
+    expect(leaderFail).not.toBeNull();
+    expect(leaderFail!.meta.state).toBe("failed");
+    expect(leaderFail!.meta.story_id).toBe("st-1");
+    // storyId != null excludes it from the CTO feed under V2.
+    expect(ctoBridge().consume(taskUpdated(failed))).toBeNull();
+
+    const aborted = {
+      id: "v2-sm-abort",
+      workspace_id: "dir-1",
+      status: "aborted",
+      revert_reason: "operator aborted",
+      story_id: "st-1",
+    };
+    expect(storyBridge().consume(taskUpdated(aborted))).not.toBeNull();
+    expect(ctoBridge().consume(taskUpdated(aborted))).toBeNull();
   });
 });
 

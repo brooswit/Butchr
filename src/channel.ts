@@ -20,7 +20,7 @@
 // the same way src/mcp.ts hand-rolls the Streamable-HTTP framing. The only butchr
 // import is `config` (for the default SSE URL); everything else is self-contained so
 // the pieces stay unit-testable without a live butchr or a real claude.
-import { config } from "./config.ts";
+import { config, responderV2Enabled } from "./config.ts";
 import { ATTENTION_STATES } from "./db.ts";
 import { humanizeMs } from "./duration.ts";
 import {
@@ -464,11 +464,20 @@ export class AttentionBridge {
    *    feedback (resolved responder 'story', which includes a reset-back-to-story on a fresh
    *    feedback event) AND their failures (failed/aborted — a terminal failure has no
    *    responder, but the leader still owns its subtasks' failures). Items that ESCALATE up
-   *    to the CTO (responder 'cto') are NOT owned here.
-   *  - WORKSPACE/CTO scope (BUTCHR_CHANNEL_WORKSPACE, or unscoped legacy): a task in this
-   *    workspace that is either STANDALONE (story_id == null — TODAY'S EXACT behavior: the
-   *    CTO is notified and self-selects cto-vs-user) OR a story item ESCALATED to the CTO
-   *    (responder 'cto'). A story member's tier-0 / failed items go to its LEADER, never here.
+   *    to the CTO (responder 'cto') are NOT owned here. This arm is IDENTICAL under V1 and V2.
+   *  - WORKSPACE/CTO scope (BUTCHR_CHANNEL_WORKSPACE, or unscoped legacy): GATED by
+   *    responderV2Enabled() (story st-def561dd, design §5):
+   *     - V1 (gate OFF — the live model): a task in this workspace that is either STANDALONE
+   *       (story_id == null — TODAY'S EXACT behavior: the CTO is notified and self-selects
+   *       cto-vs-user) OR a story item ESCALATED to the CTO (responder 'cto'). A story
+   *       member's tier-0 / failed items go to its LEADER, never here.
+   *     - V2 (gate ON): the CTO feed owns ONLY NON-STORY tasks — it NEVER owns a story member
+   *       (those always belong to the leader). A non-story task is owned when it is awaiting
+   *       the CTO (responder 'cto') OR has FAILED (failed/aborted — a failure has no responder,
+   *       hence the explicit status check). A non-story task ESCALATED to the user (responder
+   *       'user' from escalated_to_user) is DROPPED here — the webapp/dashboard surfaces it to
+   *       the user. Under V2 a story member never resolves to 'cto', so the V1 form's
+   *       `responder === 'cto'` story-member arm is simply unreachable — gated, not deleted.
    */
   private routeOwns(
     storyId: string | null,
@@ -483,6 +492,14 @@ export class AttentionBridge {
       );
     }
     if (this.scopeDir && dirId !== this.scopeDir) return false;
+    if (responderV2Enabled()) {
+      // V2: NON-STORY tasks only — awaiting the CTO ('cto') or a non-story failure. A
+      // non-story 'user' escalation falls through to false (dropped → webapp surfaces it).
+      return (
+        storyId == null &&
+        (responder === "cto" || status === "failed" || status === "aborted")
+      );
+    }
     return storyId == null || responder === "cto";
   }
 }
