@@ -26,6 +26,7 @@ import {
   getWorkspace,
   listWorkspaces,
   responderFor,
+  workspaceBranchIsolation,
   workspaceChangelogPath,
   workspaceGateCmd,
   workspaceReleaseMode,
@@ -961,14 +962,40 @@ function emitUpdated(id: string): void {
 // these yet — finalizeMerge keeps its current main-level flow until Phase D.
 
 /**
+ * GUARDED (CONTRIBUTING §11.8) — the story branch an isolated story member retargets onto,
+ * or null. Returns git.storyBranchName(story_id) iff the task is a story member AND its
+ * workspace has branch_isolation ON AND the story's CAPTURED `isolated` bit is 1; else null.
+ * Reads the story's isolated bit via a DIRECT db query (not stories.ts) to avoid a
+ * tasks↔stories import cycle. UNREACHABLE this phase: the flag is OFF everywhere and every
+ * story captures isolated=0, so it always returns null. Phase D makes resolveBase RETURN
+ * this branch; here it only gates the lazy ensureStoryBranch side effect.
+ */
+function isolatedStoryBranch(row: TaskRow): string | null {
+  if (!row.story_id) return null;
+  if (!workspaceBranchIsolation(row.workspace_id)) return null;
+  const story = db
+    .query<{ isolated: number }, [string]>(`SELECT isolated FROM stories WHERE id=?`)
+    .get(row.story_id);
+  if (!story || story.isolated !== 1) return null;
+  return git.storyBranchName(row.story_id);
+}
+
+/**
  * Resolve a task's REBASE/MERGE BASE — the ref its branch is measured/rebased against.
  * INERT this phase: returns the workspace default branch for EVERY task (today's value).
- * Phase D returns the story branch for an isolated story member. Throws 404 if the task's
- * workspace is gone (same contract as the other git-probe reads here).
+ *
+ * The one Phase-C side effect (GUARDED/UNREACHABLE): for an isolated story member it
+ * lazily ensures the story branch + its worktree exist BEFORE the subtask worktree is
+ * branched off it (§11.3). The flag is OFF everywhere and every story captures isolated=0,
+ * so isolatedStoryBranch always returns null and ensureStoryBranch never runs. Phase D
+ * flips the RETURN to the story branch (and owns the activation tests). Throws 404 if the
+ * task's workspace is gone (same contract as the other git-probe reads here).
  */
 export async function resolveBase(row: TaskRow): Promise<string> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
+  const storyBranch = isolatedStoryBranch(row);
+  if (storyBranch) await git.ensureStoryBranch(dir.path, storyBranch);
   return git.defaultBranch(dir.path);
 }
 

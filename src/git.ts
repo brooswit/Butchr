@@ -119,13 +119,37 @@ export function worktreePath(dir: string, taskId: string): string {
 }
 
 /**
+ * The branch-name prefix for a STORY's branch (`butchr/story/`). The single source of
+ * truth for the prefix, shared by storyBranchName (build) and storyIdFromBranch (parse).
+ */
+const STORY_BRANCH_PREFIX = "butchr/story/";
+
+/**
  * The branch name for a STORY's branch: `butchr/story/<storyId>`. Pure (no git I/O).
  * The `butchr/story/` prefix can't collide with task branches (named by the
  * `adjective-noun-4hex` task id) or the default branch (CONTRIBUTING §11.3). Used by
  * the branch-isolation merge model to cut/merge a story branch off the default branch.
  */
 export function storyBranchName(storyId: string): string {
-  return `butchr/story/${storyId}`;
+  return `${STORY_BRANCH_PREFIX}${storyId}`;
+}
+
+/**
+ * Absolute path to an isolated story's STORY WORKTREE: `<dir>/butchr-story-<storyId>`
+ * (CONTRIBUTING §11.1). Pure (no git I/O). The DASH-joined dir name deliberately differs
+ * from the SLASH-prefixed branch (`butchr/story/<storyId>`) so the branch can't collide
+ * with task branches while the worktree stays a single flat sibling dir of the repo root.
+ */
+export function storyWorktreePath(dir: string, storyId: string): string {
+  return join(dir, `butchr-story-${storyId}`);
+}
+
+/** Recover a storyId from its story branch (`butchr/story/<id>` → `<id>`). The inverse of
+ * storyBranchName; falls back to the input unchanged if it carries no story prefix. */
+function storyIdFromBranch(storyBranch: string): string {
+  return storyBranch.startsWith(STORY_BRANCH_PREFIX)
+    ? storyBranch.slice(STORY_BRANCH_PREFIX.length)
+    : storyBranch;
 }
 
 /**
@@ -270,6 +294,88 @@ async function addLocalExclude(dir: string, pattern: string): Promise<void> {
   if (lines.includes(pattern)) return;
   if (text.length > 0 && !text.endsWith("\n")) text += "\n";
   writeFileSync(excludePath, text + pattern + "\n", "utf8");
+}
+
+// ---- STORY BRANCH LIFECYCLE (3-level branch-isolation merge model — CONTRIBUTING §11) --
+// A story worktree is to its subtasks exactly what the repo root is to standalone tasks
+// (§11.1): an isolated open story gets a checkout on its story branch at
+// <repo>/butchr-story-<storyId>; subtasks branch FROM and fast-forward INTO it. These
+// helpers create / remove that branch + worktree. GUARDED/UNUSED this phase — no story is
+// isolated while the workspace branch_isolation flag is OFF (every story captures
+// isolated=0), so resolveBase never reaches ensureStoryBranch.
+
+/**
+ * Lazily ensure an isolated story's BRANCH + its STORY WORKTREE exist, returning the story
+ * worktree path (`<repo>/butchr-story-<storyId>`, §11.1). Mirrors createWorktree's
+ * VALIDATE-OR-REBUILD idempotency so it is restart-safe and safe to call before every
+ * subtask is branched off the story branch (§11.3):
+ *
+ *  1. A VALID story worktree at the path is reused unchanged. The reuse probe passes
+ *     `base = the story branch itself`, so the stale-base check in worktreeIsReusable is
+ *     trivially satisfied (the branch is its own ancestor): a story branch LEGITIMATELY
+ *     diverges from main (it accrues subtask merges) and must NEVER be rebuilt for being
+ *     "behind" the default tip.
+ *  2. A broken/missing-link leftover at the path is removed WORKTREE-ONLY
+ *     (removeStaleStoryWorktree — it does NOT delete the branch, which carries merged
+ *     subtask commits) and re-attached below.
+ *  3. If the branch already exists (it holds subtask work) but had no live worktree, a
+ *     fresh worktree is attached onto the EXISTING branch (preserving the work). Only the
+ *     FIRST creation cuts the branch off the CURRENT default-branch (main) tip.
+ *
+ * The story worktree dir is added to .git/info/exclude like task worktrees, so it never
+ * shows as untracked. Throws (via runOrThrow) only if the worktree add itself fails.
+ */
+export async function ensureStoryBranch(dir: string, storyBranch: string): Promise<string> {
+  const storyId = storyIdFromBranch(storyBranch);
+  const path = storyWorktreePath(dir, storyId);
+  await addLocalExclude(dir, `/butchr-story-${storyId}/`);
+  if (existsSync(path)) {
+    // base = the story branch itself → the stale-base probe is a trivial no-op (see above),
+    // so a valid story worktree is reused even when it has fallen "behind" the moving main.
+    if (await worktreeIsReusable(dir, storyBranch, path, storyBranch)) return path;
+    await removeStaleStoryWorktree(dir, path); // WORKTREE-ONLY — never deletes the branch
+  }
+  if (await branchExists(dir, storyBranch)) {
+    // Branch exists (merged subtask work) but its worktree was missing/broken → re-attach a
+    // worktree onto the EXISTING branch so none of that work is lost.
+    await runOrThrow([git, "-C", dir, "worktree", "add", path, storyBranch]);
+  } else {
+    // First lazy creation → cut the story branch off the CURRENT main tip + check it out.
+    const base = await defaultBranch(dir);
+    await runOrThrow([git, "-C", dir, "worktree", "add", "-b", storyBranch, path, base]);
+  }
+  return path;
+}
+
+/**
+ * Remove a stale/broken story WORKTREE at `path` and its git admin entry, but DELIBERATELY
+ * NOT the branch — the story branch carries merged subtask commits that must survive (the
+ * worktree is re-attached onto it by ensureStoryBranch). The worktree-only sibling of
+ * removeStaleWorktree (which also `branch -D`s). Best-effort + idempotent: try the clean
+ * `worktree remove --force`; if the dir survives (a broken `.git` link git no longer
+ * recognizes), delete it outright and `worktree prune` the dangling admin record.
+ */
+async function removeStaleStoryWorktree(dir: string, path: string): Promise<void> {
+  await run([git, "-C", dir, "worktree", "remove", "--force", path]);
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  await run([git, "-C", dir, "worktree", "prune"]);
+}
+
+/**
+ * Tear down an isolated story's worktree AND delete its branch — the completion/cleanup
+ * counterpart of ensureStoryBranch (§11.4/§11.9). Removes the story worktree (clean
+ * remove, then an outright delete + prune if a broken link left the dir behind) and then
+ * `branch -D`s the story branch. Best-effort + idempotent (a no-op when neither exists).
+ */
+export async function removeStoryBranch(dir: string, storyBranch: string): Promise<void> {
+  const storyId = storyIdFromBranch(storyBranch);
+  const path = storyWorktreePath(dir, storyId);
+  if (existsSync(path)) {
+    await run([git, "-C", dir, "worktree", "remove", "--force", path]);
+  }
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  await run([git, "-C", dir, "worktree", "prune"]);
+  await run([git, "-C", dir, "branch", "-D", storyBranch]);
 }
 
 /**
@@ -743,6 +849,13 @@ async function bumpVersionFile(
  *    story branch so the subtask fast-forwards into the story checkout (CONTRIBUTING
  *    §11.2/§11.4). With the defaults the git commands + captured shas are identical to
  *    today's single-level merge.
+ *  - `sourceWorktree` — the SOURCE checkout where `taskId`'s branch is committed + rebased
+ *    (and the version bump is committed). DEFAULTS to `worktreePath(dir, taskId)` — the
+ *    task's own worktree — so an omitted value is byte-for-byte today's merge. A story→main
+ *    merge passes the STORY WORKTREE: the story branch (`butchr/story/<id>`) and its
+ *    worktree dir (`butchr-story-<id>`) diverge, so the default `worktreePath(dir, taskId)`
+ *    would not find the checkout. `taskId` itself stays the git REF used for the rebase
+ *    target / ff source / diff range (CONTRIBUTING §11.4).
  */
 export type MergeOptions = {
   versionFile?: string;
@@ -753,6 +866,7 @@ export type MergeOptions = {
   base?: string;
   ffWorktree?: string;
   ffTargetBranch?: string;
+  sourceWorktree?: string;
 };
 
 export async function merge(
@@ -767,7 +881,12 @@ export async function merge(
   const base = opts.base ?? def;
   const ffWorktree = opts.ffWorktree ?? dir;
   const ffTargetBranch = opts.ffTargetBranch ?? def;
-  const wt = worktreePath(dir, taskId);
+  // The SOURCE checkout where the task branch is committed + rebased. Defaults to the
+  // task's own worktree (<dir>/<taskId>); a story→main merge overrides it with the story
+  // worktree (the story branch ref and its worktree dir name diverge — see MergeOptions).
+  // Every use of `wt` below flows from this one definition, so an omitted override is
+  // byte-for-byte today's merge.
+  const wt = opts.sourceWorktree ?? worktreePath(dir, taskId);
 
   // Auto-commit any dangling worktree changes so they're part of the rebase.
   if (existsSync(wt)) {
@@ -860,6 +979,30 @@ export async function merge(
     message: (ff.stderr || ff.stdout).trim() || `fast-forward into ${ffTargetBranch} failed`,
     conflictFiles: [],
   };
+}
+
+/**
+ * Merge a completed isolated story's BRANCH into the default branch (main) — the story→main
+ * step of the 3-level model (CONTRIBUTING §11.4). A THIN wrapper over the generalized
+ * merge(): task = the story branch, base = main, the SOURCE checkout = the story worktree
+ * (where the story branch is checked out), and the ff-target = main at the repo root (dir).
+ * This is "today's merge() flow with task = story-branch and base = main" the design calls
+ * for; encoding the §11.4 mapping in one place keeps the eventual completion path trivial.
+ * GUARDED/UNUSED this phase — the story-completion path that calls it is not built yet.
+ */
+export async function mergeStoryToMain(
+  dir: string,
+  storyId: string,
+  opts: Omit<MergeOptions, "base" | "sourceWorktree" | "ffWorktree" | "ffTargetBranch"> = {},
+): Promise<MergeResult> {
+  const main = await defaultBranch(dir);
+  return merge(dir, storyBranchName(storyId), {
+    ...opts,
+    base: main,
+    sourceWorktree: storyWorktreePath(dir, storyId),
+    ffWorktree: dir,
+    ffTargetBranch: main,
+  });
 }
 
 /**

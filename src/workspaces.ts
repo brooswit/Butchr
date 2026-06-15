@@ -383,6 +383,18 @@ export function workspaceReleaseMode(id: string): boolean {
 }
 
 /**
+ * Whether a workspace has 3-LEVEL BRANCH ISOLATION enabled (the `branch_isolation` column
+ * !== 0 — see db.ts + CONTRIBUTING §11). Mirrors workspaceReleaseMode. Stories OPENED while
+ * this is on capture isolated=1; thereafter isolation keys off that captured per-story bit,
+ * NOT this live flag (§11.8), so flipping the flag never retroactively changes an open story.
+ * Pure read of the workspace row; unknown id → false. INERT until the activation phase —
+ * default OFF.
+ */
+export function workspaceBranchIsolation(id: string): boolean {
+  return (getWorkspace(id)?.branch_isolation ?? 0) !== 0;
+}
+
+/**
  * Normalize an incoming optional-string override for storage. `undefined`/`null`
  * clears the override (→ NULL → falls back to the global default); a string is
  * stored verbatim (the empty string is a deliberate "disable for this workspace"

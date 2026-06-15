@@ -20,7 +20,7 @@ import {
 import type { StoryAgentStatus } from "./story-agent.ts";
 import { abortTask, createTask, getTask, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
-import { HttpError, getWorkspace, listWorkspaces } from "./workspaces.ts";
+import { HttpError, getWorkspace, listWorkspaces, workspaceBranchIsolation } from "./workspaces.ts";
 
 // The three valid story statuses (mirrors the StoryStatus union in db.ts). Used to
 // validate an incoming status before it touches the row.
@@ -64,9 +64,14 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
   }
   const id = uniqueStoryId();
   const created = nowIso();
+  // Capture the per-story ISOLATION bit ONCE from the workspace flag — the §11.8
+  // bootstrapping cut. Isolation keys off THIS captured bit, never the live flag, so
+  // flipping the workspace flag never retroactively changes an already-open story. The
+  // flag is OFF everywhere today ⇒ every story still captures isolated=0.
+  const isolated = workspaceBranchIsolation(workspaceId) ? 1 : 0;
   db.query(
-    `INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, ?, ?)`,
-  ).run(id, workspaceId, brief.trim(), "open", created);
+    `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, workspaceId, brief.trim(), "open", created, isolated);
   // A new `open` story gets a managed STORY-LEADER agent (Phase 3): mark it desired +
   // launch it. Thin hook into story-agent.ts so the CRUD here stays clean; the hook marks
   // desired synchronously and fires the launch best-effort (never fails story creation).

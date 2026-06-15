@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Branch isolation (stories) phase C-lifecycle, additive + guarded/unused (CONTRIBUTING §11): `git.ensureStoryBranch` / `removeStoryBranch` lazily create + tear down an isolated story's branch and its story worktree (`<repo>/butchr-story-<id>`) with createWorktree-style validate-or-rebuild idempotency that never discards merged subtask work; `git.merge` gains an optional `sourceWorktree` (defaults to the task worktree → byte-for-byte unchanged) and a thin `mergeStoryToMain` wrapper for the generalized story→main merge; `createStory` captures the per-story `isolated` bit from the workspace `branch_isolation` flag; `resolveBase` gains a guarded (unreachable while the flag is off) `ensureStoryBranch` hook. No behavior change — every story still captures `isolated=0`.
+
 ## [0.9.93] - 2026-06-15
 
 ### Added
