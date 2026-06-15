@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.83] - 2026-06-15
+
 ### Added
 - **Stories epic, Phase 2 — responder escalation chain.** A story-member task's feedback
   now resolves up a fixed chain `story → cto → user`: a new `tasks.responder_tier` column
