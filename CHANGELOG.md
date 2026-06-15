@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.88] - 2026-06-15
+
 ### Changed
 - **Stories epic, Phase 7 — AUTHORITY FLIP.** The operator/CTO now creates only STORIES;
   work TASKS are created exclusively by story leaders. `POST /api/workspaces/:id/tasks`
