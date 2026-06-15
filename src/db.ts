@@ -330,6 +330,18 @@ ensureColumn("workspaces", "branch_isolation", "INTEGER NOT NULL DEFAULT 0");
 // Phase D consumes it). Additive nullable-with-default column, mirroring release_mode.
 ensureColumn("stories", "isolated", "INTEGER NOT NULL DEFAULT 0");
 
+// STORY-LEVEL MERGE-RANGE bookkeeping (CONTRIBUTING §11.6 — Phase E). When an isolated
+// story's branch is merged into the default branch (the story→main step on completion),
+// we record the SHAs that bracket the WHOLE story's commit range ON the default branch:
+// `merge_base_sha` = the default-branch tip BEFORE the story's fast-forward (exclusive
+// lower bound), `merged_sha` = the new tip AFTER it (inclusive upper bound). These are the
+// story-level analog of the per-task merge_base_sha/merged_sha and are the unit a
+// whole-story rollback reverts (the story→main rebase rewrites the subtasks' commits, so
+// their story-branch shas are meaningless against main afterward — §11.6 caveat). NULL for
+// every non-isolated story and any story not yet landed. Additive nullable columns.
+ensureColumn("stories", "merge_base_sha", "TEXT");
+ensureColumn("stories", "merged_sha", "TEXT");
+
 // `summary` holds the agent's optional request_review summary (shown in review).
 ensureColumn("tasks", "summary", "TEXT");
 
@@ -901,11 +913,23 @@ export type WorkspaceRow = {
 // the `kind` column comment above).
 export type TaskKind = "task" | "rollback";
 
-// A STORY's lifecycle status (see the `stories` table above). `open` (the default) — the
-// story is active; `done` — its work is complete; `aborted` — it was cancelled. Phase 1
-// data-model only: nothing transitions these automatically yet (a later phase's story-
-// leader agent will); they are set by the operator via PATCH /api/stories/:id.
-export type StoryStatus = "open" | "done" | "aborted";
+// A STORY's lifecycle status (see the `stories` table above). The three OPERATOR-set
+// values: `open` (the default) — the story is active and accepting subtasks; `done` — its
+// work is complete (for an ISOLATED story this means its branch LANDED on the default
+// branch and the post-merge verify was green — §11.7); `aborted` — it was cancelled. The
+// two remaining values are BUTCHR-OWNED and transient, used ONLY on an isolated story's
+// completion path (CONTRIBUTING §11.7, Phase E) — never set directly via PATCH:
+//   - `merging`       — completion was requested; the story-level re-gate + story→main
+//                       merge are in flight (transient, serialized through the global merge
+//                       queue, restart-recoverable — re-driven on boot like a rolling_back
+//                       task). The leader is kept UP.
+//   - `merge_blocked` — the re-gate came back RED, or the story↔main merge hit a conflict:
+//                       the story did NOT land, the default branch is untouched, an
+//                       escalation fired. A visible merge-failed surface, NOT `done`. The
+//                       leader is kept UP to re-attempt (fix a RED via more subtasks, or a
+//                       CTO/human resolves a conflict, then re-request → `merging`).
+// A non-isolated story only ever uses open/done/aborted (its PATCH-`done` is immediate).
+export type StoryStatus = "open" | "merging" | "merge_blocked" | "done" | "aborted";
 
 // A STORY row (see the `stories` table above): a CONTAINER grouping member tasks (which
 // carry a nullable story_id FK). Phase 1 is data-model only — fully inert; later phases
@@ -929,6 +953,11 @@ export type StoryRow = {
   // spread (no extra plumbing). See StoryRow's isolated comment for the additive-column pattern.
   pending_ask: string | null;
   ask_responder: string | null;
+  // STORY-LEVEL MERGE-RANGE shas (see the merge_base_sha/merged_sha ensureColumns above):
+  // the default-branch tips bracketing the whole story's commit range, set ONLY when an
+  // isolated story's branch LANDS on the default branch (§11.6, Phase E). NULL otherwise.
+  merge_base_sha: string | null;
+  merged_sha: string | null;
   created_at: string;
 };
 

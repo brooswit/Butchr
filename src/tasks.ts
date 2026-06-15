@@ -2598,11 +2598,14 @@ export function isStoryComplete(storyId: string): boolean {
  * attention event targeted at the LEADER feed ('story <id> ready for completion review') so
  * the leader verifies the story's goal is met — then it PATCHes the story `done` (which tears
  * the leader down + reports completion UP to the CTO) or, if the goal is NOT met, creates more
- * subtasks. Fires ONLY for an `open` story (a done/aborted story has no live leader to receive
- * it). Returns whether the completion event fired. The single completion-detection seam,
- * called from finalizeMerge's success path (story_id-guarded so STANDALONE tasks never reach
- * here — no merge-behavior regression for story-less tasks). Best-effort: events.publish
- * swallows a dead-subscriber throw, so this never breaks the merge that triggered it.
+ * subtasks. Fires for an `open` story OR a `merge_blocked` one (CONTRIBUTING §11.7, Phase E):
+ * while a story sits in `merge_blocked` (a RED re-gate the leader is fixing), each fix-subtask
+ * landing re-fires the completion-review so the leader re-verifies + re-requests the land. A
+ * `merging`/`done`/`aborted` story does NOT re-notify (mid-merge, or no live leader). Returns
+ * whether the completion event fired. The single completion-detection seam, called from
+ * finalizeMerge's success path (story_id-guarded so STANDALONE tasks never reach here — no
+ * merge-behavior regression for story-less tasks). Best-effort: events.publish swallows a
+ * dead-subscriber throw, so this never breaks the merge that triggered it.
  */
 export function notifyStoryCompletionIfReady(storyId: string): boolean {
   const story = db
@@ -2610,7 +2613,7 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
       `SELECT workspace_id, brief, status FROM stories WHERE id=?`,
     )
     .get(storyId);
-  if (!story || story.status !== "open") return false;
+  if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
   if (!isStoryComplete(storyId)) return false;
   publish({
     type: "story.attention",
@@ -2621,6 +2624,114 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
     detail: story.brief ?? null,
   });
   return true;
+}
+
+// --- STORY → MAIN MERGE MECHANICS (CONTRIBUTING §11.4/§11.5/§11.6 — Phase E) -------
+// The git side of an ISOLATED story's completion: re-gate the assembled story branch, merge
+// it into the default branch through the SAME global merge queue (runExclusiveMerge) that
+// serializes subtask merges, run the post-merge verify on the default branch, and clean up.
+// PURE MECHANICS — this writes NO story state and fires NO story events; stories.landStory
+// owns the merging/merge_blocked/done transitions + the attention events + leader teardown
+// (keeping story-state ownership in stories.ts and off the tasks↔stories import cycle). Gated
+// upstream: stories.landStory only calls this for an isolated story (isolated=1), so it is
+// inert for non-isolated stories + standalone tasks.
+
+/** The outcome of mergeStoryBranch (the story→main attempt). Exactly one kind:
+ *  - `landed`        — re-gate GREEN, story→main ff'd, post-merge verify GREEN, story branch
+ *                      + worktree removed; `baseSha`/`mergedSha` bracket the story's range on main.
+ *  - `gateRed`       — the story-level re-gate (on the story-branch tip) came back RED: a HARD
+ *                      BLOCK, no merge ran, main untouched (§11.5 refinement #1). `output` = gate log.
+ *  - `postVerifyRed` — re-gate was GREEN and the ff stuck, but the post-merge verify ON MAIN went
+ *                      RED, so main was reset to its pre-merge tip (§11.5 backstop). `output` = log.
+ *  - `conflict`      — the story↔main rebase conflicted; it was aborted, story branch + main
+ *                      untouched (§11.4). `files`/`message` describe the conflict.
+ *  - `mergeError`    — a non-conflict git failure in the merge; main untouched. `message` = error. */
+export type StoryMergeOutcome =
+  | { kind: "landed"; baseSha: string | null; mergedSha: string | null }
+  | { kind: "gateRed"; output: string }
+  | { kind: "postVerifyRed"; output: string }
+  | { kind: "conflict"; files: string[]; message: string }
+  | { kind: "mergeError"; message: string };
+
+/**
+ * Run an ISOLATED story's story→main merge attempt — the §11.4/§11.5 completion mechanics,
+ * the whole sequence inside ONE runExclusiveMerge so a story→main merge can never interleave
+ * with a subtask→story merge of the same story (or any other merge moving main). Steps:
+ *   1. ensure the story branch + its worktree exist (idempotent; restart-safe);
+ *   2. RE-GATE the story-branch tip in the story worktree — RED ⇒ HARD BLOCK (`gateRed`), no
+ *      merge, main untouched;
+ *   3. capture main's pre-merge tip, then rebase the story branch onto main + ff main at the
+ *      repo root (git.mergeStoryToMain) — a conflict ⇒ `conflict` (rebase already aborted), a
+ *      non-conflict failure ⇒ `mergeError` (both leave main + the story branch untouched);
+ *   4. POST-MERGE VERIFY on main at the repo root — RED ⇒ resetHard main to the captured tip
+ *      (`postVerifyRed`), so a broken commit never stays on main;
+ *   5. GREEN ⇒ removeStoryBranch (delete the story branch + worktree) ⇒ `landed`.
+ * NO release/version-bump opts are passed to the merge: each subtask already bumped the
+ * version + stamped the changelog when it merged INTO the story branch (release_mode runs the
+ * bump on every isolated subtask merge — see finalizeMerge/git.merge), so the story→main ff
+ * carries those commits; a fresh story-level bump would double-stamp (CONTRIBUTING §11.6,
+ * approved steer). Throws HttpError(404) if the story / its workspace is gone.
+ */
+export async function mergeStoryBranch(storyId: string): Promise<StoryMergeOutcome> {
+  const story = db
+    .query<{ workspace_id: string }, [string]>(`SELECT workspace_id FROM stories WHERE id=?`)
+    .get(storyId);
+  if (!story) throw new HttpError(404, `story not found: ${storyId}`);
+  const dir = getWorkspace(story.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+
+  const storyBranch = git.storyBranchName(storyId);
+  const gateCmd = workspaceGateCmd(dir.id);
+
+  return runExclusiveMerge<StoryMergeOutcome>(async () => {
+    // 1. Ensure the story branch + worktree (checked out at the story tip). Idempotent +
+    //    restart-safe — a recovery merge after a crash still finds/rebuilds the checkout.
+    const storyWt = await git.ensureStoryBranch(dir.path, storyBranch);
+
+    // 2. RE-GATE the assembled story branch IN the story worktree (its tip). RED is a HARD
+    //    BLOCK: the merge does not run and main is never touched (§11.5 refinement #1).
+    const regate = await verifyDefaultBranch(storyWt, gateCmd);
+    if (!regate.ok) {
+      return { kind: "gateRed", output: regate.output?.trim() || "(no gate output captured)" };
+    }
+
+    // 3. Capture main's pre-merge tip (to reset on a post-verify RED), then rebase the story
+    //    branch onto main + ff main at the repo root. A conflict / non-conflict failure both
+    //    leave the story branch AND main untouched (git.merge aborts the rebase on conflict).
+    const mainPriorTip = await git.headSha(dir.path).catch(() => null);
+    const mr = await git.mergeStoryToMain(dir.path, storyId);
+    if (!mr.ok) {
+      if (mr.conflict) {
+        return { kind: "conflict", files: mr.conflictFiles, message: mr.message };
+      }
+      return { kind: "mergeError", message: mr.message };
+    }
+
+    // 4. POST-MERGE VERIFY on main at the repo root (the final backstop). RED ⇒ reset main to
+    //    its captured pre-merge tip so a broken commit never sits on main (§11.5).
+    const postVerify = await verifyDefaultBranch(dir.path, gateCmd);
+    if (!postVerify.ok) {
+      if (mainPriorTip) {
+        await git.resetHard(dir.path, mainPriorTip).catch((e) => {
+          console.error(
+            `[butchr] CRITICAL: story ${storyId} post-merge verify FAILED but the reset of ` +
+              `main to ${mainPriorTip} ALSO failed: ${e}. The default branch may hold a broken story.`,
+          );
+        });
+      } else {
+        console.error(
+          `[butchr] CRITICAL: story ${storyId} post-merge verify FAILED but main's pre-merge ` +
+            `tip was not captured, so the story merge could not be reverted. Inspect the default branch.`,
+        );
+      }
+      return { kind: "postVerifyRed", output: postVerify.output?.trim() || "(no verify output captured)" };
+    }
+
+    // 5. LANDED + green → the story branch is on main. Delete the story branch + worktree and
+    //    return the story-level merge range (main tips before/after the ff — §11.6).
+    await git.removeStoryBranch(dir.path, storyBranch);
+    return { kind: "landed", baseSha: mr.baseSha ?? null, mergedSha: mr.mergedSha ?? null };
+  });
 }
 
 // --- dispatcher-facing state transitions (kept here so all writes live together) ---

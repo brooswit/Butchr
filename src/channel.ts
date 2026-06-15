@@ -94,23 +94,29 @@ const STATE_PHRASE: Record<AttentionState, string> = {
 // `idle-handling` responder to act on gracefully (nudge-with-guidance, requeue, or abort).
 const IDLE_PHRASE = "agent idle — needs idle-handling";
 
-// STORY-LEVEL attention phrases (Phase 6 of the STORIES epic + the responder-redesign ask
-// seam, §4b). These are NOT task status transitions but story-scoped notifications routed
-// by `target` (see AttentionBridge.consumeStoryAttention):
-//  - `completion-review` (target story) → the LEADER's feed: all subtasks merged → verify.
-//  - `complete` (target cto) → the WORKSPACE/CTO feed: the leader marked the story done.
-//  - `ask` (target cto, or user on a cto→user escalation) → the CTO feed: a leader raised
-//    a STORY-LEVEL ask. (A target:user escalation is DROPPED by every bridge — the
-//    dashboard surfaces it; see consumeStoryAttention.)
-//  - `ask-answered` (target story) → the LEADER's feed: its open ask was answered.
+// STORY-LEVEL attention phrases (STORIES epic — the story→main merge model, CONTRIBUTING
+// §11, plus the responder-redesign ask seam, §4b). These are NOT task status transitions but
+// story-scoped notifications routed by `target` (see AttentionBridge.consumeStoryAttention),
+// SPLIT by who can act:
+//   - LEADER feed (target:'story'): `completion-review` (all subtasks merged → verify the
+//     goal), `gate-red` (the assembled story failed its re-gate / post-merge verify — the
+//     leader fixes it with more subtasks, §11.5), and `ask-answered` (the leader's open ask
+//     was answered).
+//   - WORKSPACE/CTO feed (target:'cto'): `complete` (the leader marked the story done),
+//     `merge-conflict` (the story↔main rebase conflicted — a CTO/human git action in the
+//     story worktree, §11.4; the leader has no worktree and cannot resolve it), and `ask` (a
+//     leader raised a story-level ask to the CTO; a target:user escalation is DROPPED by every
+//     bridge — the dashboard surfaces it; see consumeStoryAttention).
 // Each carries its own `meta.state` so a recipient can branch on the surface, mirroring
 // STATE_PHRASE/IDLE_PHRASE for the task surfaces.
 const STORY_ATTENTION: Record<
-  "completion-review" | "complete" | "ask" | "ask-answered",
+  "completion-review" | "complete" | "gate-red" | "merge-conflict" | "ask" | "ask-answered",
   { phrase: string; state: string }
 > = {
   "completion-review": { phrase: "story ready for completion review", state: "story_completion_review" },
   complete: { phrase: "story complete", state: "story_complete" },
+  "gate-red": { phrase: "story gate RED — fix with more subtasks", state: "story_gate_red" },
+  "merge-conflict": { phrase: "story↔main MERGE CONFLICT — resolve in the story worktree", state: "story_merge_conflict" },
   ask: { phrase: "story ask awaiting an answer", state: "story_ask" },
   "ask-answered": { phrase: "story ask answered", state: "story_ask_answered" },
 };
@@ -416,12 +422,12 @@ export class AttentionBridge {
    * Translate a STORY-LEVEL attention event into a channel notification, or null when THIS
    * bridge's scope does not own it. Routing by `target` (the story-scoped vs workspace/CTO
    * feed split — the story analog of routeOwns):
-   *  - `target:'story'` (`completion-review` / `ask-answered`) is owned ONLY by the
-   *    STORY-leader bridge whose scopeStory === the event's story_id. A WORKSPACE/CTO bridge
-   *    never sees it.
-   *  - `target:'cto'` (`complete` / `ask`) is owned by the WORKSPACE/CTO bridge: NOT a story
-   *    bridge, and (when workspace-scoped) the event's workspace must match scopeDir. A story
+   *  - `target:'story'` (`completion-review` / `gate-red` / `ask-answered`) is owned ONLY by
+   *    the STORY-leader bridge whose scopeStory === the event's story_id. A WORKSPACE/CTO
    *    bridge never sees it.
+   *  - `target:'cto'` (`complete` / `merge-conflict` / `ask`) is owned by the WORKSPACE/CTO
+   *    bridge: NOT a story bridge, and (when workspace-scoped) the event's workspace must match
+   *    scopeDir. A story bridge never sees it.
    *  - `target:'user'` (a CTO→user ask escalation) is owned by NO bridge — `target` only
    *    parses to {story, cto}, so a user-escalated ask yields null here (the CTO + leader
    *    feeds stay silent); the dashboard's SSE consumer surfaces it to the human.
@@ -435,6 +441,8 @@ export class AttentionBridge {
     const reason =
       e.reason === "completion-review" ||
       e.reason === "complete" ||
+      e.reason === "gate-red" ||
+      e.reason === "merge-conflict" ||
       e.reason === "ask" ||
       e.reason === "ask-answered"
         ? e.reason

@@ -104,12 +104,19 @@ function storyWorkspacePath(storyId: string): string | null {
 
 /**
  * Is a story's leader DESIRED up (boot auto-start + supervision)? A story's leader is
- * desired exactly while the story is `open`; a `done`/`aborted` story (or a gone story)
- * has no leader. This is the story-leader analog of cto-agent.isCtoEnabled. Exported for
- * testing.
+ * desired while the story is `open` OR mid-completion (`merging`/`merge_blocked`) — the
+ * leader is KEPT UP across an isolated story's land attempt so it can re-attempt a blocked
+ * merge (fix a RED re-gate with more subtasks) (CONTRIBUTING §11.7, Phase E). Only a
+ * terminal `done`/`aborted` story (or a gone story) has no leader. This is the story-leader
+ * analog of cto-agent.isCtoEnabled. Exported for testing.
  */
 export function isStoryLeaderDesired(story: StoryRow | null): boolean {
-  return !!story && story.status === "open";
+  return (
+    !!story &&
+    (story.status === "open" ||
+      story.status === "merging" ||
+      story.status === "merge_blocked")
+  );
 }
 
 /** The view of a story's managed leader-agent state (mirrors CtoStatus). */
@@ -656,7 +663,10 @@ export function onStoryCreated(storyId: string): void {
 
 /**
  * Hook: a story's STATUS changed. `open` → (re)desire + launch the leader; `done`/`aborted`
- * → stop it (desired-down + teardown). Best-effort; never throws into the CRUD caller.
+ * → stop it (desired-down + teardown). `merging`/`merge_blocked` KEEP the leader up (no-op:
+ * the leader is mid-completion and must stay alive to re-attempt — CONTRIBUTING §11.7, Phase
+ * E; isStoryLeaderDesired keeps it desired so the supervisor relaunches it if it dies).
+ * Best-effort; never throws into the CRUD caller.
  */
 export function onStoryStatusChanged(storyId: string, status: string): void {
   if (status === "open") {
@@ -666,6 +676,8 @@ export function onStoryStatusChanged(storyId: string, status: string): void {
       console.error(`[butchr] story leader stop failed for ${storyId}: ${(e as Error).message}`);
     });
   }
+  // merging / merge_blocked: leave the leader up (no teardown, no relaunch) — it is already
+  // running and stays desired so it can re-attempt the land / fix a RED re-gate.
 }
 
 /**

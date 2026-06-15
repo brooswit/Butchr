@@ -1159,12 +1159,19 @@ sha)` and `headSha(dir)` need **no** signature change — the caller passes the
    reuse `merge()`.
    - **story ↔ `main` conflict:** the leader is an **operator** (no worktree of
      its own) and cannot resolve code conflicts. On conflict, abort (story branch
-     **and** `main` left untouched) and fire a `story-merge-conflict` attention
-     event **up the existing escalation chain** (leader → CTO → user). Resolution
-     is a CTO/human action performed **in the story worktree** (rebase the story
-     branch onto `main`, resolve, then re-trigger the story→`main` merge). The
-     story does **not** complete (see §11.7). *(Future, not built: an
-     auto-spawned reconcile agent in the story worktree.)*
+     **and** `main` left untouched), set the story `merge_blocked`, and fire a
+     `merge-conflict` story-attention event **directly to the CTO** (`target:'cto'`,
+     **not** the leader — the leader can't act on it, and the story-level ask seam
+     that would let it escalate isn't built yet). **CTO conflict runbook** (carried
+     verbatim in the event `detail`, and the action a human/CTO performs): in the
+     **story worktree** (`<repo>/butchr-story-<storyId>`, on `butchr/story/<storyId>`),
+     `git rebase <default-branch>`, resolve each conflicting file + `git add` it,
+     `git rebase --continue` to completion, then **re-PATCH the story `done`**
+     (`PATCH /api/stories/:id {"status":"done"}`) to re-attempt the land
+     (`merge_blocked → merging → …`). The story does **not** complete (see §11.7).
+     *(Future, not built: an auto-spawned reconcile agent in the story worktree, and
+     a story-level ask seam so the leader can escalate rather than butchr notifying
+     the CTO directly.)*
    - **Global merge queue:** story→`main` moves `main`, so it **must** go through
      `runExclusiveMerge`. For the first cut, **all** merges (subtask→story **and**
      story→`main`) route through the **single existing global queue** — simplest,
@@ -1196,11 +1203,15 @@ sha)` and `headSha(dir)` need **no** signature change — the caller passes the
 **Story-level RED is a HARD BLOCK (refinement #1).** This is **not** merely the
 `main`-level reset-on-red. If the story-level re-gate (CI on the story-branch tip
 **before** story→`main`) comes back RED, then: the story→`main` merge **does not
-run**, the story **does not complete**, `main` is **never touched**, and the
-leader is **notified** (a `story-gate-red` attention event up the chain) to fix
-it via **more subtasks**. A red story must **never** reach `main`. (The post-merge
+run**, the story **does not complete** (it lands `merge_blocked`), `main` is
+**never touched**, and the **leader is notified** (a `gate-red` story-attention
+event, `target:'story'`) to fix it via **more subtasks** (a `merge_blocked` story
+accepts new subtasks; each one landing re-fires the leader's completion-review so
+it re-requests the land). A red story must **never** reach `main`. (The post-merge
 verify in `dir` *after* a green re-gate + ff still follows the ordinary
-reset-`main`-on-red path as a final backstop.)
+reset-`main`-on-red path as a final backstop — that RED also lands `merge_blocked`
+and notifies the leader the same way, since `main` was restored and the story
+didn't land.)
 
 ### 11.6 Rollback / revert + sha semantics per level
 

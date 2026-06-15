@@ -10,6 +10,7 @@
 import { ALL_STATUSES, db, isTerminal, nowIso } from "./db.ts";
 import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
+import * as git from "./git.ts";
 import { generateStoryId } from "./ids.ts";
 import {
   onStoryCreated,
@@ -18,7 +19,7 @@ import {
   stopStoryAgent,
 } from "./story-agent.ts";
 import type { StoryAgentStatus } from "./story-agent.ts";
-import { abortTask, createTask, getTask, taskView } from "./tasks.ts";
+import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
 import { HttpError, getWorkspace, listWorkspaces, workspaceBranchIsolation } from "./workspaces.ts";
 
@@ -82,8 +83,17 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
 /**
  * Apply a PARTIAL update to a story (brief and/or status), by KEY PRESENCE so updating
  * one field never clobbers the other. `brief` must be a non-empty string; `status` must
- * be one of open|done|aborted (400 otherwise). 404 if the story is gone. Returns the
- * refreshed row. A patch with neither recognized key is a no-op refresh.
+ * be one of open|done|aborted (400 otherwise — `merging`/`merge_blocked` are butchr-owned
+ * transients, never settable via PATCH). 404 if the story is gone. Returns the refreshed row.
+ * A patch with neither recognized key is a no-op refresh.
+ *
+ * ISOLATED-STORY "done" IS A REQUEST TO LAND (CONTRIBUTING §11.7, Phase E). For an isolated
+ * story (isolated=1) currently `open`/`merge_blocked`, a PATCH `done` does NOT write `done`
+ * (and does NOT fire `complete` / tear the leader down): instead the story enters `merging`
+ * and the story→main landing path runs asynchronously (landStory) — only a landed-and-green
+ * story reaches `done`. A NON-isolated story's `done` is byte-for-byte unchanged (immediate
+ * `done` + `complete` report + leader teardown). From `merge_blocked`, a re-PATCH `done`
+ * re-enters `merging` (the re-attempt loop).
  */
 export function updateStory(
   id: string,
@@ -92,21 +102,51 @@ export function updateStory(
   const story = getStory(id);
   if (!story) throw new HttpError(404, `story not found: ${id}`);
 
-  const assigns: string[] = [];
-  const params: (string | null)[] = [];
+  // Validate up front (so an invalid brief/status is rejected before any side effect).
+  let briefUpdate: string | null = null;
   if (patch.brief !== undefined) {
     if (typeof patch.brief !== "string" || !patch.brief.trim()) {
       throw new HttpError(400, "brief must be a non-empty string");
     }
+    briefUpdate = patch.brief.trim();
+  }
+  if (
+    patch.status !== undefined &&
+    (typeof patch.status !== "string" || !STORY_STATUSES.has(patch.status))
+  ) {
+    throw new HttpError(400, "status must be 'open', 'done', or 'aborted'");
+  }
+
+  // REQUEST-TO-LAND interception: an isolated story's `done` (from `open`/`merge_blocked`)
+  // routes through the story→main landing path instead of a direct `done` write. Apply any
+  // brief update first, then set `merging` (leader kept up) and drive landStory in the
+  // background (restart-recoverable: boot recovery re-drives a `merging` story). Returns the
+  // `merging` row immediately — the merge runs async + surfaces its outcome via attention events.
+  const isLandRequest =
+    patch.status === "done" &&
+    story.isolated === 1 &&
+    (story.status === "open" || story.status === "merge_blocked");
+  if (isLandRequest) {
+    if (briefUpdate !== null) {
+      db.query(`UPDATE stories SET brief=? WHERE id=?`).run(briefUpdate, id);
+    }
+    db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(id);
+    onStoryStatusChanged(id, "merging"); // keep the leader up through the merge
+    void landStory(id).catch((e) => {
+      console.error(`[butchr] story ${id} landStory failed: ${(e as Error).message}`);
+    });
+    return getStory(id)!;
+  }
+
+  const assigns: string[] = [];
+  const params: (string | null)[] = [];
+  if (briefUpdate !== null) {
     assigns.push("brief=?");
-    params.push(patch.brief.trim());
+    params.push(briefUpdate);
   }
   if (patch.status !== undefined) {
-    if (typeof patch.status !== "string" || !STORY_STATUSES.has(patch.status)) {
-      throw new HttpError(400, "status must be 'open', 'done', or 'aborted'");
-    }
     assigns.push("status=?");
-    params.push(patch.status);
+    params.push(patch.status as string);
   }
   if (assigns.length) {
     params.push(id);
@@ -118,6 +158,8 @@ export function updateStory(
   // `done` (story.status was not already `done`) so a no-op re-PATCH doesn't re-notify. This
   // is published BEFORE the leader teardown below — the leader (the diff-review responder that
   // merged the last subtask) is provably still up, but the report is for the CTO, not it.
+  // (An isolated story never reaches here for `done` — its land path publishes `complete`
+  // from landStory only once the branch has actually landed on main.)
   if (patch.status === "done" && story.status !== "done") {
     publish({
       type: "story.attention",
@@ -236,6 +278,118 @@ export function answerStoryAsk(id: string, answer: unknown): StoryRow {
 }
 
 /**
+ * LAND AN ISOLATED STORY (CONTRIBUTING §11.4/§11.5/§11.7, Phase E) — the orchestration around
+ * the story→main merge: own the story-state transitions, the attention events, and the leader
+ * teardown (the git mechanics live in tasks.mergeStoryBranch, run through the global merge
+ * queue). Drives `→ merging` then, on the merge outcome:
+ *   - LANDED  → store the story-level merge range, set `done`, report `complete` UP to the CTO,
+ *               and tear the leader down (onStoryStatusChanged "done"). The ONLY path to `done`.
+ *   - gateRed / postVerifyRed → `merge_blocked` + a `gate-red` attention event to the LEADER
+ *               (it fixes the assembled story with MORE subtasks; leader kept up).
+ *   - conflict → `merge_blocked` + a `merge-conflict` attention event to the CTO (a CTO/human
+ *               git action in the story worktree — the leader has no worktree; runbook in `detail`).
+ *   - mergeError → `merge_blocked` + a loud log (a rare non-conflict git failure; no event).
+ * Idempotent + restart-safe: a no-op if the story is gone, non-isolated, or already terminal
+ * (done/aborted); safe to call from updateStory (the PATCH path) and recoverMergingStories
+ * (boot). The story branch + main are untouched on every non-landed outcome.
+ */
+export async function landStory(storyId: string): Promise<StoryRow | null> {
+  const story = getStory(storyId);
+  if (!story) return null;
+  // Only an ISOLATED story lands via this path; a non-isolated story is a programming error
+  // here (updateStory never routes it in) — be defensive and no-op.
+  if (story.isolated !== 1) return story;
+  // Re-attemptable only from open/merge_blocked/merging; a done/aborted story is finished.
+  if (story.status !== "open" && story.status !== "merge_blocked" && story.status !== "merging") {
+    return story;
+  }
+
+  // Ensure the transient `merging` state (idempotent — updateStory already set it on the PATCH
+  // path; boot recovery re-enters with it already set; a merge_blocked re-attempt flips it now).
+  if (story.status !== "merging") {
+    db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(storyId);
+    onStoryStatusChanged(storyId, "merging");
+  }
+
+  const outcome = await mergeStoryBranch(storyId);
+
+  if (outcome.kind === "landed") {
+    db.query(`UPDATE stories SET status='done', merge_base_sha=?, merged_sha=? WHERE id=?`).run(
+      outcome.baseSha,
+      outcome.mergedSha,
+      storyId,
+    );
+    // Report `complete` UP to the CTO (the leader is provably still up here), THEN tear the
+    // leader down. Only a landed-and-green story ever reaches this.
+    publish({
+      type: "story.attention",
+      story_id: storyId,
+      workspace_id: story.workspace_id,
+      target: "cto",
+      reason: "complete",
+      detail: story.brief ?? null,
+    });
+    onStoryStatusChanged(storyId, "done");
+    return getStory(storyId);
+  }
+
+  // Every non-landed outcome leaves main + the story branch untouched → merge_blocked (the
+  // leader is KEPT up to re-attempt). onStoryStatusChanged("merge_blocked") is a no-op stop
+  // (the leader stays up), called for symmetry with the other transitions.
+  db.query(`UPDATE stories SET status='merge_blocked' WHERE id=?`).run(storyId);
+  onStoryStatusChanged(storyId, "merge_blocked");
+
+  if (outcome.kind === "gateRed" || outcome.kind === "postVerifyRed") {
+    // The assembled story failed its tests → notify the LEADER to fix it with more subtasks.
+    const where = outcome.kind === "gateRed" ? "story re-gate" : "post-merge verify on main";
+    publish({
+      type: "story.attention",
+      story_id: storyId,
+      workspace_id: story.workspace_id,
+      target: "story",
+      reason: "gate-red",
+      detail: `${where} RED — add subtask(s) to fix, then re-request completion. ${outcome.output}`.trim(),
+    });
+  } else if (outcome.kind === "conflict") {
+    // The story↔main rebase conflicted: the LEADER cannot resolve it (no worktree). Notify
+    // the CTO directly with the resolution runbook (a CTO/human git action IN the story worktree).
+    const dir = getWorkspace(story.workspace_id);
+    const storyWt = dir ? git.storyWorktreePath(dir.path, storyId) : `<repo>/butchr-story-${storyId}`;
+    const branch = git.storyBranchName(storyId);
+    const fileList = outcome.files.length ? ` (conflicting: ${outcome.files.join(", ")})` : "";
+    publish({
+      type: "story.attention",
+      story_id: storyId,
+      workspace_id: story.workspace_id,
+      target: "cto",
+      reason: "merge-conflict",
+      // CTO RUNBOOK: resolve in the story worktree, then re-PATCH the story `done` to re-attempt.
+      detail:
+        `story↔main merge conflict${fileList} — resolve in the story worktree: ` +
+        `cd ${storyWt} && git rebase $(git -C ${dir?.path ?? "<repo>"} branch --show-current || echo main); ` +
+        `resolve + 'git add' each file, 'git rebase --continue'; then re-PATCH the story 'done' ` +
+        `(PATCH /api/stories/${storyId} {"status":"done"}) to re-attempt the land. Branch: ${branch}.`,
+    });
+  } else {
+    // A rare non-conflict git failure — main untouched; surface loud, no spurious attention event.
+    console.error(`[butchr] story ${storyId} story→main merge failed (non-conflict): ${outcome.message}`);
+  }
+  return getStory(storyId);
+}
+
+/**
+ * BOOT RECOVERY (CONTRIBUTING §11.7, Phase E) — re-drive every story left mid-merge in
+ * `merging` (butchr stopped while a story→main land was in flight) through landStory so it
+ * lands (`done`) or bounces (`merge_blocked`) rather than stranding. The sibling of
+ * tasks.recoverRollingBackTasks for the story level. Returns how many were re-driven.
+ */
+export async function recoverMergingStories(): Promise<number> {
+  const rows = db.query<{ id: string }, []>(`SELECT id FROM stories WHERE status='merging'`).all();
+  for (const r of rows) await landStory(r.id).catch(() => {});
+  return rows.length;
+}
+
+/**
  * Delete a story. 404 if it is gone. Member tasks are NOT deleted — their story_id is
  * NULLed out first (tasks are real work; only the grouping goes away), then the story
  * row is removed. (The workspace cascade still removes a workspace's stories wholesale.)
@@ -282,12 +436,14 @@ export function assignTaskToStory(taskId: string, storyId: string | null): TaskV
 
 /**
  * Create a SUBTASK belonging to a story (Phase 5 — the surface the story LEADER uses to
- * decompose its story). 404 if the story is gone; 409 if the story is not `open` (no work
- * can be added to a done/aborted story). Otherwise delegates to tasks.createTask, pinning
- * the new task to the story's OWN workspace and passing story_id — so the subtask is
- * dispatched exactly like any task, and its feedback then routes to the leader via the
- * escalation chain (Phase 2) + story channel (Phase 4). The delegation is ONE-WAY
- * (stories.ts → tasks.ts); createTask re-validates the same-workspace integrity itself.
+ * decompose its story). 404 if the story is gone; 409 if the story is not `open` OR
+ * `merge_blocked` (CONTRIBUTING §11.7, Phase E: a merge_blocked story accepts fix-subtasks
+ * so the leader can repair a RED re-gate, then re-request the land; a `merging`/`done`/
+ * `aborted` story rejects new work). Otherwise delegates to tasks.createTask, pinning the new
+ * task to the story's OWN workspace and passing story_id — so the subtask is dispatched
+ * exactly like any task, and its feedback then routes to the leader via the escalation chain
+ * (Phase 2) + story channel (Phase 4). The delegation is ONE-WAY (stories.ts → tasks.ts);
+ * createTask re-validates the same-workspace integrity itself.
  */
 export async function createSubtask(
   storyId: string,
@@ -307,7 +463,7 @@ export async function createSubtask(
 ): Promise<TaskView> {
   const story = getStory(storyId);
   if (!story) throw new HttpError(404, `story not found: ${storyId}`);
-  if (story.status !== "open") {
+  if (story.status !== "open" && story.status !== "merge_blocked") {
     throw new HttpError(409, `cannot add a subtask to a ${story.status} story`);
   }
   return createTask(

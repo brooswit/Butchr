@@ -14,6 +14,7 @@ import * as git from "./git.ts";
 import { initFileLogging } from "./log.ts";
 import { reapDeadRunningAgents, reapOrphans, reapStuckGates } from "./reaper.ts";
 import { startServer } from "./server.ts";
+import { recoverMergingStories } from "./stories.ts";
 import { recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
 import { listWorkspaces, pruneTempWorkspaces } from "./workspaces.ts";
@@ -66,6 +67,15 @@ async function main(): Promise<void> {
   const rolledBack = await recoverRollingBackTasks();
   if (rolledBack > 0) {
     console.log(`[butchr] re-drove ${rolledBack} rollback task(s) left rolling_back from a prior run`);
+  }
+
+  // Re-drive any ISOLATED story left mid-merge in `merging` (butchr stopped while its
+  // story→main land was in flight) so it lands (`done`) or bounces (`merge_blocked`) rather
+  // than stranding — the story-level sibling of the rollback recovery above (CONTRIBUTING
+  // §11.7, Phase E). Inert when no story is isolated/merging.
+  const mergedStories = await recoverMergingStories();
+  if (mergedStories > 0) {
+    console.log(`[butchr] re-drove ${mergedStories} story(ies) left merging from a prior run`);
   }
 
   // GATE RECOVERY (sibling of the agent auto-resume above): the CI build/test gate and
