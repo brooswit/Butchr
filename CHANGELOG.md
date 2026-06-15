@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.86] - 2026-06-15
+
 ### Added
 - **Stories epic, Phase 5 — leader decomposition (subtask creation).** A story leader can
   now break its story into subtasks: a new `POST /api/stories/:id/tasks` endpoint creates a
