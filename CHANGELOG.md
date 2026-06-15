@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.89] - 2026-06-15
+
 ### Added
 - **Reset a story.** New `POST /api/stories/:id/reset` convenience endpoint aborts ALL of a
   story's IN-FLIGHT subtasks in one call, so a story leader can "throw it all away and start
