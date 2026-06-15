@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.104] - 2026-06-15
+
 - **Agent addressing is resolved STRICTLY BY NAME — the stored pane/tab columns stop being the source of truth (story st-a77b050f, subtask 1/3: addressing cleanup).** Every place that re-acquires a live agent's pane/tab now trusts the renumber-stable NAME resolver and no longer falls back to the cached `herdr_pane_id`/`herdr_tab_id` column (the value that goes stale after a herdr/host restart and was the bug). `dispatcher.reconcileRunningTasks` re-adopts a live agent purely at its name-resolved pane (dropping the `?? row.herdr_pane_id ?? row.id` and `?? row.herdr_tab_id` fallbacks); if the name resolves NO live pane the agent is treated as not-attachable and falls through to the existing auto-resume / rescue branch instead of inventing a pane named the task id. `cto-agent.adoptCtoAgent` and `story-agent.adoptStoryAgent` likewise resolve pane/tab by name only (falling to `null`, not the stored column). The columns, their WRITES, and the `herdr_pane_id`-based liveness gates are intentionally LEFT in place — they're removed in later subtasks (liveness, then column drop); this change only stops them being read for ADDRESSING. (`harness.teardownTask` already re-resolved the live tab by name; confirmed.) Tests extended: `test/auto-resume.test.ts` proves re-adoption lands on the current name-resolved pane despite a stale stored column and that an unresolvable name auto-resumes instead of adopting a bogus pane; `test/herdr-dry.test.ts` proves `teardownTask` closes the name-resolved tab and never the stale stored args.
 
 ## [0.9.103] - 2026-06-15
