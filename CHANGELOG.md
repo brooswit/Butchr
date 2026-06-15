@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stale temp-dir workspace registrations are pruned automatically at startup.** Every
+  selftest / integration run registers a throwaway repo under the OS temp dir, and those
+  rows used to linger in the config DB long after the tmp dir was gone — cluttering the
+  dashboard and CTO channel with dead `test` workspaces and orphaned tasks. On boot,
+  butchr now unregisters any workspace whose path resolves under the OS temp dir
+  (`os.tmpdir()`, plus a literal `/tmp` prefix for Linux CI), reusing the existing
+  `unregisterWorkspace` so the removal cascades to the workspace's tasks and tears down
+  its panes/worktrees/CTO agent. The prune runs EARLY — before the running-task and
+  CTO-agent reconcile steps — so butchr doesn't waste work re-adopting agents it is about
+  to delete, and it is best-effort per workspace (one failure never aborts boot). Only
+  temp-dir paths are touched: real (`/home/...`) workspaces are never pruned and survive a
+  restart untouched.
+
 ## [0.9.80] - 2026-06-13
 
 ### Fixed
