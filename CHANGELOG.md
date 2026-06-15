@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.99] - 2026-06-15
+
 - **Story-level ASK endpoints + channel reasons (story st-def561dd, spine subtask 3 — additive + INERT).** The leader↔CTO↔user escalation seam (design §4b/§4c), unused until activation. Added three guarded `stories.ts` helpers over the existing `pending_ask`/`ask_responder` columns: `openStoryAsk` (leader→CTO; 400 blank question, 409 non-`open` story or ask-already-open; sets `pending_ask`+`ask_responder='cto'`, publishes `story.attention {target:cto, reason:ask}`), `escalateStoryAsk` (CTO→user single boundary; 409 unless an open CTO-owned ask exists; sets `ask_responder='user'`, re-publishes `story.attention {target:user, reason:ask}`), and `answerStoryAsk` (CTO or user; 400 blank answer, 409 no open ask; clears the pair, publishes `story.attention {target:story, reason:ask-answered}`). Exposed as `POST /api/stories/:id/{ask,escalate,answer}`. Widened `events.ts` `story.attention` to `target: story|cto|user` and `reason: completion-review|complete|ask|ask-answered`. Extended `channel.ts` `STORY_ATTENTION` with `ask` (CTO feed, state `story_ask`) and `ask-answered` (leader feed, state `story_ask_answered`); `consumeStoryAttention` parses the two new reasons but `target` still only resolves to {story, cto}, so a `target:user` escalation is dropped by every channel bridge (the dashboard SSE consumer surfaces it). No gate, no agent-doc wiring — nothing calls these yet; the live V1 responder model is unchanged for this story and the concurrent st-bbca649e.
 
 ## [0.9.98] - 2026-06-15
