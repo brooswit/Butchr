@@ -681,3 +681,18 @@ export const config = {
 };
 
 export type Config = typeof config;
+
+/**
+ * RESPONDER-REDESIGN V2 GATE (story st-def561dd — the single gate; design §8 / Q-E). Reads
+ * env `BUTCHR_RESPONDER_V2` (DEFAULT FALSE) at CALL TIME — deliberately a function, not a
+ * frozen `config.*` field, so a test can flip the env var and re-observe it. Returns true
+ * for the same truthy forms the rest of butchr accepts (`1`/`true`/`yes`/`on`, via the shared
+ * `envBool`). When false (the default), the V1 responder model (responder_tier chain +
+ * step_responders config) stays live; when true, later spine subtasks' V2 code paths
+ * (pendingResponder / routeOwns / escalate / the channel) are selected instead. NOTHING calls
+ * this yet — it is wired by the later spine subtasks and its default is flipped (and the gate
+ * deleted) by the final activation/cleanup subtask.
+ */
+export function responderV2Enabled(): boolean {
+  return envBool("BUTCHR_RESPONDER_V2", false);
+}

@@ -665,6 +665,28 @@ ensureColumn("tasks", "story_id", "TEXT");
 // existing row backfills to it); creation lands at 0 via this default. Resolved by
 // tasks.pendingResponder; surfaced on TaskView via the `...row` spread (no extra plumbing).
 ensureColumn("tasks", "responder_tier", "INTEGER NOT NULL DEFAULT 0");
+
+// RESPONDER-REDESIGN V2 SCHEMA (story st-def561dd, spine subtask 1 — additive + INERT).
+// These three columns realize the V2 data model (design §2): feedback flows UP to the
+// STRUCTURAL parent, so a non-story task gets a single cto→user boundary (a boolean) and a
+// story carries its leader's open story-level ask. They are ADDITIVE and UNUSED until the
+// responder-redesign ACTIVATION subtask — NOTHING reads them yet; the live V1 responder
+// model (responder_tier chain walk + step_responders config) stays in force. The V2 gate
+// (config.responderV2Enabled, default OFF) selects V2 paths once later subtasks wire them.
+//
+// `escalated_to_user` is set ONLY on a NON-STORY task when the CTO escalates its pending
+// feedback to the user — the single cto→user boundary that REPLACES the 3-rung
+// responder_tier for non-story tasks (a story member's feedback is terminal at its leader,
+// so it never escalates to the user). Resets to 0 whenever the task enters a fresh feedback
+// state (mirrors how responder_tier resets today). Default 0; existing rows backfill to it.
+ensureColumn("tasks", "escalated_to_user", "INTEGER NOT NULL DEFAULT 0");
+
+// `pending_ask` is a story LEADER's open STORY-LEVEL question to the CTO (NULL when none) —
+// the leader's escalation seam (design §4b). `ask_responder` is who currently OWNS that
+// open ask: 'cto' (the leader raised it to the CTO) or 'user' (the CTO escalated it onward),
+// NULL when no ask is open. Both nullable, default NULL; unused until the activation subtask.
+ensureColumn("stories", "pending_ask", "TEXT");
+ensureColumn("stories", "ask_responder", "TEXT");
 }
 
 // UNIFY TASK STATE — fold out the retracted idea→spec→build `stage` axis. An earlier
@@ -899,6 +921,14 @@ export type StoryRow = {
   // merge straight to the default branch). Captured ONCE at createStory from the
   // workspace branch_isolation flag, NOT the live flag. INERT this phase (CONTRIBUTING §11.8).
   isolated: number;
+  // RESPONDER-REDESIGN V2 (story st-def561dd — see the pending_ask/ask_responder ensureColumns
+  // above): a story LEADER's open STORY-LEVEL ask to the CTO. `pending_ask` is the question
+  // text (NULL when none); `ask_responder` is who owns it — 'cto' | 'user' — or NULL when no
+  // ask is open. ADDITIVE + INERT this phase — nothing reads them until the activation subtask
+  // (the V2 paths gate on config.responderV2Enabled). Surfaced on StoryView via the `...story`
+  // spread (no extra plumbing). See StoryRow's isolated comment for the additive-column pattern.
+  pending_ask: string | null;
+  ask_responder: string | null;
   created_at: string;
 };
 
@@ -1206,6 +1236,13 @@ export type TaskRow = {
   // 'user'] indexed by min(responder_tier, len-1); reset to 0 on each new feedback event.
   // IGNORED for non-story tasks. Default 0. Surfaced on TaskView via the `...row` spread.
   responder_tier: number;
+  // RESPONDER-REDESIGN V2 (story st-def561dd — see the escalated_to_user ensureColumn above):
+  // 1 ONLY on a NON-STORY task whose pending feedback the CTO escalated to the user (the single
+  // cto→user boundary that replaces the responder_tier chain for non-story tasks); resets to 0
+  // on each fresh feedback state. ADDITIVE + INERT this phase — nothing reads it until the
+  // activation subtask (V2 paths gate on config.responderV2Enabled). Default 0. Surfaced on
+  // TaskView via the `...row` spread (no extra plumbing).
+  escalated_to_user: number;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
