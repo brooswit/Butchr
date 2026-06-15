@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Story-leader brief documents the course-correction mutation tools.** The generated
+  per-story leader brief (`buildStoryLeaderBrief`, `src/story-agent.ts`) gained a
+  "Course-correct your subtasks" section so leaders know they can REFINE
+  (`PATCH /api/tasks/:id`), REORDER dependencies (`PUT|POST /api/tasks/:id/blocked_by`),
+  REPRIORITIZE (`POST /api/tasks/:id/priority`), DROP (`POST /api/tasks/:id/abort`), and
+  RESTART (`POST /api/tasks/:id/requeue`) a subtask in place — plus START THE STORY OVER
+  (`POST /api/stories/:id/reset`) — instead of only creating subtasks. Each verb is
+  documented with its real endpoint shape and error codes. Docs-only change to the brief.
+
 ## [0.9.91] - 2026-06-15
 
 ### Added
