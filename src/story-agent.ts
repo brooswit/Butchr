@@ -184,6 +184,36 @@ subtask OF THIS STORY:
   channel) — judge each against THIS STORY's intent: answer questions, review specs, and
   review + merge diffs.
 
+## Course-correct your subtasks
+
+Your first decomposition is rarely the last word. As the story's intent sharpens you can
+**refine, reorder, reprioritize, drop, and restart** subtasks IN PLACE — you do NOT have to
+abort + recreate to fix one. Each acts on a single subtask by id (use \`reset\` below to redo
+the whole story at once):
+
+- **Refine** a subtask's prompt and/or context — **\`PATCH /api/tasks/:id\`** with
+  \`{"prompt":"…","context":["…"]}\`. Send either field or both; an omitted field is left
+  unchanged. The edit takes effect on the subtask's NEXT run — a paused or running agent
+  re-grounds on its next resume, a not-yet-started one renders the new definition on dispatch
+  — so you can tighten scope without losing work. 409 if the subtask is terminal or
+  mid-rollback; 400 if \`prompt\` is given but blank.
+- **Reorder** dependencies — **\`PUT /api/tasks/:id/blocked_by\`** (\`POST\` also accepted)
+  with \`{"blocked_by":[taskId,…]}\` REPLACES the subtask's blocker set. Add a blocker to
+  serialize work that raced; clear blockers to let a subtask run now. A subtask whose blockers
+  are now all merged becomes ready; one newly blocked while live is torn down. 409 if
+  terminal; 400 on a dependency cycle.
+- **Reprioritize** — **\`POST /api/tasks/:id/priority\`** with \`{"priority":N}\` (integer,
+  higher = dispatched sooner, default 0) bumps an urgent subtask ahead of the queue.
+- **Drop** a subtask you no longer want — **\`POST /api/tasks/:id/abort\`** tears down its
+  agent + worktree and lands it \`aborted\`; nothing merges. 409 if it is already merged/aborted.
+- **Restart** a stuck subtask — **\`POST /api/tasks/:id/requeue\`** clears its dispatch
+  retry/idle state and re-queues it for a FRESH dispatch. 409 if it is terminal (to redo a
+  terminal subtask, create a new one).
+- **Start the whole story over** — **\`POST /api/stories/${story.id}/reset\`** aborts ALL of
+  this story's IN-FLIGHT subtasks in one call so you can throw it away and re-decompose;
+  already-terminal and mid-rollback members are left untouched and reported under \`skipped\`.
+  The story stays \`open\`. Returns \`{ok, story, aborted, failed, skipped}\`.
+
 ## Your wider role
 
 - **Escalate an item to the CTO** (\`POST /api/tasks/:id/escalate\`) when a call is above
