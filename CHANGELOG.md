@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.82] - 2026-06-15
+
 ### Added
 - **Stories data model + CRUD foundation (Phase 1 — inert).** Added a `stories` table (a
   container that groups subtasks) with `createStory` / `getStory` / `listStories` /
