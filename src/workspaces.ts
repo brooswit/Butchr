@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { config } from "./config.ts";
 import { stopCtoAgent } from "./cto-agent.ts";
+import { stopWorkspaceStoryAgents } from "./story-agent.ts";
 import { ALL_STATUSES, db, nowIso, REVIEW_STATES, sumStatuses } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
@@ -692,6 +693,11 @@ export async function unregisterWorkspace(id: string): Promise<void> {
   // name) so the DELETE below — which cascade-removes its cto_agent row — can't strand
   // an orphaned CTO pane. Best-effort; never block unregister.
   await stopCtoAgent(id).catch(() => {});
+
+  // Likewise tear down every STORY-LEADER agent for this workspace's stories (Phase 3) so
+  // no leader pane is orphaned. Their story_agent rows cascade away with the stories (which
+  // cascade with the workspace) on the DELETE below. Best-effort; never block unregister.
+  await stopWorkspaceStoryAgents(id).catch(() => {});
 
   // Best effort: clean up any worktrees for non-terminal tasks.
   const tasks = db

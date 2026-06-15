@@ -4,6 +4,11 @@ import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts
 import { config } from "./config.ts";
 import { startConnectivityMonitor, stopConnectivityMonitor } from "./connectivity.ts";
 import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
+import {
+  reconcileStoryAgents,
+  startStoryAgentSupervisor,
+  stopStoryAgentSupervisor,
+} from "./story-agent.ts";
 import { reconcileRunningTasks, startDispatcher, stopDispatcher } from "./dispatcher.ts";
 import * as git from "./git.ts";
 import { initFileLogging } from "./log.ts";
@@ -120,6 +125,17 @@ async function main(): Promise<void> {
   }
   startCtoSupervisor();
 
+  // Managed STORY-LEADER agents — ONE PER OPEN STORY (Phase 3 of the STORIES epic). Same
+  // boot pattern as the CTO agents: reconcile every open story's leader to its desired
+  // state ONCE (adopt a surviving pane, or (re)launch RESUMING its session), then start the
+  // supervisor that relaunches them on death. NOTE: this phase the leader has no attention
+  // feed yet (Phase 4) — it comes up and is supervised but receives no subtask events.
+  const stories = await reconcileStoryAgents(herdrUp);
+  if (stories.adopted > 0 || stories.launched > 0) {
+    console.log(`[butchr] story leaders: ${stories.adopted} adopted, ${stories.launched} launched`);
+  }
+  startStoryAgentSupervisor();
+
   startDispatcher();
   startServer();
   // Periodic, SQLite-safe snapshots of the source-of-truth db (see src/backup.ts)
@@ -144,6 +160,9 @@ async function main(): Promise<void> {
     // like workspace agents, the next boot re-adopts and resumes each (session
     // continuity). The reaper tracks the CTO agents separately and never orphans them.
     stopCtoSupervisor();
+    // Likewise stop SUPERVISING the per-story leaders; their panes survive for the next
+    // boot to re-adopt + resume (session continuity), mirroring the CTO agents.
+    stopStoryAgentSupervisor();
     stopBackupLoop();
     stopConnectivityMonitor();
     await snapshotOnShutdown();

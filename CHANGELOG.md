@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Stories epic, Phase 3 — story-leader agent lifecycle.** Each `open` story now gets a
+  managed, supervised, `--resume`'d story-leader agent (a "mini-CTO" scoped to one story),
+  mirroring the per-workspace CTO-agent subsystem. New `story_agent` table (keyed by
+  `story_id`, FK-cascading with the story/workspace) + a `src/story-agent.ts` module that
+  launches/stops/restarts, boot-reconciles (adopt-live / auto-resume-after-reboot /
+  relaunch-dead), and supervises leaders with bounded backoff — running in the story's
+  workspace repo root off a generated per-story brief, via a new `BUTCHR_STORY_AGENT_CMD`
+  template. Lifecycle is wired into the story CRUD: creating/reopening a story launches its
+  leader, while marking it `done`/`aborted`, deleting it, or unregistering its workspace
+  tears the leader down. The leader's subtask attention feed (Phase 4) and decompose/
+  feedback actions (Phases 5/6) are deliberately NOT wired yet — this phase brings the
+  leader up and supervises it but it receives no work feed.
+
 ## [0.9.83] - 2026-06-15
 
 ### Added

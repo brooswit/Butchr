@@ -11,6 +11,7 @@ import { db, nowIso } from "./db.ts";
 import type { StoryRow, StoryStatus, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import { generateStoryId } from "./ids.ts";
+import { onStoryCreated, onStoryStatusChanged, stopStoryAgent } from "./story-agent.ts";
 import { getTask, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
 import { HttpError, getWorkspace } from "./workspaces.ts";
@@ -60,6 +61,10 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
   db.query(
     `INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, ?, ?)`,
   ).run(id, workspaceId, brief.trim(), "open", created);
+  // A new `open` story gets a managed STORY-LEADER agent (Phase 3): mark it desired +
+  // launch it. Thin hook into story-agent.ts so the CRUD here stays clean; the hook marks
+  // desired synchronously and fires the launch best-effort (never fails story creation).
+  onStoryCreated(id);
   return getStory(id)!;
 }
 
@@ -96,6 +101,11 @@ export function updateStory(
     params.push(id);
     db.query(`UPDATE stories SET ${assigns.join(", ")} WHERE id=?`).run(...params);
   }
+  // Drive the STORY-LEADER agent off a status change (Phase 3): `done`/`aborted` stop the
+  // leader (desired-down + teardown); `open` (re)launches it. Thin hook into story-agent.ts.
+  if (patch.status !== undefined && typeof patch.status === "string") {
+    onStoryStatusChanged(id, patch.status);
+  }
   return getStory(id)!;
 }
 
@@ -106,6 +116,10 @@ export function updateStory(
  */
 export function deleteStory(id: string): void {
   if (!getStory(id)) throw new HttpError(404, `story not found: ${id}`);
+  // Tear down the story's managed STORY-LEADER agent FIRST (desired-down + close its
+  // tab/pane + free its name) so the DELETE below — which cascade-removes its story_agent
+  // row — can't strand an orphaned leader pane. Best-effort; never blocks delete.
+  void stopStoryAgent(id).catch(() => {});
   // Detach member tasks (keep the tasks — only the grouping is removed).
   db.query(`UPDATE tasks SET story_id=NULL WHERE story_id=?`).run(id);
   db.query(`DELETE FROM stories WHERE id=?`).run(id);

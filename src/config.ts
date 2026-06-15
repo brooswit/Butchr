@@ -643,6 +643,25 @@ export const config = {
   ),
 
   /**
+   * Command template that LAUNCHES a STORY-LEADER agent (Phase 3 of the STORIES epic;
+   * run via `bash -lc`, wrapped under `script` for a PTY + log, cwd = the story's
+   * workspace repo root). Mirrors `ctoAgentCmd` but DELIBERATELY OMITS the channel
+   * wiring (`--mcp-config` + `--dangerously-load-development-channels`): the leader's
+   * one-way attention feed is PHASE 4, so this phase the leader launches and is
+   * supervised but receives NO work feed yet. Placeholders (substituted by
+   * src/story-agent.ts):
+   *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (reuses `ctoAgentModel`).
+   *  - `{{SESSION_FLAG}}` → `--session-id <uuid>` fresh, or `--resume <id>` on every
+   *    supervised relaunch / boot-adopt (session continuity; see src/story-agent.ts).
+   *  - `{{PROMPT_FILE}}`  → the per-story generated leader brief file.
+   */
+  storyAgentCmd: env(
+    "BUTCHR_STORY_AGENT_CMD",
+    "claude --dangerously-skip-permissions {{MODEL_FLAG}} {{SESSION_FLAG}} " +
+      '-- "$(cat {{PROMPT_FILE}})"',
+  ),
+
+  /**
    * SUPERVISION cadence + bounded relaunch backoff for the CTO agent (mirrors the
    * dispatch retry knobs). The supervisor polls every `ctoSuperviseMs`; when the
    * agent has died it relaunches (RESUMING the same session) with exponential

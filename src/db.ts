@@ -188,6 +188,40 @@ function migrateCtoAgentPerWorkspace(): void {
   `);
 }
 
+// MANAGED STORY-LEADER AGENT (PER-STORY). Phase 3 of the STORIES epic. butchr runs ONE
+// story-leader agent per OPEN story — a persistent, supervised, --resume'd Claude session
+// scoped to that story, running in its workspace's repo ROOT (it is an OPERATOR, not a
+// builder — no worktree/branch/review/merge of its own). This table MIRRORS `cto_agent`
+// exactly, keyed by `story_id` (FK cascade so a story's leader state dies with the story —
+// and, transitively, with its workspace). Columns mirror cto_agent 1:1 (incl. `updated_at`,
+// which the reconcile honor-stop check reads). story_agent is a BRAND-NEW table (no legacy
+// shape to drop, unlike migrateCtoAgentPerWorkspace), so this is a plain CREATE-IF-NOT-EXISTS.
+// Runs AFTER createBaselineSchema (which creates `stories`) so the FK target exists.
+//   - session_id: the Claude Code session UUID, RESUMED (--resume) on every supervised
+//     relaunch + boot-adopt so the leader never cold-starts (see src/story-agent.ts).
+//   - herdr_pane_id / herdr_tab_id / herdr_workspace: its live herdr handles (the leader
+//     shares its workspace's herdr workspace, like the CTO agent).
+//   - desired: 1 when butchr wants it UP (supervisor relaunches on death — a story is
+//     desired-up while it is `open`), 0 when explicitly stopped (done/aborted/deleted).
+//   - restarts: count of supervised relaunches since the last fresh start.
+//   - last_error: most recent launch/supervision failure.
+function migrateStoryAgentTable(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS story_agent (
+      story_id        TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
+      session_id      TEXT,
+      herdr_pane_id   TEXT,
+      herdr_tab_id    TEXT,
+      herdr_workspace TEXT,
+      desired         INTEGER NOT NULL DEFAULT 0,
+      started_at      TEXT,
+      restarts        INTEGER NOT NULL DEFAULT 0,
+      last_error      TEXT,
+      updated_at      TEXT
+    );
+  `);
+}
+
 // Lightweight forward migrations: add columns introduced after the initial
 // schema. Guarded so existing databases upgrade in place without data loss.
 function ensureColumn(table: string, column: string, decl: string): void {
@@ -698,6 +732,9 @@ export function migrateReadyRunningSplit(): void {
 //                                        is renamed in place, not recreated empty)
 //   2. baseline schema                  (CREATE TABLE/INDEX IF NOT EXISTS)
 //   3. per-workspace cto_agent table    (drop old singleton shape, then CREATE)
+//   3b. per-story story_agent table      (CREATE IF NOT EXISTS — after the baseline so
+//                                         its `stories` FK target exists; brand-new, no
+//                                         legacy shape to drop)
 //   4. additive forward columns         (ensureColumn ×N — must precede the folds,
 //                                        e.g. readyRunningSplit reads herdr_tab_id)
 //   5. fold out the retracted `stage` axis
@@ -710,6 +747,7 @@ const MIGRATIONS: Array<() => void> = [
   () => migrateDirectoriesToWorkspaces(db),
   createBaselineSchema,
   migrateCtoAgentPerWorkspace,
+  migrateStoryAgentTable,
   ensureForwardColumns,
   migrateStageAxisToStatus,
   migrateStatusModel,
@@ -1256,6 +1294,94 @@ export function saveCtoAgentRow(
        updated_at=excluded.updated_at`,
   ).run(
     next.workspace_id,
+    next.session_id,
+    next.herdr_pane_id,
+    next.herdr_tab_id,
+    next.herdr_workspace,
+    next.desired,
+    next.started_at,
+    next.restarts,
+    next.last_error,
+    nowIso(),
+  );
+}
+
+// ---- MANAGED STORY-LEADER AGENT (per-story records) -----------------------
+// One row per story whose leader has ever launched/been desired (keyed by story_id).
+// MIRRORS CtoAgentRow exactly. See the story_agent table comment above and
+// src/story-agent.ts.
+export type StoryAgentRow = {
+  story_id: string;
+  session_id: string | null;
+  herdr_pane_id: string | null;
+  herdr_tab_id: string | null;
+  herdr_workspace: string | null;
+  desired: number; // 1 = should be running (supervised), 0 = stopped
+  started_at: string | null;
+  restarts: number;
+  last_error: string | null;
+  updated_at: string | null;
+};
+
+/** A story's leader-agent record, or null if it has never been written. */
+export function getStoryAgentRow(storyId: string): StoryAgentRow | null {
+  return (
+    db
+      .query<StoryAgentRow, [string]>(`SELECT * FROM story_agent WHERE story_id=?`)
+      .get(storyId) ?? null
+  );
+}
+
+/** Every story-leader-agent record (one per story that has ever launched/been desired). */
+export function listStoryAgentRows(): StoryAgentRow[] {
+  return db.query<StoryAgentRow, []>(`SELECT * FROM story_agent`).all();
+}
+
+/** Drop a story's leader-agent record (the story/workspace DELETE also cascades this). */
+export function deleteStoryAgentRow(storyId: string): void {
+  db.query(`DELETE FROM story_agent WHERE story_id=?`).run(storyId);
+}
+
+/**
+ * Upsert a partial patch onto a story's leader-agent record (stamping updated_at).
+ * Mirrors saveCtoAgentRow: single-row write, unspecified fields untouched on an existing
+ * row. Requires the story to exist (the FK cascade keys the row to it).
+ */
+export function saveStoryAgentRow(
+  storyId: string,
+  patch: Partial<Omit<StoryAgentRow, "story_id">>,
+): void {
+  const cur = getStoryAgentRow(storyId);
+  const next: StoryAgentRow = {
+    story_id: storyId,
+    session_id: cur?.session_id ?? null,
+    herdr_pane_id: cur?.herdr_pane_id ?? null,
+    herdr_tab_id: cur?.herdr_tab_id ?? null,
+    herdr_workspace: cur?.herdr_workspace ?? null,
+    desired: cur?.desired ?? 0,
+    started_at: cur?.started_at ?? null,
+    restarts: cur?.restarts ?? 0,
+    last_error: cur?.last_error ?? null,
+    updated_at: cur?.updated_at ?? null,
+    ...patch,
+  };
+  db.query(
+    `INSERT INTO story_agent
+       (story_id, session_id, herdr_pane_id, herdr_tab_id, herdr_workspace,
+        desired, started_at, restarts, last_error, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(story_id) DO UPDATE SET
+       session_id=excluded.session_id,
+       herdr_pane_id=excluded.herdr_pane_id,
+       herdr_tab_id=excluded.herdr_tab_id,
+       herdr_workspace=excluded.herdr_workspace,
+       desired=excluded.desired,
+       started_at=excluded.started_at,
+       restarts=excluded.restarts,
+       last_error=excluded.last_error,
+       updated_at=excluded.updated_at`,
+  ).run(
+    next.story_id,
     next.session_id,
     next.herdr_pane_id,
     next.herdr_tab_id,
