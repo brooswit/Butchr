@@ -178,14 +178,20 @@ function serializeFrontMatter(meta: TaskMeta): string {
     lines.push("allowlist:");
     for (const a of meta.allowlist) lines.push(`  - ${a}`);
   }
-  if (meta.context.length === 0) {
-    lines.push("context: []");
-  } else {
-    lines.push("context:");
-    for (const c of meta.context) lines.push(`  - ${c}`);
-  }
+  lines.push(...serializeContext(meta.context));
   lines.push("---");
   return lines.join("\n");
+}
+
+/**
+ * Serialize the front-matter `context:` block as YAML lines: `context: []` for an empty
+ * list, else a `context:` header followed by one `  - <path>` item per entry. Factored
+ * out of serializeFrontMatter so the WRITE path and the in-place updateTaskMdContext
+ * edit emit the EXACT same format.
+ */
+function serializeContext(context: string[]): string[] {
+  if (context.length === 0) return ["context: []"];
+  return ["context:", ...context.map((c) => `  - ${c}`)];
 }
 
 /** Create the task directory and write the initial task.md. */
@@ -360,6 +366,50 @@ export function updateTaskMdPrompt(
   const re = /(##\s*Prompt\s*\n)([\s\S]*?)(\n##\s|\s*$)/;
   if (!re.test(text)) return;
   const updated = text.replace(re, (_m, head, _body, tail) => `${head}\n${prompt.trim()}\n${tail}`);
+  writeFileSync(p, updated, "utf8");
+}
+
+/**
+ * Replace the front-matter `context:` block of a task.md, in place. Used when an
+ * operator REFINES a paused task's context-file list (editTask): the new list
+ * supersedes the old one, and on the agent's next `--resume` the grounding-fingerprint
+ * mismatch re-grounds it (renderRegroundBlock). Rewrites ONLY the context lines —
+ * order-independent: it strips the existing `context:` line plus its `  - item`
+ * continuation lines (and the inline `context: [..]` / `context: []` forms) wherever
+ * they sit in the front matter, then appends the freshly-serialized block, so the
+ * Prompt body, Review Notes, and Clarifications are untouched. No-op if the file or its
+ * front matter is missing.
+ */
+export function updateTaskMdContext(
+  workspaceRoot: string,
+  taskId: string,
+  context: string[],
+): void {
+  const p = taskMdPath(workspaceRoot, taskId);
+  if (!existsSync(p)) return;
+  const text = readFileSync(p, "utf8");
+  const fm = text.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!fm) return;
+  const inner = fm[1]!.split("\n");
+  // Drop the existing context block: the `context:` key line and (for the multi-line
+  // form) the `  - item` lines that immediately follow it.
+  const kept: string[] = [];
+  let skippingItems = false;
+  for (const line of inner) {
+    if (/^context:/.test(line)) {
+      // Begin skipping; if it's the multi-line form (`context:` with no inline value),
+      // also skip the following `  - item` lines.
+      skippingItems = /^context:\s*$/.test(line);
+      continue;
+    }
+    if (skippingItems) {
+      if (/^\s*-\s+/.test(line)) continue; // a context list item — skip it
+      skippingItems = false; // first non-item line ends the block
+    }
+    kept.push(line);
+  }
+  const newInner = [...kept, ...serializeContext(context)].join("\n");
+  const updated = text.slice(0, fm.index!) + `---\n${newInner}\n---\n` + text.slice(fm.index! + fm[0].length);
   writeFileSync(p, updated, "utf8");
 }
 

@@ -47,6 +47,7 @@ import {
   appendRejection,
   readTaskMd,
   taskMdPath,
+  updateTaskMdContext,
   updateTaskMdPrompt,
   updateTaskMdStatus,
   writeTaskMd,
@@ -352,6 +353,21 @@ export function validateAllowlist(allowlist: unknown): string[] {
     throw new HttpError(400, "each allowlist entry must be 200 characters or fewer");
   }
   return normalized;
+}
+
+/**
+ * Validate + normalize the `context` field for the in-place task EDIT (editTask): an
+ * array of context-file path strings, each trimmed, with blanks dropped. Order is
+ * preserved and duplicates are kept as-is (unlike tags/allowlist — a context list is an
+ * ordered reading list the operator curates). Anything that isn't an array of strings is
+ * a 400. An empty/absent array clears the context list.
+ */
+export function validateContext(context: unknown): string[] {
+  if (context === undefined || context === null) return [];
+  if (!Array.isArray(context) || context.some((c) => typeof c !== "string")) {
+    throw new HttpError(400, "context must be an array of strings");
+  }
+  return context.map((c) => c.trim()).filter(Boolean);
 }
 
 /**
@@ -1346,6 +1362,60 @@ export function setVersionBump(id: string, bump: unknown): TaskView {
   }
   const level = validateVersionBump(bump);
   db.query(`UPDATE tasks SET version_bump=?, major_confirm_count=0 WHERE id=?`).run(level, id);
+  emitUpdated(id);
+  return taskView(id)!;
+}
+
+/**
+ * EDIT a task's prompt and/or context-file list IN PLACE — the operator surface for
+ * REFINING a paused subtask instead of abort+recreate (PATCH /api/tasks/:id). ADDITIVE:
+ * it touches NOTHING else — no status transition, no blocked_by/priority/version_bump, no
+ * agent teardown. The prompt + context live in task.md (the on-disk source of truth; the
+ * DB stores neither), so this rewrites task.md in place via updateTaskMdPrompt /
+ * updateTaskMdContext, preserving the Review Notes and Clarifications sections.
+ *
+ * `grounding_fp` is DELIBERATELY left untouched: the dispatcher's resume path compares the
+ * task's LIVE grounding fingerprint (prompt+context) against the stored one and, on a
+ * mismatch, re-grounds the resumed agent with the CURRENT definition (renderRegroundBlock).
+ * So a paused task (needs_info / in_review) picks the edit up on its next `--resume`, and a
+ * ready `inactive` task renders the fresh task.md on first dispatch — no extra wiring here.
+ *
+ * Gating mirrors setBlockedBy/setVersionBump plus rolling_back: 404 if the task is gone;
+ * 409 if it is terminal (merged/failed/rolled_back/aborted) OR `rolling_back` (mid-rollback
+ * pipeline — its prompt/context is the revert machinery's, not an operator's to refine).
+ * Editing a live `in_progress` task is ALLOWED — the edit simply takes effect on the
+ * agent's next resume (the intended reground behavior). 400 if neither field is supplied,
+ * or if `prompt` is given but blank. Key-presence based: a field absent from `edits` is
+ * left unchanged. Emits a `task.updated`.
+ */
+export function editTask(
+  id: string,
+  edits: { prompt?: string; context?: string[] },
+): TaskView {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (isTerminal(row.status) || row.status === "rolling_back") {
+    throw new HttpError(409, `cannot edit prompt/context on a ${row.status} task`);
+  }
+  const hasPrompt = edits.prompt !== undefined;
+  const hasContext = edits.context !== undefined;
+  if (!hasPrompt && !hasContext) {
+    throw new HttpError(400, "provide a prompt and/or context to edit");
+  }
+
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+
+  if (hasPrompt) {
+    if (typeof edits.prompt !== "string" || !edits.prompt.trim()) {
+      throw new HttpError(400, "prompt must be a non-empty string");
+    }
+    updateTaskMdPrompt(dir.path, id, edits.prompt);
+  }
+  if (hasContext) {
+    updateTaskMdContext(dir.path, id, validateContext(edits.context));
+  }
+
   emitUpdated(id);
   return taskView(id)!;
 }

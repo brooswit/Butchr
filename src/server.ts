@@ -59,6 +59,7 @@ import {
   attentionList,
   confirmMajor,
   createTask,
+  editTask,
   escalateTask,
   getTask,
   nudgeTask,
@@ -803,6 +804,25 @@ route("POST", "/api/workspaces/:id/tasks", async (req, p) => {
 route("GET", "/api/tasks/:id", async (_req, p) => {
   requireTask(p.id!);
   return json(taskView(p.id!));
+});
+
+// EDIT a task's prompt and/or context-file list IN PLACE — the operator surface for
+// REFINING a paused subtask instead of abort+recreate. Body `{ prompt?, context? }`,
+// key-presence based (a field absent is left unchanged; supply at least one). ADDITIVE:
+// it changes no other task-mutation path — no status transition, no dependency/priority
+// edit, no agent teardown. The prompt + context live in task.md (the on-disk source of
+// truth), so this rewrites it in place, preserving Review Notes/Clarifications. The edit
+// takes effect on the agent's next `--resume` via the grounding-fingerprint reground (a
+// paused needs_info/in_review task) or the fresh task.md render (a ready `inactive` task).
+// 404 if the task is gone; 409 if it is terminal or `rolling_back`; 400 if neither field
+// is given or `prompt` is blank. See tasks.editTask.
+route("PATCH", "/api/tasks/:id", async (req, p) => {
+  requireTask(p.id!);
+  const body = await readJson(req);
+  const edits: { prompt?: string; context?: string[] } = {};
+  if ("prompt" in body) edits.prompt = body.prompt;
+  if ("context" in body) edits.context = body.context;
+  return json(editTask(p.id!, edits));
 });
 
 route("GET", "/api/tasks/:id/diff", async (_req, p) => {

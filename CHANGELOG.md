@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **In-place task prompt/context edit.** New `PATCH /api/tasks/:id` (body `{ prompt?, context? }`,
+  key-presence based) lets an operator REFINE a paused subtask's prompt and/or context-file list
+  instead of abort+recreate (`tasks.editTask`). It is purely additive — no status transition,
+  dependency/priority change, or agent teardown — and rewrites task.md in place (preserving the
+  Review Notes/Clarifications sections via the new `taskmd.updateTaskMdContext`, alongside the
+  existing `updateTaskMdPrompt`). `grounding_fp` is left untouched, so the edit is picked up on the
+  agent's next `--resume` through the existing grounding-fingerprint reground (a paused
+  needs_info/in_review task) or the fresh task.md render (a ready `inactive` task). Editing a live
+  `in_progress` task is allowed (takes effect on its next resume); a terminal or `rolling_back`
+  task is rejected (409).
+
 ## [0.9.89] - 2026-06-15
 
 ### Added
