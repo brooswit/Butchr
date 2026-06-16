@@ -1006,6 +1006,141 @@ export async function mergeStoryToMain(
   });
 }
 
+// ---- RECURSIVE WORK-NODE BRANCH LIFECYCLE (st-540ba705 step 4 — ADDITIVE + INERT) ----
+// The ARBITRARY-DEPTH generalization of the STORY-branch helpers above (§4, Q9 of
+// docs/rfc-work-workspace-unification.md): every NODE Work can own a branch + worktree, a
+// child branches FROM and fast-forwards INTO its parent node's branch (which itself merges
+// upward), bottoming out at the default branch for a top-level node. These are PARALLEL,
+// purely-additive helpers — the live STORY path (storyBranchName / ensureStoryBranch /
+// mergeStoryToMain / removeStoryBranch) is UNTOUCHED. They have NO live caller this step
+// (tasks.ts wires them only behind the OFF config.recursiveBranchIsolation gate, exercised
+// by tests); activation is a separate deliberate call (RFC Q9). The branch prefix differs
+// from the story prefix so the two models can't collide on a ref.
+
+/**
+ * The branch-name prefix for a WORK-NODE branch (`butchr/work/`). The single source of
+ * truth, shared by workBranchName (build) and workIdFromBranch (parse). Distinct from
+ * STORY_BRANCH_PREFIX so a recursive work-node branch can't collide with a story branch.
+ */
+const WORK_BRANCH_PREFIX = "butchr/work/";
+
+/**
+ * The branch name for a WORK NODE's branch: `butchr/work/<workId>`. Pure (no git I/O). The
+ * `butchr/work/` prefix can't collide with task branches (named by the `adjective-noun-4hex`
+ * id), the default branch, or story branches (`butchr/story/`). The arbitrary-depth analogue
+ * of storyBranchName.
+ */
+export function workBranchName(workId: string): string {
+  return `${WORK_BRANCH_PREFIX}${workId}`;
+}
+
+/**
+ * Absolute path to a WORK NODE's worktree: `<dir>/butchr-work-<workId>`. Pure (no git I/O).
+ * The DASH-joined dir name deliberately differs from the SLASH-prefixed branch
+ * (`butchr/work/<workId>`) so the branch can't collide with task branches while the worktree
+ * stays a single flat sibling dir of the repo root. The analogue of storyWorktreePath.
+ */
+export function workWorktreePath(dir: string, workId: string): string {
+  return join(dir, `butchr-work-${workId}`);
+}
+
+/** Recover a workId from its work-node branch (`butchr/work/<id>` → `<id>`). The inverse of
+ * workBranchName; falls back to the input unchanged if it carries no work prefix. */
+export function workIdFromBranch(workBranch: string): string {
+  return workBranch.startsWith(WORK_BRANCH_PREFIX)
+    ? workBranch.slice(WORK_BRANCH_PREFIX.length)
+    : workBranch;
+}
+
+/**
+ * Lazily ensure a WORK NODE's BRANCH + its worktree exist, returning the worktree path
+ * (`<dir>/butchr-work-<workId>`). The arbitrary-depth generalization of ensureStoryBranch:
+ * IDENTICAL validate-or-rebuild idempotency (restart-safe, safe to call before every child is
+ * branched off it), with ONE difference — the FIRST creation cuts the node branch off the
+ * EXPLICIT `base` param rather than always the repo default. A top-level node passes the
+ * default branch (today's story behavior); a child node passes its PARENT node's work branch,
+ * so the tree nests to arbitrary depth (RFC §4/Q8). `base` must be a real ref (the caller
+ * ensures the parent chain first — see tasks.ensureNodeChain).
+ *
+ *  1. A VALID worktree at the path is reused unchanged — the reuse probe passes
+ *     `base = the work branch itself`, so the stale-base check is trivially satisfied: a node
+ *     branch LEGITIMATELY diverges from its base (it accrues child merges) and must NEVER be
+ *     rebuilt for being "behind".
+ *  2. A broken/missing-link leftover is removed WORKTREE-ONLY (it does NOT delete the branch,
+ *     which carries merged child commits) and re-attached.
+ *  3. If the branch already exists (it holds child work) but had no live worktree, a fresh
+ *     worktree is attached onto the EXISTING branch (preserving the work). Only the FIRST
+ *     creation cuts the branch off `base`.
+ */
+export async function ensureWorkBranch(
+  dir: string,
+  workBranch: string,
+  base: string,
+): Promise<string> {
+  const workId = workIdFromBranch(workBranch);
+  const path = workWorktreePath(dir, workId);
+  await addLocalExclude(dir, `/butchr-work-${workId}/`);
+  if (existsSync(path)) {
+    // base = the work branch itself → the stale-base probe is a trivial no-op, so a valid
+    // node worktree is reused even when it has fallen "behind" the moving base.
+    if (await worktreeIsReusable(dir, workBranch, path, workBranch)) return path;
+    await removeStaleStoryWorktree(dir, path); // WORKTREE-ONLY — never deletes the branch
+  }
+  if (await branchExists(dir, workBranch)) {
+    // Branch exists (merged child work) but its worktree was missing/broken → re-attach a
+    // worktree onto the EXISTING branch so none of that work is lost.
+    await runOrThrow([git, "-C", dir, "worktree", "add", path, workBranch]);
+  } else {
+    // First lazy creation → cut the node branch off the EXPLICIT base (default tip for a
+    // top-level node, the parent node's work branch for a child) + check it out.
+    await runOrThrow([git, "-C", dir, "worktree", "add", "-b", workBranch, path, base]);
+  }
+  return path;
+}
+
+/**
+ * Tear down a WORK NODE's worktree AND delete its branch — the completion/cleanup counterpart
+ * of ensureWorkBranch (the analogue of removeStoryBranch). Removes the worktree (clean
+ * remove, then an outright delete + prune if a broken link left the dir behind) and then
+ * `branch -D`s the work branch. Best-effort + idempotent (a no-op when neither exists).
+ */
+export async function removeWorkBranch(dir: string, workBranch: string): Promise<void> {
+  const workId = workIdFromBranch(workBranch);
+  const path = workWorktreePath(dir, workId);
+  if (existsSync(path)) {
+    await run([git, "-C", dir, "worktree", "remove", "--force", path]);
+  }
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  await run([git, "-C", dir, "worktree", "prune"]);
+  await run([git, "-C", dir, "branch", "-D", workBranch]);
+}
+
+/**
+ * Merge a completed WORK NODE's branch INTO its PARENT — the node→parent step of the
+ * recursive model, the arbitrary-depth analogue of mergeStoryToMain. A THIN wrapper over the
+ * generalized merge(): task = the node's work branch, base = the parent branch, the SOURCE
+ * checkout = the node's worktree (where the work branch is checked out), and the ff-target =
+ * the parent branch in the PARENT worktree. For a TOP-LEVEL node the caller passes the
+ * default branch + repo root as the parent context, so it lands on the default branch exactly
+ * as mergeStoryToMain does. Encoding the mapping here keeps the completion path trivial. NO
+ * live caller this step — invoked only by tasks.mergeWorkBranch behind the OFF gate.
+ */
+export async function mergeWorkToParent(
+  dir: string,
+  workId: string,
+  parentBranch: string,
+  parentWorktree: string,
+  opts: Omit<MergeOptions, "base" | "sourceWorktree" | "ffWorktree" | "ffTargetBranch"> = {},
+): Promise<MergeResult> {
+  return merge(dir, workBranchName(workId), {
+    ...opts,
+    base: parentBranch,
+    sourceWorktree: workWorktreePath(dir, workId),
+    ffWorktree: parentWorktree,
+    ffTargetBranch: parentBranch,
+  });
+}
+
 /**
  * Whether the task branch is BEHIND the default branch — i.e. the current
  * default-branch tip is NOT already contained in the task branch. A freshly

@@ -707,6 +707,22 @@ export const config = {
    * of scope here.
    */
   unifiedWorkspaceEnabled: envBool("BUTCHR_UNIFIED_WORKSPACE", false),
+
+  /**
+   * RECURSIVE BRANCH-ISOLATION GATE (story st-540ba705, step 4 — DEFAULT OFF). The OFF
+   * feature flag for the ARBITRARY-DEPTH generalization of story B's 3-level branch
+   * isolation (docs/rfc-work-workspace-unification.md §4, Q9): every NODE Work can own a
+   * branch, children merge into the nearest branched ancestor, and it re-gates + merges
+   * upward (the depth-2 story-branch model is its single-level instance). DEFAULT OFF and
+   * fully INERT — mirroring unifiedWork / unifiedWorkspaceEnabled: while off, nothing in
+   * the live dispatch / review / merge path branches on it (the recursive resolvers +
+   * git.mergeWorkBranch have NO live caller this step), so today's single-level merge path
+   * stays byte-for-byte authoritative and `/api/tasks` + `/api/stories` are byte-identical.
+   * The recursive resolvers are exercised directly by tests while the live system is inert.
+   * Per RFC Q9 activation is a separate, deliberate CEO call — turning this ON today still
+   * has no live caller. Read by tasks.recursiveIsolationEnabled().
+   */
+  recursiveBranchIsolation: envBool("BUTCHR_RECURSIVE_BRANCH_ISOLATION", false),
 };
 
 export type Config = typeof config;
