@@ -962,6 +962,76 @@ export function ensureStoryWorkNode(storyId: string): void {
   ).run(storyId);
 }
 
+// UNIFIED-WORKSPACE ACTIVATION MIGRATION (story st-540ba705, step 6b — BACKWARD-SAFE +
+// IDEMPOTENT). Populate the unified `workspace` table from the two legacy operator-agent
+// tables so the unified supervisor (src/workspace-agent.ts), activated this step, re-adopts
+// EVERY live operator agent BY NAME at the CTO's deliberate restart — orphaning none:
+//   - each `cto_agent` row → a `kind='cto'` workspace row (directory_id = its workspace_id,
+//     work_id = NULL — a CTO is not bound to one unit of Work, RFC Q3/Q5);
+//   - each `story_agent` row → a `kind='leader'` workspace row (work_id = its story_id,
+//     directory_id = the story's workspace_id).
+// `name` is left NULL precisely so workspaceAgentName() DERIVES the OLD herdr names verbatim
+// (cto → `<prefix>-<directory_id>`, leader → `<prefix>-story-<work_id>`) — the Story D
+// name-only identity — so a restart ADOPTS the live agent the old server launched rather than
+// double-launching it. session_id/desired/started_at/restarts/last_error/herdr_workspace are
+// carried so the session resumes with full context; `desired` is carried even for a stopped
+// (desired=0) agent so the supervisor's honor-stop check is preserved (updated_at carried so
+// that check, which requires updated_at, fires). has_agent is seeded = desired (a desired-up
+// migrated agent is presumed live-and-owned; adopt re-affirms it).
+//
+// BUILD agents are deliberately NOT migrated: they live in `tasks` (per-task lifecycle +
+// per-task watcher) and stay DISPATCHER-owned — routing them through the unified supervisor
+// would DOUBLE-supervise them. The supervisor's kind='build' capability (step 3) is exercised
+// by its own tests; live build supervision is a separate, larger change, out of scope for 6b.
+//
+// BACKWARD-SAFE (the dev-runs-migrate-live-db hazard): this can run against the LIVE db (a
+// gate/build importing db.ts) WHILE the OLD server runs on old code, so it is purely ADDITIVE —
+// it INSERTs into the previously-inert `workspace` table and never touches `cto_agent` /
+// `story_agent` (their tables + rows stay fully intact, so the old server's cto/story
+// supervisors keep working until the deliberate restart). It NEVER DROPs/RENAMEs anything.
+// FK-safe: directory_id → workspaces(id); a leader's work_id → the materialized story Work node
+// in tasks(id) (so this MUST run AFTER migrateUnifyStoryParent).
+//
+// FK-safe leader guard: the leader INSERT requires its work_id (= story_id) to resolve to a
+// materialized story Work node in tasks(id). migrateUnifyStoryParent (which runs BEFORE this in
+// the boot pass) materializes one per story, so at real boot none are skipped; the
+// `WHERE sa.story_id IN (SELECT id FROM tasks)` guard (mirroring migrateUnifyStoryParent) is a
+// defensive belt — a story_agent row whose node is somehow absent is SKIPPED rather than crashing
+// the migration on the FK.
+//
+// IDEMPOTENT + INSERT-ONCE: a deterministic id (`ws-cto-<workspace_id>` / `ws-leader-<story_id>`)
+// + INSERT OR IGNORE means a re-run skips an already-materialized row and NEVER clobbers it —
+// so once the cutover restart flips the unified supervisor on and it begins writing the
+// `workspace` row (session/desired/restarts), a later migration re-run can't overwrite that
+// live state from the now-FROZEN legacy tables (mirrors migrateUnifyStoryParent's insert-once
+// rule). The final hard removal of cto_agent/story_agent is a LATER post-restart release.
+export function migrateWorkspaceAgentRows(): void {
+  const now = nowIso();
+  // (1) Each CTO agent → a kind='cto' workspace row (no Work binding).
+  db.query(
+    `INSERT OR IGNORE INTO workspace
+       (id, name, kind, directory_id, work_id, session_id, desired, started_at,
+        restarts, last_error, has_agent, herdr_workspace, created_at, updated_at)
+     SELECT 'ws-cto-' || workspace_id, NULL, 'cto', workspace_id, NULL,
+            session_id, desired, started_at, restarts, last_error,
+            desired, herdr_workspace, ?, updated_at
+       FROM cto_agent`,
+  ).run(now);
+  // (2) Each story LEADER → a kind='leader' workspace row bound to its story Work node. The
+  // JOIN to stories yields the directory_id (the story's workspace) and guarantees the story
+  // (hence its materialized tasks node, FK target of work_id) still exists.
+  db.query(
+    `INSERT OR IGNORE INTO workspace
+       (id, name, kind, directory_id, work_id, session_id, desired, started_at,
+        restarts, last_error, has_agent, herdr_workspace, created_at, updated_at)
+     SELECT 'ws-leader-' || sa.story_id, NULL, 'leader', s.workspace_id, sa.story_id,
+            sa.session_id, sa.desired, sa.started_at, sa.restarts, sa.last_error,
+            sa.desired, sa.herdr_workspace, ?, sa.updated_at
+       FROM story_agent sa JOIN stories s ON s.id = sa.story_id
+       WHERE sa.story_id IN (SELECT id FROM tasks)`,
+  ).run(now);
+}
+
 // ---- BOOT MIGRATION RUNNER -------------------------------------------------
 // The ONE ordered list of boot-time schema steps, run by the single loop below.
 // ORDER IS LOAD-BEARING and was previously only documented in the comments on each
@@ -988,6 +1058,12 @@ export function ensureStoryWorkNode(storyId: string): void {
 //                                         backfill members' parent_id from story_id; backward-
 //                                         safe + idempotent. After the status folds so the node
 //                                         lands as a canonical `merged` row.
+//   7c. populate `workspace` from cto_agent + story_agent (st-540ba705 step 6b) — one cto/leader
+//                                         workspace row per legacy operator-agent row so the
+//                                         unified supervisor re-adopts each BY NAME at restart.
+//                                         AFTER 7b so a leader's work_id → the materialized story
+//                                         Work node is FK-safe; backward-safe (legacy tables left
+//                                         intact) + insert-once idempotent.
 //   8. `directory` read-only view alias  (DROP+CREATE VIEW — runs LAST so it mirrors the
 //                                         FULL `workspaces` column set after step 4; inert)
 // Every step is independently idempotent (presence-guarded ALTER/UPDATE, IF NOT EXISTS, or
@@ -1004,6 +1080,7 @@ const MIGRATIONS: Array<() => void> = [
   migrateStatusModel,
   migrateReadyRunningSplit,
   migrateUnifyStoryParent,
+  migrateWorkspaceAgentRows,
   migrateDirectoryAlias,
 ];
 

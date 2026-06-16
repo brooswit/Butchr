@@ -694,21 +694,23 @@ export const config = {
    */
   unifiedWork: envBool("BUTCHR_UNIFIED_WORK", true),
 
-  // ---- UNIFIED WORKSPACE ABSTRACTION (story st-540ba705, step 3) -------------
+  // ---- UNIFIED WORKSPACE ABSTRACTION (story st-540ba705, step 3; ACTIVATED 6b) ------
   /**
    * MASTER GATE for the UNIFIED WORKSPACE supervisor (src/workspace-agent.ts) — the
-   * single supervision loop that generalizes the three agent kinds (build / story
-   * leader / CTO) into one (agent + directory) execution context over the inert
-   * `workspace` table (see docs/rfc-work-workspace-unification.md §2.2). DEFAULT OFF
-   * and fully INERT: while off the unified supervisor no-ops (it is also NOT wired
-   * into boot), and the EXISTING cto_agent / story_agent supervisors + the per-task
-   * build-agent dispatch stay the sole authoritative paths. This flag exists so the
-   * generalized loop can be exercised in tests and, at the separately-authorized
-   * step-6 cutover, flipped on to replace the three parallel supervisors. Turning it
-   * ON today does NOT remove the old supervisors — coexistence/cutover is step 6, out
-   * of scope here.
+   * single supervision loop that generalizes the OPERATOR agent kinds (story leader /
+   * CTO) into one (agent + directory) execution context over the `workspace` table (see
+   * docs/rfc-work-workspace-unification.md §2.2). DEFAULT ON as of the step-6b cutover:
+   * the unified supervisor is now wired into boot (src/index.ts) as the SOLE authority
+   * over the cto/leader agents — it re-adopts each BY NAME from the `workspace` rows the
+   * step-6b boot migration (db.migrateWorkspaceAgentRows) populated from cto_agent /
+   * story_agent, so the live CTO + leaders survive the cutover restart unorphaned. When
+   * ON, the legacy per-kind cto + story supervisors self-gate to a no-op (single, not
+   * double, supervision). BUILD agents stay DISPATCHER-owned (per-task lifecycle/watcher)
+   * — NOT migrated or supervised here. Set BUTCHR_UNIFIED_WORKSPACE=0 to fall back to the
+   * legacy parallel supervisors (the cto_agent / story_agent tables are LEFT INTACT this
+   * step; their hard removal is a later post-restart release).
    */
-  unifiedWorkspaceEnabled: envBool("BUTCHR_UNIFIED_WORKSPACE", false),
+  unifiedWorkspaceEnabled: envBool("BUTCHR_UNIFIED_WORKSPACE", true),
 
   /**
    * RECURSIVE BRANCH-ISOLATION GATE (story st-540ba705, step 4 — DEFAULT OFF). The OFF
