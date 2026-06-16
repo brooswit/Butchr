@@ -8,16 +8,20 @@
 //   - tasks.pendingResponder (subtask→leader TERMINAL / non-story→cto→user), and
 //   - the stories.ts story-ask seam + channel.ts routeOwns (story→cto→user).
 //
-// FULLY ADDITIVE + INERT (gated OFF). NOTHING in the live dispatch / review / lifecycle /
-// channel / server path imports this module, and no live code branches on the OFF flag —
-// so the running system, and `/api/tasks` + `/api/stories`, behave BYTE-IDENTICALLY. The
-// existing 2-level story|cto|user routing stays fully live and AUTHORITATIVE; the recursive
-// path here is exercised ONLY by tests (and, at a later separately-authorized cutover, by
-// flipping the flag). It adds NO API route and NO field to the serialized TaskView.
+// WIRED LIVE as of step 6a (config.unifiedWork, DEFAULT ON): tasks.pendingResponder now
+// delegates the live feedback routing to resolveWorkResponder below (the recursive
+// parent-chain generalizes the old 2-level story|cto|user rule to arbitrary depth). The
+// depth-1/2 instances resolve identically to before (a story member's parent_id == its
+// story_id, backfilled by the step-6a boot migration), so the serialized `pending_responder`
+// field, channel.ts/routeOwns, and `/api/stories` are unchanged. It still adds NO API route
+// and NO new field to the serialized TaskView. BUTCHR_UNIFIED_WORK=0 falls back to the legacy
+// 2-level routing in tasks.pendingResponder.
 //
-// Import discipline: this module imports ONLY db.ts (direct queries) and the PURE predicate
-// `isAwaitingFeedback` from tasks.ts. tasks.ts NEVER imports work.ts, so the dependency is
-// strictly one-way (no cycle).
+// Import discipline: this module imports ONLY db.ts (direct queries), `config`, and the PURE
+// seams `getTask`/`isAwaitingFeedback` from tasks.ts. tasks.ts now imports back the two
+// resolvers (resolveWorkResponder / unifiedWorkEnabled) — a RUNTIME-ONLY cycle: every
+// cross-module reference is a hoisted `function` declaration called at runtime, never at
+// module-load, so there is no load-time TDZ (confirmed by the full test suite).
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { TaskRow } from "./db.ts";

@@ -680,17 +680,19 @@ export const config = {
   ctoRestartBackoffCapMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_CAP_MS", 60000),
 
   /**
-   * UNIFIED-WORK ROUTING GATE (story st-540ba705, step 2 — DEFAULT OFF). The OFF feature
+   * UNIFIED-WORK ROUTING GATE (story st-540ba705 — DEFAULT ON as of step 6a). The feature
    * flag for the unified self-referential WORK model + the RECURSIVE parent-chain feedback
-   * responder (src/work.ts, docs/rfc-work-workspace-unification.md §2.1). DEFAULT OFF so the
-   * running system, and `/api/tasks` + `/api/stories`, stay byte-identical: nothing in the
-   * live dispatch / review / channel path branches on it this step, and the recursive
-   * resolvers are pure of it (a test exercises them directly while the live system is inert).
-   * A later, separately-authorized cutover flips it on (via BUTCHR_UNIFIED_WORK) to route the
-   * generalized recursive bubble-up in place of today's 2-level story|cto|user rules. Read by
-   * work.unifiedWorkEnabled().
+   * responder (src/work.ts, docs/rfc-work-workspace-unification.md §2.1). FLIPPED ON at the
+   * step-6a cutover: tasks.pendingResponder now resolves the live feedback responder via the
+   * recursive parent-chain (work.resolveWorkResponder over tasks.parent_id) instead of the old
+   * 2-level story|cto|user rules — generalizing to arbitrary depth, with needs_user_input
+   * short-circuiting to the user. The depth-1/2 instances (today's task/story shapes) resolve
+   * IDENTICALLY to before: a story member (parent_id == its story_id, backfilled by the step-6a
+   * boot migration) → `story`; a non-story task → `cto`, or `user` once escalated. Set
+   * BUTCHR_UNIFIED_WORK=0 to fall back to the legacy 2-level routing. Read by
+   * work.unifiedWorkEnabled() / tasks.pendingResponder.
    */
-  unifiedWork: envBool("BUTCHR_UNIFIED_WORK", false),
+  unifiedWork: envBool("BUTCHR_UNIFIED_WORK", true),
 
   // ---- UNIFIED WORKSPACE ABSTRACTION (story st-540ba705, step 3) -------------
   /**

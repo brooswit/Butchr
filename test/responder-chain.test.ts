@@ -39,6 +39,10 @@ beforeAll(async () => {
   dbMod.db
     .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(STORY, DIR, "test story", "open", dbMod.nowIso());
+  // Materialize the story's Work node (story st-540ba705 step 6a): a `tasks` row whose id IS
+  // the story id, the FK anchor a member's parent_id points at. With unifiedWork ON (default),
+  // pendingResponder routes a member to 'story' via that parent pointer.
+  dbMod.ensureStoryWorkNode(STORY);
 });
 
 afterAll(() => {
@@ -52,6 +56,7 @@ function seedTask(
   status: string,
   opts: {
     storyId?: string | null;
+    parentId?: string | null;
     escalated?: number;
     idle?: number;
     hasAgent?: number;
@@ -60,8 +65,8 @@ function seedTask(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, story_id, escalated_to_user, plan_preview, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, story_id, parent_id, escalated_to_user, plan_preview, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -71,6 +76,9 @@ function seedTask(
       // has_agent = a LIVE launched agent for this task.
       opts.hasAgent ?? 0,
       opts.storyId ?? null,
+      // parent_id is the unified-work parent pointer (== story_id for a member). escalateTask
+      // still keys on story_id; pendingResponder routes on parent_id.
+      opts.parentId ?? null,
       opts.escalated ?? 0,
       opts.planPreview ?? 0,
       dbMod.nowIso(),
@@ -113,7 +121,7 @@ describe("non-story cto→user boundary (escalateTask)", () => {
 describe("story members are terminal at the leader (no task escalation)", () => {
   test("a story member resolves 'story' and escalate 409s", () => {
     const id = "rc-member";
-    seedTask(id, "needs_info", { storyId: STORY });
+    seedTask(id, "needs_info", { storyId: STORY, parentId: STORY });
     expect(tasksMod.pendingResponder(tasksMod.getTask(id)!)).toBe("story");
     expect(() => tasksMod.escalateTask(id)).toThrow(/terminal at the leader/);
     // Untouched — a story member never carries escalated_to_user.

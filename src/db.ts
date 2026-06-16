@@ -902,6 +902,66 @@ export function migrateReadyRunningSplit(): void {
   );
 }
 
+// UNIFIED-WORK ACTIVATION MIGRATION (story st-540ba705, step 6a — BACKWARD-SAFE +
+// IDEMPOTENT). Make `tasks.parent_id` the AUTHORITATIVE parent pointer for the unified
+// Work model (work.resolveWorkResponder) by (1) materializing each `stories` row as a Work
+// NODE — a `tasks` row whose id IS the story id, the FK anchor a member's parent_id points
+// at — and (2) backfilling every story member's parent_id from its story_id.
+//
+// BACKWARD-SAFE (the dev-runs-migrate-live-db hazard): this migration can run against the
+// LIVE db (a gate/build importing db.ts) WHILE the OLD server is still running on old code,
+// so it must not disturb that server. It is purely ADDITIVE — it INSERTs rows + sets the
+// previously-inert parent_id column; it never DROPs/RENAMEs anything, and the `stories`
+// table + `story_id` stay fully intact + authoritative (story state is still read via the
+// stories table / storyView, and the /api/stories path is untouched until step 6d).
+//
+// The materialized node carries the TERMINAL inert status `merged` precisely so NO old-server
+// loop acts on it: the dispatcher selects only inactive/blocked/in_review; auto-merge selects
+// in_review; attentionList / the channel never query `merged`; reapOrphans' worktree sweep
+// enumerates on-disk worktrees (the node has none) and its husk sweep keys on the bare task
+// id (a leader's herdr name is `<prefix>-story-<id>`, never the bare id) so neither matches;
+// the chain estimator EXCLUDES `merged` rows; unregister SKIPS git.cleanup for `merged`; and
+// isStoryComplete / storyCounts key on story_id (the node's is NULL). The node's status is a
+// pure FK anchor — it carries NO story semantics (story state stays in the stories table) and
+// is irrelevant to routing (resolveWorkResponder reads parent_id, never the parent row).
+//
+// IDEMPOTENT: INSERT OR IGNORE skips already-materialized nodes; the backfill is guarded by
+// `parent_id IS NULL` (so it never clobbers a parent_id set by new code) and an FK-safe
+// `story_id IN (SELECT id FROM tasks)` guard. Runs AFTER ensureForwardColumns (parent_id +
+// the defaulted NOT NULL columns must exist) and the status folds.
+export function migrateUnifyStoryParent(): void {
+  // (1) Materialize each story as a Work node — id = story id, the FK anchor for members'
+  // parent_id. Only id/workspace_id/status/created_at are supplied; every other NOT NULL
+  // column carries a schema DEFAULT (kind='task', version_bump='patch', has_agent=0,
+  // escalated_to_user=0, conflict=0, idle=0, …) so the minimal projection is valid.
+  db.exec(
+    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at)
+       SELECT id, workspace_id, 'merged', created_at FROM stories`,
+  );
+  // (2) Backfill members' parent_id from story_id (the node now exists → FK-safe). Guarded so
+  // a re-run, or a row whose new code already set parent_id, is left untouched.
+  db.exec(
+    `UPDATE tasks SET parent_id = story_id
+       WHERE story_id IS NOT NULL AND parent_id IS NULL
+         AND story_id IN (SELECT id FROM tasks)`,
+  );
+}
+
+/**
+ * Idempotently materialize the Work NODE for a story (the FK anchor a member's parent_id
+ * points at) — the single-story form of migrateUnifyStoryParent's bulk INSERT, used by the
+ * runtime story-membership writers (createTask / assignTaskToStory) so a member created
+ * AFTER the boot migration still gets an FK-valid parent_id. INSERT OR IGNORE → a no-op when
+ * the node already exists or the story is gone. Status `merged` (the inert FK anchor — see
+ * migrateUnifyStoryParent); story state stays authoritative in the stories table.
+ */
+export function ensureStoryWorkNode(storyId: string): void {
+  db.query(
+    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at)
+       SELECT id, workspace_id, 'merged', created_at FROM stories WHERE id=?`,
+  ).run(storyId);
+}
+
 // ---- BOOT MIGRATION RUNNER -------------------------------------------------
 // The ONE ordered list of boot-time schema steps, run by the single loop below.
 // ORDER IS LOAD-BEARING and was previously only documented in the comments on each
@@ -924,6 +984,10 @@ export function migrateReadyRunningSplit(): void {
 //   5. fold out the retracted `stage` axis
 //   6. fold the pre-canonical status set into the 12-state model
 //   7. ready/running split + finalizing rescue
+//   7b. unify story→parent_id (st-540ba705 step 6a) — materialize each story as a Work node +
+//                                         backfill members' parent_id from story_id; backward-
+//                                         safe + idempotent. After the status folds so the node
+//                                         lands as a canonical `merged` row.
 //   8. `directory` read-only view alias  (DROP+CREATE VIEW — runs LAST so it mirrors the
 //                                         FULL `workspaces` column set after step 4; inert)
 // Every step is independently idempotent (presence-guarded ALTER/UPDATE, IF NOT EXISTS, or
@@ -939,6 +1003,7 @@ const MIGRATIONS: Array<() => void> = [
   migrateStageAxisToStatus,
   migrateStatusModel,
   migrateReadyRunningSplit,
+  migrateUnifyStoryParent,
   migrateDirectoryAlias,
 ];
 

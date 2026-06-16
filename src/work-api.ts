@@ -60,15 +60,17 @@ export type ResolvedWork =
 
 /**
  * Resolve a work id to its underlying resource — a TASK (leaf) or a STORY (node) — or
- * throw 404 if neither exists. Tasks are tried first (the common case). Task ids and
- * story ids are minted from disjoint id spaces (`generateStoryId` is prefixed), so a
- * collision can't ambiguate the lookup.
+ * throw 404 if neither exists. STORIES are tried FIRST: as of the step-6a cutover each story
+ * is ALSO materialized as a `tasks` row (the parent_id FK anchor — see db.ensureStoryWorkNode),
+ * so a story id now matches BOTH tables; the stories table is authoritative for "is this a
+ * NODE," so it wins. A leaf task id never collides (story ids are `st-`-prefixed, a disjoint
+ * id space), so it falls through to the task lookup.
  */
 export function resolveWork(id: string): ResolvedWork {
-  const task = getTask(id);
-  if (task) return { kind: "leaf", task };
   const story = getStory(id);
   if (story) return { kind: "node", story };
+  const task = getTask(id);
+  if (task) return { kind: "leaf", task };
   throw new HttpError(404, `work not found: ${id}`);
 }
 

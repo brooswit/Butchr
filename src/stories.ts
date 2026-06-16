@@ -7,7 +7,7 @@
 // story or a task's story_id yet. Later phases add a story-leader agent (a mini-CTO that
 // decomposes / feedbacks / merges) + a responder-escalation chain that consume it. This
 // module mirrors the shape of src/workspaces.ts (a thin CRUD service over the DB).
-import { ALL_STATUSES, db, isTerminal, nowIso } from "./db.ts";
+import { ALL_STATUSES, db, ensureStoryWorkNode, isTerminal, nowIso } from "./db.ts";
 import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
@@ -400,8 +400,15 @@ export function deleteStory(id: string): void {
   // tab/pane + free its name) so the DELETE below — which cascade-removes its story_agent
   // row — can't strand an orphaned leader pane. Best-effort; never blocks delete.
   void stopStoryAgent(id).catch(() => {});
-  // Detach member tasks (keep the tasks — only the grouping is removed).
-  db.query(`UPDATE tasks SET story_id=NULL WHERE story_id=?`).run(id);
+  // Detach member tasks (keep the tasks — only the grouping is removed). Clear BOTH the
+  // legacy story_id AND the unified parent_id (step 6a — they move in lock-step) so a detached
+  // member becomes a standalone top-level Work and no longer points at the about-to-be-removed
+  // node. Clearing parent_id first also frees the node from any member FK reference.
+  db.query(`UPDATE tasks SET story_id=NULL, parent_id=NULL WHERE story_id=?`).run(id);
+  // Remove the story's materialized Work node (the `tasks` row whose id IS the story id — see
+  // ensureStoryWorkNode). Members are already detached, so its self-FK has no referrers. A
+  // no-op when the story was never materialized (no member was ever created/assigned).
+  db.query(`DELETE FROM tasks WHERE id=?`).run(id);
   db.query(`DELETE FROM stories WHERE id=?`).run(id);
 }
 
@@ -428,7 +435,12 @@ export function assignTaskToStory(taskId: string, storyId: string | null): TaskV
     }
   }
 
-  db.query(`UPDATE tasks SET story_id=? WHERE id=?`).run(storyId, taskId);
+  // UNIFIED-WORK PARENT POINTER (step 6a): story_id and parent_id move in lock-step. When
+  // assigning, materialize the story's Work node FIRST (idempotent — the FK anchor) so the
+  // parent_id self-FK is satisfied; set parent_id == story_id. When clearing (storyId === null),
+  // parent_id is cleared too → the task becomes standalone top-level Work.
+  if (storyId !== null) ensureStoryWorkNode(storyId);
+  db.query(`UPDATE tasks SET story_id=?, parent_id=? WHERE id=?`).run(storyId, storyId, taskId);
   const view = taskView(taskId)!;
   publish({ type: "task.updated", task: view });
   return view;

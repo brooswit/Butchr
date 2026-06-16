@@ -351,7 +351,11 @@ async function healthResponse(): Promise<Response> {
     try {
       const rows = db
         .query<{ status: string; n: number }, []>(
-          `SELECT status, COUNT(*) AS n FROM tasks GROUP BY status`,
+          // EXCLUDE materialized story Work NODES (st-540ba705 step 6a — see tasks.listTasks):
+          // a story's anchor `tasks` row is not a real task, so it must not inflate the global
+          // health status rollup with a phantom `merged` per story.
+          `SELECT status, COUNT(*) AS n FROM tasks
+            WHERE id NOT IN (SELECT id FROM stories) GROUP BY status`,
         )
         .all();
       for (const r of rows) tasks[r.status] = r.n;

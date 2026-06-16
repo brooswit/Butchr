@@ -7,6 +7,7 @@ import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
 import {
   ALL_STATUSES,
   db,
+  ensureStoryWorkNode,
   estimateRows,
   isTerminal,
   matchesQuery,
@@ -14,6 +15,13 @@ import {
   recordTaskEvent,
 } from "./db.ts";
 import type { TaskRow, TaskStatus, WorkspaceRow } from "./db.ts";
+// RECURSIVE PARENT-CHAIN RESPONDER (story st-540ba705, step 6a). pendingResponder now
+// delegates the LIVE feedback routing to work.ts's recursive resolver over `parent_id`
+// (see pendingResponder). This is a RUNTIME-ONLY circular import — work.ts imports the
+// hoisted `getTask`/`isAwaitingFeedback` function declarations from here, and these are
+// likewise hoisted functions called only at runtime, so the cycle resolves with no
+// load-time TDZ. Gated by unifiedWorkEnabled() (config.unifiedWork, DEFAULT ON).
+import { resolveWorkResponder, unifiedWorkEnabled } from "./work.ts";
 import {
   classifyPathType,
   computeEstimateStats,
@@ -446,9 +454,18 @@ export function wouldCreateCycle(taskId: string, newBlockers: string[]): boolean
 }
 
 export function listTasks(workspaceId: string): TaskRow[] {
+  // EXCLUDE materialized story Work NODES (story st-540ba705 step 6a): each story is now also
+  // a `tasks` row (the parent_id FK anchor — db.ensureStoryWorkNode), but it is NOT a real
+  // task/leaf, so it must never surface in the task LIST views (taskListView / allTasksView).
+  // Keeping it out preserves the byte-identical `/api/tasks` list and a clean `/api/work` leaf
+  // set; getTask() (by id) still resolves it for the parent_id routing/FK walks. The
+  // `id NOT IN (SELECT id FROM stories)` filter is exact — story ids are a disjoint id space,
+  // so no real task is ever excluded. (Step 6d folds stories into work and revisits this.)
   return db
     .query<TaskRow, [string]>(
-      `SELECT * FROM tasks WHERE workspace_id=? ORDER BY created_at DESC`,
+      `SELECT * FROM tasks
+        WHERE workspace_id=? AND id NOT IN (SELECT id FROM stories)
+        ORDER BY created_at DESC`,
     )
     .all(workspaceId);
 }
@@ -499,20 +516,42 @@ export function isAwaitingFeedback(row: TaskRow): boolean {
 
 /**
  * The resolved RESPONDER for a task's CURRENT pending feedback — STRUCTURAL, no tier, no
- * config (design §3):
+ * per-step config. As of step 6a (config.unifiedWork, DEFAULT ON) this DELEGATES the live
+ * routing to the RECURSIVE parent-chain responder (work.resolveWorkResponder over
+ * `parent_id`), generalizing the old 2-level rule to ARBITRARY DEPTH:
  *  - not awaiting feedback → null
- *  - story member (story_id != null) → `story` (the leader), ALWAYS — terminal, no tier.
- *  - non-story + NOT escalated_to_user → `cto`
- *  - non-story + escalated_to_user → `user`
+ *  - has a parent (`parent_id` set — a story member, or any nested Work) → `story` (the
+ *    PARENT node's workspace responds — terminal there unless IT raises it on up).
+ *  - top-level (`parent_id` NULL) + NOT escalated_to_user → `cto`
+ *  - top-level + escalated_to_user → `user` (the single cto→user boundary; the
+ *    needs_user_input short-circuit — see escalateTask).
  *
- * Pure read of the row; surfaced as `pending_responder` on TaskView / TaskListView /
- * AttentionItem so the webapp + CTO never have to cross-reference anything. The single
- * cto→user boundary for a non-story task is the `escalated_to_user` bit (see escalateTask).
+ * BEHAVIOR-IDENTICAL for today's task/story shapes (the depth-1/2 instances): the step-6a
+ * boot migration backfills every story member's parent_id == its story_id, so a member still
+ * resolves to `story`; a non-story task resolves to `cto`/`user` exactly as before. The
+ * `needsUserInput` short-circuit is gated on `parent_id == null` so escalated_to_user (only
+ * ever set on a non-story task) can never flip a member off `story`. The recursive
+ * `{ kind: "work" }` (any parent node) maps to the existing `story` vocabulary so the
+ * `PendingResponder` type and channel.ts/routeOwns stay unchanged.
+ *
+ * When BUTCHR_UNIFIED_WORK=0 (legacy), the original 2-level story|cto|user rule is used.
+ * Pure read of the row (the recursive resolver reads only parent_id pointers); surfaced as
+ * `pending_responder` on TaskView / TaskListView / AttentionItem.
  */
 export function pendingResponder(row: TaskRow): PendingResponder | null {
   if (!isAwaitingFeedback(row)) return null;
-  if (row.story_id != null) return "story";
-  return row.escalated_to_user ? "user" : "cto";
+  if (!unifiedWorkEnabled()) {
+    // Legacy 2-level routing (BUTCHR_UNIFIED_WORK=0).
+    if (row.story_id != null) return "story";
+    return row.escalated_to_user ? "user" : "cto";
+  }
+  const resolved = resolveWorkResponder(row.id, {
+    needsUserInput: row.parent_id == null && !!row.escalated_to_user,
+  });
+  // Map the recursive WorkResponder onto the existing PendingResponder vocabulary: any
+  // parent NODE → `story` (the depth-1/2 instance), the base case → `cto`, the escalation
+  // short-circuit → `user`.
+  return resolved.kind === "work" ? "story" : resolved.kind;
 }
 
 /** Merge the DB row with the on-disk task.md for the detail view. */
@@ -1593,9 +1632,16 @@ export async function createTask(
     prompt,
   );
 
+  // UNIFIED-WORK PARENT POINTER (story st-540ba705, step 6a): a story member's parent IS its
+  // story (the Work node). Materialize the story's Work node FIRST (idempotent — the FK anchor
+  // parent_id points at) so the INSERT's parent_id self-FK is satisfied even for a story
+  // created after the boot migration. parent_id is set == story_id (they stay in lock-step;
+  // story_id remains authoritative for the legacy /api/stories path until step 6d). NULL for a
+  // standalone task — today's behavior.
+  if (storyId != null) ensureStoryWorkNode(storyId);
   db.query(
-    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, story_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, story_id, parent_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     workspaceId,
@@ -1608,6 +1654,7 @@ export async function createTask(
     taskPriority,
     taskPlanPreview ? 1 : 0,
     taskVersionBump,
+    storyId,
     storyId,
     created,
   );

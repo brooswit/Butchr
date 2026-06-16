@@ -144,9 +144,15 @@ describe("workView EMBEDS the existing task/story views byte-for-byte (pure supe
     expect((wv as any).work_kind).toBe("leaf");
     // The task row's OWN `kind` column ('task'/'rollback') is preserved alongside work_kind.
     expect((wv as any).kind).toBe("task");
-    // parent_id is inert pre-migration → a leaf bottoms out at the base-case cto → user chain.
-    expect((wv as any).work_responder).toEqual({ kind: "cto" });
-    expect((wv as any).work_responder_chain).toEqual([{ kind: "cto" }, { kind: "user" }]);
+    // As of the step-6a cutover parent_id is LIVE: a subtask leaf's parent IS its story node,
+    // so the informational Work responder/chain reflect the real `leaf → node → cto → user`
+    // bubble-up (the node id is the story id — see db.ensureStoryWorkNode).
+    expect((wv as any).work_responder).toEqual({ kind: "work", work_id: node.id });
+    expect((wv as any).work_responder_chain).toEqual([
+      { kind: "work", work_id: node.id },
+      { kind: "cto" },
+      { kind: "user" },
+    ]);
 
     // Strip the three added keys → byte-identical to the existing taskView.
     const { work_kind, work_responder, work_responder_chain, ...embedded } = wv as any;

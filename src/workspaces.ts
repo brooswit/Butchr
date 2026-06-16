@@ -76,7 +76,12 @@ export type WorkspaceView = WorkspaceRow & {
 function counts(workspaceId: string): Record<string, number> {
   const rows = db
     .query<{ status: string; n: number }, [string]>(
-      `SELECT status, COUNT(*) AS n FROM tasks WHERE workspace_id=? GROUP BY status`,
+      // EXCLUDE materialized story Work NODES (st-540ba705 step 6a — see tasks.listTasks): a
+      // story's anchor `tasks` row is not a real task and must not inflate the workspace's
+      // per-status counts (it would otherwise add a phantom `merged` per story).
+      `SELECT status, COUNT(*) AS n FROM tasks
+        WHERE workspace_id=? AND id NOT IN (SELECT id FROM stories)
+        GROUP BY status`,
     )
     .all(workspaceId);
   // One bucket per canonical status (from the exported ALL_STATUSES), plus the

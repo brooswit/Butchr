@@ -30,7 +30,9 @@ beforeAll(async () => {
   process.env.BUTCHR_DB = join(DATA_DIR, "test.db");
   process.env.BUTCHR_LOG_FILE = "";
   process.env.BUTCHR_HERDR_BIN = "true";
-  // The gate must be OFF by default for this run (do NOT set BUTCHR_UNIFIED_WORK).
+  // The unified-work gate is ON by default as of step 6a; don't override it. The recursive
+  // resolvers below are pure of the flag, and the LIVE pendingResponder routing now delegates
+  // to them (asserted in the final describe block).
   delete process.env.BUTCHR_UNIFIED_WORK;
 
   dbMod = await import("../src/db.ts");
@@ -205,16 +207,23 @@ describe("step 2 — blocked_by reused UNCHANGED for node-on-node blocking", () 
   });
 });
 
-describe("step 2 — the gate is OFF and the LIVE 2-level routing is UNCHANGED", () => {
-  test("unifiedWorkEnabled() defaults OFF (nothing in the live path branches on it)", () => {
-    expect(workMod.unifiedWorkEnabled()).toBe(false);
+describe("step 6a — the gate is ON and the LIVE routing uses the recursive resolver", () => {
+  test("unifiedWorkEnabled() defaults ON (the live pendingResponder branches on it)", () => {
+    expect(workMod.unifiedWorkEnabled()).toBe(true);
   });
 
-  test("tasks.pendingResponder (the authoritative live seam) is unaffected for the same rows", () => {
-    // wrf-A is a non-story task awaiting feedback → the live resolver still says 'cto',
-    // exactly as before; the recursive Work path is inert.
-    const row = tasksMod.getTask("wrf-A")!;
-    expect(row.story_id).toBeNull();
-    expect(tasksMod.pendingResponder(row)).toBe("cto");
+  test("tasks.pendingResponder now resolves the live responder via the parent chain", () => {
+    // wrf-A is a top-level Work awaiting feedback → the base case is the CTO (unchanged from
+    // the 2-level rule for a non-story task).
+    const a = tasksMod.getTask("wrf-A")!;
+    expect(a.parent_id).toBeNull();
+    expect(tasksMod.pendingResponder(a)).toBe("cto");
+
+    // wrf-C is a LEAF whose parent is a node → the parent NODE responds, mapped onto the
+    // existing 'story' vocabulary (the depth-1/2 instance — byte-identical to a story member).
+    expect(tasksMod.pendingResponder(tasksMod.getTask("wrf-C")!)).toBe("story");
+    // A deeply-nested leaf (wrf-W, 4 levels) also resolves to its parent node → 'story',
+    // proving arbitrary-depth routing is LIVE (not just the 2-level instance).
+    expect(tasksMod.pendingResponder(tasksMod.getTask("wrf-W")!)).toBe("story");
   });
 });
