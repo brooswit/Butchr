@@ -996,6 +996,238 @@ export async function resolveMergeContext(row: TaskRow): Promise<MergeContext> {
   return { ffWorktree: dir.path, targetBranch: def, base: def };
 }
 
+// ---- RECURSIVE BRANCH/MERGE (st-540ba705 step 4 — ADDITIVE + INERT, GATED OFF) ------------
+//
+// The ARBITRARY-DEPTH generalization of the story-branch resolvers above (RFC §4, Q9): the
+// 3-level story-branch model is its depth-1 instance. git.ts owns the DB-free node helpers
+// (workBranchName / ensureWorkBranch / mergeWorkToParent / removeWorkBranch); tasks.ts owns
+// RESOLVING the per-node parent chain + merge context over `parent_id` and threading them
+// down. The whole path is GATED by config.recursiveBranchIsolation (DEFAULT OFF) and has NO
+// LIVE CALLER — finalizeMerge / resolveBase / resolveMergeContext / mergeStoryBranch are all
+// untouched, so today's single-level merge path stays byte-for-byte authoritative and
+// `/api/tasks` + `/api/stories` are byte-identical. These functions are exercised directly by
+// test/recursive-branch-merge.test.ts while the live system is inert. To avoid the
+// tasks↔work import cycle, parent_id is read via the canonical getTask (NOT work.ts).
+
+/** GATE for the recursive branch-isolation path (config.recursiveBranchIsolation). When OFF,
+ * resolveRecursiveBase / resolveRecursiveMergeContext return today's EXACT single-level
+ * context (default branch / repo root) for EVERY row, so the recursive machinery is inert. */
+export function recursiveIsolationEnabled(): boolean {
+  return config.recursiveBranchIsolation;
+}
+
+/** A bound far above any real nesting depth — a backstop against a corrupt parent_id cycle the
+ * visited-set wouldn't already catch. Arbitrary-depth nesting (RFC Q8) is supported; this only
+ * guards against pathological/looping data, never legitimate depth. */
+const MAX_NODE_CHAIN_DEPTH = 1000;
+
+/** A row's parent_id, read via the canonical getTask (NOT work.ts — avoids the import cycle).
+ * null for top-level Work (parent_id NULL) or a missing row. */
+function nodeParentId(workId: string): string | null {
+  return getTask(workId)?.parent_id ?? null;
+}
+
+/**
+ * The chain of work ids from `workId` UP to (and including) the top-level ancestor — `workId`
+ * first, then each parent, bottoming out at the row whose parent_id is NULL. A `visited` set +
+ * a depth cap make a corrupt parent_id cycle / self-parent terminate (throws 409) rather than
+ * loop forever — mirroring work.workResponderChain's guard.
+ */
+function nodeChainIds(workId: string): string[] {
+  const chain: string[] = [];
+  const visited = new Set<string>();
+  let cur: string | null = workId;
+  for (let depth = 0; cur && depth < MAX_NODE_CHAIN_DEPTH; depth++) {
+    if (visited.has(cur)) {
+      throw new HttpError(409, `parent_id cycle detected at ${cur} resolving chain for ${workId}`);
+    }
+    visited.add(cur);
+    chain.push(cur);
+    cur = nodeParentId(cur);
+  }
+  return chain;
+}
+
+/**
+ * Lazily ensure the ENTIRE branch chain from a Work node up to (but not including) the default
+ * branch exists, so the node's branch is always cut from a REAL parent ref. Collects the
+ * `parent_id` chain bottom-UP, then creates branches TOP-down: the top-most node cuts from the
+ * default branch, each child cuts from its parent's (already-ensured) work branch
+ * (git.ensureWorkBranch with the resolved base). Idempotent + restart-safe (ensureWorkBranch
+ * reuses an existing branch/worktree). Returns the worktree path of `workId`'s OWN node branch
+ * (the deepest ensured node). Throws 404 if the workspace is gone.
+ */
+export async function ensureNodeChain(dir: string, workId: string): Promise<string> {
+  const chain = nodeChainIds(workId); // [workId, parent, …, top-level]
+  const def = await git.defaultBranch(dir);
+  let path = "";
+  // Create TOP-down (chain is bottom-up, so iterate in reverse): the top-most node cuts from
+  // the default branch, each descendant from its parent's already-ensured work branch.
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const id = chain[i]!;
+    const parent = i + 1 < chain.length ? chain[i + 1]! : null;
+    const base = parent ? git.workBranchName(parent) : def;
+    path = await git.ensureWorkBranch(dir, git.workBranchName(id), base);
+  }
+  return path;
+}
+
+/**
+ * Resolve a Work node's RECURSIVE REBASE/MERGE BASE — the ref its branch is measured/rebased
+ * against. WITH a parent AND the flag ON → the PARENT node's work branch (ensuring the chain
+ * first so it's a real ref); ELSE → today's EXACT default branch. The guard keeps the
+ * recursive path OPT-IN: a top-level node, or any row with the flag OFF, resolves to
+ * defaultBranch — byte-for-byte resolveBase's value. Throws 404 if the workspace is gone.
+ */
+export async function resolveRecursiveBase(row: TaskRow): Promise<string> {
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+  if (recursiveIsolationEnabled() && row.parent_id) {
+    // Ensure the whole chain (this node + all ancestors) so the parent branch exists.
+    await ensureNodeChain(dir.path, row.id);
+    return git.workBranchName(row.parent_id);
+  }
+  return git.defaultBranch(dir.path);
+}
+
+/**
+ * Resolve a Work node's RECURSIVE MERGE CONTEXT — the ff-target + base a node→parent merge
+ * uses. WITH a parent AND the flag ON → `{ ffWorktree: <parent node worktree>, targetBranch:
+ * <parent work branch>, base: <parent work branch> }` so the node fast-forwards INTO its
+ * parent's worktree (the post-merge verify runs THERE, reset-on-red resets THAT checkout).
+ * ELSE → today's EXACT `{ ffWorktree: dir.path, targetBranch: <default>, base: <default> }` —
+ * byte-for-byte resolveMergeContext's standalone value. Ensures the chain first so BOTH the
+ * node's and its parent's worktrees provably exist even on a restart-recovery merge. Throws
+ * 404 if the workspace is gone.
+ */
+export async function resolveRecursiveMergeContext(row: TaskRow): Promise<MergeContext> {
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+  if (recursiveIsolationEnabled() && row.parent_id) {
+    // Ensure the full chain (creates the parent node's branch + worktree too), then point the
+    // merge at the PARENT node's branch + worktree.
+    await ensureNodeChain(dir.path, row.id);
+    const parentBranch = git.workBranchName(row.parent_id);
+    return {
+      ffWorktree: git.workWorktreePath(dir.path, row.parent_id),
+      targetBranch: parentBranch,
+      base: parentBranch,
+    };
+  }
+  const def = await git.defaultBranch(dir.path);
+  return { ffWorktree: dir.path, targetBranch: def, base: def };
+}
+
+/** The outcome of mergeWorkBranch (a node→parent merge attempt) — the arbitrary-depth analogue
+ * of StoryMergeOutcome. Exactly one kind:
+ *  - `landed`        — re-gate GREEN, node→parent ff'd, post-merge verify GREEN; for a landed
+ *                      TOP-LEVEL node the work branch + worktree are removed. `baseSha`/
+ *                      `mergedSha` bracket the node's range on its parent (default branch for a
+ *                      top-level node).
+ *  - `gateRed`       — the node-level re-gate (on the node-branch tip) came back RED: a HARD
+ *                      BLOCK, no merge ran, the parent untouched. `output` = gate log.
+ *  - `postVerifyRed` — re-gate GREEN and the ff stuck, but the post-merge verify on the parent
+ *                      went RED, so the parent was reset to its pre-merge tip. `output` = log.
+ *  - `conflict`      — the node↔parent rebase conflicted; it was aborted, node branch + parent
+ *                      untouched. `files`/`message` describe the conflict.
+ *  - `mergeError`    — a non-conflict git failure in the merge; parent untouched. `message`. */
+export type WorkMergeOutcome =
+  | { kind: "landed"; baseSha: string | null; mergedSha: string | null }
+  | { kind: "gateRed"; output: string }
+  | { kind: "postVerifyRed"; output: string }
+  | { kind: "conflict"; files: string[]; message: string }
+  | { kind: "mergeError"; message: string };
+
+/**
+ * Run a Work NODE's node→parent merge attempt — the ARBITRARY-DEPTH generalization of
+ * mergeStoryBranch, the whole sequence inside ONE runExclusiveMerge so it can never interleave
+ * with another merge moving the same parent (or the default branch). Steps mirror
+ * mergeStoryBranch exactly, just generalized over `parent_id`:
+ *   1. ensure the node's branch chain + worktrees exist (idempotent; restart-safe);
+ *   2. RE-GATE the node-branch tip in the node worktree via verifyDefaultBranch (the SAME
+ *      verify-runner path mergeStoryBranch uses) — RED ⇒ HARD BLOCK (`gateRed`), no merge, the
+ *      parent untouched;
+ *   3. resolve the parent CONTEXT — for a child node the PARENT node's branch + worktree; for a
+ *      TOP-LEVEL node today's EXACT `{ dir.path, default, default }` (so it lands on the default
+ *      branch at the repo root, exactly as mergeStoryToMain does). Capture the parent tip, then
+ *      rebase the node branch onto the parent + ff the parent (git.mergeWorkToParent) — a
+ *      conflict ⇒ `conflict` (rebase already aborted), a non-conflict failure ⇒ `mergeError`
+ *      (both leave the parent + the node branch untouched);
+ *   4. POST-MERGE VERIFY on the parent worktree — RED ⇒ resetHard the parent to the captured tip
+ *      (`postVerifyRed`), so a broken commit never sits on the parent;
+ *   5. GREEN ⇒ for a landed TOP-LEVEL node, removeWorkBranch (delete its branch + worktree) ⇒
+ *      `landed`. A child node's branch is KEPT — it remains the live base its parent merges
+ *      upward later (cleanup happens when the parent itself lands).
+ * NO release/version-bump opts are passed (each leaf already bumped + stamped when it merged
+ * into its node branch, mirroring mergeStoryBranch's §11.6 rationale). GATED + INERT: the live
+ * system never calls this — exercised only by tests behind the OFF flag. Throws 404 if the
+ * Work / its workspace is gone.
+ */
+export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome> {
+  const row = getTask(workId);
+  if (!row) throw new HttpError(404, `work not found: ${workId}`);
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+
+  const workBranch = git.workBranchName(workId);
+  const gateCmd = workspaceGateCmd(dir.id);
+  const isTopLevel = !row.parent_id;
+
+  return runExclusiveMerge<WorkMergeOutcome>(async () => {
+    // 1. Ensure the node's branch chain + worktrees (checked out at each node tip). Idempotent
+    //    + restart-safe. Returns this node's OWN worktree (where its tip is checked out).
+    const nodeWt = await ensureNodeChain(dir.path, workId);
+
+    // 2. RE-GATE the assembled node branch IN the node worktree (its tip) via verifyDefaultBranch
+    //    — the SAME verify-runner path mergeStoryBranch uses. RED is a HARD BLOCK: the merge does
+    //    not run and the parent is never touched.
+    const regate = await verifyDefaultBranch(nodeWt, gateCmd);
+    if (!regate.ok) {
+      return { kind: "gateRed", output: regate.output?.trim() || "(no gate output captured)" };
+    }
+
+    // 3. Resolve the parent CONTEXT (parent node branch + worktree for a child; today's exact
+    //    { dir.path, default, default } for a top-level node). Capture the parent tip (to reset
+    //    on a post-verify RED), then rebase the node branch onto the parent + ff the parent. A
+    //    conflict / non-conflict failure both leave the node branch AND the parent untouched.
+    const mctx = await resolveRecursiveMergeContext(row);
+    const parentPriorTip = await git.headSha(mctx.ffWorktree).catch(() => null);
+    const mr = await git.mergeWorkToParent(dir.path, workId, mctx.targetBranch, mctx.ffWorktree);
+    if (!mr.ok) {
+      if (mr.conflict) {
+        return { kind: "conflict", files: mr.conflictFiles, message: mr.message };
+      }
+      return { kind: "mergeError", message: mr.message };
+    }
+
+    // 4. POST-MERGE VERIFY on the parent worktree (the final backstop). RED ⇒ reset the parent to
+    //    its captured pre-merge tip so a broken commit never sits on it.
+    const postVerify = await verifyDefaultBranch(mctx.ffWorktree, gateCmd);
+    if (!postVerify.ok) {
+      if (parentPriorTip) {
+        await git.resetHard(mctx.ffWorktree, parentPriorTip).catch((e) => {
+          console.error(
+            `[butchr] CRITICAL: work ${workId} post-merge verify FAILED but the reset of ` +
+              `${mctx.targetBranch} to ${parentPriorTip} ALSO failed: ${e}. It may hold a broken commit.`,
+          );
+        });
+      } else {
+        console.error(
+          `[butchr] CRITICAL: work ${workId} post-merge verify FAILED but ${mctx.targetBranch}'s ` +
+            `pre-merge tip was not captured, so the merge could not be reverted. Inspect ${mctx.targetBranch}.`,
+        );
+      }
+      return { kind: "postVerifyRed", output: postVerify.output?.trim() || "(no verify output captured)" };
+    }
+
+    // 5. LANDED + green. A landed TOP-LEVEL node is fully merged into the default branch → delete
+    //    its branch + worktree. A child node's branch is KEPT (it stays the live base its own
+    //    parent merges upward later; it is cleaned up when that parent lands).
+    if (isTopLevel) await git.removeWorkBranch(dir.path, workBranch);
+    return { kind: "landed", baseSha: mr.baseSha ?? null, mergedSha: mr.mergedSha ?? null };
+  });
+}
+
 /**
  * TEARDOWN + DISCARD the agent's worktree, in the ONE correct order: (optionally)
  * capture the session's token usage FIRST — it reads the transcript while the
@@ -3111,9 +3343,11 @@ export function ciGateInFlight(id: string): boolean {
   return ciLiveness.isLive(id);
 }
 
-/** Replace the CI runner (tests inject a fake to avoid spawning bun). */
-export function setCiRunner(r: CiRunner): void {
-  ciRunner = r;
+/** Replace the CI runner (tests inject a fake to avoid spawning bun). Pass nothing to
+ * RESTORE the real default runner — mirroring verify.setVerifyRunner so a test can reset it
+ * in afterEach and never leak a stub into another test file. */
+export function setCiRunner(r?: CiRunner): void {
+  ciRunner = r ?? defaultCiRunner;
 }
 
 /** Keep the last ~24 lines of output as a compact, human-readable tail. */
