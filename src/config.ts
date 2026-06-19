@@ -490,6 +490,25 @@ export const config = {
   idleContextLines: envInt("BUTCHR_IDLE_CONTEXT_LINES", 40),
 
   /**
+   * MID-SESSION PROMPT PROBE cadence, in watcher ticks. The per-task build-agent
+   * watcher loops every ~1s but only stat()s the run-log mtime; it never reads pane
+   * CONTENT. To catch a build agent that hits a human-only prompt AFTER launch (a
+   * mid-run tool-permission / trust dialog, not just the startup consent the launch
+   * auto-confirm covers), the watcher additionally reads the live pane every
+   * `midProbeEveryTicks` ticks and runs it through the startup-prompt classifier:
+   * a known prompt is auto-confirmed (mirroring launch auto-confirm); an
+   * unrecognized-but-prompt-like pane flips `needs_user_input` so a human is routed
+   * to it; a clean pane CLEARS the flag (same self-clearing lifecycle as idle).
+   *
+   * Kept COARSE (default every 10 ticks ≈ 10s) because `agentRead` shells out to
+   * herdr — reading every 1s would hammer the hot watcher loop. The probe is
+   * best-effort (a read/send failure is swallowed) so it can never disrupt the
+   * watcher or fail a task. `<=0` disables the probe entirely. See
+   * dispatcher.probeAgentForPrompt / shouldProbeTick.
+   */
+  midProbeEveryTicks: envInt("BUTCHR_MID_PROBE_TICKS", 10),
+
+  /**
    * Optional override for opening a GUI terminal attached to a running task.
    * Template run via `bash -lc`; `{{CMD}}` is replaced with the shell-quoted
    * `herdr agent attach <id>` command. If unset, butchr auto-detects an

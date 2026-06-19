@@ -25,8 +25,8 @@ import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
-import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
-import type { AutoConfirmResult } from "./startup-confirm.ts";
+import { autoConfirmStartupPrompts, classifyStartupScreen } from "./startup-confirm.ts";
+import type { AutoConfirmResult, ConfirmRule } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
 import { getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, requeueForResume, resolveBase, setIdle, setNeedsUserInput } from "./tasks.ts";
@@ -532,6 +532,101 @@ export async function autoConfirmAndFlagTaskStartup(taskId: string): Promise<voi
 }
 
 /**
+ * THROTTLE gate for the mid-session pane probe: true only on every `every`-th watcher
+ * tick (and never when the probe is disabled, `every <= 0`). The watcher loops ~1s but
+ * `agentRead` shells out to herdr, so we must NOT read the pane every tick — this spaces
+ * the reads to roughly `every` seconds. Pure so the throttle is unit-testable without
+ * driving the whole watcher loop. `tick` is the 1-based loop counter.
+ */
+export function shouldProbeTick(tick: number, every: number): boolean {
+  if (every <= 0) return false;
+  return tick % every === 0;
+}
+
+/** Injectable seams for the mid-session probe (the harness/DB in production; fakes in tests). */
+export type MidProbeDeps = {
+  /** Read the agent's live pane (ANSI-stripped). */
+  read: (name: string) => Promise<string>;
+  /** Push a confirming input to the agent's pane. */
+  send: (name: string, input: SendInput) => Promise<void>;
+  /** Flip/clear the task's needs_user_input flag (idempotent; capture thunk on 0→1). */
+  setFlag: (id: string, on: boolean, capture?: () => string) => void;
+  /** Is the task's needs_user_input flag currently set? */
+  flagged: (id: string) => boolean;
+  /** Extra/overriding rule table (defaults to STARTUP_CONFIRM_RULES). */
+  rules?: ConfirmRule[];
+  /** Optional diagnostics sink. */
+  log?: (msg: string) => void;
+};
+
+/**
+ * MID-SESSION SAFETY NET — one pane-CONTENT probe for a single live build agent, the
+ * counterpart to launch auto-confirm for prompts that appear AFTER startup (a mid-run
+ * tool-permission / trust dialog). Reads the live pane once and classifies it via the
+ * SAME three-way classifier as the launch path:
+ *   - `rule`  → a known prompt we can auto-confirm: send the safe response (mirroring
+ *               launch auto-confirm) and CLEAR any stale needs_user_input flag — we are
+ *               handling it, so the user no longer needs to;
+ *   - `stuck` → an unrecognized but prompt-like pane → flip `needs_user_input` on (with
+ *               the screen as context) so a human is routed to the still-attachable pane;
+ *   - `quiet` → genuinely past any prompt: CLEAR the flag if it was set (same
+ *               self-clearing lifecycle as idle — the agent moved past the prompt).
+ *
+ * BEST-EFFORT: a read failure does nothing (we cannot classify a pane we could not read),
+ * and a send failure is swallowed — this must NEVER throw or disrupt the watcher / fail
+ * the task. Idempotent against the launch-time flag: `setFlag(true)` re-setting an
+ * already-set flag and `setFlag(false)` clearing an unset one are both no-ops (setIdle
+ * shape), so it interoperates cleanly with the detection subtask's launch flag. Exported
+ * so the probe is unit-testable without the live watcher loop.
+ */
+export async function probeAgentForPrompt(taskId: string, deps: MidProbeDeps): Promise<void> {
+  let screen = "";
+  try {
+    screen = await deps.read(taskId);
+  } catch {
+    return; // best-effort: a pane we cannot read tells us nothing — leave state as-is
+  }
+  const cls = classifyStartupScreen(screen, deps.rules);
+
+  if (cls.kind === "rule") {
+    try {
+      await deps.send(taskId, cls.rule.response);
+      deps.log?.(`auto-confirmed mid-session prompt '${cls.rule.name}'`);
+    } catch {
+      /* best-effort — a send to a dead pane is a no-op */
+    }
+    // We can handle this prompt ourselves → clear any flag a prior unrecognized prompt set.
+    if (deps.flagged(taskId)) deps.setFlag(taskId, false);
+    return;
+  }
+
+  if (cls.kind === "stuck") {
+    // An unhandled blocking prompt appeared mid-run: surface it (idempotent if already set).
+    deps.setFlag(taskId, true, () => screen);
+    deps.log?.("mid-session prompt not auto-confirmable — flagging for user input");
+    return;
+  }
+
+  // cls.kind === "quiet": past any prompt. Clear the flag iff it was set (no-op otherwise).
+  if (deps.flagged(taskId)) deps.setFlag(taskId, false);
+}
+
+/**
+ * The watcher-tick wiring for `probeAgentForPrompt`: build the production deps (live pane
+ * read/send via the harness, flag get/set via the task store) and run one probe. Kept thin
+ * + best-effort so the watcher can fire-and-forget it without awaiting (it never throws).
+ */
+export function probeTaskMidSession(taskId: string): Promise<void> {
+  return probeAgentForPrompt(taskId, {
+    read: (n) => harness.agentRead(n),
+    send: (n, input) => harness.send(n, input),
+    setFlag: (id, on, capture) => setNeedsUserInput(id, on, capture),
+    flagged: (id) => !!getTask(id)?.needs_user_input,
+    log: (m) => console.log(`[butchr] task ${taskId}: ${m}`),
+  }).catch(() => {});
+}
+
+/**
  * The per-task MCP servers config. ALWAYS includes `butchr` (the HTTP review/raise
  * surface at /mcp/<id>). When connectivity monitoring is ON, ALSO registers the one-way
  * connectivity channel as a STDIO server in CONNECTIVITY-ONLY mode
@@ -963,7 +1058,12 @@ function spawnWatcher(
     // against a false "vanished" during the brief agent-registration lag at
     // startup.
     let seenAlive = false;
+    // 1-based watcher-tick counter, driving the THROTTLED mid-session pane-content probe
+    // (shouldProbeTick): the loop runs ~1s but we only read the pane every
+    // config.midProbeEveryTicks ticks (agentRead shells out to herdr).
+    let tick = 0;
     while (true) {
+      tick++;
       if (abortSignals.has(taskId)) break;
       // Release our slot the moment the task leaves its live agent phase. Once it
       // reaches in_review/needs_info/inactive/merged/failed/aborted the agent has
@@ -1020,6 +1120,14 @@ function spawnWatcher(
       // step below (liveness guard + pane self-heal; the nudge is now responder-driven).
       const quietMs = refreshIdle(taskId, logFile);
       await handleIdleAgent(taskId, cur, quietMs);
+      // MID-SESSION SAFETY NET: on a coarse cadence (NOT every 1s tick — agentRead
+      // shells out to herdr), read the pane content and auto-confirm / flag / clear a
+      // human-only prompt that appeared AFTER launch. Fire-and-forget + best-effort so
+      // it never perturbs the hot watcher loop or fails the task (probeTaskMidSession
+      // swallows all errors and never throws).
+      if (shouldProbeTick(tick, config.midProbeEveryTicks)) {
+        void probeTaskMidSession(taskId);
+      }
       await sleep(1000);
     }
 
