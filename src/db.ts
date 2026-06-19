@@ -518,6 +518,24 @@ ensureColumn("tasks", "idle", "INTEGER NOT NULL DEFAULT 0");
 // stale snapshot never lingers. Set/cleared alongside `idle` (see tasks.setIdle).
 ensureColumn("tasks", "idle_context", "TEXT");
 
+// `needs_user_input` flags a running task whose agent is hung ALIVE at a pre-MCP OS/CLI
+// dialog (e.g. a channel-confirm prompt) that ONLY A HUMAN can answer by sending keystrokes
+// to the live pane. Like `idle`, it is an orthogonal FLAG on a LIVE in_progress agent — NOT
+// a 13th status — and it is the EXACT idle pattern: the agent stays in_progress/attachable
+// (a status transition would run parkExitingAgent and the pane would vanish, but the human
+// must keep the pane to answer). It differs from idle only in ROUTING: it forces the task's
+// feedback STRAIGHT to the user (pendingResponder → 'user', regardless of parent_id), so it
+// never reaches the CTO/leader push-feed. NOTHING sets it yet (detection lands later); this
+// spine is INERT. See tasks.setNeedsUserInput.
+ensureColumn("tasks", "needs_user_input", "INTEGER NOT NULL DEFAULT 0");
+
+// `needs_user_input_context` is the ANSI-stripped tail of the agent's run log captured at the
+// instant `needs_user_input` flips 0→1, so the user can SEE what dialog the agent is wedged
+// on before answering. Cleared (NULL) the moment the flag clears (→0) or the task leaves the
+// live build phase, so a stale snapshot never lingers. Set/cleared alongside
+// `needs_user_input` (see tasks.setNeedsUserInput), exactly like idle_context tracks idle.
+ensureColumn("tasks", "needs_user_input_context", "TEXT");
+
 // `session_id` is the Claude Code session UUID butchr assigns to the agent at
 // launch (`--session-id <uuid>`). It is what makes the review handshake durable:
 // once set, butchr can re-launch the SAME session with full prior context via
@@ -1527,6 +1545,13 @@ export type TaskRow = {
   // ANSI-stripped run-log tail captured when `idle` flips on, surfaced to the
   // idle-handling responder; NULL whenever the task is not idle. See tasks.setIdle.
   idle_context: string | null;
+  // Orthogonal flag on a LIVE in_progress agent hung at a human-only OS/CLI dialog — the
+  // exact `idle` pattern, but routing the task's feedback STRAIGHT to the user
+  // (pendingResponder → 'user'). NOTHING sets it yet (inert spine). See tasks.setNeedsUserInput.
+  needs_user_input: number;
+  // ANSI-stripped run-log tail captured when `needs_user_input` flips on, surfaced to the
+  // user; NULL whenever the flag is clear. See tasks.setNeedsUserInput.
+  needs_user_input_context: string | null;
   review_note: string | null;
   summary: string | null;
   // RAISE handshake (see the `question`/`answer` ensureColumn block above): `question`

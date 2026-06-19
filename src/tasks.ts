@@ -506,6 +506,9 @@ export type PendingResponder = "story" | "cto" | "user";
  */
 export function isAwaitingFeedback(row: TaskRow): boolean {
   if (row.status === "in_progress" && row.idle) return true;
+  // A live build agent hung at a human-only OS/CLI dialog is awaiting feedback exactly like
+  // an idle one — the same flag-on-in_progress pattern; its responder resolves to 'user'.
+  if (row.status === "in_progress" && row.needs_user_input) return true;
   return (
     row.status === "idea" ||
     row.status === "spec_review" ||
@@ -540,13 +543,19 @@ export function isAwaitingFeedback(row: TaskRow): boolean {
  */
 export function pendingResponder(row: TaskRow): PendingResponder | null {
   if (!isAwaitingFeedback(row)) return null;
+  // `needs_user_input` is a HUMAN-ONLY prompt: it forces the responder STRAIGHT to the user
+  // REGARDLESS of parent_id (broader than escalated_to_user, which only ever fires on a
+  // top-level task), and takes PRECEDENCE over the escalated_to_user path. It short-circuits
+  // the whole parent-chain bubble-up — even a story member's leader is bypassed.
   if (!unifiedWorkEnabled()) {
     // Legacy 2-level routing (BUTCHR_UNIFIED_WORK=0).
+    if (row.needs_user_input) return "user";
     if (row.story_id != null) return "story";
     return row.escalated_to_user ? "user" : "cto";
   }
   const resolved = resolveWorkResponder(row.id, {
-    needsUserInput: row.parent_id == null && !!row.escalated_to_user,
+    needsUserInput:
+      !!row.needs_user_input || (row.parent_id == null && !!row.escalated_to_user),
   });
   // Map the recursive WorkResponder onto the existing PendingResponder vocabulary: any
   // parent NODE → `story` (the depth-1/2 instance), the base case → `cto`, the escalation
@@ -764,6 +773,8 @@ export function statsRollup(): StatsRollup {
  *   diff-review     — a finished diff awaiting review (in_review).
  *   major-confirm   — an in_review release_mode MAJOR task awaiting the human double-confirm.
  *   idle-handling   — a live build agent went idle (in_progress + idle).
+ *   needs-user-input — a live build agent is hung at a human-only dialog (in_progress +
+ *                      needs_user_input); only the user can answer it.
  *   failed          — a terminal execution failure to inspect.
  */
 export type AttentionReason =
@@ -773,6 +784,7 @@ export type AttentionReason =
   | "diff-review"
   | "major-confirm"
   | "idle-handling"
+  | "needs-user-input"
   | "failed";
 
 export type AttentionItem = {
@@ -811,6 +823,9 @@ export function attentionReason(row: TaskRow, releaseMode: boolean): AttentionRe
     case "in_review":
       return releaseMode && row.version_bump === "major" ? "major-confirm" : "diff-review";
     case "in_progress":
+      // needs_user_input WINS over idle — it is the more specific, human-only signal (a wedged
+      // dialog vs a generic stall), so when both flags are set it is the reason surfaced.
+      if (row.needs_user_input) return "needs-user-input";
       return row.idle ? "idle-handling" : null;
     default:
       return null;
@@ -827,6 +842,8 @@ function attentionDetail(row: TaskRow, reason: AttentionReason): string | null {
       return row.last_dispatch_error ?? row.review_note ?? row.summary ?? null;
     case "idle-handling":
       return row.idle_context ?? row.summary ?? null;
+    case "needs-user-input":
+      return row.needs_user_input_context ?? row.summary ?? null;
     default:
       return row.summary ?? row.review_note ?? null;
   }
@@ -835,9 +852,9 @@ function attentionDetail(row: TaskRow, reason: AttentionReason): string | null {
 /**
  * The /api/attention feed: a structured list of every task awaiting the operator right
  * now — the PULL side of the push-only CTO channel, so a missing list can never give a
- * false "idle" read. Selects the feedback/failed states plus a live IDLE build agent in
- * ONE query and categorizes each (attentionReason). Oldest-first (longest-waiting at the
- * top — what to look at first).
+ * false "idle" read. Selects the feedback/failed states plus a live IDLE or
+ * NEEDS_USER_INPUT build agent in ONE query and categorizes each (attentionReason).
+ * Oldest-first (longest-waiting at the top — what to look at first).
  */
 export function attentionList(): AttentionItem[] {
   const rows = db
@@ -845,6 +862,7 @@ export function attentionList(): AttentionItem[] {
       `SELECT * FROM tasks
         WHERE status IN ('spec_review','in_review','needs_info','failed')
            OR (status='in_progress' AND has_agent=1 AND idle=1)
+           OR (status='in_progress' AND has_agent=1 AND needs_user_input=1)
         ORDER BY created_at ASC`,
     )
     .all();
@@ -1390,6 +1408,18 @@ function setStatus(
   if (opts.set && "idle" in opts.set && !("idle_context" in opts.set)) {
     assigns.push("idle_context=NULL");
   }
+  // The needs_user_input CONTEXT is bound to its flag identically: any transition that clears
+  // `needs_user_input` (every setStatus that sets it does so to 0 — only setNeedsUserInput
+  // ever sets 1) also wipes the captured `needs_user_input_context`, so a stale snapshot can
+  // never linger once the task leaves the live build phase. Skipped if a caller set the
+  // context explicitly.
+  if (
+    opts.set &&
+    "needs_user_input" in opts.set &&
+    !("needs_user_input_context" in opts.set)
+  ) {
+    assigns.push("needs_user_input_context=NULL");
+  }
   // HONEST AGENT-OWNERSHIP (story st-a77b050f): `has_agent` is true ONLY while a launched
   // agent owns a LIVE `in_progress` task, so EVERY transition OFF in_progress (to review /
   // needs_info / inactive / a terminal state / …) clears it here, centrally — no need to
@@ -1903,6 +1933,7 @@ export async function setBlockedBy(
       output_snapshot: null,
       conflict: 0,
       idle: 0,
+      needs_user_input: 0,
       // Editing dependencies breaks the major double-confirm streak (must be consecutive).
       major_confirm_count: 0,
     },
@@ -1998,6 +2029,7 @@ async function requestChanges(
       summary: null,
       conflict: 0,
       idle: 0,
+      needs_user_input: 0,
       dispatch_attempts: 0,
       last_dispatch_error: null,
       next_dispatch_at: null,
@@ -2406,7 +2438,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     setStatus(id, "rolling_back", {
       from: "in_review",
       note: "approved — rolling back (mechanical revert merge)",
-      set: { review_note: null, idle: 0, conflict: 0 },
+      set: { review_note: null, idle: 0, needs_user_input: 0, conflict: 0 },
     });
   }
 
@@ -2533,6 +2565,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         set: {
           conflict: 0,
           idle: 0,
+          needs_user_input: 0,
           output_snapshot: setIfPresent(snapshot || null),
           revert_reason: reason,
           last_dispatch_error: reason,
@@ -2568,6 +2601,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         review_note: null,
         conflict: 0,
         idle: 0,
+        needs_user_input: 0,
         output_snapshot: snapshot || null,
         merge_base_sha: result.baseSha ?? null,
         merged_sha: result.mergedSha ?? null,
@@ -2692,6 +2726,7 @@ export async function abortTask(id: string): Promise<TaskView> {
     set: {
       conflict: 0,
       idle: 0,
+      needs_user_input: 0,
       review_note: null,
       output_snapshot: null,
       completed_at: nowIso(),
@@ -3077,6 +3112,7 @@ function parkExitingAgent(
       note: opts.note,
       set: {
         idle: 0,
+        needs_user_input: 0,
         output_snapshot: snapshot || null,
         ...extraSet,
       },
@@ -3282,6 +3318,7 @@ async function resumeWithAnswer(
       question: null,
       output_snapshot: null,
       idle: 0,
+      needs_user_input: 0,
       dispatch_attempts: 0,
       last_dispatch_error: null,
       next_dispatch_at: null,
@@ -3819,6 +3856,56 @@ export function setIdle(id: string, idle: boolean, captureContext?: () => string
 }
 
 /**
+ * Flag/unflag a running build task as `needs_user_input` (agent alive but hung at a
+ * human-only OS/CLI dialog it cannot answer itself), capturing/clearing the
+ * `needs_user_input_context` snapshot in lockstep. The EXACT `setIdle` shape — a flag on a
+ * LIVE in_progress build agent (has_agent=1), guarded on a value CHANGE so it only emits on a
+ * genuine flip — but where idle routes feedback to the idle-handling responder (CTO/leader),
+ * this routes STRAIGHT to the user (pendingResponder → 'user', regardless of parent_id), so a
+ * human can answer the prompt by sending keystrokes to the still-attachable pane.
+ *
+ * On the 0→1 flip we record `needs_user_input_context` — the run-log tail the user reads to
+ * see what dialog is blocking — from the optional `captureContext` thunk, invoked ONLY on a
+ * genuine flip (we peek first). Clearing (→0) wipes the context to NULL.
+ *
+ * INERT for now: NOTHING calls this yet (detection lands in a later subtask). It exists so the
+ * flag, its routing, and its surfacing are wired and provably correct before anything sets it.
+ */
+export function setNeedsUserInput(
+  id: string,
+  on: boolean,
+  captureContext?: () => string,
+): void {
+  const want = on ? 1 : 0;
+  // Peek first: only a genuine flip of a LIVE build agent does anything — and only then do we
+  // run the (log-reading) capture thunk.
+  const cur = db
+    .query<{ needs_user_input: number; status: string; has_agent: number }, [string]>(
+      `SELECT needs_user_input, status, has_agent FROM tasks WHERE id=?`,
+    )
+    .get(id);
+  if (
+    !cur ||
+    cur.status !== "in_progress" ||
+    cur.has_agent === 0 ||
+    cur.needs_user_input === want
+  ) {
+    return;
+  }
+  // Going on → snapshot the run-log tail as context (empty → NULL); clearing → NULL.
+  const context = want === 1 ? captureContext?.() || null : null;
+  // The 0→1 flip ENTERS a fresh feedback surface — clear escalated_to_user so any later
+  // escalation state starts clean (the responder is forced to 'user' regardless, but we mirror
+  // setIdle's reset faithfully). Clearing (1→0) does not touch it.
+  const escalateReset = want === 1 ? ", escalated_to_user=0" : "";
+  const res = db.query(
+    `UPDATE tasks SET needs_user_input=?, needs_user_input_context=?${escalateReset} WHERE id=? AND status='in_progress' AND has_agent=1 AND needs_user_input<>?`,
+  ).run(want, context, id, want);
+  if (res.changes === 0) return;
+  emitUpdated(id);
+}
+
+/**
  * NUDGE a live build agent — the graceful idle-handling ACTION, the responder's
  * deliberate replacement for the old blind auto-"continue". Sends `text` (or a bare
  * "continue") to the agent's pane exactly as a human would, so the idle-handling
@@ -3885,6 +3972,7 @@ export async function backToQueued(id: string): Promise<void> {
     note: "re-queued",
     set: {
       idle: 0,
+      needs_user_input: 0,
       dispatch_attempts: 0,
       last_dispatch_error: null,
       next_dispatch_at: null,
@@ -3992,6 +4080,9 @@ export async function requeueTask(id: string): Promise<TaskView> {
       // Re-queuing an IDLE agent is a valid idle-handling action — clear the idle flag
       // (and, via setStatus, the captured idle_context) so nothing stale lingers.
       idle: 0,
+      // Likewise clear any needs_user_input flag (+ its context, via setStatus's central
+      // wipe) — a re-queue restarts the agent, so a stale human-prompt flag must not linger.
+      needs_user_input: 0,
       // Operator re-queue is a fresh start — clear the auto-resume streak too.
       resume_attempts: 0,
       // A re-queue breaks the major double-confirm streak (must be consecutive).
@@ -4075,6 +4166,7 @@ export async function requeueForResume(
         has_agent: 0,
         output_snapshot: null,
         idle: 0,
+        needs_user_input: 0,
         conflict: 0,
         resume_attempts: attempts,
         // NOT a dispatch failure — clear any backoff so the relaunch is prompt.
