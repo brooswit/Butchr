@@ -60,6 +60,9 @@ const STATUS_LABELS = {
   in_progress: "in progress",
   in_review: "in review",
   needs_info: "needs info",
+  // Synthetic effStatus (a flag on a LIVE in_progress agent, like `idle`) — the agent is
+  // wedged at a human-only OS/CLI prompt and needs a person to answer in its live pane.
+  needs_user_input: "needs your input",
   rolling_back: "rolling back",
   rolled_back: "rolled back",
   idea: "idea",
@@ -115,7 +118,7 @@ function applyStateMeta(meta) {
   ALL_STATUSES = all.slice();
   TERMINAL_STATUSES = terminal.slice();
   ACTIVE_STATUSES = all.filter((s) => !terminal.includes(s));
-  FILTER_STATUSES = all.flatMap((s) => (s === "in_progress" ? [s, "idle"] : [s]));
+  FILTER_STATUSES = all.flatMap((s) => (s === "in_progress" ? [s, "needs_user_input", "idle"] : [s]));
 }
 
 // What an operator is AWAITING for each feedback state (chip hint). Pure UI copy — these
@@ -126,8 +129,12 @@ const AWAITED_LABEL = {
   spec_review: "spec approval",
   in_review: "diff review",
   needs_info: "response to raised item",
+  needs_user_input: "your answer at the terminal",
 };
 function stateKind(status) {
+  // `needs_user_input` is a synthetic effStatus (not in the server's STATE_KIND table) — it
+  // is a feedback condition (a human must answer), so surface it like the feedback states.
+  if (status === "needs_user_input") return "feedback";
   return STATE_KIND[status] || "idle";
 }
 // Who is EXPECTED to act on a feedback task, read from the server-computed STRUCTURAL
@@ -153,6 +160,9 @@ function responderChip(t) {
 // status (+ the needs_info plan-vs-question split on plan_preview). Used only for the
 // awaiting-who banner copy on the task detail. null for a non-feedback state.
 function feedbackStepLabel(t) {
+  // needs_user_input WINS over idle — a live agent wedged at a human-only prompt (the more
+  // specific, highest-attention signal), so check it first.
+  if (t.status === "in_progress" && t.needs_user_input) return "your input";
   // Idle is orthogonal to status — a flag on a LIVE in_progress agent — but it IS a
   // feedback condition (the agent went quiet and needs its responder to act).
   if (t.status === "in_progress" && t.idle) return "idle handling";
@@ -167,9 +177,13 @@ function feedbackStepLabel(t) {
 function awaitedLabel(status) {
   return AWAITED_LABEL[status] || null;
 }
-// `idle` is a flag on an in_progress task (agent alive but its CLI has gone quiet),
-// not a real lifecycle status. Render it as its own chip in place of "in progress".
+// `idle` and `needs_user_input` are flags on an in_progress task (the agent is alive but
+// its CLI has gone quiet / is wedged at a human-only prompt), not real lifecycle statuses.
+// Render each as its own synthetic chip in place of "in progress". `needs_user_input` WINS
+// over `idle` — the more specific, highest-attention signal — mirroring the server's
+// attentionKind precedence (tasks.attentionReason).
 function effStatus(t) {
+  if (t.status === "in_progress" && t.needs_user_input) return "needs_user_input";
   return t.status === "in_progress" && t.idle ? "idle" : t.status;
 }
 // Renders a task's badge cluster — the status chip plus the optional plan-preview /
@@ -345,6 +359,55 @@ async function openTaskTerminal(id, btn) {
     const r = await api("POST", "/work/" + id + "/terminal");
     terminalToast(r);
   }, { onDone: () => { if (btn) btn.disabled = false; } });
+}
+
+// Does the captured pane (needs_user_input_context) look like the dev-channels consent /
+// folder-trust / numbered-proceed prompt whose SAFE answer is option "1"? Mirrors the
+// '1'-response rules in src/startup-confirm.ts so the one-click Confirm button is offered
+// ONLY where nudging "1" is the right move; any other prompt falls back to Open terminal.
+function isOneKeyConfirmPrompt(ctx) {
+  if (!ctx) return false;
+  return /local development|development channel|trust the files|do you trust|(^|\n)\s*[❯>*]?\s*1\.\s*(yes|proceed|continue|i am|allow|trust)/i.test(ctx);
+}
+
+// The PROMINENT "needs your input" card for a work item whose LIVE agent is wedged at a
+// human-only OS/CLI prompt (effStatus === "needs_user_input"). The highest-attention surface
+// on the task detail: it states the agent is alive-but-blocked, shows the captured pane so the
+// human sees exactly WHAT prompt is blocking, and offers the tools to resolve it in place —
+//  • Open terminal — reuses POST /api/work/:id/terminal to attach a GUI terminal to the live
+//    pane (the agent is in_progress/attachable) so the human can type the answer.
+//  • Confirm — only for the dev-channels-style numbered prompt: reuses POST /api/work/:id/nudge
+//    with {text:"1"} (a bare nudge of "1\n" confirms the consent dialog). The agent then moves
+//    past the prompt and the safety-net watcher clears the flag on the next clean pane read, so
+//    the card resolves on the next SSE update — no explicit "resolve" action needed.
+function needsUserInputPanel(t) {
+  const ctx = (t.needs_user_input_context || "").trim();
+  const panel = el("div", { class: "panel needs-input-panel" });
+  panel.innerHTML = `
+    <div class="ni-head">
+      <span class="ni-icon" aria-hidden="true">⌨</span>
+      <h2>Needs your input</h2>
+    </div>
+    <p class="ni-lead">This agent is <strong>alive but blocked</strong> at a prompt only a
+      human can answer — it can't proceed until you respond in its live terminal.</p>
+    ${ctx
+      ? `<div class="ni-ctx-label">What it's waiting on</div><pre class="block ni-ctx">${esc(ctx)}</pre>`
+      : `<p class="muted ni-noctx">No captured prompt text — open the terminal to see what it's waiting on.</p>`}
+    <div class="ni-actions"></div>`;
+  const actions = panel.querySelector(".ni-actions");
+
+  const term = el("button", { class: "btn" }, "⌗ Open terminal to answer");
+  term.addEventListener("click", () => openTaskTerminal(t.id, term));
+  actions.appendChild(term);
+
+  if (isOneKeyConfirmPrompt(ctx)) {
+    const confirmBtn = el("button", { class: "btn ghost", title: "send “1” to the live pane — the safe proceed/consent choice" }, "Confirm (send “1”)");
+    confirmBtn.addEventListener("click", () => action(confirmBtn,
+      () => api("POST", "/work/" + t.id + "/nudge", { text: "1" }),
+      { success: "sent “1” — the agent should continue past the prompt", onDone: () => { confirmBtn.disabled = false; } }));
+    actions.appendChild(confirmBtn);
+  }
+  return panel;
 }
 
 // ---------- managed CTO agent (PER-WORKSPACE) ----------
@@ -797,6 +860,7 @@ function dirCard(d) {
       const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
         : s === "inactive" && c[s] ? "count-pill has-inactive"
         : s === "in_progress" && c[s] ? "count-pill has-running"
+        : s === "needs_user_input" && c[s] ? "count-pill has-needs-input"
         : s === "idle" && c[s] ? "count-pill has-idle"
         : s === "in_review" && c[s] ? "count-pill has-review"
         : s === "spec_review" && c[s] ? "count-pill has-review"
@@ -1143,11 +1207,14 @@ function queueLine(tasks) {
   const b = tasks.filter((t) => t.status === "blocked").length;
   const ni = tasks.filter((t) => t.status === "needs_info").length;
   const ready = tasks.filter((t) => t.status === "inactive").length;
-  const r = tasks.filter((t) => t.status === "in_progress" && !t.idle).length;
-  const i = tasks.filter((t) => t.status === "in_progress" && t.idle).length;
+  const nui = tasks.filter((t) => effStatus(t) === "needs_user_input").length;
+  const r = tasks.filter((t) => t.status === "in_progress" && !t.idle && !t.needs_user_input).length;
+  const i = tasks.filter((t) => t.status === "in_progress" && t.idle && !t.needs_user_input).length;
   const inRev = tasks.filter((t) => t.status === "in_review").length;
   const rb = tasks.filter((t) => t.status === "rolling_back").length;
   const parts = [];
+  // Surface FIRST — a wedged agent needing a human is the most urgent line.
+  if (nui) parts.push(`${nui} needs your input`);
   if (r) parts.push(`${r} in progress`);
   if (i) parts.push(`${i} idle`);
   if (ready) parts.push(`${ready} ready`);
@@ -2329,10 +2396,16 @@ async function renderTask(id) {
     headerRight,
   ]));
 
+  // NEEDS-YOUR-INPUT card — surfaced FIRST (above the metadata) when the live agent is wedged
+  // at a human-only prompt, so the highest-attention state and its resolve controls (open
+  // terminal / one-click confirm) read immediately. Resolves on the next SSE update once the
+  // agent moves past the prompt and the safety-net watcher clears the flag.
+  if (effStatus(t) === "needs_user_input") wrap.appendChild(needsUserInputPanel(t));
+
   // metadata
   const meta = el("div", { class: "panel" });
   meta.innerHTML = `<div class="meta-grid">
-    <div class="k">status</div><div class="v">${esc(effStatus(t))}</div>
+    <div class="k">status</div><div class="v">${esc(statusLabel(effStatus(t)))}</div>
     ${t.liveness ? `<div class="k">liveness</div><div class="v" title="${esc(t.liveness.evidence)}">${livenessChip(t.liveness)}</div>` : ""}
     ${Array.isArray(t.tags) && t.tags.length ? `<div class="k">tags</div><div class="v">${tagChips(t)}</div>` : ""}
     ${Array.isArray(t.allowlist) && t.allowlist.length ? `<div class="k">allowlist</div><div class="v">${t.allowlist.map((a) => `<code>${esc(a)}</code>`).join(" ")}</div>` : ""}

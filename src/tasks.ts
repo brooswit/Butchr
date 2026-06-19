@@ -723,13 +723,14 @@ export function allTasksView(
 
 /** Global pipeline rollup: status counts across ALL workspaces + a per-workspace breakdown. */
 export type StatsRollup = {
-  /** Total task count across all workspaces (the `idle` pseudo-bucket is NOT counted —
-   * it is peeled out of in_progress, not a distinct status). */
+  /** Total task count across all workspaces (the `idle` / `needs_user_input` pseudo-buckets
+   * are NOT counted — they are peeled out of in_progress, not distinct statuses). */
   totalTasks: number;
   /** Number of registered workspaces. */
   workspaces: number;
-  /** Status → summed count across every workspace, plus the `idle` pseudo-bucket (a flag
-   * on a LIVE in_progress agent, peeled out of in_progress — mirrors workspaces.counts). */
+  /** Status → summed count across every workspace, plus the `idle` and `needs_user_input`
+   * pseudo-buckets (flags on a LIVE in_progress agent, peeled out of in_progress — mirrors
+   * workspaces.counts). */
   totals: Record<string, number>;
   /** Per-workspace status counts (the same per-status map the dashboard/workspace views use). */
   byWorkspace: Array<{
@@ -751,11 +752,14 @@ export function statsRollup(): StatsRollup {
   const wss = listWorkspaces();
   const totals: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
   totals.idle = 0;
+  totals.needs_user_input = 0;
   let totalTasks = 0;
   const byWorkspace = wss.map((ws) => {
     for (const [status, n] of Object.entries(ws.counts)) {
       totals[status] = (totals[status] ?? 0) + n;
-      if (status !== "idle") totalTasks += n;
+      // `idle` and `needs_user_input` are peeled out of in_progress, not real statuses —
+      // counting them in totalTasks would double-count.
+      if (status !== "idle" && status !== "needs_user_input") totalTasks += n;
     }
     return { id: ws.id, label: ws.label, path: ws.path, counts: ws.counts };
   });

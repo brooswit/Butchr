@@ -32,6 +32,7 @@
   --inactive: #5b6470;     /* slate-gray (ready — queued for the dispatcher, no agent yet) */
   --in_progress: #425eff;  /* blue-500 (agent building code) */
   --idle: #0e7490;         /* cyan-700 (in_progress but quiet) */
+  --needs_user_input: #dc2626; /* red-600 (HIGHEST attention — live agent wedged at a human-only prompt) */
   --in_review: #a35901;    /* brand-orange-dark (feedback — operator reviews diff) */
   --merged: #006933;       /* green-600 (success) */
   --rolling_back: #9a3412; /* orange-800 (a rollback task's revert merging — after merge) */
@@ -85,6 +86,7 @@ html[data-theme="dark"] {
   --inactive: #6b7480;     /* slate, lifted for dark surfaces (ready) */
   --in_progress: #425eff;  /* blue-500 */
   --idle: #22a7c2;         /* cyan, lifted for dark surfaces */
+  --needs_user_input: #ef4444; /* red-500, lifted for dark (HIGHEST attention) */
   --in_review: #c47a0a;    /* orange, lifted for dark */
   --merged: #006933;
   --rolling_back: #c2410c; /* orange-700, lifted for dark (revert merging — after merge) */
@@ -274,6 +276,12 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.inactive { background: var(--inactive); }
 .chip.in_progress { background: var(--in_progress); }
 .chip.idle { background: var(--idle); }
+/* `needs_user_input` — a LIVE agent wedged at a human-only prompt. Highest attention: a
+   bold red chip that softly pulses so it pulls the eye in any list/board/board-card. */
+.chip.needs_user_input {
+  background: var(--needs_user_input);
+  animation: pause-pulse 1.6s ease-in-out infinite;
+}
 .chip.in_review { background: var(--in_review); }
 .chip.merged { background: var(--merged); }
 .chip.rolling_back { background: var(--rolling_back); }
@@ -386,6 +394,31 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   color: var(--muted);
 }
 
+/* NEEDS-YOUR-INPUT card — the highest-attention surface on the task detail: a live agent is
+   wedged at a human-only OS/CLI prompt. A bold red-accented panel (placed above the metadata)
+   that shows the captured pane and the resolve controls (open terminal / one-click confirm). */
+.needs-input-panel {
+  border: 1px solid var(--needs_user_input);
+  border-left: 4px solid var(--needs_user_input);
+  background: var(--panel-2);
+}
+.needs-input-panel .ni-head {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 8px;
+}
+.needs-input-panel .ni-head h2 { margin: 0; font-size: 16px; color: var(--needs_user_input); }
+.needs-input-panel .ni-icon { font-size: 18px; line-height: 1; }
+.needs-input-panel .ni-lead { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text); }
+.needs-input-panel .ni-ctx-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); margin-bottom: 4px;
+}
+.needs-input-panel .ni-ctx {
+  margin: 0 0 12px; max-height: 240px; overflow: auto;
+  border-color: var(--needs_user_input);
+}
+.needs-input-panel .ni-noctx { margin: 0 0 12px; font-size: 13px; }
+.needs-input-panel .ni-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
 /* STORY-LEVEL ASK panel — an open story ask (pending_ask) surfaced under its story row:
    the leader's question, who currently owns it (ask_responder), and a freeform answer box
    that POSTs /api/stories/:id/answer. Styled like the responder-banner / rollup panels:
@@ -439,6 +472,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .count-pill.has-inactive { border-color: var(--inactive); color: var(--inactive); }
 .count-pill.has-running { border-color: var(--in_progress); color: var(--in_progress); }
 .count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
+.count-pill.has-needs-input { border-color: var(--needs_user_input); color: var(--needs_user_input); }
 .count-pill.has-review { border-color: var(--in_review); color: var(--in_review); }
 .count-pill.has-awaiting { border-color: var(--needs_info); color: var(--needs_info); }
 .count-pill.has-rolling-back { border-color: var(--rolling_back); color: var(--rolling_back); }
@@ -820,6 +854,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tasks .id .pulse { font-weight: 400; }
 @media (prefers-reduced-motion: reduce) {
   .pulse .pulse-dot { animation: none; }
+  .chip.needs_user_input { animation: none; }
 }
 
 /* forms */

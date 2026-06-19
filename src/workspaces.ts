@@ -84,16 +84,30 @@ function counts(workspaceId: string): Record<string, number> {
         GROUP BY status`,
     )
     .all(workspaceId);
-  // One bucket per canonical status (from the exported ALL_STATUSES), plus the
-  // orthogonal `idle` pseudo-bucket (a flag on a LIVE in_progress agent, peeled out below).
+  // One bucket per canonical status (from the exported ALL_STATUSES), plus the orthogonal
+  // `idle` and `needs_user_input` pseudo-buckets (flags on a LIVE in_progress agent, peeled
+  // out below).
   const out: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
   out.idle = 0;
+  out.needs_user_input = 0;
   for (const r of rows) out[r.status] = r.n;
-  // `idle` is a flag on a LIVE build agent (in_progress with a pane), not a status —
-  // peel it out of the in_progress count so the dashboard shows active vs. quiet agents.
+  // `needs_user_input` is a flag on a LIVE build agent wedged at a human-only prompt — peel it
+  // out of in_progress FIRST (it WINS over idle: the more specific, highest-attention signal,
+  // mirroring tasks.attentionReason / the webapp's effStatus precedence) so a wedged agent is
+  // surfaced distinctly on the dashboard.
+  const needsInput = db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND status='in_progress' AND has_agent=1 AND needs_user_input=1`,
+    )
+    .get(workspaceId)!.n;
+  out.needs_user_input = needsInput;
+  out.in_progress -= needsInput;
+  // `idle` is a flag on a LIVE build agent (in_progress with a pane), not a status — peel it
+  // out of the in_progress count so the dashboard shows active vs. quiet agents. EXCLUDE the
+  // needs_user_input ones (already peeled above) so a task in both buckets counts exactly once.
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND status='in_progress' AND has_agent=1 AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND status='in_progress' AND has_agent=1 AND idle=1 AND needs_user_input=0`,
     )
     .get(workspaceId)!.n;
   out.idle = idle;
@@ -527,7 +541,7 @@ export function dashboard(): Dashboard {
     const c = counts(d.id);
     const active =
       (c.idea ?? 0) + (c.blocked ?? 0) + (c.inactive ?? 0) + (c.in_progress ?? 0) +
-      (c.idle ?? 0) + (c.rolling_back ?? 0);
+      (c.idle ?? 0) + (c.needs_user_input ?? 0) + (c.rolling_back ?? 0);
     // FEEDBACK states awaiting a human (kept under the `review` field name).
     const review = (c.spec_review ?? 0) + (c.in_review ?? 0) + (c.needs_info ?? 0);
     const failed = c.failed ?? 0; // the terminal `failed` state — see comment above
