@@ -108,8 +108,9 @@ describe("shouldProbeTick (throttle)", () => {
 
 // ── probeAgentForPrompt — the classify→act logic (injectable fakes) ─────────────────────
 describe("probeAgentForPrompt (classify → auto-confirm / flag / clear)", () => {
-  // A minimal in-memory deps factory over a fake flag store.
-  function makeDeps(screen: string | (() => Promise<string>), flag = { on: false }) {
+  // A minimal in-memory deps factory over a fake flag store. `idle` defaults to true so the
+  // classify→act cases exercise the action path; an idle=false deps leaves the agent untouched.
+  function makeDeps(screen: string | (() => Promise<string>), flag = { on: false }, idle = true) {
     const calls = { sends: [] as SendInput[], setFlag: [] as Array<{ on: boolean; ctx?: string }> };
     return {
       calls,
@@ -121,6 +122,7 @@ describe("probeAgentForPrompt (classify → auto-confirm / flag / clear)", () =>
           calls.setFlag.push({ on, ctx: on ? capture?.() : undefined });
         },
         flagged: () => flag.on,
+        idle: () => idle,
       },
     };
   }
@@ -178,21 +180,52 @@ describe("probeAgentForPrompt (classify → auto-confirm / flag / clear)", () =>
       send: async () => { throw new Error("dead pane"); },
       setFlag: (_id: string, on: boolean) => { flag.on = on; calls.setFlag.push(on); },
       flagged: () => flag.on,
+      idle: () => true,
     };
     await expect(dispatchMod.probeAgentForPrompt("t", deps)).resolves.toBeUndefined();
     expect(calls.setFlag).toEqual([false]);
+  });
+
+  // ── GENUINE-IDLE GATE: an ACTIVE agent is left completely alone (the false-positive fix) ──
+  test("an ACTIVE agent (idle=false) is never read/flagged even with a stuck-looking pane", async () => {
+    const reads: number[] = [];
+    const stuck = "Some tool wants permission:\n  1. Accept\n  2. Reject";
+    const { deps, calls } = makeDeps(
+      async () => { reads.push(1); return stuck; },
+      { on: false },
+      /* idle */ false,
+    );
+    await dispatchMod.probeAgentForPrompt("t", deps);
+    expect(reads).toEqual([]);     // not even read — the agent is producing output
+    expect(calls.sends).toEqual([]); // no keystroke injected
+    expect(calls.setFlag).toEqual([]); // no flag flipped
+  });
+
+  test("an ACTIVE agent (idle=false) with the `raise` tool description is NOT flagged", async () => {
+    const raiseDesc =
+      "Use this tool to put a clarifying question before proposing a plan. " +
+      "raise is also non-blocking: it records your message and returns immediately.\n❯ ";
+    const { deps, calls } = makeDeps(raiseDesc, { on: false }, /* idle */ false);
+    await dispatchMod.probeAgentForPrompt("t", deps);
+    expect(calls.sends).toEqual([]);
+    expect(calls.setFlag).toEqual([]);
   });
 });
 
 // ── probeTaskMidSession — the live harness + DB wiring ──────────────────────────────────
 describe("probeTaskMidSession (harness + needs_user_input wiring)", () => {
-  test("an unmatched mid-session prompt flags the live build task and captures the screen", async () => {
+  // A quiet duration past the idle threshold = genuinely idle (the only state the probe acts
+  // in); a small/zero duration = the agent is actively producing output → probe is a no-op.
+  const IDLE = 10_000_000; // quietMs >> config.idleMs
+  const ACTIVE = 0; //        quietMs <= config.idleMs
+
+  test("an unmatched mid-session prompt flags the live build task and captures the screen (when idle)", async () => {
     sends = [];
     seedLiveTask("mid-stuck");
     const stuck = "An unknown mid-run consent:\n  1. Foo\n  2. Bar";
     harnessMod.setRunner(makeFakeRunner(new Map([["mid-stuck", stuck]])));
 
-    await dispatchMod.probeTaskMidSession("mid-stuck");
+    await dispatchMod.probeTaskMidSession("mid-stuck", IDLE);
 
     const { flag, ctx } = flagOf("mid-stuck");
     expect(flag).toBe(1);
@@ -200,14 +233,26 @@ describe("probeTaskMidSession (harness + needs_user_input wiring)", () => {
     expect(sends).toEqual([]);
   });
 
-  test("a matched mid-session prompt auto-confirms (sends safe response) and does not flag", async () => {
+  test("an ACTIVE agent (quietMs <= idleMs) is NOT flagged even with the same stuck pane", async () => {
+    sends = [];
+    seedLiveTask("mid-active");
+    const stuck = "An unknown mid-run consent:\n  1. Foo\n  2. Bar";
+    harnessMod.setRunner(makeFakeRunner(new Map([["mid-active", stuck]])));
+
+    await dispatchMod.probeTaskMidSession("mid-active", ACTIVE);
+
+    expect(flagOf("mid-active").flag).toBe(0);
+    expect(sends).toEqual([]); // left completely alone
+  });
+
+  test("a matched mid-session prompt auto-confirms (sends safe response) and does not flag (when idle)", async () => {
     sends = [];
     seedLiveTask("mid-match");
     harnessMod.setRunner(
       makeFakeRunner(new Map([["mid-match", "  1. I am using this for local development\n  2. Exit"]])),
     );
 
-    await dispatchMod.probeTaskMidSession("mid-match");
+    await dispatchMod.probeTaskMidSession("mid-match", IDLE);
 
     expect(sends).toEqual([["mid-match", { text: "1", enter: true }]]);
     expect(flagOf("mid-match").flag).toBe(0);
@@ -220,15 +265,49 @@ describe("probeTaskMidSession (harness + needs_user_input wiring)", () => {
     const screens = new Map([["mid-clear", stuck]]);
     harnessMod.setRunner(makeFakeRunner(screens));
 
-    // First probe: the prompt is up → flagged.
-    await dispatchMod.probeTaskMidSession("mid-clear");
+    // First probe: the prompt is up (and the agent is idle) → flagged.
+    await dispatchMod.probeTaskMidSession("mid-clear", IDLE);
     expect(flagOf("mid-clear").flag).toBe(1);
 
     // The agent answers / moves past it; the pane is now quiet → next probe clears.
     screens.set("mid-clear", "● back to work, no prompt");
-    await dispatchMod.probeTaskMidSession("mid-clear");
+    await dispatchMod.probeTaskMidSession("mid-clear", IDLE);
     expect(flagOf("mid-clear").flag).toBe(0);
     expect(flagOf("mid-clear").ctx).toBeNull();
+  });
+
+  test("clearNeedsUserInputOnResume clears a stale flag the moment the agent resumes (idle→active)", async () => {
+    sends = [];
+    seedLiveTask("mid-resume");
+    const stuck = "Unhandled dialog:\n  1. A\n  2. B";
+    harnessMod.setRunner(makeFakeRunner(new Map([["mid-resume", stuck]])));
+
+    // Genuinely idle at a stuck dialog → flagged by the probe.
+    await dispatchMod.probeTaskMidSession("mid-resume", IDLE);
+    expect(flagOf("mid-resume").flag).toBe(1);
+
+    // Output resumes (quietMs <= idleMs): the per-tick clear-on-resume clears it promptly,
+    // without waiting on the throttled probe.
+    dispatchMod.clearNeedsUserInputOnResume("mid-resume", ACTIVE);
+    expect(flagOf("mid-resume").flag).toBe(0);
+    expect(flagOf("mid-resume").ctx).toBeNull();
+  });
+
+  test("clearNeedsUserInputOnResume leaves the flag set while STILL idle (quietMs > idleMs)", async () => {
+    sends = [];
+    seedLiveTask("mid-stillidle");
+    const stuck = "Unhandled dialog:\n  1. A\n  2. B";
+    harnessMod.setRunner(makeFakeRunner(new Map([["mid-stillidle", stuck]])));
+
+    await dispatchMod.probeTaskMidSession("mid-stillidle", IDLE);
+    expect(flagOf("mid-stillidle").flag).toBe(1);
+
+    // Still idle → not a resume → leave the flag for the probe lifecycle.
+    dispatchMod.clearNeedsUserInputOnResume("mid-stillidle", IDLE);
+    expect(flagOf("mid-stillidle").flag).toBe(1);
+    // And a null quietMs (idle detection off / no log) is also a no-op.
+    dispatchMod.clearNeedsUserInputOnResume("mid-stillidle", null);
+    expect(flagOf("mid-stillidle").flag).toBe(1);
   });
 
   test("best-effort: a read/send failure never throws", async () => {
@@ -242,6 +321,6 @@ describe("probeTaskMidSession (harness + needs_user_input wiring)", () => {
         },
       }),
     );
-    await expect(dispatchMod.probeTaskMidSession("mid-err")).resolves.toBeUndefined();
+    await expect(dispatchMod.probeTaskMidSession("mid-err", IDLE)).resolves.toBeUndefined();
   });
 });

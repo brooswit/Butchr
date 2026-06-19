@@ -36,10 +36,12 @@ export const STARTUP_CONFIRM_RULES: ConfirmRule[] = [
     response: { text: "1", enter: true },
   },
   // Folder-trust prompt: "Do you trust the files in this folder?" (and the
-  // "trust this folder/workspace" variants) → option 1 ("Yes, proceed").
+  // "trust this folder/workspace" variants) → option 1 ("Yes, proceed"). Anchored to the
+  // actual trust phrasing — a bare "proceed?" is NOT a folder-trust dialog (it appears in
+  // ordinary tool/agent output) and must never trigger an auto-confirm keystroke mid-session.
   {
     name: "folder-trust",
-    test: /trust the files|do you trust|trust this (folder|workspace|directory)|proceed\?/i,
+    test: /trust the files|do you trust|trust this (folder|workspace|directory)/i,
     response: { text: "1", enter: true },
   },
   // Generic numbered proceed/yes menu (e.g. "❯ 1. Yes" / "1. Continue").
@@ -84,21 +86,24 @@ export function detectStartupPrompt(
  * any tool the agent shells into) can stop on a consent/menu we have not written a rule for
  * yet, and we must NOT mistake that frozen prompt for a quiet, past-startup pane.
  *
- * Returns true on the tell-tale shapes of an interactive prompt: a `❯` selection cursor, a
- * numbered options menu (two+ consecutive `1.`/`2.` choices), a `(y/n)`/`[y/n]` confirmation,
- * an "Enter to confirm/continue" / "press enter" line, the dev-channels consent banner, or a
- * trust-dialog phrasing. Returns false for a blank/whitespace screen and for ordinary running
- * output (logs, spinners, test runs) — anything without an interactive tell.
+ * Returns true ONLY on the tell-tale shapes of a GENUINE blocking dialog: a `(y/n)`/`[y/n]`
+ * confirmation, an "Enter to confirm/continue/proceed" line, the dev-channels consent banner
+ * (and its "I am using this for local development" option line), a folder-trust dialog phrasing,
+ * or a numbered options menu (two+ consecutive `1.`/`2.` choices). It must NOT fire on benign
+ * text: the bare `❯` selection cursor is REMOVED (Claude Code's normal input box shows ❯ at all
+ * times, so it matched every active pane), and the over-broad `proceed?`, `do you want`, and
+ * bare `press enter` signals are gone — a tool description or active-turn output that merely
+ * contains those words is not a blocking dialog. Returns false for a blank/whitespace screen and
+ * for ordinary running output (logs, spinners, test runs, the `raise` tool description).
  */
 export function looksLikePrompt(screen: string): boolean {
   if (!screen || !screen.trim()) return false;
   const signals: RegExp[] = [
-    /❯/, //                                         selection cursor
     /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]/i, // bare yes/no confirmation
-    /press\s+enter|enter\s+to\s+(confirm|continue|proceed)/i,
+    /(press\s+enter\s+to|enter\s+to)\s+(confirm|continue|proceed)/i, // explicit enter-to-confirm (not a bare "press enter")
     /loading development channels/i, //             dev-channels consent banner
-    /do you (trust|want)|trust the files|trust this (folder|workspace|directory)/i,
-    /\bproceed\?/i,
+    /i am using this for local development/i, //     dev-channels consent option line
+    /trust the files|do you trust|trust this (folder|workspace|directory)/i, // folder-trust dialog
   ];
   if (signals.some((re) => re.test(screen))) return true;
   // A numbered options menu: at least two consecutive numbered choices (1. … 2. …). A lone

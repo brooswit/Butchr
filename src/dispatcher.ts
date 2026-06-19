@@ -553,6 +553,13 @@ export type MidProbeDeps = {
   setFlag: (id: string, on: boolean, capture?: () => string) => void;
   /** Is the task's needs_user_input flag currently set? */
   flagged: (id: string) => boolean;
+  /**
+   * Is the agent GENUINELY IDLE (run-log quiet past `idleMs`)? The probe takes NO action
+   * (no read, no flag, no keystroke) unless this is true — an actively-working agent
+   * (still producing output) must be left completely alone, so benign active-turn text can
+   * never be mistaken for a blocking dialog.
+   */
+  idle: () => boolean;
   /** Extra/overriding rule table (defaults to STARTUP_CONFIRM_RULES). */
   rules?: ConfirmRule[];
   /** Optional diagnostics sink. */
@@ -572,6 +579,14 @@ export type MidProbeDeps = {
  *   - `quiet` → genuinely past any prompt: CLEAR the flag if it was set (same
  *               self-clearing lifecycle as idle — the agent moved past the prompt).
  *
+ * GENUINE-IDLE GATE: the WHOLE probe is a no-op unless the agent is genuinely idle
+ * (`deps.idle()`). An actively-working agent (run-log still fresh, mid-turn) is left
+ * completely untouched — no pane read, no flag, no keystroke injection — so the `raise`
+ * tool description or normal active-turn output can never be mis-flagged as needing input,
+ * and we never inject a stray "1\n" into a working agent. A genuinely-stuck mid-session
+ * dialog still surfaces once the agent goes quiet past `idleMs` (Path A's bounded startup
+ * poll covers the immediate post-spawn window).
+ *
  * BEST-EFFORT: a read failure does nothing (we cannot classify a pane we could not read),
  * and a send failure is swallowed — this must NEVER throw or disrupt the watcher / fail
  * the task. Idempotent against the launch-time flag: `setFlag(true)` re-setting an
@@ -580,6 +595,8 @@ export type MidProbeDeps = {
  * so the probe is unit-testable without the live watcher loop.
  */
 export async function probeAgentForPrompt(taskId: string, deps: MidProbeDeps): Promise<void> {
+  // GENUINE-IDLE GATE: leave an active agent completely alone (no read/flag/keystroke).
+  if (!deps.idle()) return;
   let screen = "";
   try {
     screen = await deps.read(taskId);
@@ -612,18 +629,47 @@ export async function probeAgentForPrompt(taskId: string, deps: MidProbeDeps): P
 }
 
 /**
+ * Is an agent GENUINELY IDLE — run-log quiet past `idleMs`? `quietMs` is `refreshIdle`'s
+ * return (now - log mtime), or null when idle detection is off / the log is missing / the
+ * agent is mid-active-turn. Only a quiet duration strictly past the threshold counts as idle;
+ * a null or sub-threshold value means the agent is actively producing output. Pure +
+ * unit-testable. The mid-session probe and clear-on-resume both gate on this.
+ */
+export function isGenuinelyIdle(quietMs: number | null): boolean {
+  return quietMs !== null && quietMs > config.idleMs;
+}
+
+/**
  * The watcher-tick wiring for `probeAgentForPrompt`: build the production deps (live pane
  * read/send via the harness, flag get/set via the task store) and run one probe. Kept thin
  * + best-effort so the watcher can fire-and-forget it without awaiting (it never throws).
+ * `quietMs` (from refreshIdle) gates the whole probe on genuine idle so an active agent is
+ * never inspected/flagged.
  */
-export function probeTaskMidSession(taskId: string): Promise<void> {
+export function probeTaskMidSession(taskId: string, quietMs: number | null): Promise<void> {
   return probeAgentForPrompt(taskId, {
     read: (n) => harness.agentRead(n),
     send: (n, input) => harness.send(n, input),
     setFlag: (id, on, capture) => setNeedsUserInput(id, on, capture),
     flagged: (id) => !!getTask(id)?.needs_user_input,
+    idle: () => isGenuinelyIdle(quietMs),
     log: (m) => console.log(`[butchr] task ${taskId}: ${m}`),
   }).catch(() => {});
+}
+
+/**
+ * CLEAR-ON-RESUME — mirror of how idle self-clears. When a flagged agent starts producing
+ * output again (it is NO LONGER genuinely idle — quietMs known and at/under `idleMs`), a
+ * needs_user_input flag set by an earlier mid-session dialog is stale: the agent has moved
+ * past the prompt (or a human answered it in the pane). Clear it PROMPTLY, every watcher tick
+ * (~1s), instead of waiting on the throttled ~10s mid-session probe, so a resuming agent's
+ * "Awaiting you" banner doesn't linger. A no-op when idle detection is off / log missing
+ * (quietMs null), when the agent is still genuinely idle, or when the flag is already clear.
+ * setNeedsUserInput's own guards (live in_progress build agent, value-change) still apply.
+ */
+export function clearNeedsUserInputOnResume(taskId: string, quietMs: number | null): void {
+  if (quietMs === null || isGenuinelyIdle(quietMs)) return; // unknown or still idle → leave as-is
+  if (getTask(taskId)?.needs_user_input) setNeedsUserInput(taskId, false);
 }
 
 /**
@@ -1120,13 +1166,19 @@ function spawnWatcher(
       // step below (liveness guard + pane self-heal; the nudge is now responder-driven).
       const quietMs = refreshIdle(taskId, logFile);
       await handleIdleAgent(taskId, cur, quietMs);
+      // CLEAR-ON-RESUME: every tick (~1s), clear a stale needs_user_input flag the moment the
+      // agent resumes producing output (mirrors how idle self-clears) — don't make a resuming
+      // agent wait on the throttled mid-session probe below.
+      clearNeedsUserInputOnResume(taskId, quietMs);
       // MID-SESSION SAFETY NET: on a coarse cadence (NOT every 1s tick — agentRead
       // shells out to herdr), read the pane content and auto-confirm / flag / clear a
-      // human-only prompt that appeared AFTER launch. Fire-and-forget + best-effort so
-      // it never perturbs the hot watcher loop or fails the task (probeTaskMidSession
-      // swallows all errors and never throws).
+      // human-only prompt that appeared AFTER launch. GATED on genuine idle (quietMs passed
+      // through): an actively-working agent is left completely untouched, so benign
+      // active-turn text is never mis-flagged. Fire-and-forget + best-effort so it never
+      // perturbs the hot watcher loop or fails the task (probeTaskMidSession swallows all
+      // errors and never throws).
       if (shouldProbeTick(tick, config.midProbeEveryTicks)) {
-        void probeTaskMidSession(taskId);
+        void probeTaskMidSession(taskId, quietMs);
       }
       await sleep(1000);
     }

@@ -199,10 +199,6 @@ describe("looksLikePrompt (heuristic STUCK-detection for unrecognized prompts)",
     expect(looksLikePrompt("Enter to confirm your selection")).toBe(true);
   });
 
-  test("true for a ❯ selection cursor", () => {
-    expect(looksLikePrompt("Choose an option:\n❯ Apple\n  Banana")).toBe(true);
-  });
-
   test("true for a two-option numbered menu (no other tell)", () => {
     expect(looksLikePrompt("Pick:\n  1. Keep\n  2. Discard")).toBe(true);
   });
@@ -215,6 +211,38 @@ describe("looksLikePrompt (heuristic STUCK-detection for unrecognized prompts)",
   test("false for ordinary running output (logs/spinners/single numbered line)", () => {
     expect(looksLikePrompt("● Running tests…\n  3 passed")).toBe(false);
     expect(looksLikePrompt("Step 1. Compiling the project")).toBe(false);
+  });
+
+  // ── LOAD-BEARING false-positive regressions (the needs_user_input fix) ──────────────
+  // A bare ❯ selection cursor is Claude Code's NORMAL input box — present on every active
+  // pane — so it must NOT count as a blocking dialog on its own (the lone-❯ signal was
+  // removed). Previously this returned true and mis-flagged every working agent.
+  test("false for a bare ❯ active input box with no dialog phrase", () => {
+    expect(looksLikePrompt("Choose an option:\n❯ Apple\n  Banana")).toBe(false);
+    expect(looksLikePrompt("❯ ")).toBe(false);
+  });
+
+  // The OBSERVED false-positive: an actively-working agent whose pane held only the `raise`
+  // MCP tool description got flagged. That benign description must classify as non-blocking.
+  test("false for the `raise` MCP tool description text", () => {
+    const raiseDesc =
+      "Use this tool to put a clarifying question before proposing a plan. " +
+      "raise is also non-blocking: it records your message and returns immediately, " +
+      "after which you should stop and exit. Prefer raising over guessing.\n❯ ";
+    expect(looksLikePrompt(raiseDesc)).toBe(false);
+  });
+
+  test("false for a normal active-turn pane (spinner + esc-to-interrupt + input box)", () => {
+    expect(looksLikePrompt("✻ Considering… (12s · esc to interrupt)\n❯ ")).toBe(false);
+  });
+
+  test("true for the real dev-channels consent box and folder-trust dialog", () => {
+    expect(
+      looksLikePrompt(
+        "WARNING: Loading development channels\n❯ 1. I am using this for local development\n  2. Exit",
+      ),
+    ).toBe(true);
+    expect(looksLikePrompt("Do you trust the files in this folder?\n❯ 1. Yes\n  2. No")).toBe(true);
   });
 });
 
@@ -244,5 +272,12 @@ describe("broadened rule table (enter-to-confirm + folder-trust variants)", () =
 
   test("a 'trust this workspace' variant is caught by folder-trust", () => {
     expect(detectStartupPrompt("Do you trust this workspace?")?.name).toBe("folder-trust");
+  });
+
+  // Defense-in-depth (the needs_user_input fix): a bare "proceed?" is NOT a folder-trust
+  // dialog — it appears in ordinary tool/agent output — so it must match NO rule, lest the
+  // mid-session probe inject a spurious "1\n" into a working agent.
+  test("a bare 'proceed?' matches NO rule (folder-trust no longer over-matches it)", () => {
+    expect(detectStartupPrompt("Shall I proceed?")).toBeNull();
   });
 });
