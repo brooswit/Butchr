@@ -7,7 +7,9 @@ import type { SendInput } from "../src/harness.ts";
 import {
   STARTUP_CONFIRM_RULES,
   autoConfirmStartupPrompts,
+  classifyStartupScreen,
   detectStartupPrompt,
+  looksLikePrompt,
 } from "../src/startup-confirm.ts";
 
 const noSleep = async () => {};
@@ -76,7 +78,7 @@ describe("autoConfirmStartupPrompts (bounded, idempotent poll loop)", () => {
     ];
     let i = 0;
     const sent: Array<{ name: string; input: SendInput }> = [];
-    const answered = await autoConfirmStartupPrompts("agent-x", {
+    const result = await autoConfirmStartupPrompts("agent-x", {
       read: async () => screens[Math.min(i++, screens.length - 1)]!,
       send: async (name, input) => { sent.push({ name, input }); },
       sleep: noSleep,
@@ -85,14 +87,15 @@ describe("autoConfirmStartupPrompts (bounded, idempotent poll loop)", () => {
       quietPolls: 2,
     });
     // Each distinct prompt confirmed exactly once; nothing sent after the pane is ready.
-    expect(answered).toEqual(["dev-channels-consent", "folder-trust"]);
+    expect(result.answered).toEqual(["dev-channels-consent", "folder-trust"]);
+    expect(result.stuckScreen).toBeUndefined();
     expect(sent.length).toBe(2);
     expect(sent.map((s) => s.name)).toEqual(["agent-x", "agent-x"]);
   });
 
   test("does NOT send when there is never a prompt (no stray input)", async () => {
     const sent: SendInput[] = [];
-    const answered = await autoConfirmStartupPrompts("agent-y", {
+    const result = await autoConfirmStartupPrompts("agent-y", {
       read: async () => "● running normally",
       send: async (_n, input) => { sent.push(input); },
       sleep: noSleep,
@@ -100,7 +103,8 @@ describe("autoConfirmStartupPrompts (bounded, idempotent poll loop)", () => {
       maxPolls: 10,
       quietPolls: 2,
     });
-    expect(answered).toEqual([]);
+    expect(result.answered).toEqual([]);
+    expect(result.stuckScreen).toBeUndefined();
     expect(sent.length).toBe(0);
   });
 
@@ -109,7 +113,7 @@ describe("autoConfirmStartupPrompts (bounded, idempotent poll loop)", () => {
     // then the pane advances to ready.
     let polls = 0;
     const sent: SendInput[] = [];
-    const answered = await autoConfirmStartupPrompts("agent-z", {
+    const result = await autoConfirmStartupPrompts("agent-z", {
       read: async () => (polls++ < 6 ? "1. I am using this for local development" : "● ready"),
       send: async (_n, input) => { sent.push(input); },
       sleep: noSleep,
@@ -120,7 +124,46 @@ describe("autoConfirmStartupPrompts (bounded, idempotent poll loop)", () => {
     });
     // First send immediately, then a resend after `resendEvery` polls of persistence.
     expect(sent.length).toBeGreaterThanOrEqual(2);
-    expect(answered.every((a) => a === "dev-channels-consent")).toBe(true);
+    expect(result.answered.every((a) => a === "dev-channels-consent")).toBe(true);
+  });
+
+  test("returns stuckScreen when an UNRECOGNIZED prompt persists the whole budget", async () => {
+    // A prompt-like pane that matches NO rule (an unknown numbered consent menu) stays up for
+    // every poll — auto-confirm must NOT mistake it for quiet, must send nothing (no safe
+    // keystroke), and must report the screen so the caller can flag it for user input.
+    const stuck = "Some unrecognized consent we have no rule for:\n  1. Foo\n  2. Bar";
+    const sent: SendInput[] = [];
+    const result = await autoConfirmStartupPrompts("agent-stuck", {
+      read: async () => stuck,
+      send: async (_n, input) => { sent.push(input); },
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 5,
+      quietPolls: 2,
+    });
+    expect(result.answered).toEqual([]);
+    expect(result.stuckScreen).toBe(stuck);
+    expect(sent.length).toBe(0); // no rule → no keystroke
+  });
+
+  test("a stuck pane that LATER goes quiet returns no stuckScreen (human answered)", async () => {
+    // The unrecognized prompt clears (e.g. a human answered it) → the pane goes quiet and the
+    // run reports a clean exit, NOT a stuck one.
+    const screens = [
+      "Unknown prompt:\n  1. Foo\n  2. Bar",
+      "● ready — awaiting your prompt",
+      "● ready — awaiting your prompt",
+    ];
+    let i = 0;
+    const result = await autoConfirmStartupPrompts("agent-recovered", {
+      read: async () => screens[Math.min(i++, screens.length - 1)]!,
+      send: async () => {},
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 10,
+      quietPolls: 2,
+    });
+    expect(result.stuckScreen).toBeUndefined();
   });
 
   test("never throws when read/send fail (best-effort)", async () => {
@@ -133,6 +176,73 @@ describe("autoConfirmStartupPrompts (bounded, idempotent poll loop)", () => {
         maxPolls: 3,
         quietPolls: 1,
       }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual({ answered: [] });
+  });
+});
+
+describe("looksLikePrompt (heuristic STUCK-detection for unrecognized prompts)", () => {
+  test("true for the dev-channels consent banner", () => {
+    expect(looksLikePrompt("WARNING: Loading development channels\n  1. Yes\n  2. No")).toBe(true);
+  });
+
+  test("true for a folder-trust dialog", () => {
+    expect(looksLikePrompt("Do you trust the files in this folder?")).toBe(true);
+    expect(looksLikePrompt("Do you want to trust this workspace?")).toBe(true);
+  });
+
+  test("true for a (y/n) confirmation", () => {
+    expect(looksLikePrompt("Overwrite existing file? (y/n)")).toBe(true);
+  });
+
+  test("true for an 'Enter to confirm' / 'press enter' prompt", () => {
+    expect(looksLikePrompt("Press Enter to continue")).toBe(true);
+    expect(looksLikePrompt("Enter to confirm your selection")).toBe(true);
+  });
+
+  test("true for a ❯ selection cursor", () => {
+    expect(looksLikePrompt("Choose an option:\n❯ Apple\n  Banana")).toBe(true);
+  });
+
+  test("true for a two-option numbered menu (no other tell)", () => {
+    expect(looksLikePrompt("Pick:\n  1. Keep\n  2. Discard")).toBe(true);
+  });
+
+  test("false for a blank or whitespace screen", () => {
+    expect(looksLikePrompt("")).toBe(false);
+    expect(looksLikePrompt("   \n  ")).toBe(false);
+  });
+
+  test("false for ordinary running output (logs/spinners/single numbered line)", () => {
+    expect(looksLikePrompt("● Running tests…\n  3 passed")).toBe(false);
+    expect(looksLikePrompt("Step 1. Compiling the project")).toBe(false);
+  });
+});
+
+describe("classifyStartupScreen (rule / stuck / quiet — the null-ambiguity fix)", () => {
+  test("rule: a known prompt is classified for auto-confirm", () => {
+    const cls = classifyStartupScreen("1. I am using this for local development");
+    expect(cls.kind).toBe("rule");
+    if (cls.kind === "rule") expect(cls.rule.name).toBe("dev-channels-consent");
+  });
+
+  test("stuck: an unrecognized prompt-like screen (matches NO rule)", () => {
+    expect(classifyStartupScreen("Unknown consent:\n  1. Foo\n  2. Bar").kind).toBe("stuck");
+  });
+
+  test("quiet: a blank screen or ordinary running output", () => {
+    expect(classifyStartupScreen("").kind).toBe("quiet");
+    expect(classifyStartupScreen("● Running tests…\n  3 passed").kind).toBe("quiet");
+  });
+});
+
+describe("broadened rule table (enter-to-confirm + folder-trust variants)", () => {
+  test("a bare 'Press Enter to confirm' is auto-confirmed with a lone Enter", () => {
+    const rule = detectStartupPrompt("Press Enter to confirm");
+    expect(rule?.name).toBe("enter-to-confirm");
+    expect(rule?.response).toEqual({ enter: true });
+  });
+
+  test("a 'trust this workspace' variant is caught by folder-trust", () => {
+    expect(detectStartupPrompt("Do you trust this workspace?")?.name).toBe("folder-trust");
   });
 });

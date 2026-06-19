@@ -26,9 +26,10 @@ import { harness } from "./harness.ts";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
+import type { AutoConfirmResult } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, requeueForResume, resolveBase, setIdle } from "./tasks.ts";
+import { getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, requeueForResume, resolveBase, setIdle, setNeedsUserInput } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -500,8 +501,12 @@ export function connectivityChannelFlag(): string {
  * prompt is actually on screen (de-bounced), so once the worker is past startup nothing
  * leaks into its real session; it never throws (so it can never fail a dispatch).
  * Exported so the dispatcher startup path is unit-testable directly.
+ *
+ * Returns `{ answered, stuckScreen? }`: `stuckScreen` is set when auto-confirm GAVE UP on an
+ * unrecognized but prompt-like pane — the build-launch caller turns that into a
+ * `setNeedsUserInput` flag so the hung agent becomes visible + user-routed.
  */
-export function autoConfirmTaskStartup(name: string): Promise<string[]> {
+export function autoConfirmTaskStartup(name: string): Promise<AutoConfirmResult> {
   return autoConfirmStartupPrompts(name, {
     read: (n) => harness.agentRead(n),
     send: (n, input) => harness.send(n, input),
@@ -510,7 +515,20 @@ export function autoConfirmTaskStartup(name: string): Promise<string[]> {
     maxPolls: config.ctoPromptMaxPolls,
     quietPolls: config.ctoPromptQuietPolls,
     log: (m) => console.log(`[butchr] task ${name}: ${m}`),
-  }).catch(() => []);
+  }).catch(() => ({ answered: [] }));
+}
+
+/**
+ * The build-launch startup step: auto-confirm known prompts, and if auto-confirm GAVE UP on
+ * an unrecognized but prompt-like pane, flag the task with `setNeedsUserInput` so the hung
+ * agent becomes visible + user-routed (it stays in_progress/attachable so a human can answer
+ * the prompt in the live pane). Best-effort: `autoConfirmTaskStartup` never throws, and
+ * `setNeedsUserInput` is a guarded no-op when the task is not a live in_progress build agent.
+ * Exported so the wiring (stuck → flag) is unit-testable without the full dispatch path.
+ */
+export async function autoConfirmAndFlagTaskStartup(taskId: string): Promise<void> {
+  const r = await autoConfirmTaskStartup(taskId);
+  if (r.stuckScreen) setNeedsUserInput(taskId, true, () => r.stuckScreen!);
 }
 
 /**
@@ -756,15 +774,17 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
     markRunning(task.id, paneId, sessionId, tabId, groundingFp);
     spawnWatcher(dir, task.id, paneId, logFile, doneFile);
 
-    // LAUNCH AUTO-CONFIRM: when connectivity is on, this worker carries the
-    // dev-channel flag (connectivityChannelFlag) and Claude Code blocks on the
-    // dev-channels consent prompt the first time it loads — clear it so the worker
-    // reaches its task unattended. Symmetric to the CTO's launch auto-confirm.
-    // Gated on connectivityEnabled (no flag → no consent prompt); best-effort +
-    // idempotent, so it can never wedge or fail an already-running dispatch. Fired
-    // AFTER markRunning/spawnWatcher (task tracked first) and NOT awaited so it never
-    // delays the dispatch — it polls the pane in the background.
-    if (config.connectivityEnabled) void autoConfirmTaskStartup(task.id);
+    // LAUNCH AUTO-CONFIRM: clear any BLOCKING interactive startup prompt so the worker
+    // reaches its task unattended (dev-channels consent under the dev-channel flag, but
+    // ALSO the folder-trust dialog, which appears INDEPENDENT of that flag). Run
+    // UNCONDITIONALLY — a connectivity-OFF build can still hit folder-trust — best-effort
+    // + idempotent, so it can never wedge or fail an already-running dispatch. Fired AFTER
+    // markRunning/spawnWatcher (task tracked first) and NOT awaited so it never delays the
+    // dispatch — it polls the pane in the background. If auto-confirm GIVES UP on an
+    // unrecognized but prompt-like pane (`stuckScreen`), flag the task for user input so the
+    // hung agent becomes visible + user-routed instead of silently frozen; it stays
+    // in_progress/attachable so a human can answer the prompt in the live pane.
+    void autoConfirmAndFlagTaskStartup(task.id);
   } catch (e) {
     // Dispatch failed — re-queue so the next tick retries. Any herdr tab/agent we
     // created was already torn down inside the locked section above (where its id

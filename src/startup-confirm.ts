@@ -35,11 +35,11 @@ export const STARTUP_CONFIRM_RULES: ConfirmRule[] = [
     test: /local development|development channel/i,
     response: { text: "1", enter: true },
   },
-  // Folder-trust prompt: "Do you trust the files in this folder?" → option 1
-  // ("Yes, proceed").
+  // Folder-trust prompt: "Do you trust the files in this folder?" (and the
+  // "trust this folder/workspace" variants) → option 1 ("Yes, proceed").
   {
     name: "folder-trust",
-    test: /trust the files|do you trust|proceed\?/i,
+    test: /trust the files|do you trust|trust this (folder|workspace|directory)|proceed\?/i,
     response: { text: "1", enter: true },
   },
   // Generic numbered proceed/yes menu (e.g. "❯ 1. Yes" / "1. Continue").
@@ -53,6 +53,14 @@ export const STARTUP_CONFIRM_RULES: ConfirmRule[] = [
     name: "yes-no",
     test: /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]/i,
     response: { text: "y", enter: true },
+  },
+  // A bare "Press Enter to confirm/continue" prompt with no numbered menu — the safe
+  // affirming response is a lone Enter (no text). Lowest priority: only when none of
+  // the more-specific menus above matched.
+  {
+    name: "enter-to-confirm",
+    test: /press\s+enter\s+to\s+(confirm|continue|proceed)|enter\s+to\s+(confirm|continue)/i,
+    response: { enter: true },
   },
 ];
 
@@ -68,6 +76,61 @@ export function detectStartupPrompt(
   if (!screen || !screen.trim()) return null;
   for (const r of rules) if (r.test.test(screen)) return r;
   return null;
+}
+
+/**
+ * Pure heuristic: does `screen` LOOK like a blocking interactive prompt even though no
+ * confirm RULE matched it? This is the safety net behind the rule table — Claude Code (or
+ * any tool the agent shells into) can stop on a consent/menu we have not written a rule for
+ * yet, and we must NOT mistake that frozen prompt for a quiet, past-startup pane.
+ *
+ * Returns true on the tell-tale shapes of an interactive prompt: a `❯` selection cursor, a
+ * numbered options menu (two+ consecutive `1.`/`2.` choices), a `(y/n)`/`[y/n]` confirmation,
+ * an "Enter to confirm/continue" / "press enter" line, the dev-channels consent banner, or a
+ * trust-dialog phrasing. Returns false for a blank/whitespace screen and for ordinary running
+ * output (logs, spinners, test runs) — anything without an interactive tell.
+ */
+export function looksLikePrompt(screen: string): boolean {
+  if (!screen || !screen.trim()) return false;
+  const signals: RegExp[] = [
+    /❯/, //                                         selection cursor
+    /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]/i, // bare yes/no confirmation
+    /press\s+enter|enter\s+to\s+(confirm|continue|proceed)/i,
+    /loading development channels/i, //             dev-channels consent banner
+    /do you (trust|want)|trust the files|trust this (folder|workspace|directory)/i,
+    /\bproceed\?/i,
+  ];
+  if (signals.some((re) => re.test(screen))) return true;
+  // A numbered options menu: at least two consecutive numbered choices (1. … 2. …). A lone
+  // "1." can appear in ordinary output, so require the second option to call it a menu.
+  const opt1 = /(^|\n)\s*[❯>*]?\s*1\.\s+\S/.test(screen);
+  const opt2 = /(^|\n)\s*[❯>*]?\s*2\.\s+\S/.test(screen);
+  return opt1 && opt2;
+}
+
+/**
+ * The THREE-way classification of a startup pane — the fix for `detectStartupPrompt`'s
+ * null-ambiguity (a clean screen and an unrecognized-but-blocking prompt both used to read as
+ * null, so an unhandled consent dialog was miscounted as "quiet" and the launch proceeded
+ * while the agent stayed frozen forever):
+ *   - `rule`  → a known prompt we can auto-confirm (send `rule.response`);
+ *   - `stuck` → no rule matched but the screen LOOKS like a blocking prompt → surface it;
+ *   - `quiet` → genuinely past startup (blank / ordinary running output).
+ */
+export type StartupClassification =
+  | { kind: "rule"; rule: ConfirmRule }
+  | { kind: "stuck" }
+  | { kind: "quiet" };
+
+/** Classify a startup `screen` into rule / stuck / quiet. Pure + unit-testable. */
+export function classifyStartupScreen(
+  screen: string,
+  rules: ConfirmRule[] = STARTUP_CONFIRM_RULES,
+): StartupClassification {
+  const rule = detectStartupPrompt(screen, rules);
+  if (rule) return { kind: "rule", rule };
+  if (looksLikePrompt(screen)) return { kind: "stuck" };
+  return { kind: "quiet" };
 }
 
 /** Injectable seams for the poll loop (the harness/timer in production; fakes in tests). */
@@ -94,25 +157,42 @@ export type AutoConfirmDeps = {
 };
 
 /**
+ * The outcome of an auto-confirm run. `answered` is the ordered list of rule names confirmed
+ * (for logging/tests). `stuckScreen` is set ONLY when the loop gave up with an unrecognized
+ * prompt-like screen STILL showing (no rule matched but `looksLikePrompt` held through the
+ * budget) — the captured pane text the caller surfaces to a human (via `setNeedsUserInput`).
+ * When the pane went genuinely quiet, `stuckScreen` is absent.
+ */
+export type AutoConfirmResult = { answered: string[]; stuckScreen?: string };
+
+/**
  * Poll the agent's live pane and auto-confirm blocking startup prompts until it is
  * prompt-free (`quietPolls` consecutive clean reads) or `maxPolls` is hit. Returns
- * the ordered list of rule names it confirmed (for logging/tests). Best-effort: a
- * read/send error is swallowed and never propagates — this must never fail a launch.
+ * `{ answered, stuckScreen? }`: the rules it confirmed, plus the still-showing screen if it
+ * GAVE UP on an unrecognized but prompt-like pane (so a stuck agent becomes visible instead
+ * of silently declared past-startup). Best-effort: a read/send error is swallowed and never
+ * propagates — this must NEVER throw or fail a launch.
  *
- * Idempotency: a confirming input is sent ONLY while a prompt is actually detected,
- * and the same contiguous prompt is de-bounced (sent once, then re-sent only every
- * `resendEvery` polls if it persists). Once the pane is prompt-free, nothing is sent
- * — so no stray keystroke leaks into the session after startup.
+ * Three-way per-poll via `classifyStartupScreen`:
+ *   - `rule`  → send the safe response (de-bounced: sent once per contiguous prompt, re-sent
+ *               only every `resendEvery` polls if it persists), reset the quiet counter;
+ *   - `stuck` → an unhandled blocking prompt: reset the quiet counter (NOT past startup) and
+ *               remember the screen, but send nothing (no rule → no safe keystroke);
+ *   - `quiet` → count toward `quietPolls`; break once past startup.
+ * If the loop ends while the last read was `stuck`, that screen is returned as `stuckScreen`.
+ * Once the pane is prompt-free, nothing is sent — so no stray keystroke leaks into the session.
  */
 export async function autoConfirmStartupPrompts(
   name: string,
   deps: AutoConfirmDeps,
-): Promise<string[]> {
+): Promise<AutoConfirmResult> {
   const answered: string[] = [];
   const resendEvery = deps.resendEvery ?? 4;
   let lastRule: string | null = null;
   let sameCount = 0;
   let quiet = 0;
+  // The most recent unrecognized prompt-like screen, or undefined after a rule/quiet read.
+  let stuckScreen: string | undefined;
 
   for (let i = 0; i < deps.maxPolls; i++) {
     let screen = "";
@@ -121,17 +201,33 @@ export async function autoConfirmStartupPrompts(
     } catch {
       screen = "";
     }
-    const rule = detectStartupPrompt(screen, deps.rules);
+    const cls = classifyStartupScreen(screen, deps.rules);
 
-    if (!rule) {
+    if (cls.kind === "quiet") {
       lastRule = null;
       sameCount = 0;
+      stuckScreen = undefined; // a clean read means it is not stuck right now
       if (++quiet >= deps.quietPolls) break; // past startup → done
       await deps.sleep(deps.pollMs);
       continue;
     }
 
+    if (cls.kind === "stuck") {
+      // An unhandled blocking prompt: it is NOT quiet, but we have no safe keystroke to send.
+      // Capture it and keep polling — it may yet clear or be answered by a human.
+      quiet = 0;
+      lastRule = null;
+      sameCount = 0;
+      stuckScreen = screen;
+      deps.log?.("startup prompt not auto-confirmable — flagging for user input");
+      await deps.sleep(deps.pollMs);
+      continue;
+    }
+
+    // cls.kind === "rule": a known prompt we can confirm.
+    const rule = cls.rule;
     quiet = 0;
+    stuckScreen = undefined;
     const isNew = rule.name !== lastRule;
     // Re-send a persisted prompt periodically in case the first keystroke was dropped.
     const resend = !isNew && ++sameCount >= resendEvery;
@@ -148,5 +244,5 @@ export async function autoConfirmStartupPrompts(
     lastRule = rule.name;
     await deps.sleep(deps.pollMs);
   }
-  return answered;
+  return stuckScreen === undefined ? { answered } : { answered, stuckScreen };
 }
