@@ -947,19 +947,21 @@ async function renderWorkspace(id) {
   launch.appendChild(newStoryBtn);
   wrap.appendChild(launch);
 
-  // WORK TREE — the operator's primary work surface: a recursive, scannable tree of story
-  // NODES (collapsed by default, showing a truncated one-liner + colored status chip + subtask
-  // rollup + leader/ask indicators) whose child task LEAVES (and full brief + open ask) appear
-  // on expand. Built client-side from the flat /api/work union; replaces the old wall-of-text.
-  wrap.appendChild(renderWorkTree(work));
-
-  // List / Graph view toggle. The toggle bar sits outside the body region so it
-  // persists while the body is swapped; the chosen mode lives in dirView (module
-  // scope + localStorage) so it survives SSE re-renders and reloads.
+  // Tree / List / Graph / Board view toggle. The toggle bar sits outside the body
+  // region so it persists while the body is swapped; the chosen mode lives in dirView
+  // (module scope + localStorage) so it survives SSE re-renders and reloads. The work
+  // TREE — a recursive, scannable view of story NODES (collapsed by default, showing a
+  // truncated one-liner + colored status chip + subtask rollup + leader/ask indicators)
+  // whose child task LEAVES (and full brief + open ask) appear on expand — is now one of
+  // the selectable views (built client-side from the flat /api/work union), so it renders
+  // in the same body region as graph/list/board instead of being forced above the toggle.
   const body = el("div", { class: "ws-body" });
   const paintBody = () => {
     body.innerHTML = "";
-    if (dirView === "graph") {
+    if (dirView === "tree") {
+      body.appendChild(el("h2", {}, "Work tree"));
+      body.appendChild(renderWorkTree(work));
+    } else if (dirView === "graph") {
       body.appendChild(el("h2", {}, "Dependency graph"));
       body.appendChild(renderGraph(tasks));
     } else if (dirView === "board") {
@@ -1343,15 +1345,16 @@ function queueLine(tasks) {
 // never be hidden under Finished.
 const HISTORY_KEY = "butchr-history-open";
 
-// Workspace page body mode: the task "List", the pipeline "Board", or the
-// dependency "Graph". Kept at module scope (and mirrored to localStorage) so it
-// survives the full re-render the app does on every SSE event and across reloads.
+// Workspace page body mode: the work "Tree" (default), the task "List", the
+// dependency "Graph", or the pipeline "Board". Kept at module scope (and mirrored to
+// localStorage) so it survives the full re-render the app does on every SSE event and
+// across reloads.
 const DIRVIEW_KEY = "butchr-dirview";
 let dirView = (() => {
   try {
     const v = localStorage.getItem(DIRVIEW_KEY);
-    return v === "graph" || v === "board" ? v : "list";
-  } catch (e) { return "list"; }
+    return v === "tree" || v === "graph" || v === "board" || v === "list" ? v : "tree";
+  } catch (e) { return "tree"; }
 })();
 function setDirView(v) {
   dirView = v;
@@ -1678,14 +1681,14 @@ function tasksTable(tasks) {
   return table;
 }
 
-// List / Board / Graph segmented toggle for the workspace body. Mutates dirView
+// Tree / List / Graph / Board segmented toggle for the workspace body. Mutates dirView
 // (module scope + localStorage) and calls repaint() to swap the body region — the
 // toggle node itself is left in place so the choice sticks across clicks. The
 // workspace view re-renders wholesale on every SSE event and reads dirView, so the
 // chosen mode also survives live updates without re-wiring anything.
 function buildViewToggle(repaint) {
   const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Task view" });
-  const defs = [["list", "List"], ["board", "Board"], ["graph", "Graph"]];
+  const defs = [["tree", "Tree"], ["list", "List"], ["graph", "Graph"], ["board", "Board"]];
   const btns = {};
   for (const [v, label] of defs) {
     const b = el("button", {
