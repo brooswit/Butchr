@@ -23,33 +23,51 @@
 // server.ts) imports both tasks.ts and stories.ts; work.ts imports neither.
 import { HttpError, getWorkspace } from "./workspaces.ts";
 import {
+  abortTask,
   allTasksView,
   answerTask,
+  approvePlan,
   approveTask,
+  assertWorkspaceTaskCreationAllowed,
+  confirmMajor,
+  createTask,
   editTask,
   escalateTask,
   getTask,
+  nudgeTask,
+  rejectPlan,
   rejectTask,
+  requeueTask,
   setBlockedBy,
   setPriority,
+  setVersionBump,
+  submitSpec,
+  taskChainEstimate,
+  taskDiff,
+  taskEstimate,
+  taskReadiness,
   taskView,
 } from "./tasks.ts";
-import type { ApproveOutcome, TaskListView, TaskView } from "./tasks.ts";
+import type { ApproveOutcome, TaskListView, TaskReadiness, TaskView } from "./tasks.ts";
 import {
   allStoryViews,
   answerStoryAsk,
+  assignTaskToStory,
   createStory,
   createSubtask,
+  deleteStory,
   escalateStoryAsk,
   getStory,
   openStoryAsk,
+  resetStory,
   storyView,
   updateStory,
 } from "./stories.ts";
-import type { StoryView } from "./stories.ts";
+import type { StoryResetResult, StoryView } from "./stories.ts";
 import { resolveWorkResponder, workResponderChain } from "./work.ts";
 import type { WorkResponder } from "./work.ts";
-import type { StoryRow, TaskRow } from "./db.ts";
+import { listTaskEvents } from "./db.ts";
+import type { StoryRow, TaskEventRow, TaskRow } from "./db.ts";
 
 // --- WORK RESOLUTION (id → leaf task | node story) ---------------------------
 
@@ -170,6 +188,39 @@ export function createWork(workspaceId: string, brief: unknown): StoryRow {
 }
 
 /**
+ * Create a workspace-level ROLLBACK LEAF (`POST /api/workspaces/:id/work` with `kind=rollback`)
+ * — the unified-surface home of the webapp's "Roll back" flow, which the split `/api/tasks` route
+ * served via `POST /api/workspaces/:id/tasks` (kind=rollback). Top-level NON-rollback Work is a
+ * NODE (createWork → createStory); the ONE workspace-level LEAF butchr still creates directly is a
+ * rollback (authority flip — see tasks.assertWorkspaceTaskCreationAllowed, which we re-run so the
+ * rollback-only contract holds identically over this surface). The `args` mirror the
+ * `/api/work/:id/work` (createSubtask) body. 404 if the workspace is gone.
+ */
+export async function createWorkspaceRollback(
+  workspaceId: string,
+  args: Parameters<typeof createSubtask>[1],
+): Promise<TaskView> {
+  if (!getWorkspace(workspaceId)) {
+    throw new HttpError(404, `workspace not found: ${workspaceId}`);
+  }
+  assertWorkspaceTaskCreationAllowed("rollback");
+  return createTask(
+    workspaceId,
+    args.prompt,
+    args.context ?? [],
+    args.blockedBy ?? [],
+    "rollback",
+    args.model ?? null,
+    args.tags ?? [],
+    args.priority ?? 0,
+    args.planPreview ?? false,
+    args.idea ?? false,
+    args.versionBump ?? "patch",
+    args.allowlist ?? [],
+  );
+}
+
+/**
  * Create a CHILD unit of Work under a node (`POST /api/work/:id/work`) — a LEAF (subtask)
  * belonging to the node. Only a NODE can hold children (a leaf has no decomposition), so a
  * leaf parent is a 409. Maps to `createSubtask` (which pins the child to the node's own
@@ -286,6 +337,124 @@ export async function setWorkBlockedBy(id: string, blockedBy: string[]): Promise
   return setBlockedBy(id, blockedBy);
 }
 
+// --- LEAF READ OPS (diff / readiness / estimate / events) --------------------
+// These mirror the read-only `/api/tasks/:id/*` surfaces over the unified vocabulary. Each is
+// LEAF-only — a node (story) has no diff/branch/estimate of its own (its members do) — so it
+// 409s on a node via requireLeaf. The session-backed reads (output/transcript/activity) stay in
+// server.ts where the task-session helpers live; they guard with the exported assertWorkLeaf.
+
+/** A LEAF's working-tree diff (`GET /api/work/:id/diff`) — maps to `taskDiff`. 409 on a node. */
+export async function diffWork(id: string): Promise<string> {
+  requireLeaf(id, "diff");
+  return taskDiff(id);
+}
+
+/** A LEAF's merge-readiness snapshot (`GET /api/work/:id/readiness`) — maps to `taskReadiness`. 409 on a node. */
+export async function readinessWork(id: string): Promise<TaskReadiness> {
+  requireLeaf(id, "readiness");
+  return taskReadiness(id);
+}
+
+/** A LEAF's duration estimate + dependency-chain estimate (`GET /api/work/:id/estimate`). 409 on a node. */
+export function estimateWork(id: string): { single: ReturnType<typeof taskEstimate>; chain: ReturnType<typeof taskChainEstimate> } {
+  requireLeaf(id, "estimate");
+  return { single: taskEstimate(id), chain: taskChainEstimate(id) };
+}
+
+/** A LEAF's status-transition audit timeline (`GET /api/work/:id/events`) — maps to `listTaskEvents`. 409 on a node. */
+export function eventsWork(id: string): TaskEventRow[] {
+  requireLeaf(id, "events");
+  return listTaskEvents(id);
+}
+
+// --- LEAF ACTIONS (spec / plan / version_bump / confirm-major / abort / nudge / requeue / reparent)
+
+/** Submit a LEAF's SPEC for a task parked in `idea` (`POST /api/work/:id/spec`) — maps to `submitSpec`. 409 on a node. */
+export async function specWork(id: string, spec: string): Promise<TaskView> {
+  requireLeaf(id, "submit a spec for");
+  return submitSpec(id, spec);
+}
+
+/** APPROVE a LEAF's proposed plan (`POST /api/work/:id/plan/approve`) — resume to implement. 409 on a node. */
+export async function planApproveWork(id: string, note?: string): Promise<TaskView> {
+  requireLeaf(id, "approve a plan for");
+  return approvePlan(id, note);
+}
+
+/** REJECT a LEAF's proposed plan (`POST /api/work/:id/plan/reject`) — send it back to re-propose. 409 on a node. */
+export async function planRejectWork(id: string, note: string): Promise<TaskView> {
+  requireLeaf(id, "reject a plan for");
+  return rejectPlan(id, note);
+}
+
+/** Update a LEAF's declared semver `version_bump` level (`POST /api/work/:id/version_bump`) — maps to `setVersionBump`. 409 on a node. */
+export function versionBumpWork(id: string, bump: unknown): TaskView {
+  requireLeaf(id, "set the version bump for");
+  return setVersionBump(id, bump);
+}
+
+/** MAJOR DOUBLE-CONFIRM on a LEAF (`POST /api/work/:id/confirm-major`) — maps to `confirmMajor` (same ApproveOutcome). 409 on a node. */
+export async function confirmMajorWork(id: string): Promise<ApproveOutcome> {
+  requireLeaf(id, "confirm a major bump for");
+  return confirmMajor(id);
+}
+
+/** ABORT a LEAF (`POST /api/work/:id/abort`) — maps to `abortTask`. 409 on a node (a node is reset/deleted, not aborted). */
+export async function abortWork(id: string): Promise<TaskView> {
+  requireLeaf(id, "abort");
+  return abortTask(id);
+}
+
+/** NUDGE a LEAF's idle build agent (`POST /api/work/:id/nudge`) — maps to `nudgeTask`. 409 on a node. */
+export async function nudgeWork(id: string, text?: string): Promise<TaskView> {
+  requireLeaf(id, "nudge");
+  return nudgeTask(id, text);
+}
+
+/** REQUEUE a LEAF that gave up dispatching (`POST /api/work/:id/requeue`) — maps to `requeueTask`. 409 on a node. */
+export async function requeueWork(id: string): Promise<TaskView> {
+  requireLeaf(id, "requeue");
+  return requeueTask(id);
+}
+
+/**
+ * REPARENT a LEAF under a node, or clear its parent (`POST /api/work/:id/parent`, body
+ * `{parent_id: string|null}`) — the unified-surface form of `POST /api/tasks/:id/story`
+ * (assign-to-story). Maps to `assignTaskToStory`, which keeps story_id and parent_id in
+ * lock-step. LEAF-only — node-on-node reparenting is not in today's storage. 409 on a node.
+ */
+export function reparentWork(id: string, parentId: string | null): TaskView {
+  requireLeaf(id, "reparent");
+  return assignTaskToStory(id, parentId);
+}
+
+// --- NODE ACTIONS (delete / reset) -------------------------------------------
+
+/**
+ * DELETE a NODE (`DELETE /api/work/:id`) — maps to `deleteStory` (member leaves are NOT deleted;
+ * their parent pointer is cleared). NODE-only — a leaf is ABORTED, not deleted (there is no
+ * task-delete on the split surface either), so a leaf is a 409 directing the caller to abort.
+ */
+export function deleteWork(id: string): void {
+  const resolved = resolveWork(id);
+  if (resolved.kind !== "node") {
+    throw new HttpError(409, "cannot delete a leaf work item (abort it instead)");
+  }
+  deleteStory(id);
+}
+
+/**
+ * RESET a NODE (`POST /api/work/:id/reset`) — abort all of its in-flight children so the leader
+ * can re-decompose. NODE-only (maps to `resetStory`). 409 on a leaf; 404 if gone.
+ */
+export async function resetWork(id: string): Promise<StoryResetResult> {
+  const resolved = resolveWork(id);
+  if (resolved.kind !== "node") {
+    throw new HttpError(409, "cannot reset a leaf work item (reset applies to a node/story)");
+  }
+  return resetStory(id);
+}
+
 /** Resolve a work id and assert it is a LEAF for a leaf-only verb, else 409 (or 404 if gone). */
 function requireLeaf(id: string, verb: string): TaskRow {
   const resolved = resolveWork(id);
@@ -293,4 +462,14 @@ function requireLeaf(id: string, verb: string): TaskRow {
     throw new HttpError(409, `cannot ${verb} a node work item (it applies to a leaf/task only)`);
   }
   return resolved.task;
+}
+
+/**
+ * Public LEAF guard for the session-backed `/api/work/:id/*` routes (output / transcript /
+ * activity / terminal) that stay in server.ts because they reuse the task-session helpers there.
+ * Resolves the work id, asserts it is a LEAF (409 on a node), and returns the task row. Throws 404
+ * if the work is gone — same contract as requireLeaf, exported so server.ts shares the one rule.
+ */
+export function assertWorkLeaf(id: string, verb: string): TaskRow {
+  return requireLeaf(id, verb);
 }

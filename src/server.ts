@@ -93,17 +93,34 @@ import {
   updateStory,
 } from "./stories.ts";
 import {
+  abortWork,
   answerWork,
   approveWork,
   askWork,
+  assertWorkLeaf,
+  confirmMajorWork,
   createWork,
   createWorkChild,
+  createWorkspaceRollback,
+  deleteWork,
+  diffWork,
   escalateWork,
+  estimateWork,
+  eventsWork,
   listWork,
+  nudgeWork,
   patchWork,
+  planApproveWork,
+  planRejectWork,
   prioritizeWork,
+  readinessWork,
   rejectWork,
+  reparentWork,
+  requeueWork,
+  resetWork,
   setWorkBlockedBy,
+  specWork,
+  versionBumpWork,
   workView,
 } from "./work-api.ts";
 import { listTemplates, renderTemplate } from "./templates.ts";
@@ -1211,12 +1228,35 @@ route("GET", "/api/work", async (req) => {
   );
 });
 
-// Create a TOP-LEVEL unit of Work in a workspace — a NODE (story/container); body {brief}.
-// Leaves are created as children of a node (see POST /api/work/:id/work). Maps to
-// createStory. 404 if the workspace is gone; 400 if the brief is blank.
+// Create a TOP-LEVEL unit of Work in a workspace. By default a NODE (story/container; body
+// {brief}) — ordinary leaves are created as children of a node (see POST /api/work/:id/work).
+// The ONE workspace-level LEAF still created directly is a ROLLBACK (`kind:'rollback'` or the
+// `rollback` template — the webapp's "Roll back" flow): it builds a revert like any task and
+// MIRRORS the POST /api/stories/:id/tasks body (prompt/template/context/blocked_by/model/tags/
+// priority/plan_preview/idea/version_bump/allowlist). Maps to createWorkspaceRollback (node →
+// createStory). 404 if the workspace is gone; 400 if the brief/prompt is blank.
 route("POST", "/api/workspaces/:id/work", async (req, p) => {
   requireWorkspace(p.id!);
   const body = await readJson(req);
+  const isRollback = body.kind === "rollback" || body.template === "rollback";
+  if (isRollback) {
+    const prompt = body.template ? renderTemplate(body.template, body.vars) : body.prompt;
+    const idea = body.idea === true || body.stage === "idea";
+    const view = await createWorkspaceRollback(p.id!, {
+      prompt,
+      context: body.context ?? [],
+      blockedBy: body.blocked_by ?? [],
+      kind: "rollback",
+      model: body.model ?? null,
+      tags: body.tags ?? [],
+      priority: body.priority ?? 0,
+      planPreview: body.plan_preview ?? false,
+      idea,
+      versionBump: body.version_bump ?? "patch",
+      allowlist: body.allowlist ?? [],
+    });
+    return json(view, 201);
+  }
   return json(createWork(p.id!, body.brief), 201);
 });
 
@@ -1307,6 +1347,130 @@ async function workBlockedByHandler(req: Request, p: Record<string, string>): Pr
 }
 route("PUT", "/api/work/:id/blocked_by", workBlockedByHandler);
 route("POST", "/api/work/:id/blocked_by", workBlockedByHandler);
+
+// ---- WORK PARITY OPS (leaf reads / leaf actions / node actions) ------------
+// The remaining `/api/work/:id/*` surfaces that mirror the split `/api/tasks/:id/*` +
+// `/api/stories/:id/*` ops over the unified vocabulary, so `/api/work` is a TRUE superset
+// before `/api/tasks` + `/api/stories` are deleted (the later 6e cutover). Each LEAF op 409s
+// on a node and each NODE op 409s on a leaf (see work-api guards). Still ADDITIVE — the split
+// routes above stay byte-identical until the deliberate cutover/restart.
+
+// LEAF working-tree diff. 409 on a node. Mirrors GET /api/tasks/:id/diff.
+route("GET", "/api/work/:id/diff", async (_req, p) => json({ diff: await diffWork(p.id!) }));
+
+// LEAF merge-readiness snapshot. 409 on a node. Mirrors GET /api/tasks/:id/readiness.
+route("GET", "/api/work/:id/readiness", async (_req, p) => json(await readinessWork(p.id!)));
+
+// LEAF duration + dependency-chain estimate. 409 on a node. Mirrors GET /api/tasks/:id/estimate.
+route("GET", "/api/work/:id/estimate", async (_req, p) => json(estimateWork(p.id!)));
+
+// LEAF status-transition audit timeline. 409 on a node. Mirrors GET /api/tasks/:id/events.
+route("GET", "/api/work/:id/events", async (_req, p) => json(eventsWork(p.id!)));
+
+// LEAF live agent terminal output (best-effort). 409 on a node. Mirrors GET /api/tasks/:id/output.
+route("GET", "/api/work/:id/output", async (_req, p) => {
+  const t = assertWorkLeaf(p.id!, "read output for");
+  const output = t.has_agent ? await herdr.agentRead(p.id!) : "";
+  return json({ output });
+});
+
+// LEAF agent transcript (paginated). 409 on a node. Mirrors GET /api/tasks/:id/transcript.
+route("GET", "/api/work/:id/transcript", async (req, p) => {
+  assertWorkLeaf(p.id!, "read a transcript for");
+  const ctx = taskSessionContext(p.id!);
+  const all = ctx ? readSessionTranscript(ctx.wt, ctx.sessionId) : [];
+  const total = all.length;
+  const url = new URL(req.url);
+  const offset = intParam(url, "offset", { def: 0, max: total });
+  const limit = intParam(url, "limit", { def: 200, max: 500 });
+  const turns = all.slice(offset, offset + limit);
+  return json({ turns, total, offset, limit, hasMore: offset + turns.length < total });
+});
+
+// LEAF live activity pulse. 409 on a node. Mirrors GET /api/tasks/:id/activity.
+route("GET", "/api/work/:id/activity", async (_req, p) => {
+  assertWorkLeaf(p.id!, "read activity for");
+  const ctx = taskSessionContext(p.id!);
+  const activity = ctx
+    ? readSessionActivity(ctx.wt, ctx.sessionId)
+    : { lastAction: null, lastAt: null };
+  const t = getTask(p.id!)!; // assertWorkLeaf proved the leaf row exists
+  const startMs = t.started_at ? Date.parse(t.started_at) : NaN;
+  const elapsedMs = Number.isFinite(startMs) ? Math.max(0, Date.now() - startMs) : null;
+  return json({ ...activity, elapsedMs });
+});
+
+// Submit the SPEC for a LEAF parked in `idea`. 409 on a node. Mirrors POST /api/tasks/:id/spec.
+route("POST", "/api/work/:id/spec", async (req, p) => {
+  const body = await readJson(req);
+  return json(await specWork(p.id!, body.spec));
+});
+
+// LEAF plan approve/reject (plan-preview step). 409 on a node. Mirrors POST /api/tasks/:id/plan/*.
+route("POST", "/api/work/:id/plan/approve", async (req, p) => {
+  const body = await readJson(req).catch(() => ({}));
+  return json(await planApproveWork(p.id!, body.note ?? body.feedback));
+});
+route("POST", "/api/work/:id/plan/reject", async (req, p) => {
+  const body = await readJson(req);
+  return json(await planRejectWork(p.id!, body.note ?? body.feedback));
+});
+
+// Update a LEAF's declared version_bump level. 409 on a node. Mirrors POST /api/tasks/:id/version_bump.
+route("POST", "/api/work/:id/version_bump", async (req, p) => {
+  const body = await readJson(req);
+  return json(versionBumpWork(p.id!, body.version_bump));
+});
+
+// MAJOR double-confirm on a LEAF — flag-shaped response (conflict/revert/awaiting). 409 on a
+// node. Mirrors POST /api/tasks/:id/confirm-major.
+route("POST", "/api/work/:id/confirm-major", async (_req, p) => {
+  const r = await confirmMajorWork(p.id!);
+  if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
+  if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
+  if (r.awaitingMajorConfirm) return json({ task: r.task, awaitingMajorConfirm: true });
+  return json(r.task);
+});
+
+// ABORT a LEAF. 409 on a node (a node is reset/deleted). Mirrors POST /api/tasks/:id/abort.
+route("POST", "/api/work/:id/abort", async (_req, p) => json(await abortWork(p.id!)));
+
+// NUDGE a LEAF's idle build agent (optional {text}). 409 on a node. Mirrors POST /api/tasks/:id/nudge.
+route("POST", "/api/work/:id/nudge", async (req, p) => {
+  const body = await readJson(req);
+  return json(await nudgeWork(p.id!, body.text));
+});
+
+// REQUEUE a LEAF that gave up dispatching. 409 on a node. Mirrors POST /api/tasks/:id/requeue.
+route("POST", "/api/work/:id/requeue", async (_req, p) => json(await requeueWork(p.id!)));
+
+// REPARENT a LEAF under a node, or clear it (body {parent_id: string|null}) — the unified form
+// of POST /api/tasks/:id/story (assign-to-story). 409 on a node.
+route("POST", "/api/work/:id/parent", async (req, p) => {
+  const body = await readJson(req);
+  return json(reparentWork(p.id!, body.parent_id ?? null));
+});
+
+// Open a GUI terminal attached to a LEAF's live agent pane. 409 on a node or no live agent.
+// Mirrors POST /api/tasks/:id/terminal.
+route("POST", "/api/work/:id/terminal", async (_req, p) => {
+  const t = assertWorkLeaf(p.id!, "attach a terminal to");
+  if (!t.has_agent) {
+    throw new HttpError(409, `work has no live agent to attach to (status=${t.status})`);
+  }
+  return attachAgentTerminal(p.id!);
+});
+
+// DELETE a NODE (member leaves' parent pointer is cleared, not deleted). 409 on a leaf (abort
+// it instead). Mirrors DELETE /api/stories/:id.
+route("DELETE", "/api/work/:id", async (_req, p) => {
+  deleteWork(p.id!);
+  return json({ ok: true });
+});
+
+// RESET a NODE — abort all in-flight children so the leader can re-decompose. 409 on a leaf.
+// Mirrors POST /api/stories/:id/reset.
+route("POST", "/api/work/:id/reset", async (_req, p) => json(await resetWork(p.id!)));
 
 // Shared pane-attach: spawn a GUI terminal attached to a herdr AGENT by name (a
 // task's agent name is its id; the managed CTO agent has its own fixed name). Used by

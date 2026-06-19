@@ -6,10 +6,10 @@
 // the next real task.
 //
 // This is almost entirely a REST CLIENT: it adds no server logic and maps onto
-// existing routes. It drives the REAL operator path post-authority-flip: the operator
-// creates a STORY (POST /api/workspaces/:id/stories) and the probe runs as a story
-// SUBTASK (POST /api/stories/:id/tasks) — standalone workspace task creation is now
-// rejected, so the smoke test exercises the same surface the operator uses. The ONE
+// existing routes. It drives the REAL operator path over the UNIFIED `/api/work`
+// surface: the operator creates a top-level NODE (POST /api/workspaces/:id/work) and the
+// probe runs as a child LEAF (POST /api/work/:id/work) — standalone workspace leaf creation
+// is rejected, so the smoke test exercises the same surface the operator uses. The ONE
 // exception is the `--merge` cleanup: a merged probe
 // can no longer be undone via a server route (the mechanical /rollback endpoint was
 // retired — deliberate rollback is now a normal task), so the harness reverts its
@@ -213,17 +213,17 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     result.dir = dir;
     mark("resolve", true, `${dir.label} (${dir.id})`);
 
-    // (2) Create a throwaway STORY, then its probe SUBTASK — the real operator path
-    // (operator → story → leader-decomposed subtask). Standalone workspace task creation is
-    // now rejected (only story leaders create tasks), so the probe runs as a story subtask;
-    // it dispatches exactly like any task. Tagged so it's identifiable in the UI.
+    // (2) Create a throwaway top-level NODE (Work), then its probe child LEAF — the real
+    // operator path over the unified surface (operator → node → child leaf). Standalone
+    // workspace leaf creation is rejected (children are decomposed under a node), so the probe
+    // runs as a child leaf; it dispatches exactly like any task. Tagged so it's identifiable.
     const marker = options.marker ?? String(now());
-    const story = await api("POST", `/api/workspaces/${encodeURIComponent(dir.id)}/stories`, {
+    const story = await api("POST", `/api/workspaces/${encodeURIComponent(dir.id)}/work`, {
       brief: `butchr self-test probe story (marker: ${marker})`,
     });
     result.storyId = story.id;
     const prompt = buildProbePrompt(marker);
-    const task = await api("POST", `/api/stories/${encodeURIComponent(story.id)}/tasks`, {
+    const task = await api("POST", `/api/work/${encodeURIComponent(story.id)}/work`, {
       prompt,
       tags: ["selftest"],
     });
@@ -237,7 +237,7 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     let sawRunning = false;
     let reachedReview: any = null;
     while (now() < deadline) {
-      const t = await api("GET", `/api/tasks/${encodeURIComponent(task.id)}`);
+      const t = await api("GET", `/api/work/${encodeURIComponent(task.id)}`);
       if (t.status === "in_progress" && !sawRunning) {
         sawRunning = true;
         mark("dispatch", true, "in_progress");
@@ -266,14 +266,14 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
     // bounces the probe back to `inactive`, and a post-merge-verify revert lands it in
     // `failed` — both are failures for the probe).
     if (options.merge) {
-      const r = await api("POST", `/api/tasks/${encodeURIComponent(task.id)}/approve`, {});
+      const r = await api("POST", `/api/work/${encodeURIComponent(task.id)}/approve`, {});
       if (r && r.conflictSentBack) {
         throw new Error("approve hit a merge conflict (sent back to the agent)");
       }
       const mergeDeadline = now() + timeoutMs;
       let mergedTask: any = null;
       while (now() < mergeDeadline) {
-        const t = await api("GET", `/api/tasks/${encodeURIComponent(task.id)}`);
+        const t = await api("GET", `/api/work/${encodeURIComponent(task.id)}`);
         if (t.status === "merged") {
           mergedTask = t;
           break;
@@ -316,7 +316,7 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
           await revertMerge(result.dir.path, mergedRange.from, mergedRange.to);
           mark("cleanup", true, "reverted");
         } else {
-          await api("POST", `/api/tasks/${encodeURIComponent(result.taskId)}/abort`, {});
+          await api("POST", `/api/work/${encodeURIComponent(result.taskId)}/abort`, {});
           mark("cleanup", true, "aborted");
         }
       } catch (e) {
@@ -325,13 +325,13 @@ export async function runSelftest(options: SelftestOptions): Promise<SelftestRes
         mark("cleanup", false, `FAILED: ${(e as Error).message}`);
       }
     }
-    // Delete the throwaway STORY (best-effort): removes the story row + its managed LEADER
-    // agent. Member tasks are only DETACHED (story_id nulled), so the subtask teardown above
-    // stands. Runs even when the subtask was never created (story-only leftover). A deletion
-    // failure is flagged — a leftover story/leader defeats the "clean sandbox" guarantee.
+    // Delete the throwaway NODE (best-effort): removes the node row + its managed LEADER
+    // agent. Member leaves are only DETACHED (parent pointer cleared), so the child teardown
+    // above stands. Runs even when the child was never created (node-only leftover). A deletion
+    // failure is flagged — a leftover node/leader defeats the "clean sandbox" guarantee.
     if (result.storyId) {
       try {
-        await api("DELETE", `/api/stories/${encodeURIComponent(result.storyId)}`);
+        await api("DELETE", `/api/work/${encodeURIComponent(result.storyId)}`);
       } catch (e) {
         mark("cleanup", false, `story delete FAILED: ${(e as Error).message}`);
       }

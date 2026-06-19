@@ -39,19 +39,19 @@ function mockApi(opts: {
     if (method === "GET" && path === "/api/workspaces") {
       return opts.workspaces ?? [];
     }
-    // AUTHORITY FLIP: the probe is now a story SUBTASK — create the throwaway story first,
-    // then the subtask via POST /api/stories/:id/tasks (matched by the /tasks$ rule below).
-    if (method === "POST" && /\/stories$/.test(path)) {
+    // UNIFIED SURFACE: the probe is a child LEAF of a top-level NODE — create the throwaway
+    // NODE via POST /api/workspaces/:id/work, then the child LEAF via POST /api/work/:id/work.
+    if (method === "POST" && /\/api\/workspaces\/[^/]+\/work$/.test(path)) {
       return opts.story ?? { id: "story-1", status: "open" };
     }
-    if (method === "DELETE" && /\/api\/stories\//.test(path)) {
+    if (method === "POST" && /\/api\/work\/[^/]+\/work$/.test(path)) {
+      return opts.created ?? { id: "probe-1", status: "queued" };
+    }
+    if (method === "DELETE" && /\/api\/work\//.test(path)) {
       opts.onStoryDelete?.();
       return { ok: true };
     }
-    if (method === "POST" && /\/tasks$/.test(path)) {
-      return opts.created ?? { id: "probe-1", status: "queued" };
-    }
-    if (method === "GET" && /\/api\/tasks\//.test(path)) {
+    if (method === "GET" && /\/api\/work\//.test(path)) {
       // Return the next scripted snapshot; stick on the last one once exhausted.
       return seq.length > 1 ? seq.shift() : seq[0];
     }
@@ -132,13 +132,17 @@ test("happy path (no merge): resolve→create→dispatch→review→abort cleanu
   ]);
   expect(result.stages.find((s) => s.name === "review")?.detail).toContain("ci=pass");
   expect(aborted).toBe(true);
-  // AUTHORITY FLIP: the probe ran as a story SUBTASK — a throwaway story was created first,
-  // the subtask was created under it (POST /api/stories/:id/tasks), and the story was
-  // deleted at cleanup (tearing down its leader).
-  const storyCreate = calls.find((c) => c.method === "POST" && /\/stories$/.test(c.path));
+  // UNIFIED SURFACE: the probe ran as a child LEAF — a throwaway NODE was created first
+  // (POST /api/workspaces/:id/work), the child LEAF was created under it (POST
+  // /api/work/:id/work), and the node was deleted at cleanup (tearing down its leader).
+  const storyCreate = calls.find(
+    (c) => c.method === "POST" && /\/api\/workspaces\/[^/]+\/work$/.test(c.path),
+  );
   expect((storyCreate?.body as any).brief).toContain("self-test probe story");
-  const createCall = calls.find((c) => c.method === "POST" && /\/tasks$/.test(c.path));
-  expect(createCall?.path).toContain("/api/stories/story-1/tasks");
+  const createCall = calls.find(
+    (c) => c.method === "POST" && /\/api\/work\/[^/]+\/work$/.test(c.path),
+  );
+  expect(createCall?.path).toContain("/api/work/story-1/work");
   // The probe subtask was tagged so it's identifiable in the UI.
   expect((createCall?.body as any).tags).toEqual(["selftest"]);
   expect(storyDeleted).toBe(true);
@@ -253,13 +257,15 @@ test("timeout waiting for review fails and still cleans up", async () => {
 test("a failed run whose cleanup ALSO fails surfaces the cleanup failure", async () => {
   const api: SelftestApi = async (method, path) => {
     if (method === "GET" && path === "/api/workspaces") return [SANDBOX];
-    if (method === "POST" && /\/stories$/.test(path)) return { id: "story-1", status: "open" };
-    if (method === "POST" && /\/tasks$/.test(path)) return { id: "probe-1", status: "queued" };
-    if (method === "GET" && /\/api\/tasks\//.test(path)) {
+    if (method === "POST" && /\/api\/workspaces\/[^/]+\/work$/.test(path))
+      return { id: "story-1", status: "open" };
+    if (method === "POST" && /\/api\/work\/[^/]+\/work$/.test(path))
+      return { id: "probe-1", status: "queued" };
+    if (method === "POST" && /\/abort$/.test(path)) throw new Error("abort 500");
+    if (method === "GET" && /\/api\/work\//.test(path)) {
       return { id: "probe-1", status: "aborted", last_dispatch_error: "boom" };
     }
-    if (method === "POST" && /\/abort$/.test(path)) throw new Error("abort 500");
-    if (method === "DELETE" && /\/api\/stories\//.test(path)) return { ok: true };
+    if (method === "DELETE" && /\/api\/work\//.test(path)) return { ok: true };
     throw new Error(`unexpected ${method} ${path}`);
   };
   const result = await runSelftest({ api, sleep: noSleep, now: fakeClock(), marker: "m7" });

@@ -412,7 +412,7 @@ async function tick(): Promise<void> {
 
     // NOTE: `idea`-state tasks are NOT dispatched. An idea is a WAITING/feedback state —
     // it holds a brief and waits for the spec-generation responder (the CTO agent or a
-    // human) to submit a spec via POST /api/tasks/:id/spec, which advances it to
+    // human) to submit a spec via POST /api/work/:id/spec, which advances it to
     // spec_review. The dispatcher only launches build agents for `inactive` tasks below.
 
     // The queued tasks eligible to launch this tick — empty while dispatch is

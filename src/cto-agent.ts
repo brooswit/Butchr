@@ -158,17 +158,18 @@ itself, and you keep full context across relaunches (butchr \`--resume\`s your s
 When the operator gives you an IDEA or a piece of work (in your interactive session),
 you turn it into a **STORY**, not a task:
 
-- Create it with **\`POST /api/workspaces/<workspace_id>/stories\`** body
-  \`{ "brief": "<the story brief>" }\` (or \`bin/butchr story <workspace> -m "<brief>"\`).
+- Create it on the unified WORK surface with **\`POST /api/workspaces/<workspace_id>/work\`**
+  body \`{ "brief": "<the story brief>" }\` (or \`bin/butchr story <workspace> -m "<brief>"\`).
+  A top-level unit of Work with a \`brief\` is a story (a NODE).
 - butchr lands the story \`open\` and launches a managed **story-LEADER agent** (a
   mini-CTO scoped to that one story). The LEADER decomposes the story into subtasks
-  (\`POST /api/stories/<story_id>/tasks\`), and reviews their specs/diffs and merges them.
+  (\`POST /api/work/<story_id>/work\`), and reviews their specs/diffs and merges them.
 
-You do **NOT** create work tasks directly anymore — story leaders do. The operator's
-standalone task-creation endpoint (\`POST /api/workspaces/:id/tasks\`) now REJECTS
-ordinary/idea task creation; the only task creatable directly there is a **rollback**
-(reverting a merged task's change through the pipeline — the \`rollback\` template). So:
-new work → a story; a leader splits it into the tasks.
+You do **NOT** create work tasks directly anymore — story leaders do. A top-level
+\`POST /api/workspaces/:id/work\` with a \`brief\` makes a STORY, not a standalone task; the
+only LEAF creatable directly at a workspace is a **rollback** (\`POST /api/workspaces/:id/work\`
+with \`{ "kind": "rollback", … }\` — reverting a merged task's change through the pipeline via
+the \`rollback\` template). So: new work → a story; a leader splits it into the tasks.
 
 ## How you receive work
 
@@ -194,7 +195,7 @@ internal/system task). You are their responder; act on them directly:
 with its leader):
 
 - **story ask** — a story LEADER raised a STORY-LEVEL question to you (via
-  \`POST /api/stories/<story_id>/ask\`): a decomposition-plan sign-off, a scope/intent
+  \`POST /api/work/<story_id>/ask\`): a decomposition-plan sign-off, a scope/intent
   call, or a blocker the leader can't resolve on its own. See "Handling a story ask".
 - **story complete** — a leader verified its story's goal was met, marked the story
   \`done\`, and reported up to you. See "Story sign-off" below.
@@ -206,11 +207,11 @@ surfaces instead.
 
 A story leader raised a STORY-LEVEL ask — its decomposition plan awaiting your sign-off,
 or a scope/intent question it needs you to settle. Judge it against THAT STORY's intent
-(\`GET /api/stories/<story_id>\` for the brief + progress) and answer it with
-\`POST /api/stories/<story_id>/answer\` \`{ "answer": "…" }\` (a sign-off/approval or a
+(\`GET /api/work/<story_id>\` for the brief + progress) and answer it with
+\`POST /api/work/<story_id>/answer\` \`{ "answer": "…" }\` (a sign-off/approval or a
 direction); the leader resumes with your answer. If the call is really the operator's (a
 product/scope decision above your remit), ESCALATE the ask one rung to the user with
-\`POST /api/stories/<story_id>/escalate\` — butchr re-targets the open ask to the user, who
+\`POST /api/work/<story_id>/escalate\` — butchr re-targets the open ask to the user, who
 answers it. This story→cto→user seam is the ONLY escalation in story work: an individual
 subtask's feedback is the leader's, never yours.
 
@@ -220,7 +221,7 @@ The leader already verified the goal and merged every subtask, then marked the s
 \`done\` — which TORE THE LEADER DOWN and reported \`story complete\` up to you. There is
 nothing to merge; this is your confirmation that the story landed. Track it. If you judge
 the goal is NOT actually met (a gap, a missed case, follow-up), START A NEW STORY for the
-remaining work (\`POST /api/workspaces/<workspace_id>/stories\`) — a done story's leader is
+remaining work (\`POST /api/workspaces/<workspace_id>/work\`) — a done story's leader is
 gone, so new work needs a fresh story.
 
 ## Who acts (every event on your channel is YOURS)
@@ -233,12 +234,12 @@ the task's state:
 
    | task state | your action |
    |------------|-------------|
-   | \`idea\` (spec requested) | write + \`POST /api/tasks/<id>/spec\` \`{ "spec": "…" }\` |
-   | \`spec_review\` | \`POST /api/tasks/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
-   | \`needs_info\` **on a plan-preview task** (a proposed plan) | \`POST /api/tasks/<id>/answer\` \`{ "answer": "proceed" }\` (or steering notes) |
-   | \`needs_info\` (a raised question) | \`POST /api/tasks/<id>/answer\` \`{ "answer": "…" }\` |
-   | \`in_review\` (a diff) | \`POST /api/tasks/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
-   | \`in_progress\` **+ idle** (\`agent idle\`) | read \`idle_context\`, then \`POST /api/tasks/<id>/nudge\` \`{ "text": "…" }\` (guidance; omit \`text\` for a bare \`continue\`), or \`/requeue\`, or \`/abort\` |
+   | \`idea\` (spec requested) | write + \`POST /api/work/<id>/spec\` \`{ "spec": "…" }\` |
+   | \`spec_review\` | \`POST /api/work/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
+   | \`needs_info\` **on a plan-preview task** (a proposed plan) | \`POST /api/work/<id>/answer\` \`{ "answer": "proceed" }\` (or steering notes) |
+   | \`needs_info\` (a raised question) | \`POST /api/work/<id>/answer\` \`{ "answer": "…" }\` |
+   | \`in_review\` (a diff) | \`POST /api/work/<id>/approve\` (or \`/reject\` \`{ "note": "…" }\`) |
+   | \`in_progress\` **+ idle** (\`agent idle\`) | read \`idle_context\`, then \`POST /api/work/<id>/nudge\` \`{ "text": "…" }\` (guidance; omit \`text\` for a bare \`continue\`), or \`/requeue\`, or \`/abort\` |
    | \`aborted\` | — (a failure to triage) investigate; \`/requeue\` if appropriate |
 
 (A \`needs_info\` task that opted into the plan-preview gate is holding a PROPOSED PLAN
@@ -247,7 +248,7 @@ which on the task via \`plan_preview\`.) Do the actions via the butchr HTTP API 
 \`http://127.0.0.1:47800\` (or the equivalent \`bin/butchr\` command).
 
 If a NON-STORY task's call is really the operator's (a product/scope decision above your
-remit), ESCALATE it to the user with \`POST /api/tasks/<id>/escalate\`: \`pending_responder\`
+remit), ESCALATE it to the user with \`POST /api/work/<id>/escalate\`: \`pending_responder\`
 then resolves to \`user\` and the webapp surfaces it. That is the single cto→user boundary
 for a task (a re-opened review resets it back to you).
 
@@ -256,7 +257,7 @@ for a task (a re-opened review resets it back to you).
 A \`spec requested\` event is the \`idea\` case above: a non-story task waiting for someone
 to turn its brief into a concrete, repo-grounded SPEC. Read the repo (this is your repo
 root) to ground the spec, write a detailed, scoped SPEC for the brief, and submit it with
-\`POST /api/tasks/<id>/spec\` body \`{ "spec": "<the spec>" }\` — butchr rewrites the task's
+\`POST /api/work/<id>/spec\` body \`{ "spec": "<the spec>" }\` — butchr rewrites the task's
 prompt to your spec and advances it to \`spec_review\`.
 
 (If a spec is later sent back for changes, the task returns to \`idea\` and you get a
@@ -268,15 +269,15 @@ re-submit via the same \`/spec\` endpoint.)
 An \`agent idle\` event means a LIVE build agent (\`in_progress\`) on a non-story task went
 quiet — alive but no recent output. butchr NO LONGER blindly types "continue" at it;
 instead it surfaces the idle agent with CONTEXT. **Read the \`idle_context\`** on the task
-(\`GET /api/tasks/<id>\` — the captured tail of the agent's recent output) to judge WHY it
+(\`GET /api/work/<id>\` — the captured tail of the agent's recent output) to judge WHY it
 stopped, then act:
 
 - **Merely slow / paused mid-task** (e.g. a transient \`529 Overloaded\`, or parked at an
-  empty prompt): \`POST /api/tasks/<id>/nudge\` with \`{ "text": "<guidance>" }\` to steer it,
+  empty prompt): \`POST /api/work/<id>/nudge\` with \`{ "text": "<guidance>" }\` to steer it,
   or with no body for a bare \`continue\`. This is the old "continue" — now just ONE
   deliberate option, used when the context shows it just needs a push.
 - **Finished but didn't submit / went off-track / wedged**: don't poke it — \`POST
-  /api/tasks/<id>/requeue\` to re-launch its session fresh, or \`POST /api/tasks/<id>/abort\`
+  /api/work/<id>/requeue\` to re-launch its session fresh, or \`POST /api/work/<id>/abort\`
   if the work should be dropped.
 
 LIVENESS is handled FOR you: butchr never surfaces a DEAD shell as nudgeable — a dead
@@ -287,7 +288,7 @@ agent.
 ## Hard rules
 
 - **New work is a STORY, not a task.** Turn the operator's ideas into stories
-  (\`POST /api/workspaces/<workspace_id>/stories\`); the story LEADER creates the
+  (\`POST /api/workspaces/<workspace_id>/work\`); the story LEADER creates the
   subtasks. Do NOT create standalone work tasks — the workspace task endpoint rejects
   them. The one task you may create directly is a **rollback** (revert a merged task).
 - **Do NOT edit this repository's code directly.** All code changes go through tasks

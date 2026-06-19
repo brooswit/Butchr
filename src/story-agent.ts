@@ -22,7 +22,7 @@
 // writes a per-story channel MCP config (writeStoryChannelMcpConfig) that scopes the bridge
 // via BUTCHR_CHANNEL_STORY so the leader sees its members' feedback + failures (the routing
 // contract lives in src/channel.ts; subtask feedback is TERMINAL at the leader — to reach the
-// CTO the leader raises a STORY-LEVEL ask via POST /api/stories/:id/ask).
+// CTO the leader raises a STORY-LEVEL ask via POST /api/work/:id/ask).
 //
 // PHASE SCOPE / GUARD-RAILS (deliberately NOT wired this phase):
 //   - NO DECOMPOSITION / FEEDBACK ACTIONS. The leader's decompose-the-story and
@@ -181,7 +181,7 @@ keeps your full context across relaunches (it \`--resume\`s your session).
 Break this story down into the SUBTASKS needed to deliver it, and create each one as a
 subtask OF THIS STORY:
 
-- Create each subtask with **\`POST /api/stories/${story.id}/tasks\`** (or \`bin/butchr\`).
+- Create each subtask with **\`POST /api/work/${story.id}/work\`** (or \`bin/butchr\`).
   The body is the same as ordinary task creation (\`prompt\`, \`context\`, \`plan_preview\`,
   \`model\`, \`tags\`, \`priority\`, \`allowlist\`, \`version_bump\`, \`idea\`/\`template\`);
   butchr pins the new task to THIS story + dispatches it like any task.
@@ -199,25 +199,25 @@ Your first decomposition is rarely the last word. As the story's intent sharpens
 abort + recreate to fix one. Each acts on a single subtask by id (use \`reset\` below to redo
 the whole story at once):
 
-- **Refine** a subtask's prompt and/or context — **\`PATCH /api/tasks/:id\`** with
+- **Refine** a subtask's prompt and/or context — **\`PATCH /api/work/:id\`** with
   \`{"prompt":"…","context":["…"]}\`. Send either field or both; an omitted field is left
   unchanged. The edit takes effect on the subtask's NEXT run — a paused or running agent
   re-grounds on its next resume, a not-yet-started one renders the new definition on dispatch
   — so you can tighten scope without losing work. 409 if the subtask is terminal or
   mid-rollback; 400 if \`prompt\` is given but blank.
-- **Reorder** dependencies — **\`PUT /api/tasks/:id/blocked_by\`** (\`POST\` also accepted)
+- **Reorder** dependencies — **\`PUT /api/work/:id/blocked_by\`** (\`POST\` also accepted)
   with \`{"blocked_by":[taskId,…]}\` REPLACES the subtask's blocker set. Add a blocker to
   serialize work that raced; clear blockers to let a subtask run now. A subtask whose blockers
   are now all merged becomes ready; one newly blocked while live is torn down. 409 if
   terminal; 400 on a dependency cycle.
-- **Reprioritize** — **\`POST /api/tasks/:id/priority\`** with \`{"priority":N}\` (integer,
+- **Reprioritize** — **\`POST /api/work/:id/priority\`** with \`{"priority":N}\` (integer,
   higher = dispatched sooner, default 0) bumps an urgent subtask ahead of the queue.
-- **Drop** a subtask you no longer want — **\`POST /api/tasks/:id/abort\`** tears down its
+- **Drop** a subtask you no longer want — **\`POST /api/work/:id/abort\`** tears down its
   agent + worktree and lands it \`aborted\`; nothing merges. 409 if it is already merged/aborted.
-- **Restart** a stuck subtask — **\`POST /api/tasks/:id/requeue\`** clears its dispatch
+- **Restart** a stuck subtask — **\`POST /api/work/:id/requeue\`** clears its dispatch
   retry/idle state and re-queues it for a FRESH dispatch. 409 if it is terminal (to redo a
   terminal subtask, create a new one).
-- **Start the whole story over** — **\`POST /api/stories/${story.id}/reset\`** aborts ALL of
+- **Start the whole story over** — **\`POST /api/work/${story.id}/reset\`** aborts ALL of
   this story's IN-FLIGHT subtasks in one call so you can throw it away and re-decompose;
   already-terminal and mid-rollback members are left untouched and reported under \`skipped\`.
   The story stays \`open\`. Returns \`{ok, story, aborted, failed, skipped}\`.
@@ -225,12 +225,12 @@ the whole story at once):
 ## Your wider role
 
 Your subtasks' feedback is **TERMINAL at you** — there is no task-level escalation: a
-subtask's question/spec/diff/idle is yours to resolve, and \`POST /api/tasks/:id/escalate\`
+subtask's question/spec/diff/idle is yours to resolve, and \`POST /api/work/:id/escalate\`
 does NOT apply to a story member (it 409s). When a call is genuinely above your scope —
 architectural, a product/scope decision, your decomposition PLAN needing sign-off, or a
 blocker you can't settle — raise a **STORY-LEVEL ASK** to the CTO:
 
-- **\`POST /api/stories/${story.id}/ask\`** with \`{"question":"…"}\` opens an ask to the CTO
+- **\`POST /api/work/${story.id}/ask\`** with \`{"question":"…"}\` opens an ask to the CTO
   and notifies it. 409 if an ask is already open or the story is not \`open\`.
 - The CTO **\`/answer\`s** it (its reply comes back to you on your story channel as a \`story
   ask answered\` event), or **\`/escalate\`s** it one rung to the USER for a product call.
@@ -246,11 +246,11 @@ review\` event on your story channel. That is your cue to **verify the story's g
 actually met** (review what landed against THIS story's intent — don't just trust the
 merge count):
 
-- **Goal MET** → mark the story done: **\`PATCH /api/stories/${story.id}\`** with
+- **Goal MET** → mark the story done: **\`PATCH /api/work/${story.id}\`** with
   \`{"status":"done"}\`. This **tears YOU (the leader) down** and **reports \`story
   complete\` UP to the CTO**. You are finished — nothing more to do.
 - **Goal NOT met** (a gap, a missed case, follow-up work) → **create more subtasks**
-  (\`POST /api/stories/${story.id}/tasks\`, as above) to close the gap. Leave the story
+  (\`POST /api/work/${story.id}/work\`, as above) to close the gap. Leave the story
   \`open\`; when those merge you'll get another completion-review event and re-check.
 
 ## Hard rules
