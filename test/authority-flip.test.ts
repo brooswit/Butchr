@@ -84,8 +84,10 @@ test("assertWorkspaceTaskCreationAllowed: the 409 points the caller at story cre
   } catch (e) {
     msg = (e as Error).message;
   }
-  expect(msg).toContain("/api/workspaces/:id/stories");
-  expect(msg).toContain("/api/stories/:id/tasks");
+  // Post step-6e cutover the message points at the unified work surface (the legacy
+  // /api/workspaces/:id/stories + /api/stories/:id/tasks routes were deleted).
+  expect(msg).toContain("/api/workspaces/:id/work");
+  expect(msg).toContain("/api/work/:id/work");
 });
 
 // ---- (2) the paths that MUST still create tasks after the flip ----

@@ -1507,27 +1507,28 @@ export function validateIdea(idea: unknown): boolean {
 
 /**
  * THE OPERATOR STANDALONE-TASK-CREATION GATE (Phase 7 — AUTHORITY FLIP). The operator/CTO
- * may no longer create story-less work tasks directly: new work flows through STORIES
- * (POST /api/workspaces/:id/stories) and the tasks themselves are created EXCLUSIVELY by
- * story LEADERS (POST /api/stories/:id/tasks → createSubtask). The ONE task kind still
- * creatable straight from a workspace is a ROLLBACK — the 'Roll back' flow, which reverts a
- * merged task's commit through the normal pipeline (src/templates.ts). So the workspace task
- * route admits ONLY kind==='rollback' and rejects every ordinary/idea standalone create with
- * 409, pointing the caller at story creation.
+ * may no longer create story-less work tasks directly: new work flows through STORIES (nodes —
+ * POST /api/workspaces/:id/work {brief}) and the tasks themselves are created EXCLUSIVELY by
+ * story LEADERS (POST /api/work/:id/work → createSubtask). The ONE task kind still creatable
+ * straight from a workspace is a ROLLBACK — the 'Roll back' flow, which reverts a merged task's
+ * commit through the normal pipeline (src/templates.ts). So the workspace work route admits ONLY
+ * kind==='rollback' as a leaf and rejects every ordinary/idea standalone create with 409,
+ * pointing the caller at story (node) creation.
  *
- * This gates the HTTP ENTRY POINT only — it is called by the POST /api/workspaces/:id/tasks
- * route, NOT by createTask itself. In-process createTask/createSubtask (leader decomposition
- * + any internal/system task creation) are deliberately UNAFFECTED, since they never pass
- * through this gate. Pure + exported so the rule is unit-testable without the HTTP server
- * (mirrors csrfGuard). Throws HttpError(409) to reject; returns for an allowed (rollback) kind.
+ * This gates the HTTP ENTRY POINT only — it is called by createWorkspaceRollback on the unified
+ * POST /api/workspaces/:id/work route (after the step-6e cutover deleted the legacy
+ * /api/workspaces/:id/tasks route), NOT by createTask itself. In-process createTask/createSubtask
+ * (leader decomposition + any internal/system task creation) are deliberately UNAFFECTED, since
+ * they never pass through this gate. Pure + exported so the rule is unit-testable without the HTTP
+ * server (mirrors csrfGuard). Throws HttpError(409) to reject; returns for an allowed (rollback) kind.
  */
 export function assertWorkspaceTaskCreationAllowed(kind: TaskKind): void {
   if (kind === "rollback") return;
   throw new HttpError(
     409,
     "standalone task creation is disabled — the operator creates STORIES " +
-      "(POST /api/workspaces/:id/stories) and story leaders create the tasks " +
-      "(POST /api/stories/:id/tasks). Only the 'Roll back' flow may create a task directly here.",
+      "(POST /api/workspaces/:id/work) and story leaders create the tasks " +
+      "(POST /api/work/:id/work). Only the 'Roll back' flow may create a task directly here.",
   );
 }
 

@@ -342,7 +342,7 @@ function wireTermLink(container, taskId) {
 // re-enables on failure) — opening a terminal never navigates, so no render().
 async function openTaskTerminal(id, btn) {
   await action(btn, async () => {
-    const r = await api("POST", "/tasks/" + id + "/terminal");
+    const r = await api("POST", "/work/" + id + "/terminal");
     terminalToast(r);
   }, { onDone: () => { if (btn) btn.disabled = false; } });
 }
@@ -589,7 +589,7 @@ function stopLiveOutput() {
 
 // ---------- live activity pulse ----------
 // A read-only one-line "what is the agent doing right now" on each running task's
-// card/row, polled from GET /api/tasks/:id/activity (which reads only the tail of
+// card/row, polled from GET /api/work/:id/activity (which reads only the tail of
 // the session transcript). The workspace view re-renders wholesale on every SSE
 // event, which destroys+rebuilds the pulse nodes; this timer is module-scope and
 // re-discovers the live `.pulse[data-id]` nodes each tick, and `activityCache`
@@ -653,7 +653,7 @@ async function pollActivity() {
   await Promise.all(nodes.map(async (node) => {
     const id = node.getAttribute("data-id");
     try {
-      const a = await api("GET", "/tasks/" + id + "/activity");
+      const a = await api("GET", "/work/" + id + "/activity");
       activityCache.set(id, a);
       applyPulse(node, a);
       tickPulseElapsed(node);
@@ -850,16 +850,19 @@ async function ctoMiniBadge(dirId, slot) {
 async function renderWorkspace(id) {
   // Pull the workspace from the dashboard rollup (it carries the effective gate
   // command + override state the gate panel needs) alongside its task list.
-  const [dash, tasks, stories] = await Promise.all([
+  const [dash, work] = await Promise.all([
     api("GET", "/dashboard"),
-    // Carry the active full-text search so it survives SSE-driven re-renders; the
-    // server filters by `?q=` (see searchParam / buildFilterBar).
-    api("GET", "/workspaces/" + id + "/tasks" + searchParam()),
-    // The workspace's STORIES (enriched StoryViews: brief + status + per-status subtask
-    // counts + leader status) — the operator's primary work surface post-authority-flip.
-    // Best-effort: a failure leaves the section empty rather than blanking the page.
-    api("GET", "/workspaces/" + id + "/stories").catch(() => []),
+    // The UNIFIED work list for this workspace (leaf tasks + node stories), carrying the
+    // active full-text search so it survives SSE-driven re-renders (the server filters by
+    // `?q=` — see workListPath / buildFilterBar). Best-effort: a failure leaves both surfaces
+    // empty rather than blanking the page.
+    api("GET", workListPath(id)).catch(() => []),
   ]);
+  // Split the leaf|node union: leaves are the TASK list the table/board/graph render; nodes
+  // are the enriched StoryViews (brief + status + per-status subtask counts + leader status)
+  // the stories panel renders — the operator's primary work surface post-authority-flip.
+  const tasks = workLeaves(work);
+  const stories = workNodes(work);
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
 
@@ -870,7 +873,7 @@ async function renderWorkspace(id) {
 
   // create-work launcher (AUTHORITY FLIP, Phase 7) — the operator's entry point for new
   // work is now a STORY, not a standalone task. A single "New story" button opens the
-  // brief modal (POST /api/workspaces/:id/stories); a story leader then decomposes it into
+  // brief modal (POST /api/workspaces/:id/work); a story leader then decomposes it into
   // subtasks. Standalone task + idea creation are gone (the server rejects them) — the only
   // task creatable directly is a rollback, via the per-task "Roll back" button.
   const launch = el("div", { class: "row between", style: "margin-top:18px" });
@@ -882,8 +885,8 @@ async function renderWorkspace(id) {
   wrap.appendChild(launch);
 
   // STORIES panel — the operator's primary work surface: every story with its brief,
-  // status, member-subtask counts, and leader status (the Phase 6 GET /api/stories rollup).
-  // So the operator isn't blind to the stories they just created. Minimal by design.
+  // status, member-subtask counts, and leader status (the node members of the GET /api/work
+  // list). So the operator isn't blind to the stories they just created. Minimal by design.
   wrap.appendChild(renderStories(stories));
 
   // List / Graph view toggle. The toggle bar sits outside the body region so it
@@ -1017,10 +1020,10 @@ function openGateModal(dir) {
 // New-task / Add-idea modals are gone — the server now REJECTS standalone task creation
 // (only a rollback may be created directly, via the per-task "Roll back" button). Two
 // surfaces replace them: a minimal "New story" modal, and a read-only stories list/progress
-// panel built from the Phase 6 GET /api/stories rollup (brief + status + per-status subtask
-// counts + leader status), so the operator isn't blind to the stories they just created.
+// panel built from the node members of the GET /api/work list (brief + status + per-status
+// subtask counts + leader status), so the operator isn't blind to the stories they just created.
 
-// The brief modal: jot a one-line story brief and POST it to /api/workspaces/:id/stories.
+// The brief modal: jot a one-line story brief and POST it to /api/workspaces/:id/work.
 // butchr lands the story `open` and launches its leader (which creates + reviews the
 // subtasks); the new story surfaces via the SSE-driven re-render.
 function openNewStoryModal(workspaceId) {
@@ -1053,14 +1056,14 @@ function openNewStoryModal(workspaceId) {
     showErr("");
     // action(): disables the button, toasts on success/failure, re-enables on error. On
     // success close + re-render so the new story appears in the panel below.
-    action(submit, () => api("POST", "/workspaces/" + workspaceId + "/stories", { brief }),
+    action(submit, () => api("POST", "/workspaces/" + workspaceId + "/work", { brief }),
       { success: "story created", onDone: () => { close(); render(); } });
   });
 }
 
 // Read-only STORIES panel: a heading plus one row per story (newest-first, as the API
 // returns). Empty-state prompts the operator to create one. Minimal by design — it reuses
-// the GET /api/stories rollup already fetched in renderWorkspace; no per-story drill-in.
+// the node members of the GET /api/work list already fetched in renderWorkspace; no drill-in.
 function renderStories(stories) {
   const panel = el("div", { class: "stories", style: "margin-top:18px" });
   panel.appendChild(el("h2", {}, "Stories"));
@@ -1101,7 +1104,7 @@ function renderStoryRow(s) {
 
 // The open STORY-LEVEL ask on a story row (only when s.pending_ask is non-null — the caller
 // guards): the question text (HTML-escaped), who currently OWNS it (ask_responder), and a
-// freeform answer box that POSTs /api/stories/:id/answer. `cto` is MUTED ("awaiting the CTO" —
+// freeform answer box that POSTs /api/work/:id/answer. `cto` is MUTED ("awaiting the CTO" —
 // an agent handles it automatically, a human may still act); `user` is EMPHASIZED ("escalated
 // to you" — it needs a human), mirroring the task-level awaiting-who emphasis. action() owns the
 // disable/toast dance and re-renders on success (clearing the now-answered ask).
@@ -1128,7 +1131,7 @@ function storyAskPanel(s) {
     if (!answer) return toast("an answer is required", true);
     // POST the answer; action() disables the button, toasts, and re-renders on success
     // (the answered ask is cleared server-side, so the panel disappears on the re-render).
-    action(submit, () => api("POST", "/stories/" + s.id + "/answer", { answer }),
+    action(submit, () => api("POST", "/work/" + s.id + "/answer", { answer }),
       { success: "answer sent" });
   });
   return panel;
@@ -1222,6 +1225,23 @@ function searchParam() {
   return q ? "?q=" + encodeURIComponent(q) : "";
 }
 
+// The unified WORK-LIST URL for one workspace: GET /api/work scoped to this workspace
+// (?workspace=) carrying the active full-text search (&q=). The single replacement for the
+// split /workspaces/:id/tasks + /workspaces/:id/stories fetches — the response is the WorkView
+// leaf|node union, which callers split by `work_kind` (leaves → task list, nodes → stories).
+function workListPath(workspaceId) {
+  const q = taskSearch.trim();
+  return "/work?workspace=" + encodeURIComponent(workspaceId) + (q ? "&q=" + encodeURIComponent(q) : "");
+}
+// The LEAF (task) members of a /api/work list — the task list the renderers consume.
+function workLeaves(work) {
+  return (Array.isArray(work) ? work : []).filter((w) => w && w.work_kind === "leaf");
+}
+// The NODE (story) members of a /api/work list — the story rollup the stories panel consumes.
+function workNodes(work) {
+  return (Array.isArray(work) ? work : []).filter((w) => w && w.work_kind === "node");
+}
+
 function filterActive() {
   return taskSearch.trim() !== "" || statusFilter.size > 0 || tagFilter.size > 0;
 }
@@ -1272,7 +1292,9 @@ function buildFilterBar(dirId, tasks, results) {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
       try {
-        currentTasks = await api("GET", "/workspaces/" + dirId + "/tasks" + searchParam());
+        // Re-fetch the unified work list and keep only the LEAF (task) members — the results
+        // region renders tasks; the stories panel is not part of this debounced search repaint.
+        currentTasks = workLeaves(await api("GET", workListPath(dirId)));
       } catch (e) {
         toast(e.message, true);
         return;
@@ -1994,7 +2016,7 @@ function conformanceBadge(t) {
 // Compact vertical AUDIT TIMELINE of a task's status transitions (oldest → newest):
 // one row per change with the transition (from → to chips) and the short note that
 // explains why it moved, plus a relative timestamp (full ISO on hover). Driven by
-// GET /api/tasks/:id/events. Returns null when there are no recorded events.
+// GET /api/work/:id/events. Returns null when there are no recorded events.
 function renderTimeline(events) {
   if (!Array.isArray(events) || events.length === 0) return null;
   const panel = el("div", { class: "panel timeline-panel" });
@@ -2152,7 +2174,7 @@ function renderTranscriptPanel(id) {
     try {
       const offset = transcriptState.turns.length;
       const r = await api("GET",
-        `/tasks/${id}/transcript?offset=${offset}&limit=${TRANSCRIPT_PAGE}`);
+        `/work/${id}/transcript?offset=${offset}&limit=${TRANSCRIPT_PAGE}`);
       transcriptState.turns = transcriptState.turns.concat(r.turns || []);
       transcriptState.total = r.total || 0;
       transcriptState.loaded = true;
@@ -2266,7 +2288,7 @@ function rollupPanel(rollup) {
 }
 
 async function renderTask(id) {
-  const t = await api("GET", "/tasks/" + id);
+  const t = await api("GET", "/work/" + id);
   const dirs = await api("GET", "/workspaces");
   const dir = dirs.find((x) => x.id === t.workspace_id);
 
@@ -2330,12 +2352,12 @@ async function renderTask(id) {
   // task's blockers). Best-effort — a fetch failure or a
   // null chain just omits the line. The task's OWN estimate already rides on
   // t.estimate (shown in the meta grid above).
-  const estData = await api("GET", "/tasks/" + id + "/estimate").catch(() => null);
+  const estData = await api("GET", "/work/" + id + "/estimate").catch(() => null);
   const chainLine = estData ? fmtChain(estData.chain) : null;
 
   // audit timeline — the task's status-transition history (best-effort: a fetch
   // failure just omits the panel rather than breaking the detail view).
-  const events = await api("GET", "/tasks/" + id + "/events").catch(() => []);
+  const events = await api("GET", "/work/" + id + "/events").catch(() => []);
   const timeline = renderTimeline(events);
   if (timeline) wrap.appendChild(timeline);
 
@@ -2360,7 +2382,10 @@ async function renderTask(id) {
   // client-side from the workspace's task list (no extra API field); best-effort —
   // a fetch failure just omits the panel — and nothing renders for a task with no
   // dependents. Re-fetched on each render so it live-updates via the SSE re-render.
-  const siblings = await api("GET", "/workspaces/" + t.workspace_id + "/tasks").catch(() => null);
+  // The sibling LEAF tasks in this workspace (for the dependent-subtree rollup) — the leaf
+  // members of the unified work list. null (not []) on failure so the rollup is skipped.
+  const siblingWork = await api("GET", "/work?workspace=" + encodeURIComponent(t.workspace_id)).catch(() => null);
+  const siblings = siblingWork ? workLeaves(siblingWork) : null;
   const rollup = siblings ? dependentRollup(t.id, siblings) : null;
   if (rollup) wrap.appendChild(rollupPanel(rollup));
 
@@ -2407,7 +2432,7 @@ async function renderTask(id) {
 
     const poll = async () => {
       try {
-        const r = await api("GET", "/tasks/" + t.id + "/output");
+        const r = await api("GET", "/work/" + t.id + "/output");
         const text = (r.output || "").trimEnd();
         liveOutputCache = text;
         // Keep the view pinned to the newest output if already scrolled to bottom.
@@ -2482,7 +2507,7 @@ async function renderTask(id) {
   // wires its OWN buttons before it's appended, so a control's build + wire live in one
   // place instead of split across a panel block here and a getElementById block far below.
   const submitTo = (btn, path, body, successMsg) =>
-    action(btn, () => api("POST", "/tasks/" + id + path, body), {
+    action(btn, () => api("POST", "/work/" + id + path, body), {
       success: successMsg,
       onDone: () => backToWorkspace(t.workspace_id),
     });
@@ -2517,7 +2542,7 @@ async function renderTask(id) {
       banner.querySelector("#confirm-major").addEventListener("click", (ev) => {
         let merged = false;
         action(ev.target, async () => {
-          const r = await api("POST", "/tasks/" + id + "/confirm-major");
+          const r = await api("POST", "/work/" + id + "/confirm-major");
           if (r && r.conflictSentBack) {
             toast("Merge conflict — sent back to the agent to resolve");
             merged = true;
@@ -2543,7 +2568,7 @@ async function renderTask(id) {
     wrap.appendChild(el("h2", {}, "Diff vs main"));
     const diffBox = el("div", { class: "diffview" }, [el("div", { class: "meta" }, "loading diff…")]);
     wrap.appendChild(diffBox);
-    api("GET", "/tasks/" + id + "/diff")
+    api("GET", "/work/" + id + "/diff")
       .then((d) => { diffBox.innerHTML = renderDiff(d.diff); wireDiff(diffBox, id); })
       .catch((e) => { diffBox.innerHTML = `<div class="meta">diff error: ${esc(e.message)}</div>`; });
 
@@ -2577,7 +2602,7 @@ async function renderTask(id) {
       }
       let parked = false;
       action(ev.target, async () => {
-        const r = await api("POST", "/tasks/" + id + "/approve");
+        const r = await api("POST", "/work/" + id + "/approve");
         // A merge conflict isn't an error — it's sent back to the live agent to
         // resolve in-context. The SSE refresh will show the task back in in_progress.
         if (r && r.conflictSentBack) {
@@ -2609,7 +2634,7 @@ async function renderTask(id) {
 
   // idea — a brief AWAITING a spec. butchr runs NO agent for it: it pushes a `spec
   // requested` event on the channel and waits for the task's STRUCTURAL responder to submit
-  // a spec (POST /tasks/:id/spec), which advances it to spec_review. The responder
+  // a spec (POST /work/:id/spec), which advances it to spec_review. The responder
   // (story|cto|user) only frames this UI — the editor is ALWAYS available so a human can
   // submit, but for a cto/story task the responsible agent normally handles it.
   if (t.status === "idea") {
@@ -2662,7 +2687,7 @@ async function renderTask(id) {
     // is the common submit-and-leave path.
     controls.querySelector("#approve").addEventListener("click", (ev) => {
       action(ev.target, async () => {
-        await api("POST", "/tasks/" + id + "/approve");
+        await api("POST", "/work/" + id + "/approve");
         toast("spec approved ✓ — dispatching workspace agent");
       }, { onDone: () => backToWorkspace(t.workspace_id) });
     });
@@ -2755,12 +2780,12 @@ async function renderTask(id) {
       const text = (idlePanel.querySelector("#nudgeText").value || "").trim();
       // A bare nudge sends "continue"; with text it sends guidance. The backend re-checks
       // liveness and auto-resumes a dead pane instead of poking it.
-      action(ev.target, () => api("POST", "/tasks/" + id + "/nudge", text ? { text } : {}),
+      action(ev.target, () => api("POST", "/work/" + id + "/nudge", text ? { text } : {}),
         { success: text ? "guidance sent ✓" : "nudged — sent “continue” ✓" });
     });
     idlePanel.querySelector("#requeue").addEventListener("click", (ev) => {
       if (!confirm("Re-queue this idle agent? Its current run is torn down and re-launched (resuming its session) from scratch.")) return;
-      action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
+      action(ev.target, () => api("POST", "/work/" + id + "/requeue"), { success: "re-queued ✓" });
     });
     wrap.appendChild(idlePanel);
   }
@@ -2769,7 +2794,7 @@ async function renderTask(id) {
 
   if (t.status === "aborted" && (t.revert_reason || t.last_dispatch_error)) {
     document.getElementById("requeue").addEventListener("click", (ev) => {
-      action(ev.target, () => api("POST", "/tasks/" + id + "/requeue"), { success: "re-queued ✓" });
+      action(ev.target, () => api("POST", "/work/" + id + "/requeue"), { success: "re-queued ✓" });
     });
   }
 
@@ -2779,7 +2804,7 @@ async function renderTask(id) {
         ? "Abort this in-progress task? The agent is stopped and its worktree + branch are discarded without merging."
         : "Abort this task? Its worktree + branch are discarded without merging.";
       if (!confirm(msg)) return;
-      action(ev.target, () => api("POST", "/tasks/" + id + "/abort"), { success: "task aborted" });
+      action(ev.target, () => api("POST", "/work/" + id + "/abort"), { success: "task aborted" });
     });
   }
 
@@ -2791,11 +2816,13 @@ async function renderTask(id) {
         + "dependents, tests, docs, revert conflicts — then it flows through the "
         + "normal CI gate → review → merge pipeline like any task.",
       )) return;
-      // Create from the built-in `rollback` template via the normal create-task
-      // flow: the server renders {{task}}/{{sha}} into the prompt (server.ts). Jump
-      // to the new task so the operator can follow it through the pipeline.
+      // Create from the built-in `rollback` template via the unified work surface: a
+      // rollback is the one workspace-level LEAF still created directly (kind:'rollback'),
+      // and the server renders {{task}}/{{sha}} into the prompt (server.ts). Jump to the new
+      // task so the operator can follow it through the pipeline.
       action(ev.target, async () => {
-        const created = await api("POST", "/workspaces/" + t.workspace_id + "/tasks", {
+        const created = await api("POST", "/workspaces/" + t.workspace_id + "/work", {
+          kind: "rollback",
           template: "rollback",
           vars: { task: id, sha: t.merged_sha },
         });
