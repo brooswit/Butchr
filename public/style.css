@@ -461,6 +461,56 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .story-ask-panel .sa-answer { min-height: 64px; }
 
+/* ---------- unified WORK TREE ----------
+   One uniform card for every work item (node story + leaf task), rendered recursively. Status
+   colors come ONLY from the shared .chip.<status> system — no parallel palette here. Nodes
+   collapse by default; expanding reveals the full brief + open ask + indented child cards. */
+.work-tree-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.work-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.work-card.is-node { background: var(--panel-2); }
+.work-card-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px;
+}
+.work-card-row.clickable { cursor: pointer; }
+.work-card-row.clickable:hover { background: var(--panel); }
+.work-caret {
+  flex: 0 0 auto; width: 12px; text-align: center;
+  color: var(--muted); font-size: 11px; user-select: none;
+}
+.work-caret.empty { visibility: hidden; }
+/* The single-line truncated summary — the heart of the wall-of-text fix. */
+.work-summary {
+  flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 14px; font-weight: 600; color: var(--text);
+}
+a.work-summary { font-family: var(--mono); font-weight: 500; text-decoration: none; }
+a.work-summary:hover { text-decoration: underline; }
+.work-chips { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; }
+.work-rollup {
+  flex: 0 0 auto;
+  color: var(--muted); font-family: var(--mono); font-size: 11px;
+  white-space: nowrap;
+}
+.work-expanded { padding: 0 12px 12px; }
+.work-brief-full {
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 13px; line-height: 1.5; color: var(--text);
+  padding: 4px 0 10px; border-top: 1px solid var(--border);
+}
+/* Children indented one level with a left rule so the hierarchy reads at a glance. */
+.work-children {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-left: 14px; padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.work-no-children { padding: 2px 0; }
+
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
   font-size: 11px; color: var(--muted);
