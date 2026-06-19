@@ -101,10 +101,16 @@ function counts(workspaceId: string): Record<string, number> {
   return out;
 }
 
+// NOTE (st-540ba705 STEP 6c): the directory+config table is now physically `directory`
+// (renamed from `workspaces` — see db.migrateRenameWorkspacesToDirectory). This canonical
+// service reads AND writes `directory` DIRECTLY; `workspaces` survives only as a writable
+// back-compat VIEW for the running OLD server (db.migrateWorkspacesView). The exported
+// names/types keep the "workspace" wording — the concept is unchanged; only the table moved.
+
 /** Look up a registered workspace by its id, or null if none matches. */
 export function getWorkspace(id: string): WorkspaceRow | null {
   return (
-    db.query<WorkspaceRow, [string]>(`SELECT * FROM workspaces WHERE id=?`).get(id) ??
+    db.query<WorkspaceRow, [string]>(`SELECT * FROM directory WHERE id=?`).get(id) ??
     null
   );
 }
@@ -112,7 +118,7 @@ export function getWorkspace(id: string): WorkspaceRow | null {
 /** Look up a registered workspace by its absolute filesystem path, or null if none matches. */
 export function getWorkspaceByPath(path: string): WorkspaceRow | null {
   return (
-    db.query<WorkspaceRow, [string]>(`SELECT * FROM workspaces WHERE path=?`).get(path) ??
+    db.query<WorkspaceRow, [string]>(`SELECT * FROM directory WHERE path=?`).get(path) ??
     null
   );
 }
@@ -180,14 +186,14 @@ async function healHerdrWorkspace(
   }
   const ws = await harness.workspaceCreate(cwd, label);
   db.query(
-    `UPDATE workspaces SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
+    `UPDATE directory SET herdr_workspace=?, herdr_pane=? WHERE id=?`,
   ).run(ws.workspaceId ?? null, ws.rootPaneId ?? null, workspaceId);
   return { workspaceId: ws.workspaceId, created: true };
 }
 
 export function listWorkspaces(): WorkspaceView[] {
   const rows = db
-    .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
+    .query<WorkspaceRow, []>(`SELECT * FROM directory ORDER BY created_at ASC`)
     .all();
   return rows.map((d) => ({ ...d, counts: counts(d.id) }));
 }
@@ -345,7 +351,7 @@ function updateWorkspaceColumn(
   stored: string | number | null,
 ): WorkspaceView {
   if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
-  db.query(`UPDATE workspaces SET ${column}=? WHERE id=?`).run(stored, id);
+  db.query(`UPDATE directory SET ${column}=? WHERE id=?`).run(stored, id);
   const view: WorkspaceView = { ...getWorkspace(id)!, counts: counts(id) };
   publish({ type: "workspace.updated", workspace: view });
   return view;
@@ -507,7 +513,7 @@ function openStoryCount(workspaceId: string): number {
 
 export function dashboard(): Dashboard {
   const rows = db
-    .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
+    .query<WorkspaceRow, []>(`SELECT * FROM directory ORDER BY created_at ASC`)
     .all();
   const totals = {
     workspaces: rows.length,
@@ -605,7 +611,7 @@ export async function registerWorkspace(
   const id = generateWorkspaceId();
   const created = nowIso();
   db.query(
-    `INSERT INTO workspaces (id, path, label, herdr_workspace, herdr_pane, gate_cmd, version_file, changelog_path, created_at)
+    `INSERT INTO directory (id, path, label, herdr_workspace, herdr_pane, gate_cmd, version_file, changelog_path, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id, path, finalLabel, workspaceId, paneId,
@@ -663,7 +669,7 @@ export async function unregisterWorkspace(id: string): Promise<void> {
     // ignore cleanup failures
   }
 
-  db.query(`DELETE FROM workspaces WHERE id=?`).run(id); // cascades to tasks
+  db.query(`DELETE FROM directory WHERE id=?`).run(id); // cascades to tasks
   publish({ type: "workspace.deleted", id });
 }
 

@@ -40,6 +40,18 @@ function columnExists(database: Database, table: string, column: string): boolea
     .all()
     .some((c) => c.name === column);
 }
+// True iff a VIEW (type='view', distinct from a table) of this name exists. The
+// workspaces→directory cutover (migrateRenameWorkspacesToDirectory) uses this to tell the
+// step-1 `directory` VIEW apart from the real `directory` TABLE this step creates, so we
+// only ever `DROP VIEW` an actual view (a `DROP VIEW` on a table name throws even with
+// IF EXISTS), keeping the guarded rename a clean idempotent no-op once converged.
+function viewExists(database: Database, name: string): boolean {
+  return !!database
+    .query<{ name: string }, [string]>(
+      `SELECT name FROM sqlite_master WHERE type='view' AND name=?`,
+    )
+    .get(name);
+}
 // Pure (takes the connection) so it is unit-testable on a hand-built legacy DB
 // independent of the module-level singleton (see test/workspace-migration.test.ts).
 export function migrateDirectoriesToWorkspaces(database: Database): void {
@@ -226,10 +238,11 @@ function migrateStoryAgentTable(): void {
 // later step-6 cutover, SUPERSEDES the three parallel agent shapes (cto_agent /
 // story_agent / a task's live-agent columns).
 //
-// NAMING: the table is the SINGULAR `workspace`. Today's PLURAL `workspaces` table is
-// really a DIRECTORY + per-repo config and is renamed `directory` at the step-6 cutover
-// (see migrateDirectoryAlias, which introduces that name additively as a read-only view
-// now). The two names do not collide. Likewise the row type is `WorkspaceAgentRow` this
+// NAMING: the table is the SINGULAR `workspace`. The PLURAL `workspaces` table is really a
+// DIRECTORY + per-repo config and is renamed `directory` at the step-6c cutover (see
+// migrateRenameWorkspacesToDirectory; `workspaces` then survives as a writable back-compat
+// view, migrateWorkspacesView). The two names do not collide. Likewise the row type is
+// `WorkspaceAgentRow` this
 // step because `WorkspaceRow` is ALREADY the directory row and must not be renamed/broken
 // here; it becomes the canonical Workspace at the cutover.
 //
@@ -272,25 +285,97 @@ function migrateWorkspaceTable(): void {
   `);
 }
 
-// `directory` READ-ONLY ALIAS (story st-540ba705, step 1 — SCHEMA FOUNDATION, fully inert).
-// The future model frees the word "workspace" to mean the (agent + directory) execution
-// context (the `workspace` table above) and renames today's directory+config table
-// `workspaces` → `directory`. That PHYSICAL rename is the step-6 cutover (a guarded
-// in-place ALTER … RENAME, like migrateDirectoriesToWorkspaces — the sanctioned pre-1.0
-// exception in CONTRIBUTING §5); this step introduces the NAME `directory` ADDITIVELY,
-// WITHOUT renaming or breaking the live table, so later steps can refer to `directory`
-// while `workspaces` stays the sole authoritative table.
+// PHYSICAL RENAME `workspaces` → `directory` (story st-540ba705, STEP 6c — the cutover).
+// This INVERTS step 1's `directory`-VIEW-over-`workspaces`: the directory+config table
+// becomes the REAL `directory` table and `workspaces` becomes a (writable) back-compat VIEW
+// over it (migrateWorkspacesView, below). The CONTRIBUTING §5 sanctioned pre-1.0 in-place
+// conceptual rename — every row AND its opaque `dir-…` id VALUE is preserved (we never
+// rewrite id values), exactly like migrateDirectoriesToWorkspaces.
 //
-// We do it as a read-only SQLite VIEW that mirrors `workspaces` 1:1. DROP-then-CREATE on
-// every boot is non-destructive (a view holds NO data) and guarantees the alias always
-// reflects the CURRENT `workspaces` column set even after later `ensureColumn`s add more
-// (a `CREATE VIEW … SELECT *` snapshots columns at creation time, so a stale view would
-// otherwise miss newly-added columns). Runs LAST in the boot pass, after ensureForwardColumns
-// has added every `workspaces` column. The view is READ-ONLY — all writes still go to the
-// authoritative `workspaces` table; nothing writes through `directory`.
-function migrateDirectoryAlias(): void {
-  db.exec(`DROP VIEW IF EXISTS directory`);
-  db.exec(`CREATE VIEW directory AS SELECT * FROM workspaces`);
+// ORDER (load-bearing): runs AFTER the cto_agent/story_agent/`workspace` tables are created
+// (so the rename rewrites their child FK `REFERENCES workspaces(id)` → `directory(id)`) and
+// BEFORE ensureForwardColumns (so the additive column ALTERs target the real `directory`
+// table). SQLite with legacy_alter_table OFF (bun's default) auto-rewrites every child FK
+// reference in tasks/stories/cto_agent/`workspace` on the table rename — the same mechanism
+// migrateDirectoriesToWorkspaces relies on.
+//
+// BACKWARD-SAFE (the dev-runs-migrate-live-db hazard): a gate/build importing db.ts can run
+// this against the LIVE db WHILE the OLD server runs on old code. The OLD server both READS
+// and WRITES `workspaces`; the writable VIEW created by migrateWorkspacesView keeps both
+// working unchanged until the deliberate restart — no destructive DROP/RENAME the old server
+// depends on. The final hard removal of the `workspaces` view is a LATER post-restart release.
+//
+// IDEMPOTENT: guarded on `workspaces` still being a real TABLE and `directory` not yet a
+// table — once converged (`workspaces` is a view, `directory` is the table) the whole block
+// is skipped and never throws. The step-1 `directory` VIEW (if present) is dropped FIRST
+// (viewExists-guarded — never a `DROP VIEW` on the real table) so the name frees up for the
+// rename, and so SQLite doesn't rewrite that view into a self-referential `SELECT * FROM
+// directory` during the rename. Pure (takes the connection) so it is unit-testable on a
+// hand-built post-step-1 DB independent of the module singleton (test/work-cutover-6c.test.ts).
+export function migrateRenameWorkspacesToDirectory(database: Database): void {
+  if (tableExists(database, "workspaces") && !tableExists(database, "directory")) {
+    if (viewExists(database, "directory")) database.exec(`DROP VIEW directory`);
+    database.exec(`ALTER TABLE workspaces RENAME TO directory`);
+  }
+}
+
+// `workspaces` BACKWARD-COMPAT WRITABLE VIEW (story st-540ba705, STEP 6c). After the rename
+// above, `directory` is the authoritative table; this re-creates `workspaces` as a VIEW over
+// it so the running OLD server — and the test suite, which writes to `workspaces` throughout —
+// keep working byte-identically until the deliberate restart. REPLACES step 1's
+// migrateDirectoryAlias and stays LAST in the boot pass so the view mirrors the FULL column
+// set after ensureForwardColumns (a `CREATE VIEW … SELECT *` snapshots columns at creation
+// time). DROP-then-CREATE every boot is non-destructive (a view holds NO data) + idempotent
+// (byte-identical sqlite_master SQL each pass).
+//
+// WRITABLE via three INSTEAD OF triggers redirecting every write to `directory` (a plain
+// SQLite view is read-only). Faithful mapping:
+//   - INSERT: forwards NEW.* with COALESCE only on the two NOT NULL DEFAULT 0 columns
+//     (release_mode/branch_isolation), so an INSERT that OMITS them — the common test/old
+//     shape `(id, path, label, created_at)` — gets the table default instead of a NOT NULL
+//     violation. `INSERT OR IGNORE` so an explicit `INSERT OR IGNORE INTO workspaces` (the
+//     shared-singleton test idiom) stays tolerant rather than throwing on a PK re-insert.
+//   - UPDATE: writes NEW.* VERBATIM (NO COALESCE) — NEW already carries each unchanged
+//     column's existing value, and an UPDATE that explicitly sets a column to NULL MUST
+//     persist NULL (COALESCE would wrongly clobber it back to a default). WHERE id=OLD.id.
+//   - DELETE: `DELETE FROM directory WHERE id=OLD.id`, which cascades to tasks/stories/etc.
+//     via the FK rewritten by the rename — preserving the old `DELETE FROM workspaces` cascade.
+// Pure (takes the connection) for standalone testing, mirroring migrateRenameWorkspacesToDirectory.
+export function migrateWorkspacesView(database: Database): void {
+  // DROP the view (which also drops its INSTEAD OF triggers); the explicit trigger drops are
+  // a belt-and-suspenders no-op for the impossible trigger-without-view state.
+  database.exec(`DROP TRIGGER IF EXISTS workspaces_view_insert`);
+  database.exec(`DROP TRIGGER IF EXISTS workspaces_view_update`);
+  database.exec(`DROP TRIGGER IF EXISTS workspaces_view_delete`);
+  database.exec(`DROP VIEW IF EXISTS workspaces`);
+  database.exec(`CREATE VIEW workspaces AS SELECT * FROM directory`);
+  database.exec(`
+    CREATE TRIGGER workspaces_view_insert INSTEAD OF INSERT ON workspaces BEGIN
+      INSERT OR IGNORE INTO directory
+        (id, path, label, herdr_workspace, herdr_pane, gate_cmd, version_file,
+         changelog_path, cto_enabled, release_mode, branch_isolation, created_at)
+      VALUES
+        (NEW.id, NEW.path, NEW.label, NEW.herdr_workspace, NEW.herdr_pane, NEW.gate_cmd,
+         NEW.version_file, NEW.changelog_path, NEW.cto_enabled,
+         COALESCE(NEW.release_mode, 0), COALESCE(NEW.branch_isolation, 0), NEW.created_at);
+    END;
+  `);
+  database.exec(`
+    CREATE TRIGGER workspaces_view_update INSTEAD OF UPDATE ON workspaces BEGIN
+      UPDATE directory SET
+        id=NEW.id, path=NEW.path, label=NEW.label, herdr_workspace=NEW.herdr_workspace,
+        herdr_pane=NEW.herdr_pane, gate_cmd=NEW.gate_cmd, version_file=NEW.version_file,
+        changelog_path=NEW.changelog_path, cto_enabled=NEW.cto_enabled,
+        release_mode=NEW.release_mode, branch_isolation=NEW.branch_isolation,
+        created_at=NEW.created_at
+      WHERE id=OLD.id;
+    END;
+  `);
+  database.exec(`
+    CREATE TRIGGER workspaces_view_delete INSTEAD OF DELETE ON workspaces BEGIN
+      DELETE FROM directory WHERE id=OLD.id;
+    END;
+  `);
 }
 
 // Lightweight forward migrations: add columns introduced after the initial
@@ -316,6 +401,14 @@ function dropColumnIfExists(table: string, column: string): void {
 // status-fold migrations). Each ensureColumn is independently idempotent.
 function ensureForwardColumns(): void {
 
+// NOTE (st-540ba705 STEP 6c): the directory+config table is now physically `directory`
+// (renamed from `workspaces` by migrateRenameWorkspacesToDirectory, which runs immediately
+// before this step). These additive column ALTERs therefore target `directory` — the real
+// table — NOT the `workspaces` back-compat VIEW (an `ALTER TABLE` on a view throws). The
+// view (migrateWorkspacesView) runs LAST and `SELECT *`s these columns through for the old
+// server. The column comments still say "PER-WORKSPACE" — the CONCEPT is unchanged; only the
+// physical table name moved.
+
 // PER-WORKSPACE BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
 // worktree) and the post-merge verify gate (repo root) both need a build/test
 // command to run. butchr manages OTHER projects with no universal build command, so
@@ -326,7 +419,7 @@ function ensureForwardColumns(): void {
 // the empty string, which DISABLES the gate for that workspace) is used verbatim.
 // Resolved by workspaces.workspaceGateCmd and run via `bash -lc` in the relevant
 // cwd. Settable at register time and updatable via PATCH /api/workspaces/:id.
-ensureColumn("workspaces", "gate_cmd", "TEXT");
+ensureColumn("directory", "gate_cmd", "TEXT");
 
 // PER-WORKSPACE OPTIONAL VERSION FILE. butchr no longer ASSUMES every repo carries a
 // version file — auto-patch-bumping at merge is opt-in. This column is the relative
@@ -337,7 +430,7 @@ ensureColumn("workspaces", "gate_cmd", "TEXT");
 // bump for that workspace) is used verbatim. Resolved by workspaces.workspaceVersionFile;
 // applied at merge by git.bumpVersionFile (a no-op when the file is absent / has no
 // semver version field). Settable at register time + via PATCH /api/workspaces/:id.
-ensureColumn("workspaces", "version_file", "TEXT");
+ensureColumn("directory", "version_file", "TEXT");
 
 // PER-WORKSPACE OPTIONAL CHANGELOG-GATE PATH. butchr no longer WRITES the changelog at
 // merge — the task/agent owns its entry and the CI gate VERIFIES one was added. This
@@ -348,7 +441,7 @@ ensureColumn("workspaces", "version_file", "TEXT");
 // the gate for that workspace) is used verbatim. Resolved by
 // workspaces.workspaceChangelogPath; enforced in tasks.triggerCi via
 // changelog.checkChangelogUpdated. Settable at register time + via PATCH /api/workspaces/:id.
-ensureColumn("workspaces", "changelog_path", "TEXT");
+ensureColumn("directory", "changelog_path", "TEXT");
 
 // PER-WORKSPACE CTO-AGENT ENABLE. The managed CTO agent is now ONE PER WORKSPACE (it
 // runs in the repo root and IS that project's principal/dev agent — see the cto_agent
@@ -359,7 +452,7 @@ ensureColumn("workspaces", "changelog_path", "TEXT");
 // by cto-agent.isCtoEnabled; settable via PATCH /api/workspaces/:id. (The on-demand
 // /api/workspaces/:id/cto/* endpoints still work regardless, so an operator can start
 // one even when boot-auto-start is off.)
-ensureColumn("workspaces", "cto_enabled", "INTEGER");
+ensureColumn("directory", "cto_enabled", "INTEGER");
 
 // PER-WORKSPACE VERSIONED-RELEASES MODE. When 1, butchr treats this workspace as a
 // versioned-release repo: EVERY merged change bumps the version file by the task's
@@ -370,7 +463,7 @@ ensureColumn("workspaces", "cto_enabled", "INTEGER");
 // drops the docs-only bump-skip. Default 0 (off — today's opt-in patch-bump behavior).
 // Resolved by workspaces.workspaceReleaseMode; everything keys off THIS column (no
 // hardcoded workspace id). Settable via PATCH /api/workspaces/:id.
-ensureColumn("workspaces", "release_mode", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("directory", "release_mode", "INTEGER NOT NULL DEFAULT 0");
 
 // PER-WORKSPACE 3-LEVEL BRANCH-ISOLATION GUARD (the stories merge model — CONTRIBUTING
 // §11). When 1, stories OPENED AFTER the flag is set are ISOLATED: each gets its own
@@ -383,7 +476,7 @@ ensureColumn("workspaces", "release_mode", "INTEGER NOT NULL DEFAULT 0");
 // CAPTURED `isolated` bit (see stories.isolated), NOT this live flag, so flipping it NEVER
 // retroactively changes an already-open story (§11.8). Settable via PATCH /api/workspaces/:id
 // (workspaces.setWorkspaceBranchIsolation).
-ensureColumn("workspaces", "branch_isolation", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("directory", "branch_isolation", "INTEGER NOT NULL DEFAULT 0");
 
 // PER-STORY ISOLATION BIT (the bootstrapping cut — CONTRIBUTING §11.8). Captured ONCE at
 // createStory time from the workspace `branch_isolation` flag: 1 = this story is isolated
@@ -763,11 +856,12 @@ ensureColumn("stories", "ask_responder", "TEXT");
 // RESPONDER-REDESIGN ACTIVATION (story st-def561dd, design §2/§6, Q-D). The V1 responder
 // model is gone, so its two columns are retired: `tasks.responder_tier` (the 3-rung
 // escalation walk, replaced by the structural pending_responder + escalated_to_user) and
-// `workspaces.step_responders` (the per-step responder config, replaced by structural
-// routing). PRAGMA-guarded so a fresh DB (never created them) and an existing DB (drops
-// them once) both succeed. Pre-1.0: no back-compat, the columns are physically dropped.
+// `directory.step_responders` (the per-step responder config — on today's `directory`
+// table, renamed from `workspaces` in step 6c above — replaced by structural routing).
+// PRAGMA-guarded so a fresh DB (never created them) and an existing DB (drops them once)
+// both succeed. Pre-1.0: no back-compat, the columns are physically dropped.
 dropColumnIfExists("tasks", "responder_tier");
-dropColumnIfExists("workspaces", "step_responders");
+dropColumnIfExists("directory", "step_responders");
 
 // HONEST AGENT-OWNERSHIP MARKER (story st-a77b050f — AGENT IDENTITY = NAME ONLY). 1 ⇔
 // butchr launched an agent for this `in_progress` task and hasn't torn it down. It is the
@@ -1047,8 +1141,15 @@ export function migrateWorkspaceAgentRows(): void {
 //   3c. unified `workspace` table         (CREATE IF NOT EXISTS — after the baseline so its
 //                                         `workspaces`/`tasks` FK targets exist; brand-new,
 //                                         no legacy shape to drop; inert — nothing reads it)
-//   4. additive forward columns         (ensureColumn ×N + retired-column drops — must
-//                                        precede the folds; this is also where the
+//   3d. rename workspaces→directory       (st-540ba705 step 6c — guarded ALTER … RENAME, the
+//                                         INVERSE of step 1's directory-VIEW-over-workspaces.
+//                                         MUST run AFTER the cto_agent/story_agent/`workspace`
+//                                         tables (so the rename rewrites their child FKs →
+//                                         directory) and BEFORE step 4 (so the additive ALTERs
+//                                         target the real `directory` table). The matching
+//                                         `workspaces` writable VIEW is step 8.)
+//   4. additive forward columns         (ensureColumn ×N on `directory` + retired-column drops —
+//                                        must precede the folds; this is also where the
 //                                        has_agent seed-then-drop name-only cutover runs,
 //                                        so readyRunningSplit can key purely on has_agent)
 //   5. fold out the retracted `stage` axis
@@ -1064,10 +1165,12 @@ export function migrateWorkspaceAgentRows(): void {
 //                                         AFTER 7b so a leader's work_id → the materialized story
 //                                         Work node is FK-safe; backward-safe (legacy tables left
 //                                         intact) + insert-once idempotent.
-//   8. `directory` read-only view alias  (DROP+CREATE VIEW — runs LAST so it mirrors the
-//                                         FULL `workspaces` column set after step 4; inert)
-// Every step is independently idempotent (presence-guarded ALTER/UPDATE, IF NOT EXISTS, or
-// DROP-then-CREATE of a data-less view), so the whole pass is a no-op once converged and
+//   8. `workspaces` writable view        (st-540ba705 step 6c — DROP+CREATE VIEW over `directory`
+//                                         + INSTEAD OF write triggers — runs LAST so the view
+//                                         mirrors the FULL `directory` column set after step 4;
+//                                         the back-compat surface for the running OLD server.)
+// Every step is independently idempotent (presence-guarded ALTER/UPDATE/RENAME, IF NOT EXISTS,
+// or DROP-then-CREATE of a data-less view), so the whole pass is a no-op once converged and
 // safe to re-run on every boot.
 const MIGRATIONS: Array<() => void> = [
   () => migrateDirectoriesToWorkspaces(db),
@@ -1075,13 +1178,14 @@ const MIGRATIONS: Array<() => void> = [
   migrateCtoAgentPerWorkspace,
   migrateStoryAgentTable,
   migrateWorkspaceTable,
+  () => migrateRenameWorkspacesToDirectory(db),
   ensureForwardColumns,
   migrateStageAxisToStatus,
   migrateStatusModel,
   migrateReadyRunningSplit,
   migrateUnifyStoryParent,
   migrateWorkspaceAgentRows,
-  migrateDirectoryAlias,
+  () => migrateWorkspacesView(db),
 ];
 
 /**
@@ -1781,19 +1885,18 @@ export type WorkspaceAgentRow = {
   updated_at: string | null;
 };
 
-// ---- `directory` READ-ONLY ALIAS of `workspaces` --------------------------
-// `directory` is a read-only VIEW mirroring the `workspaces` table 1:1 (see
-// migrateDirectoryAlias) — the additive introduction of the future name for today's
-// directory+config table, BEFORE the physical rename (step-6 cutover). A `DirectoryRow` is
-// therefore exactly a `WorkspaceRow`; this alias lets later steps refer to `directory`
-// while `workspaces` stays the sole authoritative table.
+// ---- `directory` — the directory+config table -----------------------------
+// As of st-540ba705 STEP 6c, `directory` is the AUTHORITATIVE table (physically renamed
+// from `workspaces` by migrateRenameWorkspacesToDirectory); `workspaces` is now a writable
+// back-compat VIEW over it (migrateWorkspacesView) for the running OLD server. A
+// `DirectoryRow` is structurally identical to a `WorkspaceRow` (the rename preserved every
+// column), so the two row types remain aliases.
 export type DirectoryRow = WorkspaceRow;
 
 /**
- * Every directory, read through the `directory` view (== the `workspaces` table). A
- * thin read-only accessor proving later code can address the directory concept by its
- * future name without touching the live `workspaces` paths. Reads only — all writes still
- * go to `workspaces`.
+ * Every directory, read from the canonical `directory` table. New code addresses the
+ * directory concept by this name; the legacy `workspaces` view exists only so the old
+ * server keeps working until the deliberate restart.
  */
 export function listDirectories(): DirectoryRow[] {
   return db.query<DirectoryRow, []>(`SELECT * FROM directory ORDER BY created_at ASC`).all();

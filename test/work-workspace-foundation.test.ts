@@ -5,14 +5,15 @@
 //      link can be written while story_id is ALSO set (coexistence), with the self-FK
 //      enforced (a bogus parent_id is rejected).
 //   2. the new singular `workspace` table exists with the full expected column set.
-//   3. the `directory` read-only VIEW exists and mirrors the `workspaces` table 1:1
-//      (same rows), and the listDirectories() accessor reads through it.
+//   3. POST-6c shape — the st-540ba705 step-6c cutover INVERTED the step-1 alias: `directory`
+//      is now the authoritative TABLE and `workspaces` is the writable back-compat VIEW over
+//      it (same rows), and the listDirectories() accessor reads the `directory` table.
 //   4. UNAFFECTED — the legacy DB still converges exactly as before (the existing
 //      directories→workspaces rename, cto-singleton fold, status folds), existing
 //      task/story/workspace SELECTs still run and return the same rows.
 //   5. IDEMPOTENCE — re-running the full boot pass twice more is a clean no-op (schema +
-//      rows byte-identical), since it runs on the live DB every boot (the directory view
-//      is DROP+CREATEd each boot and the workspace table is CREATE-IF-NOT-EXISTS).
+//      rows byte-identical), since it runs on the live DB every boot (the rename is guarded,
+//      the workspaces view is DROP+CREATEd each boot, the workspace table is CREATE-IF-NOT-EXISTS).
 //
 // Mirrors test/db-migrations.test.ts: db.ts is a module-level singleton whose boot pass
 // runs at import time, so we exercise the REAL boot path in an ISOLATED SUBPROCESS bound
@@ -70,7 +71,10 @@ const snapB = snap();
 const taskCols = m.db.query("PRAGMA table_info(tasks)").all().map((c) => c.name);
 const workspaceTableExists = m.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='workspace'").all().length > 0;
 const workspaceCols = m.db.query("PRAGMA table_info(workspace)").all().map((c) => c.name);
-const directoryViewExists = m.db.query("SELECT name FROM sqlite_master WHERE type='view' AND name='directory'").all().length > 0;
+// st-540ba705 step 6c INVERTED the step-1 alias: directory is now the real TABLE and
+// workspaces is the back-compat VIEW over it. Capture both object types to assert that.
+const directoryType = m.db.query("SELECT type FROM sqlite_master WHERE name='directory'").get()?.type;
+const workspacesType = m.db.query("SELECT type FROM sqlite_master WHERE name='workspaces'").get()?.type;
 const directoryIds = m.db.query("SELECT id FROM directory ORDER BY id").all().map((r) => r.id);
 const workspacesIds = m.db.query("SELECT id FROM workspaces ORDER BY id").all().map((r) => r.id);
 const listDirectoriesIds = m.listDirectories().map((r) => r.id);
@@ -100,7 +104,7 @@ try {
 
 console.log("RESULT:" + JSON.stringify({
   snapA, snapB, taskCols, workspaceTableExists, workspaceCols,
-  directoryViewExists, directoryIds, workspacesIds, listDirectoriesIds,
+  directoryType, workspacesType, directoryIds, workspacesIds, listDirectoriesIds,
   existingQueriesOk, write,
 }));
 `;
@@ -158,14 +162,18 @@ describe("step 1 — the new `workspace` table", () => {
   });
 });
 
-describe("step 1 — the `directory` read-only view alias", () => {
-  test("the view exists and mirrors the workspaces table 1:1", () => {
-    expect(out.directoryViewExists).toBe(true);
+// st-540ba705 step 6c INVERTED the step-1 alias: `directory` is the authoritative TABLE and
+// `workspaces` is the writable back-compat VIEW over it (see test/work-cutover-6c.test.ts for
+// the focused proof). This guards that the converged live shape reflects the cutover.
+describe("step 6c — `directory` is the table and `workspaces` is the view", () => {
+  test("directory is a TABLE, workspaces is a VIEW, and both expose the same rows", () => {
+    expect(out.directoryType).toBe("table");
+    expect(out.workspacesType).toBe("view");
     expect(out.directoryIds).toEqual(out.workspacesIds);
     expect(out.directoryIds).toEqual(["dir-1"]);
   });
 
-  test("listDirectories() reads through the view", () => {
+  test("listDirectories() reads the canonical `directory` table", () => {
     expect(out.listDirectoriesIds).toEqual(["dir-1"]);
   });
 });
