@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.147] - 2026-06-20
+
 - **Auto-merge dedup race (F2): `maybeAutoMerge` now claims its `autoMerging` guard SYNCHRONOUSLY, before any `await`, closing a TOCTOU that let two `finalizeMerge` runs fire for one task.** The guard was READ (`if (autoMerging.has(id)) return false`) at the top but only SET (`autoMerging.add(id)`) *after* the pre-merge `await git.headSha` / `await git.diffStat` checks — so the two callers that both invoke it (the CI-settle hook `triggerCi` and the dispatcher-tick backstop) could each pass `has()` during the other's awaits and both reach `finalizeMerge`. The guarded landing write still prevented a double-LAND, but the loser ran spurious git ops in the main worktree against the now-merged/deleted branch (wasted work under the merge lock + log noise). Fix: `add(id)` immediately after the `has()` check, with the entire body wrapped in `try { … } finally { autoMerging.delete(id) }` so every early-return / throw path releases the claim; existing behavior and return values are unchanged. Only reachable with auto-merge enabled (defaults off). Regression test (`test/auto-merge.test.ts`): two concurrent `maybeAutoMerge` calls for one task perform exactly one `git.merge` (a gated post-merge verify holds the winner's merge lock while the loser is in flight). No `package.json`/version edit.
 
 ## [0.9.146] - 2026-06-20
