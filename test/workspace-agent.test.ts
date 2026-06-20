@@ -33,6 +33,19 @@ let originalRunner: AgentRunner;
 /** Let fire-and-forget teardowns (updateStory's `void teardownLeaderWorkspaceForWork`) settle. */
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
+/**
+ * BOUNDED poll until `pred()` is true (NOT a fixed sleep — no unbounded waits, no flakes).
+ * Used to await the DETACHED, fire-and-forget startup auto-confirm (adoptOrLaunch no longer
+ * awaits it) before asserting on its observable effects (sends issued / reads consumed).
+ */
+async function waitFor(pred: () => boolean, timeoutMs = 1000, stepMs = 1): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error("waitFor: predicate not met within timeout");
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+}
+
 const DIR = "dir-wstest1";
 
 /** Insert a directory (today's `workspaces`) row so workspace.directory_id FK resolves. */
@@ -460,6 +473,11 @@ describe("leader teardown on node-Work completion (unified)", () => {
 
       expect(calls.launch.length).toBe(0); // adopted, NOT relaunched
       expect(status.running).toBe(true);
+      // The auto-confirm is now DETACHED (fire-and-forget) so adopt returns without awaiting
+      // the poll — wait (bounded) for the probe to issue its single keystroke, then confirm it
+      // stays exactly one (the de-bounce holds across its remaining quiet reads).
+      await waitFor(() => sends.length >= 1);
+      await flush();
       // Exactly ONE confirming keystroke (the consent's option 1), then nothing more once quiet.
       expect(sends.length).toBe(1);
       expect(sends[0].input).toEqual({ text: "1", enter: true });
@@ -472,7 +490,8 @@ describe("leader teardown on node-Work completion (unified)", () => {
   test("adopt while already QUIET/working → NO keystroke is ever sent (a working leader is never disturbed)", async () => {
     const { runner, launcher, calls, live } = makeFake();
     const sends: Array<{ name: string; input: unknown }> = [];
-    runner.agentRead = async () => ""; // already past startup — quiet/working pane
+    let reads = 0;
+    runner.agentRead = async () => { reads++; return ""; }; // already past startup — quiet/working pane
     runner.send = async (name, input) => { sends.push({ name, input }); };
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
@@ -495,10 +514,61 @@ describe("leader teardown on node-Work completion (unified)", () => {
 
       expect(calls.launch.length).toBe(0); // adopted
       expect(status.running).toBe(true);
+      // The probe is DETACHED — bounded-wait for it to actually run its quiet reads to the
+      // de-bounce exit, THEN assert it never sent a keystroke into a working leader.
+      await waitFor(() => reads >= cfgMod.config.ctoPromptQuietPolls);
+      await flush();
       expect(sends.length).toBe(0); // the quiet-poll de-bounce gate held — nothing sent
     } finally {
       cfgMod.config.ctoPromptMaxPolls = savedMax;
       cfgMod.config.ctoPromptQuietPolls = savedQuiet;
+    }
+  });
+
+  // ---- HOTFIX Bug 1, acceptance (a): the boot/reconcile critical path MUST NOT block on the
+  // per-workspace startup poll. Root cause of the 0.9.136 crash-loop: adoptOrLaunch AWAITED
+  // autoConfirmWorkspaceStartup, so an operator pane that never goes quiet burned the full
+  // maxPolls×pollMs budget and gated the port bind. The confirm is now fire-and-forget — this
+  // test pins that with a NEVER-resolving read: if adopt still awaited the probe it would
+  // deadlock on the gated read and this test would TIME OUT.
+  test("adopt RETURNS PROMPTLY without awaiting the startup poll (never-quiet pane cannot block reconcile)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    // The startup read BLOCKS forever (a pane that never classifies as quiet) until the test
+    // releases it in `finally`, so the detached probe can finish and not leak.
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((r) => { releaseRead = r; });
+    let readEntered = false;
+    let readReturned = false;
+    runner.agentRead = async () => {
+      readEntered = true;
+      await readGate; // block — the per-pane poll can never complete on its own
+      readReturned = true;
+      return ""; // quiet once released, so the detached probe exits cleanly (no leak)
+    };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    // Give the poll a real (large) budget — the point is that adopt does NOT wait on it.
+    const savedMax = cfgMod.config.ctoPromptMaxPolls;
+    cfgMod.config.ctoPromptMaxPolls = 1000;
+    try {
+      dbMod.saveWorkspaceAgentRow("w-detach", { kind: "cto", directory_id: DIR, session_id: "sess-detach" });
+      live.add(wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("w-detach")!)); // live → adopt branch
+
+      // Had adoptOrLaunch awaited the probe, this would never resolve (the read is gated open).
+      const status = await wa.startWorkspaceAgent("w-detach");
+
+      expect(calls.launch.length).toBe(0); // adopted, NOT relaunched
+      expect(status.running).toBe(true);
+      // The detached probe was kicked but is STILL PENDING on the gated read — the not-yet-
+      // resolved seam proving the critical path returned without awaiting the poll.
+      expect(readEntered).toBe(true);
+      expect(readReturned).toBe(false);
+    } finally {
+      releaseRead(); // unblock the detached probe so it finishes (no dangling promise)
+      await waitFor(() => readReturned).catch(() => {});
+      await flush();
+      cfgMod.config.ctoPromptMaxPolls = savedMax;
     }
   });
 });

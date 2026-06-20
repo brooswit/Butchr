@@ -308,7 +308,10 @@ const defaultLauncher: WorkspaceLauncher = {
         `(${isResume ? `--resume ${sessionId}` : `fresh session ${sessionId}`}, pane ${paneId})`,
     );
 
-    await autoConfirmWorkspaceStartup(name);
+    // FIRE-AND-FORGET (see the adopt branch in adoptOrLaunch): never await the per-pane
+    // startup poll on the boot/reconcile critical path, so a slow/never-quiet pane can
+    // never delay the launch caller (and thus the port bind). Best-effort + double-swallow.
+    void autoConfirmWorkspaceStartup(name).catch(() => {});
   },
   async teardown(name) {
     await harness.teardownTask(name).catch(() => {});
@@ -365,7 +368,13 @@ async function adoptOrLaunch(row: WorkspaceAgentRow, fresh: boolean): Promise<"a
       // explicit). Best-effort: it can NEVER fail an adopt, and is a strict no-op (sends
       // nothing) once the agent is past startup, so a working leader is never disturbed.
       if (row.kind === "cto" || row.kind === "leader") {
-        await autoConfirmWorkspaceStartup(name).catch(() => {});
+        // FIRE-AND-FORGET: never await the per-pane startup poll on the boot/reconcile
+        // critical path. A pane that misclassifies as non-quiet would otherwise burn the
+        // full maxPolls×pollMs budget here and gate the port bind (the 0.9.136 crash-loop).
+        // The probe still runs + still confirms a real dev-channels dialog — it just no
+        // longer blocks adoptOrLaunch. The inner .catch (and autoConfirmWorkspaceStartup's
+        // own swallow) guarantees a detached rejection can never crash the process.
+        void autoConfirmWorkspaceStartup(name).catch(() => {});
       }
       return "adopted";
     }

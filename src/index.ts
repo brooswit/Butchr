@@ -130,6 +130,19 @@ async function main(): Promise<void> {
   // auto-deleted. Best-effort per repo — a heal failure never blocks boot.
   await hardenManagedRepos();
 
+  // BIND THE HTTP SERVER EARLY — BEFORE any operator-agent (CTO/leader) reconcile below.
+  // Bun.serve binds the port synchronously, and the health/liveness endpoints come up with
+  // it. The operator-agent boot reconcile (reconcileWorkspaceAgents, or the legacy
+  // reconcileCtoAgents/reconcileStoryAgents) can adopt panes that are still parked at a
+  // startup prompt; its per-pane auto-confirm is now fire-and-forget (src/workspace-agent.ts)
+  // so it can no longer block, but we ALSO bind first so agent supervision can NEVER gate the
+  // port bind under the systemd start timeout (the 0.9.136 crash-loop root cause). All
+  // prerequisites already ran above: initFileLogging() (top of main), the db (initialized at
+  // import, already used by reconcileRunningTasks), and every housekeeping/recovery step
+  // (prune, reconcile, rollback, gate-recovery, reap, harden). Only the agent
+  // reconcile/supervisor + dispatcher run AFTER the bind.
+  startServer();
+
   // MANAGED OPERATOR AGENTS (CTO + story leaders). At the step-6b cutover these two
   // parallel supervisors are GENERALIZED into ONE unified-workspace supervisor
   // (src/workspace-agent.ts) over the `workspace` table — gated by
@@ -171,7 +184,6 @@ async function main(): Promise<void> {
   }
 
   startDispatcher();
-  startServer();
   // Periodic, SQLite-safe snapshots of the source-of-truth db (see src/backup.ts)
   // so a crash/power loss mid-write can be rolled back to the last good copy.
   startBackupLoop();
