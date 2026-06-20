@@ -25,6 +25,7 @@ let harnessMod: typeof import("../src/harness.ts");
 let livenessMod: typeof import("../src/liveness.ts");
 let wa: typeof import("../src/workspace-agent.ts");
 let storiesMod: typeof import("../src/stories.ts");
+let dirsMod: typeof import("../src/workspaces.ts");
 let originalRunner: AgentRunner;
 
 /** Let fire-and-forget teardowns (updateStory's `void teardownLeaderWorkspaceForWork`) settle. */
@@ -64,6 +65,7 @@ beforeAll(async () => {
   livenessMod = await import("../src/liveness.ts");
   wa = await import("../src/workspace-agent.ts");
   storiesMod = await import("../src/stories.ts");
+  dirsMod = await import("../src/workspaces.ts");
   originalRunner = harnessMod.getRunner();
 
   // Deterministic supervision knobs (the unified loop reuses the CTO knobs).
@@ -482,6 +484,90 @@ describe("leader teardown on node-Work completion (unified)", () => {
       cfgMod.config.ctoPromptMaxPolls = savedMax;
       cfgMod.config.ctoPromptQuietPolls = savedQuiet;
     }
+  });
+});
+
+// unregisterWorkspace must close the teardown-vs-relaunch RACE on the UNIFIED `workspace`
+// rows (story st-93384200 Bug 2): it marks the directory's cto/leader rows desired=0 as the
+// VERY FIRST teardown action — before the legacy stops close any pane BY NAME — so no
+// supervise tick can relaunch a just-closed pane during the legacy-close -> DELETE window.
+// The rows themselves still cascade away on the DELETE (FK ON DELETE CASCADE).
+describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
+  test("a supervise tick during teardown does NOT relaunch the cto/leader rows", async () => {
+    const UDIR = "dir-unreg-race";
+    const ctoId = `ws-cto-${UDIR}`;
+    const leaderId = "ws-leader-st-unreg-race";
+    insertDir(UDIR);
+
+    const { runner, launcher, calls, live } = makeFake();
+    // Materialize live (desired=1, has_agent=1, registered) unified cto + leader rows.
+    dbMod.saveWorkspaceAgentRow(ctoId, {
+      kind: "cto", directory_id: UDIR, desired: 1, has_agent: 1, session_id: "sess-cto",
+    });
+    dbMod.saveWorkspaceAgentRow(leaderId, {
+      kind: "leader", directory_id: UDIR, desired: 1, has_agent: 1, session_id: "sess-leader",
+    });
+    const ctoName = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(ctoId)!);
+    const leaderName = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(leaderId)!);
+    live.add(ctoName);
+    live.add(leaderName);
+
+    // A tick firing DURING the unified stop (launcher.teardown is invoked by
+    // stopWorkspaceAgent) — desired=0 is already written synchronously, so no relaunch.
+    const origTeardown = launcher.teardown;
+    launcher.teardown = async (name: string) => {
+      await origTeardown(name);
+      await wa._superviseTickForTest(ctoId);
+      await wa._superviseTickForTest(leaderId);
+    };
+    // A tick firing in the LEGACY-close -> DELETE window: the legacy stopCtoAgent /
+    // stopWorkspaceStoryAgents close the panes via harness.teardownTask → runner.teardownTask.
+    // Simulate that close having killed both panes (names dropped from `live`), THEN tick —
+    // the early desired=0 must still prevent any relaunch. (Were the unified stop deferred to
+    // just before the DELETE, desired would still be 1 here and these ticks WOULD relaunch —
+    // the regression this test guards.)
+    const origTeardownTask = runner.teardownTask;
+    let firedLegacyTick = false;
+    runner.teardownTask = async (name: string) => {
+      await origTeardownTask(name);
+      if (!firedLegacyTick) {
+        firedLegacyTick = true;
+        live.delete(ctoName);
+        live.delete(leaderName);
+        await wa._superviseTickForTest(ctoId);
+        await wa._superviseTickForTest(leaderId);
+      }
+    };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    await dirsMod.unregisterWorkspace(UDIR);
+
+    expect(firedLegacyTick).toBe(true); // the legacy-window tick really ran
+    // NO relaunch happened for either row across BOTH ticks.
+    expect(calls.launch).toHaveLength(0);
+  });
+
+  test("after unregister NO unified workspace rows remain for the directory (cascade)", async () => {
+    const UDIR = "dir-unreg-cascade";
+    insertDir(UDIR);
+    dbMod.saveWorkspaceAgentRow(`ws-cto-${UDIR}`, { kind: "cto", directory_id: UDIR, desired: 1 });
+    dbMod.saveWorkspaceAgentRow("ws-leader-st-unreg-cascade", {
+      kind: "leader", directory_id: UDIR, desired: 1,
+    });
+    expect(
+      dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(UDIR),
+    ).toMatchObject({ n: 2 });
+
+    const { runner, launcher } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    await dirsMod.unregisterWorkspace(UDIR);
+
+    expect(
+      dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(UDIR),
+    ).toMatchObject({ n: 0 });
   });
 });
 

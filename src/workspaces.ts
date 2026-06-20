@@ -13,6 +13,7 @@ import {
 import { config } from "./config.ts";
 import { stopCtoAgent } from "./cto-agent.ts";
 import { stopWorkspaceStoryAgents } from "./story-agent.ts";
+import { stopWorkspaceAgent } from "./workspace-agent.ts";
 import { ALL_STATUSES, db, nowIso, REVIEW_STATES, sumStatuses } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
@@ -642,9 +643,29 @@ export async function unregisterWorkspace(id: string): Promise<void> {
   const dir = getWorkspace(id);
   if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
 
-  // Tear down this workspace's managed CTO agent FIRST (close its tab/pane + free its
-  // name) so the DELETE below — which cascade-removes its cto_agent row — can't strand
-  // an orphaned CTO pane. Best-effort; never block unregister.
+  // RACE-PREVENTION (story st-93384200 Bug 2): mark this directory's UNIFIED `workspace`
+  // (singular) cto/leader rows desired=0 as the VERY FIRST teardown action — before the
+  // legacy stops below close any pane BY NAME. stopWorkspaceAgent writes desired=0
+  // SYNCHRONOUSLY (before its first await), so once these have run no unified supervise
+  // tick can relaunch a just-closed pane at any point during unregister. Doing it last
+  // (right before the DELETE) would instead MAXIMIZE the legacy-close -> DELETE window in
+  // which a tick could revive the pane. This is RACE-prevention, NOT leak-prevention: the
+  // rows themselves still cascade away on the DELETE below (FK ON DELETE CASCADE, db.ts).
+  // Best-effort; never block unregister. No-op when the unified supervisor is gated OFF.
+  await stopWorkspaceAgent(`ws-cto-${id}`).catch(() => {});
+  const unifiedRows = db
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM workspace WHERE directory_id=? AND kind IN ('cto','leader')`,
+    )
+    .all(id);
+  for (const r of unifiedRows) {
+    await stopWorkspaceAgent(r.id).catch(() => {});
+  }
+
+  // Tear down this workspace's managed CTO agent (close its tab/pane + free its name) so
+  // the DELETE below — which cascade-removes its cto_agent row — can't strand an orphaned
+  // CTO pane. Legacy MIRROR-AND-DEFER path, kept alongside the unified stop above.
+  // Best-effort; never block unregister.
   await stopCtoAgent(id).catch(() => {});
 
   // Likewise tear down every STORY-LEADER agent for this workspace's stories (Phase 3) so
