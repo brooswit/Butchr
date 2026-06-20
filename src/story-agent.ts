@@ -41,6 +41,7 @@ import {
   type StoryAgentRow,
   type StoryRow,
   db,
+  ensureStoryWorkNode,
   getStoryAgentRow,
   listStoryAgentRows,
   nowIso,
@@ -693,6 +694,12 @@ export function onStoryCreated(storyId: string): void {
       console.error(`[butchr] story leader create skipped for ${storyId}: story row not found`);
       return;
     }
+    // FK ANCHOR: the leader row's work_id references the story's MATERIALIZED Work node in
+    // `tasks` (workspace.work_id FK). A story member materializes it lazily (createTask /
+    // assignTaskToStory), but a story can be created with NO members yet — so materialize it NOW
+    // (idempotent INSERT OR IGNORE) or the ws-leader insert below FK-fails. Mirrors the boot
+    // migrateUnifyStoryParent anchor write (the leader migration assumes the node already exists).
+    ensureStoryWorkNode(storyId);
     const wsId = `ws-leader-${storyId}`;
     // directory_id = the story's workspace (NEVER null — guarded above), so the row is visible to
     // unregister enumeration; work_id binds it to the story node; has_agent 0 on create.

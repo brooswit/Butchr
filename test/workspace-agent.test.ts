@@ -27,6 +27,7 @@ let wa: typeof import("../src/workspace-agent.ts");
 let storiesMod: typeof import("../src/stories.ts");
 let dirsMod: typeof import("../src/workspaces.ts");
 let ctoMod: typeof import("../src/cto-agent.ts");
+let saMod: typeof import("../src/story-agent.ts");
 let originalRunner: AgentRunner;
 
 /** Let fire-and-forget teardowns (updateStory's `void teardownLeaderWorkspaceForWork`) settle. */
@@ -68,6 +69,7 @@ beforeAll(async () => {
   storiesMod = await import("../src/stories.ts");
   dirsMod = await import("../src/workspaces.ts");
   ctoMod = await import("../src/cto-agent.ts");
+  saMod = await import("../src/story-agent.ts");
   originalRunner = harnessMod.getRunner();
 
   // Deterministic supervision knobs (the unified loop reuses the CTO knobs).
@@ -970,3 +972,159 @@ function mkRow(p: Partial<WorkspaceAgentRow> & { id: string; kind: WorkspaceAgen
     updated_at: p.updated_at ?? null,
   };
 }
+
+// ---- CREATE-TIME UNIFIED ROWS (story st-93384200, Bug 3) ----------------------------------
+// A CTO/leader created (workspace registered / story created) AFTER boot must get its UNIFIED
+// `workspace` row at CREATION time so the unified supervisor — the SOLE launcher when the flag
+// is ON — owns it immediately (launch AND relaunch-on-death) without waiting for a restart to
+// re-seed it from the legacy tables. These drive the real lifecycle hooks (ensureCtoWorkspaceRow
+// for the cto row; storiesMod.createStory → onStoryCreated for the leader row) through the same
+// injected launcher seam the rest of this file uses.
+describe("create-time unified rows (st-93384200 Bug 3)", () => {
+  test("a story created mid-uptime gets a desired-up ws-leader row; the create-time kick launches it once; a racing supervise tick does NOT double-launch; on death the supervisor RELAUNCHES (no restart)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    const story = storiesMod.createStory(DIR, "mid-uptime story");
+    const wsId = `ws-leader-${story.id}`;
+    const leaderLaunches = () => calls.launch.filter((c) => c.id === wsId).length;
+
+    // The unified row is created SYNCHRONOUSLY in onStoryCreated (the launch kick is async).
+    const r0 = dbMod.getWorkspaceAgentRow(wsId)!;
+    expect(r0).toBeTruthy();
+    expect(r0.kind).toBe("leader");
+    expect(r0.desired).toBe(1);
+    expect(r0.work_id).toBe(story.id);
+    expect(r0.directory_id).toBe(DIR); // == story.workspace_id → visible to unregister enumeration
+    // The FK anchor (the story's materialized Work node) was created so the leader row is FK-valid.
+    expect(dbMod.db.query(`SELECT id FROM tasks WHERE id=?`).get(story.id)).toBeTruthy();
+
+    await flush(); // let the create-time kick settle
+
+    // The LEGACY launchStoryAgent direct path did NOT fire (it would set story_agent.session_id);
+    // only the desired=1 MIRROR was written there.
+    expect(dbMod.getStoryAgentRow(story.id)?.session_id ?? null).toBeNull();
+    expect(dbMod.getStoryAgentRow(story.id)?.desired).toBe(1);
+
+    // The create-time kick launched the leader EXACTLY once and it is now live.
+    expect(leaderLaunches()).toBe(1);
+    expect(dbMod.getWorkspaceAgentRow(wsId)!.has_agent).toBe(1);
+
+    // NUDGE #1: a supervise tick RIGHT AFTER the kick must NOT double-launch (kick + tick share the
+    // SAME per-id launchInFlight guard → the tick adopts the now-live agent, no second launch).
+    await wa._superviseTickForTest(wsId);
+    expect(leaderLaunches()).toBe(1); // still exactly one agent for this story name
+
+    // RELAUNCH-ON-DEATH with NO restart: the agent dies, then a later supervise tick relaunches it.
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(wsId)!);
+    live.delete(name); // agent died
+    wa._resetSupervisionStateForTest(wsId); // clear backoff so the tick fires immediately
+    await wa._superviseTickForTest(wsId);
+    expect(leaderLaunches()).toBe(2); // relaunched without any restart
+    expect(dbMod.getWorkspaceAgentRow(wsId)!.has_agent).toBe(1); // live again
+  });
+
+  test("NUDGE #2: onStoryCreated for a NONEXISTENT story creates NO ws-leader row (never a null-directory_id row)", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    // No `stories` row for this id → getStoryRow returns null. The hook must bail (record-and-skip),
+    // NOT insert a directory_id=null leader row (which would be invisible to unregister enumeration).
+    saMod.onStoryCreated("st-does-not-exist");
+    await flush();
+
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-does-not-exist")).toBeNull();
+    expect(calls.launch.length).toBe(0); // nothing launched
+  });
+
+  test("ensureCtoWorkspaceRow: cto ENABLED → ws-cto row desired=1 and launched (no restart)", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
+
+    dirsMod.ensureCtoWorkspaceRow(DIR);
+    const wsId = `ws-cto-${DIR}`;
+    const r = dbMod.getWorkspaceAgentRow(wsId)!;
+    expect(r.kind).toBe("cto");
+    expect(r.directory_id).toBe(DIR);
+    expect(r.work_id).toBeNull(); // a CTO is not bound to a unit of Work
+    expect(r.desired).toBe(1);
+
+    await flush(); // create-time kick
+    expect(calls.launch.filter((c) => c.id === wsId).length).toBe(1);
+    expect(dbMod.getWorkspaceAgentRow(wsId)!.has_agent).toBe(1);
+  });
+
+  test("ensureCtoWorkspaceRow: cto DISABLED → ws-cto row desired=0 and NOT launched", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=0 WHERE id=?`).run(DIR);
+
+    dirsMod.ensureCtoWorkspaceRow(DIR);
+    const r = dbMod.getWorkspaceAgentRow(`ws-cto-${DIR}`)!;
+    expect(r.desired).toBe(0);
+    await flush();
+    expect(calls.launch.length).toBe(0); // never kicked
+  });
+
+  test("ensureCtoWorkspaceRow: cto_enabled NULL + GLOBAL default OFF → ws-cto row desired=0 and NOT launched", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    cfgMod.config.ctoAgentEnabled = false; // the global default (inherited when the column is NULL)
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=NULL WHERE id=?`).run(DIR);
+
+    dirsMod.ensureCtoWorkspaceRow(DIR);
+    const r = dbMod.getWorkspaceAgentRow(`ws-cto-${DIR}`)!;
+    expect(r.desired).toBe(0);
+    await flush();
+    expect(calls.launch.length).toBe(0);
+  });
+
+  test("ensureCtoWorkspaceRow is INERT when the unified supervisor is gated OFF (no row written)", () => {
+    cfgMod.config.unifiedWorkspaceEnabled = false; // reset to true by the top-level beforeEach
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
+    dirsMod.ensureCtoWorkspaceRow(DIR);
+    expect(dbMod.getWorkspaceAgentRow(`ws-cto-${DIR}`)).toBeNull();
+  });
+
+  test("a leader whose story is MERGING / MERGE_BLOCKED is NOT torn down by reconcile OR supervise (keep-alive)", async () => {
+    for (const status of ["merging", "merge_blocked"] as const) {
+      dbMod.db.query(`DELETE FROM workspace`).run();
+      dbMod.db.query(`DELETE FROM tasks`).run();
+      dbMod.db.query(`DELETE FROM stories`).run();
+      wa._resetSupervisionStateForTest();
+      const { runner, launcher, calls, live } = makeFake();
+      harnessMod.setRunner(runner);
+      wa.setLauncherForTest(launcher);
+
+      const storyId = `st-keep-${status}`;
+      // AUTHORITATIVE transient status; isolated=0 is irrelevant here (no PATCH).
+      dbMod.db
+        .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?,?,?,?,?,0)`)
+        .run(storyId, DIR, `brief ${storyId}`, status, dbMod.nowIso());
+      insertTask(storyId); // the materialized story node (FK target of the leader's work_id)
+      const wsId = `ws-leader-${storyId}`;
+      dbMod.saveWorkspaceAgentRow(wsId, {
+        kind: "leader", directory_id: DIR, work_id: storyId, desired: 1, has_agent: 1, session_id: `sess-${wsId}`,
+      });
+      const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(wsId)!);
+      live.add(name); // the leader's pane is registered/alive
+
+      // RECONCILE keeps (adopts) it — a non-terminal node is never stopped.
+      const res = await wa.reconcileWorkspaceAgent(wsId, true);
+      expect(res.action).toBe("adopted");
+      expect(dbMod.getWorkspaceAgentRow(wsId)!.desired).toBe(1);
+
+      // A SUPERVISE tick likewise leaves a live, non-terminal leader untouched (no teardown).
+      await wa._superviseTickForTest(wsId);
+      expect(calls.teardown).not.toContain(name);
+      expect(dbMod.getWorkspaceAgentRow(wsId)!.desired).toBe(1);
+      expect((await wa.workspaceAgentStatus(wsId)).running).toBe(true);
+    }
+  });
+});
