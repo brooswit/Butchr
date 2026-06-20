@@ -325,6 +325,22 @@ describe("isolated `done` is a request to land (§11.7)", () => {
     await storiesMod.landStory(SID); // idempotent re-drive; awaits the outcome deterministically
     expect(storyRow(SID).status).toBe("done");
   });
+
+  test("a LANDED story clears any open story-level ask on the terminal `done` (hygiene)", async () => {
+    const SID = "st-smask1";
+    mkStory(SID, WS_ISO, 1);
+    await seedMerged(REPO_ISO, WS_ISO, SID, "ask.txt", "a\n");
+    // Leave a stale open ask on the story, then land it.
+    storiesMod.openStoryAsk(SID, "leftover question?");
+    expect(storyRow(SID).pending_ask).not.toBeNull();
+
+    verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
+    await storiesMod.landStory(SID);
+
+    expect(storyRow(SID).status).toBe("done");
+    expect(storyRow(SID).pending_ask).toBeNull();
+    expect(storyRow(SID).ask_responder).toBeNull();
+  });
 });
 
 describe("non-isolated story is unchanged (§11.8)", () => {

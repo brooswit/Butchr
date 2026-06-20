@@ -593,6 +593,65 @@ describe("story-level ASK: open / escalate / answer (responder-redesign §4b)", 
   });
 });
 
+describe("abort/delete cascade: a terminal/removed node never STRANDS a live member", () => {
+  test("updateStory(aborted) aborts an in_progress member (not left orphaned/standalone)", async () => {
+    const story = storiesMod.createStory(WS_A, "Aborted-story cascade");
+    seedMember("st-abc-live", WS_A, story.id, "in_progress", { hasAgent: true });
+
+    storiesMod.updateStory(story.id, { status: "aborted" });
+
+    // The member's teardown is fire-and-forget (mirrors the leader teardown) — wait for it.
+    await waitFor(() => tasksMod.getTask("st-abc-live")!.status === "aborted");
+    const m = tasksMod.getTask("st-abc-live")!;
+    // It was ABORTED (agent/worktree torn down), NOT left a live standalone task.
+    expect(m.status).toBe("aborted");
+    expect(storiesMod.getStory(story.id)!.status).toBe("aborted");
+  });
+
+  test("deleteStory aborts a live member; an already-merged member is preserved", async () => {
+    const story = storiesMod.createStory(WS_A, "Deleted-story cascade");
+    seedMember("st-del-live", WS_A, story.id, "in_progress", { hasAgent: true });
+    seedMember("st-del-merged", WS_A, story.id, "merged");
+
+    storiesMod.deleteStory(story.id);
+
+    // The live member is aborted (its abort was captured BEFORE the detach/DELETE).
+    await waitFor(() => tasksMod.getTask("st-del-live")!.status === "aborted");
+    expect(tasksMod.getTask("st-del-live")!.status).toBe("aborted");
+    // The already-MERGED member is PRESERVED (historical record), only detached.
+    const merged = tasksMod.getTask("st-del-merged")!;
+    expect(merged.status).toBe("merged");
+    expect(merged.story_id).toBeNull();
+    // The story node itself is gone.
+    expect(storiesMod.getStory(story.id)).toBeNull();
+  });
+});
+
+describe("terminal transitions clear a stale story-level ask (hygiene)", () => {
+  test("updateStory(aborted) clears pending_ask + ask_responder", () => {
+    const story = storiesMod.createStory(WS_A, "Abort clears ask");
+    storiesMod.openStoryAsk(story.id, "leftover question?");
+    storiesMod.escalateStoryAsk(story.id); // user-owned, to prove BOTH columns clear
+    expect(storiesMod.getStory(story.id)!.pending_ask).not.toBeNull();
+
+    storiesMod.updateStory(story.id, { status: "aborted" });
+    const row = storiesMod.getStory(story.id)!;
+    expect(row.pending_ask).toBeNull();
+    expect(row.ask_responder).toBeNull();
+  });
+
+  test("updateStory(done) clears pending_ask + ask_responder", () => {
+    const story = storiesMod.createStory(WS_A, "Done clears ask");
+    storiesMod.openStoryAsk(story.id, "leftover question?");
+    expect(storiesMod.getStory(story.id)!.ask_responder).toBe("cto");
+
+    storiesMod.updateStory(story.id, { status: "done" });
+    const row = storiesMod.getStory(story.id)!;
+    expect(row.pending_ask).toBeNull();
+    expect(row.ask_responder).toBeNull();
+  });
+});
+
 describe("workspace deletion cascade-deletes its stories", () => {
   test("removing a workspace removes its stories (FK cascade)", () => {
     const WS_C = "stories-ws-c";

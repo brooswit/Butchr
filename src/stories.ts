@@ -139,6 +139,18 @@ export function updateStory(
     return getStory(id)!;
   }
 
+  // A NODE going ABORTED must FIRST tear down its LIVE members, or each in-flight member is
+  // STRANDED as an orphaned standalone top-level task (its feedback re-routes to the CTO; it
+  // merges to main with no story context) AND keeps a story_id/parent_id pointing at an aborted
+  // node whose completion seam can never fire. Fire the shared cascade BEFORE the node write —
+  // the member SELECT runs synchronously here (before its first await), so it captures the full
+  // live-member set now; the per-member teardown then completes asynchronously (mirrors this
+  // file's `void landStory` / `void teardownLeaderWorkspaceForWork` fire-and-forget idiom and
+  // keeps updateStory's synchronous signature). Already-MERGED members are PRESERVED untouched.
+  if (patch.status === "aborted") {
+    void abortInflightMembers(id).catch(() => {});
+  }
+
   const assigns: string[] = [];
   const params: (string | null)[] = [];
   if (briefUpdate !== null) {
@@ -148,6 +160,12 @@ export function updateStory(
   if (patch.status !== undefined) {
     assigns.push("status=?");
     params.push(patch.status as string);
+  }
+  // HYGIENE: a TERMINAL transition (`done`/`aborted`) clears any open story-level ask — leaving
+  // stale `pending_ask`/`ask_responder` on a finished story is dead data and a pointless still-
+  // answerable ask. (answerStoryAsk is otherwise the only writer that clears the pair.)
+  if (patch.status === "done" || patch.status === "aborted") {
+    assigns.push("pending_ask=NULL", "ask_responder=NULL");
   }
   if (assigns.length) {
     params.push(id);
@@ -323,11 +341,11 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
   const outcome = await mergeStoryBranch(storyId);
 
   if (outcome.kind === "landed") {
-    db.query(`UPDATE stories SET status='done', merge_base_sha=?, merged_sha=? WHERE id=?`).run(
-      outcome.baseSha,
-      outcome.mergedSha,
-      storyId,
-    );
+    // Clear any open ask on this terminal `done` transition too (hygiene, mirrors updateStory's
+    // terminal branch) — a landed story is finished, so a stale answerable ask is dead data.
+    db.query(
+      `UPDATE stories SET status='done', merge_base_sha=?, merged_sha=?, pending_ask=NULL, ask_responder=NULL WHERE id=?`,
+    ).run(outcome.baseSha, outcome.mergedSha, storyId);
     // Report `complete` UP to the CTO (the leader is provably still up here), THEN tear the
     // leader down. Only a landed-and-green story ever reaches this.
     publish({
@@ -402,12 +420,23 @@ export async function recoverMergingStories(): Promise<number> {
 }
 
 /**
- * Delete a story. 404 if it is gone. Member tasks are NOT deleted — their story_id is
- * NULLed out first (tasks are real work; only the grouping goes away), then the story
- * row is removed. (The workspace cascade still removes a workspace's stories wholesale.)
+ * Delete a story. 404 if it is gone. LIVE (in-flight) member tasks are ABORTED first — their
+ * agents/worktrees torn down — so none is STRANDED as an orphaned standalone top-level task
+ * (its feedback re-routing to the CTO; merging to main with no story context). Already-MERGED
+ * (or otherwise terminal) members are PRESERVED as a historical record — they are NOT deleted,
+ * only detached: their story_id/parent_id is NULLed (tasks are real work; only the grouping goes
+ * away), then the story row is removed. (The workspace cascade still removes a workspace's
+ * stories wholesale.)
  */
 export function deleteStory(id: string): void {
   if (!getStory(id)) throw new HttpError(404, `story not found: ${id}`);
+  // FIRST abort the LIVE members so none is orphaned by the detach/DELETE below. Fire-and-forget
+  // (deleteStory is deliberately synchronous — see story-agent.ts stopStoryAgent's note), but the
+  // member SELECT inside the cascade runs synchronously NOW (before its first await), so it
+  // captures every in-flight member while story_id is still set — the subsequent NULLing can't
+  // hide a live member from the abort. abortTask works by task id, so the detach below never
+  // races it. Terminal/merged members are skipped (preserved). Best-effort; never blocks delete.
+  void abortInflightMembers(id).catch(() => {});
   // Tear down the story's managed STORY-LEADER agent FIRST (desired-down + close its
   // tab/pane + free its name) so the DELETE below — which cascade-removes its story_agent
   // row — can't strand an orphaned leader pane. Best-effort; never blocks delete.
@@ -581,6 +610,62 @@ export async function allStoryViews(): Promise<StoryView[]> {
   return out;
 }
 
+// --- ABORT A STORY'S IN-FLIGHT MEMBERS: the shared cascade primitive ----------
+
+/** Per-member outcome of an in-flight-member abort cascade: which subtasks were aborted,
+ *  which failed to abort (best-effort), and which were left untouched (already terminal, or
+ *  mid-rollback) with their status. */
+export type MemberAbortOutcome = {
+  aborted: string[];
+  failed: string[];
+  skipped: Array<{ id: string; status: TaskStatus }>;
+};
+
+/**
+ * ABORT ALL of a story's IN-FLIGHT member subtasks — the single cascade primitive shared by
+ * resetStory (re-decompose), updateStory(`aborted`), and deleteStory. Reuses tasks.abortTask
+ * verbatim per member (signalAbort + worktree/agent teardown + the `aborted` transition +
+ * task.updated SSE).
+ *
+ * A member is IN-FLIGHT (and so abortable) iff it is neither terminal (isTerminal — merged/
+ * aborted/failed/rolled_back) nor `rolling_back` (mid-rollback-pipeline work this must NOT
+ * yank). An already-MERGED (or otherwise terminal) member is PRESERVED untouched — it is a
+ * historical record, reported in `skipped`; only LIVE members are torn down, never orphaned.
+ * Aborting is best-effort PER member — a teardown failure on one is collected in `failed` and
+ * never strands the rest. Pre-condition: the caller has already verified the story exists.
+ *
+ * The member SELECT runs synchronously at call time (before the first `await`), so a fire-and-
+ * forget caller (`void abortInflightMembers(id)`) captures the full member set BEFORE it mutates
+ * the node (e.g. deleteStory NULLing story_id) — no live member can slip the capture.
+ */
+export async function abortInflightMembers(storyId: string): Promise<MemberAbortOutcome> {
+  const members = db
+    .query<{ id: string; status: TaskStatus }, [string]>(
+      `SELECT id, status FROM tasks WHERE story_id=?`,
+    )
+    .all(storyId);
+
+  const aborted: string[] = [];
+  const failed: string[] = [];
+  const skipped: Array<{ id: string; status: TaskStatus }> = [];
+  for (const m of members) {
+    // Leave terminal AND mid-rollback members untouched — only IN-FLIGHT work is yanked.
+    // An already-merged member is PRESERVED (historical record), never aborted.
+    if (isTerminal(m.status) || m.status === "rolling_back") {
+      skipped.push({ id: m.id, status: m.status });
+      continue;
+    }
+    try {
+      await abortTask(m.id);
+      aborted.push(m.id);
+    } catch {
+      // Best-effort: one teardown failure must not strand the rest of the cascade.
+      failed.push(m.id);
+    }
+  }
+  return { aborted, failed, skipped };
+}
+
 // --- RESET A STORY: abort all in-flight subtasks (additive convenience) ------
 
 /** The result of resetStory: the refreshed StoryView plus the per-member outcome — which
@@ -610,30 +695,8 @@ export type StoryResetResult = {
  */
 export async function resetStory(storyId: string): Promise<StoryResetResult> {
   if (!getStory(storyId)) throw new HttpError(404, `story not found: ${storyId}`);
-
-  const members = db
-    .query<{ id: string; status: TaskStatus }, [string]>(
-      `SELECT id, status FROM tasks WHERE story_id=?`,
-    )
-    .all(storyId);
-
-  const aborted: string[] = [];
-  const failed: string[] = [];
-  const skipped: Array<{ id: string; status: TaskStatus }> = [];
-  for (const m of members) {
-    // Leave terminal AND mid-rollback members untouched — reset only yanks in-flight work.
-    if (isTerminal(m.status) || m.status === "rolling_back") {
-      skipped.push({ id: m.id, status: m.status });
-      continue;
-    }
-    try {
-      await abortTask(m.id);
-      aborted.push(m.id);
-    } catch {
-      // Best-effort: one teardown failure must not strand the rest of the reset.
-      failed.push(m.id);
-    }
-  }
-
+  // Reuse the shared cascade — reset is exactly "abort the in-flight members, leave the
+  // story open". The story row is untouched here (no terminal transition).
+  const { aborted, failed, skipped } = await abortInflightMembers(storyId);
   return { ok: true, story: await storyView(storyId), aborted, failed, skipped };
 }
