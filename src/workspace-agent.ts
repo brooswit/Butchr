@@ -128,12 +128,26 @@ type SupState = {
   nextRetryAt: number;
   /** Supervise-tick counter for the throttled operator mid-session pane probe. */
   superviseTicks: number;
+  /**
+   * A stop was requested while a launch-claim was (or might be) in flight. guarded() swallows
+   * the stop body when launchInFlight is set, so this flag (paired with a SYNCHRONOUS desired=0)
+   * lets the completing launch's tail re-check (reassertStopAfterLaunch) force desired-down — so
+   * STOP wins the race deterministically. Cleared ONLY on a deliberate start (ensureStarted) and
+   * after stopWorkspaceAgent's own teardown body — NEVER on the supervise relaunch path.
+   */
+  stopRequested: boolean;
 };
 const supStates = new Map<string, SupState>();
 function supState(id: string): SupState {
   let s = supStates.get(id);
   if (!s) {
-    s = { launchInFlight: null, consecutiveFailures: 0, nextRetryAt: 0, superviseTicks: 0 };
+    s = {
+      launchInFlight: null,
+      consecutiveFailures: 0,
+      nextRetryAt: 0,
+      superviseTicks: 0,
+      stopRequested: false,
+    };
     supStates.set(id, s);
   }
   return s;
@@ -403,8 +417,14 @@ function ensureStarted(
     const st = supState(row.id);
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
+    st.stopRequested = false; // a DELIBERATE start supersedes any prior stop intent
     action = await adoptOrLaunch(row, fresh);
-    if (action === "launched") saveWorkspaceAgentRow(row.id, { restarts: 0 });
+    // STOP-WINS / terminal re-check: a stop (or a terminal transition) that raced this slow
+    // launch must not be clobbered by the desired=1 write above. If it intervened, do NOT
+    // restamp restarts (the launch was just undone).
+    if (!(await reassertStopAfterLaunch(row.id)) && action === "launched") {
+      saveWorkspaceAgentRow(row.id, { restarts: 0 });
+    }
     return workspaceAgentStatus(row.id);
   });
   return status.then((s) => ({ action, status: s }));
@@ -456,13 +476,22 @@ export function startWorkspaceAgent(
  */
 export function stopWorkspaceAgent(id: string): Promise<WorkspaceAgentStatus> {
   if (!isUnifiedWorkspaceEnabled()) return workspaceAgentStatus(id);
+  // STOP MUST WIN over an in-flight launch. guarded() early-returns the in-flight launch promise
+  // when launchInFlight is set, which would SWALLOW the stop body below — so the desired=0 write
+  // must NOT live only inside guarded(). Mark stop-requested + write desired-down SYNCHRONOUSLY
+  // here, OUTSIDE the launch-claim, so a stop issued mid-launch always lands; the completing
+  // launch's tail re-check (reassertStopAfterLaunch) then forces desired-down deterministically.
+  const st = supState(id);
+  st.stopRequested = true;
+  if (getWorkspaceAgentRow(id)) {
+    saveWorkspaceAgentRow(id, { desired: 0, has_agent: 0, started_at: null });
+  }
   return guarded(id, async () => {
     const row = getWorkspaceAgentRow(id);
-    if (row) saveWorkspaceAgentRow(id, { desired: 0, has_agent: 0, started_at: null });
-    const st = supState(id);
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
     if (row) await launcher.teardown(workspaceAgentName(row));
+    st.stopRequested = false; // teardown ran to completion → future starts are unblocked
     console.log(`[butchr] stopped workspace ${id}`);
     return workspaceAgentStatus(id);
   });
@@ -520,6 +549,28 @@ function nodeWorkIsTerminal(workId: string | null): boolean {
     .query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`)
     .get(workId)?.status;
   return status === "done" || status === "aborted";
+}
+
+/**
+ * STOP-WINS / terminal re-check — run at the TAIL of every launch-claim (ensureStarted + the
+ * supervise relaunch). A launch can take a while; meanwhile a stop may have been requested (its
+ * guarded body swallowed by guarded()'s in-flight early-return) OR the node-Work may have gone
+ * terminal. In either case the just-completed launch must NOT stand. Force desired-down FIRST
+ * (so even a failing teardown can never leave desired=1), THEN best-effort tear the freshly
+ * launched pane back down, and clear the stop flag. Returns true if it intervened. This is what
+ * makes STOP authoritative over a concurrent in-flight launch deterministically.
+ */
+async function reassertStopAfterLaunch(id: string): Promise<boolean> {
+  const st = supState(id);
+  const row = getWorkspaceAgentRow(id);
+  if (!row) return false;
+  if (!st.stopRequested && !(row.kind === "leader" && nodeWorkIsTerminal(row.work_id))) {
+    return false;
+  }
+  saveWorkspaceAgentRow(id, { desired: 0, has_agent: 0, started_at: null });
+  await launcher.teardown(workspaceAgentName(row)).catch(() => {});
+  st.stopRequested = false;
+  return true;
 }
 
 /**
@@ -787,6 +838,17 @@ async function superviseWorkspace(id: string): Promise<void> {
     return;
   }
 
+  // A LEADER whose node-Work is already TERMINAL must NEVER be relaunched (mirror
+  // reconcileWorkspaceAgent's terminal-leader gate + the legacy superviseStory). The
+  // completion-teardown may have raced or been missed, leaving a stray desired=1; correct it
+  // authoritatively. Placed ABOVE the backoff/restart-budget lines so a terminal leader never
+  // burns restart-budget nor logs a false "died — relaunching". launchInFlight is null here
+  // (checked above), so stopWorkspaceAgent runs its full desired-down + teardown body.
+  if (row.kind === "leader" && nodeWorkIsTerminal(row.work_id)) {
+    await stopWorkspaceAgent(id);
+    return;
+  }
+
   // Dead while DESIRED up → relaunch with backoff.
   if (st.consecutiveFailures >= config.ctoMaxRestarts) return; // gave up — await operator
   const now = Date.now();
@@ -804,6 +866,10 @@ async function superviseWorkspace(id: string): Promise<void> {
   await guarded(id, async () => {
     const before = getWorkspaceAgentRow(id)?.restarts ?? 0;
     await launcher.launch(getWorkspaceAgentRow(id)!, false); // resume — never cold-start
+    // STOP-WINS / terminal re-check: a stop (or a done/aborted transition) that raced this slow
+    // relaunch must win — do NOT let launcher.launch's desired=1 resurrect a terminal/stopped
+    // leader. The relaunch path itself never clears stopRequested (an in-flight stop must win).
+    if (await reassertStopAfterLaunch(id)) return workspaceAgentStatus(id);
     saveWorkspaceAgentRow(id, { restarts: before + 1 });
     return workspaceAgentStatus(id);
   }).catch((e) => {

@@ -437,6 +437,102 @@ describe("leader teardown on node-Work completion (unified)", () => {
     }
   });
 
+  // ---- F1: superviseWorkspace's RELAUNCH branch must not revive a terminal leader ----------
+  // The dead-while-desired RELAUNCH path (NOT boot reconcile) had no terminal-leader guard, so a
+  // leader whose story is done/aborted but still has a stray desired=1 would be relaunched every
+  // supervise tick forever. The guard sits ABOVE the backoff/restart-budget lines, so a terminal
+  // leader never burns restart-budget nor logs a false "died — relaunching".
+  test("F1: superviseWorkspace does NOT relaunch a DEAD leader whose node-Work is terminal — forces desired=0", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertStory("st-f1", "done"); // AUTHORITATIVE terminal
+    insertTask("st-f1"); // FK target of the leader's work_id
+    dbMod.saveWorkspaceAgentRow("ws-f1", {
+      kind: "leader",
+      directory_id: DIR,
+      work_id: "st-f1",
+      desired: 1, // stray desired-up
+      has_agent: 1,
+      session_id: "sess-ws-f1",
+    });
+    // The pane is DEAD (never added to `live`) → the dead-while-desired RELAUNCH path.
+
+    // Several ticks: a terminal leader must NEVER be relaunched, no matter how many times polled.
+    for (let i = 0; i < 5; i++) await wa._superviseTickForTest("ws-f1");
+
+    expect(calls.launch.length).toBe(0); // never relaunched (also: restart-budget never burned)
+    expect(dbMod.getWorkspaceAgentRow("ws-f1")!.desired).toBe(0); // forced desired-down
+  });
+
+  // ---- F2: STOP must WIN a race with an in-flight (slow) relaunch --------------------------
+  // A leader pane dies → superviseWorkspace relaunches via guarded() (a slow launch keeps
+  // launchInFlight set) → concurrently the story goes done → teardownLeaderWorkspaceForWork →
+  // stopWorkspaceAgent. The stop used to write desired=0 INSIDE guarded(), which early-returns
+  // the in-flight launch promise → the stop body was swallowed → the completing launch resurrected
+  // desired=1 → the terminal leader got relaunched. Stop must now be authoritative: synchronous
+  // desired=0 + a launch-tail re-check that refuses to let the completion stand.
+  test("F2: a stop racing an in-flight relaunch wins — the completing launch does NOT resurrect desired=1", async () => {
+    const { runner, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+
+    // A launcher whose launch BLOCKS on a gate (keeps launchInFlight set), then — like the real
+    // one — writes desired=1 as its LAST step (the dangerous resurrecting write).
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((res) => {
+      releaseGate = res;
+    });
+    const gatedLauncher: WorkspaceLauncher = {
+      async launch(row, fresh) {
+        calls.launch.push({ id: row.id, fresh });
+        await gate; // slow pane start — launchInFlight stays set across this await
+        dbMod.saveWorkspaceAgentRow(row.id, {
+          session_id: row.session_id ?? `sess-${row.id}`,
+          started_at: dbMod.nowIso(),
+          desired: 1,
+          has_agent: 1,
+          last_error: null,
+        });
+        live.add(wa.workspaceAgentName(row));
+      },
+      async teardown(name) {
+        calls.teardown.push(name);
+        live.delete(name);
+      },
+    };
+    wa.setLauncherForTest(gatedLauncher);
+
+    insertStory("st-f2", "open"); // OPEN at relaunch time, so the relaunch actually starts
+    insertTask("st-f2");
+    dbMod.saveWorkspaceAgentRow("ws-f2", {
+      kind: "leader",
+      directory_id: DIR,
+      work_id: "st-f2",
+      desired: 1,
+      has_agent: 1,
+      session_id: "sess-ws-f2",
+    });
+    // Pane DEAD → the relaunch path. Fire the tick WITHOUT awaiting (it parks on the gate).
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("ws-f2")!);
+    const tickP = wa._superviseTickForTest("ws-f2");
+    await flush(); // let the relaunch reach launcher.launch → launchInFlight now set
+    expect(calls.launch.length).toBe(1); // relaunch is IN FLIGHT
+
+    // Concurrently: the story goes terminal → teardown → stopWorkspaceAgent. desired=0 lands
+    // SYNCHRONOUSLY even though guarded() swallows the stop body (in-flight launch claim).
+    storiesMod.updateStory("st-f2", { status: "done" });
+    expect(dbMod.getWorkspaceAgentRow("ws-f2")!.desired).toBe(0); // stop won synchronously
+
+    // Now let the in-flight launch COMPLETE: its desired=1 write must NOT stand.
+    releaseGate();
+    await tickP;
+    await flush();
+
+    expect(dbMod.getWorkspaceAgentRow("ws-f2")!.desired).toBe(0); // NOT resurrected — stop wins
+    expect(calls.teardown).toContain(name); // the freshly-launched pane was torn back down
+    expect((await wa.workspaceAgentStatus("ws-f2")).running).toBe(false);
+  });
+
   // ---- ADOPT-PATH startup auto-confirm (story st-a57a552e, subtask A) -------------------
   // An operator workspace can be ADOPTED while still parked at a blocking startup prompt
   // (butchr restarted during the launch auto-confirm window, leaving the operator frozen at
