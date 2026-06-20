@@ -288,6 +288,13 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.rolled_back { background: var(--rolled_back); }
 .chip.failed { background: var(--failed); }
 .chip.aborted { background: var(--aborted); }
+/* STORY (node) status chips — stories share the unified work list with tasks, so they reuse
+   the same chip palette: open ≈ a fresh idea, merging ≈ work in flight, merge_blocked ≈ blocked,
+   done ≈ merged (aborted is shared with tasks above). */
+.chip.open { background: var(--idea); }
+.chip.merging { background: var(--in_progress); }
+.chip.merge_blocked { background: var(--blocked); }
+.chip.done { background: var(--merged); }
 /* Legacy status chips — kept for audit timeline backward-compat */
 .chip.finalizing { background: var(--finalizing); }
 .chip.queued { background: var(--queued); }
@@ -461,55 +468,39 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .story-ask-panel .sa-answer { min-height: 64px; }
 
-/* ---------- unified WORK TREE ----------
-   One uniform card for every work item (node story + leaf task), rendered recursively. Status
-   colors come ONLY from the shared .chip.<status> system — no parallel palette here. Nodes
-   collapse by default; expanding reveals the full brief + open ask + indented child cards. */
-.work-tree-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-.work-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
-}
-.work-card.is-node { background: var(--panel-2); }
-.work-card-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 12px;
-}
-.work-card-row.clickable { cursor: pointer; }
-.work-card-row.clickable:hover { background: var(--panel); }
+/* ---------- unified work list (stories + tasks) ----------
+   Stories and tasks render as PEER rows in the shared .tasks table. Status colors come ONLY
+   from the shared .chip.<status> system — no parallel palette. A story row is a foldable group
+   header: clicking it toggles its detail block (full brief + open ask) shown as a full-width
+   row beneath it; its subtask rows render indented one level and stay visible regardless. */
 .work-caret {
-  flex: 0 0 auto; width: 12px; text-align: center;
-  color: var(--muted); font-size: 11px; user-select: none;
+  display: inline-block; width: 12px; text-align: center;
+  color: var(--muted); font-size: 11px; user-select: none; margin-right: 4px;
 }
-.work-caret.empty { visibility: hidden; }
-/* The single-line truncated summary — the heart of the wall-of-text fix. */
-.work-summary {
-  flex: 1 1 auto; min-width: 0;
+/* Story (node) row — a subtle tinted fill + left accent + pointer so it reads as a group head. */
+.tasks tr.is-node { cursor: pointer; }
+.tasks tr.is-node td { background: var(--panel-2); }
+.tasks tr.is-node td.id { border-left: 2px solid var(--border); }
+.tasks tr.is-node:hover td { background: var(--panel); }
+/* The single-line truncated brief in the story row's id cell — the wall-of-text fix. */
+.tasks tr.is-node .story-brief {
+  display: inline-block; max-width: 60ch; vertical-align: bottom;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font-size: 14px; font-weight: 600; color: var(--text);
+  font-family: var(--font); font-weight: 600; color: var(--text);
 }
-a.work-summary { font-family: var(--mono); font-weight: 500; text-decoration: none; }
-a.work-summary:hover { text-decoration: underline; }
-.work-chips { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; }
-.work-rollup {
-  flex: 0 0 auto;
-  color: var(--muted); font-family: var(--mono); font-size: 11px;
-  white-space: nowrap;
-}
-.work-expanded { padding: 0 12px 12px; }
+/* Child subtask rows indented one level under their parent story. */
+.tasks tr.is-child td.id { padding-left: 30px; }
+/* The expanded story detail spans the full table width directly below its story row. */
+.tasks tr.story-detail-row td { background: var(--panel-2); padding: 0 12px 12px; }
+.tasks tr.story-detail-row:hover td { background: var(--panel-2); }
+.work-expanded { padding: 0; }
 .work-brief-full {
   white-space: pre-wrap; word-break: break-word;
   font-size: 13px; line-height: 1.5; color: var(--text);
-  padding: 4px 0 10px; border-top: 1px solid var(--border);
+  padding: 8px 0 4px;
 }
-/* Children indented one level with a left rule so the hierarchy reads at a glance. */
-.work-children {
-  display: flex; flex-direction: column; gap: 6px;
-  margin-left: 14px; padding-left: 10px;
-  border-left: 2px solid var(--border);
-}
-.work-no-children { padding: 2px 0; }
+/* A finished STORY in the Finished list has no detail route — render it as a plain row. */
+.finished-row.is-node { cursor: default; }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {

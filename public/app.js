@@ -70,6 +70,12 @@ const STATUS_LABELS = {
   merged: "merged",
   failed: "failed",
   aborted: "aborted",
+  // STORY (node) statuses — stories share the unified work list with tasks, so their
+  // statuses get friendly labels here too. `aborted` is shared with tasks (defined above).
+  open: "open",
+  done: "done",
+  merging: "merging",
+  merge_blocked: "merge blocked",
 };
 function statusLabel(status) {
   return STATUS_LABELS[status] || status;
@@ -119,6 +125,10 @@ function applyStateMeta(meta) {
   TERMINAL_STATUSES = terminal.slice();
   ACTIVE_STATUSES = all.filter((s) => !terminal.includes(s));
   FILTER_STATUSES = all.flatMap((s) => (s === "in_progress" ? [s, "needs_user_input", "idle"] : [s]));
+  // Story (node) statuses live alongside task statuses in the unified work list, so the
+  // filter chips must narrow stories too. Append the story-specific statuses not already
+  // present (`aborted` is shared with tasks, so it's already in the set).
+  for (const s of ["open", "done"]) if (!FILTER_STATUSES.includes(s)) FILTER_STATUSES.push(s);
 }
 
 // What an operator is AWAITING for each feedback state (chip hint). Pure UI copy — these
@@ -922,9 +932,10 @@ async function renderWorkspace(id) {
     // empty rather than blanking the page.
     api("GET", workListPath(id)).catch(() => []),
   ]);
-  // Split the leaf|node union: leaves are the TASK list the table/board/graph render; the
-  // full union (nodes + leaves) feeds the unified WORK TREE, which groups leaves under their
-  // parent node client-side — the operator's primary work surface post-authority-flip.
+  // Split the leaf|node union: leaves are the TASK list the GRAPH and BOARD views render
+  // (those stay leaves-only — they're reworked by sibling subtasks). The LIST view instead
+  // consumes the FULL union (nodes + leaves) so stories render as peer rows alongside tasks,
+  // with their subtasks grouped underneath client-side.
   const tasks = workLeaves(work);
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
@@ -947,21 +958,16 @@ async function renderWorkspace(id) {
   launch.appendChild(newStoryBtn);
   wrap.appendChild(launch);
 
-  // Tree / List / Graph / Board view toggle. The toggle bar sits outside the body
-  // region so it persists while the body is swapped; the chosen mode lives in dirView
-  // (module scope + localStorage) so it survives SSE re-renders and reloads. The work
-  // TREE — a recursive, scannable view of story NODES (collapsed by default, showing a
-  // truncated one-liner + colored status chip + subtask rollup + leader/ask indicators)
-  // whose child task LEAVES (and full brief + open ask) appear on expand — is now one of
-  // the selectable views (built client-side from the flat /api/work union), so it renders
-  // in the same body region as graph/list/board instead of being forced above the toggle.
+  // List / Graph / Board view selector — the PRIMARY control of the main view, sitting
+  // directly under the launcher row and above the body. The toggle bar persists while the
+  // body is swapped; the chosen mode lives in dirView (module scope + localStorage) so it
+  // survives SSE re-renders and reloads. The LIST view (default) shows ALL work — stories
+  // AND tasks — as peer rows; Graph and Board stay leaves-only (reworked by sibling
+  // subtasks), so they receive workLeaves(work) while the list receives the full union.
   const body = el("div", { class: "ws-body" });
   const paintBody = () => {
     body.innerHTML = "";
-    if (dirView === "tree") {
-      body.appendChild(el("h2", {}, "Work tree"));
-      body.appendChild(renderWorkTree(work));
-    } else if (dirView === "graph") {
+    if (dirView === "graph") {
       body.appendChild(el("h2", {}, "Dependency graph"));
       body.appendChild(renderGraph(tasks));
     } else if (dirView === "board") {
@@ -972,14 +978,13 @@ async function renderWorkspace(id) {
       // (taskSearch / statusFilter) so it survives the full re-render the app does
       // on every SSE event. The full-text search runs SERVER-SIDE (?q=) — typing
       // re-fetches the list (debounced) and repaints only the results region below
-      // (not the bar itself), so the search input keeps focus while you type. The
-      // split of active (everything non-terminal, incl. the feedback states
-      // awaiting the operator) vs terminal-state history (merged/aborted only)
-      // happens inside renderResults.
+      // (not the bar itself), so the search input keeps focus while you type. The list
+      // gets the FULL work union (stories + tasks); the split of active vs terminal-state
+      // history (and the story/subtask grouping) happens inside renderResults.
       const results = el("div", { class: "results" });
-      body.appendChild(buildFilterBar(id, tasks, results));
+      body.appendChild(buildFilterBar(id, work, results));
       body.appendChild(results);
-      renderResults(tasks, results);
+      renderResults(work, results);
     }
   };
   wrap.appendChild(buildViewToggle(paintBody));
@@ -1127,11 +1132,12 @@ function openNewStoryModal(workspaceId) {
   });
 }
 
-// ---------- unified WORK TREE ----------
-// Expand/collapse state for story NODES in the work tree, keyed by node id. Kept at MODULE
-// scope (NOT per-card closure) so it survives the full re-render the app does on every SSE
-// event — a node id is present in the Set only while EXPANDED; nodes default COLLAPSED so
-// the tree stays scannable at a glance.
+// ---------- unified work list (stories + tasks) ----------
+// Expand/collapse state for story NODES in the unified list, keyed by node id. Kept at MODULE
+// scope (NOT per-row closure) so it survives the full re-render the app does on every SSE
+// event. A node id is present only while its DETAIL is expanded; the detail (full brief + open
+// ask) defaults COLLAPSED so the list stays scannable. NOTE: a story's child subtask ROWS are
+// always visible (indented) regardless of this set — only the detail block toggles.
 const WORK_TREE_EXPANDED = new Set();
 
 // Group the flat /api/work list (nodes + leaves, newest-first) into a tree CLIENT-SIDE — no
@@ -1175,105 +1181,16 @@ function workRollup(counts) {
   return parts.length ? total + " · " + parts.join(" ") : String(total);
 }
 
-// The ONE uniform work-card component, used for EVERY work item — a leaf (task) and a node
-// (story) render with the SAME component. Collapsed it shows a single-line truncated summary
-// + a colored status chip (+ for a node a rollup/leader/workspace meta line and an ask-
-// attention chip). A NODE is expandable (caret + row click toggles WORK_TREE_EXPANDED): the
-// expanded panel reveals the node's FULL brief, its open story-ask answer box (if any), and
-// its child cards rendered RECURSIVELY one level indented. A LEAF's summary links to its
-// detail page (#/task/:id, same as the board cards) so the tree drills in to review.
-// `repaint` is the tree's in-place paintTree() closure — toggling a caret rebuilds the tree
-// without a network round-trip, surviving (and re-reading) the module-level expand Set.
-function renderWorkCard(work, children, depth, repaint) {
-  const isNode = work.work_kind === "node";
-  const kids = children || [];
-  const expanded = isNode && WORK_TREE_EXPANDED.has(work.id);
-  const card = el("div", {
-    class: "work-card " + (isNode ? "is-node" : "is-leaf") + (expanded ? " expanded" : ""),
-    "data-depth": String(depth),
-  });
-
-  // --- collapsed row: caret · one-line summary · status chip(s) · (node) rollup meta ---
-  const row = el("div", { class: "work-card-row" + (isNode ? " clickable" : "") });
-  row.appendChild(el("span", { class: "work-caret" + (isNode ? "" : " empty") },
-    isNode ? (expanded ? "▾" : "▸") : ""));
-
-  const summaryText = isNode ? (work.brief || "(no brief)") : (work.summary || work.id);
-  // A leaf drills in to its detail/review page; a node has no detail route, so its summary is
-  // inert text and the whole row toggles expand instead.
-  row.appendChild(isNode
-    ? el("span", { class: "work-summary", title: summaryText }, summaryText)
-    : el("a", { class: "work-summary", href: "#/task/" + work.id, title: summaryText }, summaryText));
-
-  // status chip via the shared chip()/effStatus() — a live leaf wedged on human input already
-  // resolves to the red pulsing `needs_user_input` chip here (label "needs your input"), so no
-  // separate leaf attention badge is needed.
-  let chipsHtml = chip(effStatus(work));
-  // NODE ask attention: an open story-level ask owned by the user is highest-attention (the
-  // red needs_user_input pill); owned by the CTO it's the muted awaiting-cto note.
-  if (isNode && work.pending_ask != null) {
-    chipsHtml += work.ask_responder === "user"
-      ? ' <span class="chip needs_user_input" title="an open story ask was escalated to YOU — expand to answer">needs your input</span>'
-      : ' <span class="chip awaiting-cto" title="an open story ask owned by the CTO agent (handled automatically) — you can also answer">awaiting CTO</span>';
-  }
-  row.appendChild(el("span", { class: "work-chips", html: chipsHtml }));
-
-  if (isNode) {
-    const leader = work.leader || {};
-    const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
-    row.appendChild(el("span", { class: "work-rollup" },
-      workRollup(work.counts) + " · " + leaderState + " · " + (work.workspace_id || "")));
-    row.addEventListener("click", () => {
-      if (WORK_TREE_EXPANDED.has(work.id)) WORK_TREE_EXPANDED.delete(work.id);
-      else WORK_TREE_EXPANDED.add(work.id);
-      repaint();
-    });
-  }
-  card.appendChild(row);
-
-  // --- expanded panel (nodes only): FULL brief, then the open story-ask answer box (kept
-  // reachable here), then the child cards indented one level (recursive for forward-compat). ---
-  if (isNode && expanded) {
-    const panel = el("div", { class: "work-expanded" });
-    panel.appendChild(el("div", { class: "work-brief-full" }, work.brief || "(no brief)"));
-    if (work.pending_ask != null) panel.appendChild(storyAskPanel(work));
-    if (kids.length) {
-      const childWrap = el("div", { class: "work-children" });
-      // Leaves carry no children today; pass [] — the recursion is forward-compatible.
-      for (const child of kids) childWrap.appendChild(renderWorkCard(child, [], depth + 1, repaint));
-      panel.appendChild(childWrap);
-    } else {
-      panel.appendChild(el("div", { class: "muted hint work-no-children" }, "No subtasks yet."));
-    }
-    card.appendChild(panel);
-  }
-  return card;
-}
-
-// The primary WORK surface: a recursive, scannable tree built CLIENT-SIDE from the flat
-// /api/work list (top-level nodes + orphan leaves, newest-first; each node's leaves nested
-// underneath). Replaces the old wall-of-text stories panel. `paintTree()` rebuilds the body in
-// place on a caret toggle so the expand Set drives the view without re-fetching.
-function renderWorkTree(work) {
-  const panel = el("div", { class: "work-tree", style: "margin-top:18px" });
-  panel.appendChild(el("h2", {}, "Work"));
-  const { topLevel, childrenByNode } = groupWork(work);
-  const body = el("div", { class: "work-tree-body" });
-  panel.appendChild(body);
-
-  const paintTree = () => {
-    body.innerHTML = "";
-    if (!topLevel.length) {
-      body.appendChild(el("div", { class: "muted hint" }, "No work yet — create a story to start."));
-      return;
-    }
-    for (const w of topLevel) {
-      const kids = w.work_kind === "node" ? (childrenByNode.get(w.id) || []) : [];
-      body.appendChild(renderWorkCard(w, kids, 0, paintTree));
-    }
-  };
-  paintTree();
-  return panel;
+// The expandable STORY DETAIL block — the "wall of text" moved OFF the story row and revealed
+// only when the row's caret is toggled. It carries the node's FULL brief and, when there's an
+// open story-level ask, its answer box (storyAskPanel). It deliberately does NOT contain the
+// story's child subtask rows: those are ALWAYS-visible indented peer rows in the unified table
+// (see workTable), so all work stays visible by default and only this detail toggles.
+function renderStoryDetail(work) {
+  const wrap = el("div", { class: "work-expanded" });
+  wrap.appendChild(el("div", { class: "work-brief-full" }, work.brief || "(no brief)"));
+  if (work.pending_ask != null) wrap.appendChild(storyAskPanel(work));
+  return wrap;
 }
 
 // The open STORY-LEVEL ask on a story row (only when s.pending_ask is non-null — the caller
@@ -1345,16 +1262,17 @@ function queueLine(tasks) {
 // never be hidden under Finished.
 const HISTORY_KEY = "butchr-history-open";
 
-// Workspace page body mode: the work "Tree" (default), the task "List", the
-// dependency "Graph", or the pipeline "Board". Kept at module scope (and mirrored to
-// localStorage) so it survives the full re-render the app does on every SSE event and
-// across reloads.
+// Workspace page body mode: the unified work "List" (default — stories + tasks as peer rows),
+// the dependency "Graph", or the pipeline "Board". Kept at module scope (and mirrored to
+// localStorage) so it survives the full re-render the app does on every SSE event and across
+// reloads. The old "tree" view was removed: a stored "tree" (the previous default) falls back
+// to "list" so an operator with the stale value doesn't load a view that no longer exists.
 const DIRVIEW_KEY = "butchr-dirview";
 let dirView = (() => {
   try {
     const v = localStorage.getItem(DIRVIEW_KEY);
-    return v === "tree" || v === "graph" || v === "board" || v === "list" ? v : "tree";
-  } catch (e) { return "tree"; }
+    return v === "graph" || v === "board" || v === "list" ? v : "list";
+  } catch (e) { return "list"; }
 })();
 function setDirView(v) {
   dirView = v;
@@ -1411,9 +1329,9 @@ function workListPath(workspaceId) {
   const q = taskSearch.trim();
   return "/work?workspace=" + encodeURIComponent(workspaceId) + (q ? "&q=" + encodeURIComponent(q) : "");
 }
-// The LEAF (task) members of a /api/work list — the task list the table/board/graph render.
-// The NODE (story) members are consumed via groupWork() in the unified work tree, which needs
-// the full union rather than a pre-split list, so there's no node-only splitter here.
+// The LEAF (task) members of a /api/work list — the task list the GRAPH and BOARD views render
+// (those stay leaves-only). The LIST view instead consumes the full union via groupWork(), so
+// there's no node-only splitter here.
 function workLeaves(work) {
   return (Array.isArray(work) ? work : []).filter((w) => w && w.work_kind === "leaf");
 }
@@ -1424,7 +1342,9 @@ function filterActive() {
 // Client-side filter applied ON TOP of the server's full-text `?q=` result: the
 // status chips and tag chips. The text search itself is NOT re-checked here — the
 // server already narrowed the list by prompt/summary/notes/id, which the client
-// can't reproduce (it never receives the prompt bodies).
+// can't reproduce (it never receives the prompt bodies). Handles BOTH work kinds: a
+// node (story) filters by its status (effStatus passes node.status through, since a story
+// is never in_progress/idle) and its tags (defaulting to none when a node carries none).
 function taskMatchesFilter(t) {
   if (statusFilter.size && !statusFilter.has(effStatus(t))) return false;
   // Tag filter is ANY-match: keep a task if it carries at least one selected tag.
@@ -1448,12 +1368,12 @@ function allTags(tasks) {
 // (debounced) and repaints ONLY the results region, so the bar (and the focused
 // search input) stay put and live-as-you-type works. The status/tag chip handlers
 // mutate the module-level filter state and re-filter the last-fetched set client-side.
-function buildFilterBar(dirId, tasks, results) {
+function buildFilterBar(dirId, work, results) {
   const bar = el("div", { class: "filter-bar" });
 
-  // The most recently fetched (server-filtered) task set the chips filter over.
-  // Starts as the list `tasks` painted with; a search re-fetch replaces it.
-  let currentTasks = tasks;
+  // The most recently fetched (server-filtered) WORK union (stories + tasks) the chips filter
+  // over. Starts as the list `work` painted with; a search re-fetch replaces it.
+  let currentTasks = work;
 
   const search = el("input", {
     type: "text", class: "task-search", placeholder: "Search prompt, summary, notes, id…",
@@ -1468,9 +1388,9 @@ function buildFilterBar(dirId, tasks, results) {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
       try {
-        // Re-fetch the unified work list and keep only the LEAF (task) members — the results
-        // region renders tasks; the stories panel is not part of this debounced search repaint.
-        currentTasks = workLeaves(await api("GET", workListPath(dirId)));
+        // Re-fetch the unified work list and keep the FULL union (stories + tasks) — the LIST
+        // renders all work as peer rows, so it must NOT be narrowed to leaves here.
+        currentTasks = await api("GET", workListPath(dirId));
       } catch (e) {
         toast(e.message, true);
         return;
@@ -1530,7 +1450,7 @@ function buildFilterBar(dirId, tasks, results) {
   // match). Only shown when the workspace has any tagged tasks. A stale selection
   // (a tag whose last task left the set) is harmlessly ignored — it just matches
   // nothing — and is dropped here so the bar reflects the live tag universe.
-  const tags = allTags(tasks);
+  const tags = allTags(work);
   for (const g of [...tagFilter]) if (!tags.includes(g)) tagFilter.delete(g);
   let tagRow = null;
   if (tags.length) {
@@ -1558,29 +1478,43 @@ function buildFilterBar(dirId, tasks, results) {
   return bar;
 }
 
-// Render the active table + Finished section into `container`, applying the
-// current filter. Called on first paint and on every search/chip change. When a
-// filter is active, the Finished section auto-expands if it has matches and its
-// count shows "matches of total" so it's clear the view is filtered.
-function renderResults(tasks, container) {
+// Whether a work item belongs to HISTORY (the collapsed Finished section): a NODE (story) once
+// it reaches a terminal state (done/aborted), a LEAF (task) by the server's terminal status
+// set. Everything else stays in the visible active list — including stories that are
+// open/merging/merge_blocked and any feedback task awaiting the operator.
+function isHistoryItem(w) {
+  if (!w) return false;
+  if (w.work_kind === "node") return w.status === "done" || w.status === "aborted";
+  return TERMINAL_STATUSES.includes(w.status);
+}
+
+// Render the active unified table (stories + tasks as peer rows) + the Finished section into
+// `container`, applying the current filter. Called on first paint and on every search/chip
+// change, and re-invoked in place when a story's detail caret toggles (the expand Set is
+// module-level, so it survives the rebuild). When a filter is active, the Finished section
+// auto-expands if it has matches and its count shows "matches of total".
+function renderResults(work, container) {
   container.innerHTML = "";
+  const list = Array.isArray(work) ? work : [];
   const filtering = filterActive();
-  // Finished holds ONLY terminal idle states (merged/aborted); everything else —
-  // including the feedback states awaiting the operator and any legacy `failed` /
-  // `rejected` row — stays in the visible active table so it's never hidden.
-  const active = tasks.filter((t) => !TERMINAL_STATUSES.includes(t.status));
-  const history = tasks.filter((t) => TERMINAL_STATUSES.includes(t.status));
+  // A caret toggle just re-renders this region from the same union; the expand state lives in
+  // the module-level WORK_TREE_EXPANDED set, so it carries across the rebuild.
+  const repaint = () => renderResults(work, container);
+  // History holds terminal items (merged/aborted tasks, done/aborted stories); everything
+  // else — including feedback tasks awaiting the operator and live stories — stays visible.
+  const active = list.filter((w) => !isHistoryItem(w));
+  const history = list.filter(isHistoryItem);
   const activeMatch = active.filter(taskMatchesFilter);
   const historyMatch = history.filter(taskMatchesFilter);
 
-  container.appendChild(el("h2", {}, "Tasks"));
-  if (tasks.length === 0) {
-    container.appendChild(el("div", { class: "empty" }, "No tasks yet."));
+  container.appendChild(el("h2", {}, "Work"));
+  if (list.length === 0) {
+    container.appendChild(el("div", { class: "empty" }, "No work yet — create a story to start."));
   } else if (activeMatch.length === 0) {
     container.appendChild(el("div", { class: "empty" },
-      filtering ? "No active tasks match the filter." : "No active tasks."));
+      filtering ? "No active work matches the filter." : "No active work."));
   } else {
-    container.appendChild(tasksTable(activeMatch));
+    container.appendChild(workTable(activeMatch, repaint));
   }
 
   if (history.length) {
@@ -1635,17 +1569,21 @@ function finishedTime(t) {
   return t.merged_at || t.completed_at || t.created_at;
 }
 
-// Compact one-line-per-task list for finished (terminal) tasks: id, final status
-// chip, and when it completed. Most-recent first. Each row links to the full task
-// detail; no live/terminal affordances (these tasks have no live pane).
-function finishedList(tasks) {
-  const sorted = tasks.slice().sort((a, b) =>
+// Compact one-line-per-item list for finished (terminal) WORK: id, final status chip, and when
+// it completed. Most-recent first. A finished TASK links to its detail page; a finished STORY
+// has no detail route, so it renders as a non-link row with its brief in place of the id.
+function finishedList(items) {
+  const sorted = items.slice().sort((a, b) =>
     new Date(finishedTime(b) || 0).getTime() - new Date(finishedTime(a) || 0).getTime());
   const list = el("div", { class: "finished-list" });
   for (const t of sorted) {
-    const row = el("a", { class: "finished-row", href: "#/task/" + esc(t.id) });
+    const isNode = t.work_kind === "node";
+    const label = isNode ? (t.brief || t.id) : t.id;
+    const row = isNode
+      ? el("div", { class: "finished-row is-node" })
+      : el("a", { class: "finished-row", href: "#/task/" + esc(t.id) });
     row.innerHTML = `
-      <span class="fr-id">${esc(t.id)}</span>
+      <span class="fr-id" title="${esc(label)}">${esc(label)}</span>
       ${taskChips(t)}${tagChips(t)}
       <span class="fr-when" title="${esc(finishedTime(t) || "")}">${esc(fmtTime(finishedTime(t)))}</span>`;
     list.appendChild(row);
@@ -1653,42 +1591,106 @@ function finishedList(tasks) {
   return list;
 }
 
-function tasksTable(tasks) {
+// The unified work table: stories and tasks as PEER rows. Items are grouped via groupWork (a
+// child attaches to its parent node by parent_id||story_id); a top-level orphan task renders at
+// root. A STORY is one row (caret + single-line brief, status chip, rollup/leader meta) whose
+// child subtask rows ALWAYS render indented one level beneath it (visible by default). Clicking
+// a story row toggles only its DETAIL block (full brief + open ask), inserted as a full-width
+// row right under it; the children are never hidden by the toggle. `repaint` re-renders the
+// results region in place so a caret toggle reflects the module-level expand Set with no fetch.
+function workTable(items, repaint) {
+  const { topLevel, childrenByNode } = groupWork(items);
   const table = el("table", { class: "tasks" });
   table.innerHTML = `<thead><tr>
     <th>id</th><th>status</th><th>created</th><th></th>
   </tr></thead>`;
   const tb = el("tbody");
-  for (const t of tasks) {
-    const tr = el("tr");
-    const action = t.status === "in_review" ? "review →"
-      : t.status === "spec_review" ? "review spec →"
-      : t.status === "needs_info" ? "answer →" : "open →";
-    const termLink = termLinkMarkup(t);
-    // Feedback states are awaiting the operator — surface the state-kind chip
-    // (e.g. "feedback: diff review") so a row that needs a human reads at a glance,
-    // rather than just sitting in the list looking like in-flight work.
-    const feedback = stateKind(effStatus(t)) === "feedback";
-    tr.innerHTML = `
-      <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
-      <td>${taskChips(t, { kind: feedback, responder: true })}${tagChips(t)}</td>
-      <td class="when">${esc(fmtTime(t.created_at))}</td>
-      <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
-    wireTermLink(tr, t.id);
-    tb.appendChild(tr);
+  for (const w of topLevel) {
+    if (w.work_kind === "node") appendStoryRows(tb, w, childrenByNode.get(w.id) || [], repaint);
+    else tb.appendChild(taskRow(w, 0));
   }
   table.appendChild(tb);
   return table;
 }
 
-// Tree / List / Graph / Board segmented toggle for the workspace body. Mutates dirView
-// (module scope + localStorage) and calls repaint() to swap the body region — the
-// toggle node itself is left in place so the choice sticks across clicks. The
-// workspace view re-renders wholesale on every SSE event and reads dirView, so the
-// chosen mode also survives live updates without re-wiring anything.
+// One TASK row in the unified table. `depth` > 0 marks it as a story's child (indented via the
+// is-child class). A task links to its detail/review page; the action label reflects the state.
+function taskRow(t, depth) {
+  const tr = el("tr", { class: depth ? "is-child" : "" });
+  const action = t.status === "in_review" ? "review →"
+    : t.status === "spec_review" ? "review spec →"
+    : t.status === "needs_info" ? "answer →" : "open →";
+  const termLink = termLinkMarkup(t);
+  // Feedback states are awaiting the operator — surface the state-kind chip
+  // (e.g. "feedback: diff review") so a row that needs a human reads at a glance,
+  // rather than just sitting in the list looking like in-flight work.
+  const feedback = stateKind(effStatus(t)) === "feedback";
+  tr.innerHTML = `
+    <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
+    <td>${taskChips(t, { kind: feedback, responder: true })}${tagChips(t)}</td>
+    <td class="when">${esc(fmtTime(t.created_at))}</td>
+    <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
+  wireTermLink(tr, t.id);
+  return tr;
+}
+
+// Append a STORY row (+ its expanded detail row when toggled + its always-visible child rows)
+// to a table body. The story row carries the caret + single-line brief in the id column, the
+// status chip (+ an ask-attention chip when there's an open story ask) in the status column,
+// and the subtask rollup + leader state in the meta column. A story has NO detail route, so the
+// whole row is clickable to toggle WORK_TREE_EXPANDED (revealing the brief/ask detail row);
+// the child subtask rows render indented regardless of that toggle.
+function appendStoryRows(tb, story, children, repaint) {
+  const expanded = WORK_TREE_EXPANDED.has(story.id);
+  const brief = story.brief || "(no brief)";
+  // status chip (+ open-ask attention): user-owned ask = the red needs_user_input pill;
+  // cto-owned = the muted awaiting-cto note — mirroring the task-level awaiting-who emphasis.
+  let chipsHtml = chip(effStatus(story));
+  if (story.pending_ask != null) {
+    chipsHtml += story.ask_responder === "user"
+      ? ' <span class="chip needs_user_input" title="an open story ask was escalated to YOU — expand to answer">needs your input</span>'
+      : ' <span class="chip awaiting-cto" title="an open story ask owned by the CTO agent (handled automatically) — you can also answer">awaiting CTO</span>';
+  }
+  const leader = story.leader || {};
+  const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
+  const meta = workRollup(story.counts) + " · " + leaderState;
+
+  const tr = el("tr", { class: "is-node clickable" + (expanded ? " expanded" : "") });
+  tr.innerHTML = `
+    <td class="id"><span class="work-caret">${expanded ? "▾" : "▸"}</span><span class="story-brief" title="${esc(brief)}">${esc(brief)}</span></td>
+    <td>${chipsHtml}</td>
+    <td class="when" title="${esc(meta)}">${esc(meta)}</td>
+    <td></td>`;
+  tr.addEventListener("click", () => {
+    if (WORK_TREE_EXPANDED.has(story.id)) WORK_TREE_EXPANDED.delete(story.id);
+    else WORK_TREE_EXPANDED.add(story.id);
+    repaint();
+  });
+  tb.appendChild(tr);
+
+  // Expanded: the detail block (full brief + open ask) as a full-width row directly under the
+  // story, ABOVE its children so it reads as the story's own content then its subtasks.
+  if (expanded) {
+    const dr = el("tr", { class: "story-detail-row" });
+    const td = el("td", { colspan: "4" });
+    td.appendChild(renderStoryDetail(story));
+    dr.appendChild(td);
+    tb.appendChild(dr);
+  }
+
+  // Child subtask rows ALWAYS render (indented one level), regardless of expand state — so all
+  // work stays visible by default; expanding only adds the story's brief/ask detail row above.
+  for (const c of children) tb.appendChild(taskRow(c, 1));
+}
+
+// List / Graph / Board segmented toggle for the workspace body — the PRIMARY view control.
+// Mutates dirView (module scope + localStorage) and calls repaint() to swap the body region —
+// the toggle node itself is left in place so the choice sticks across clicks. The workspace
+// view re-renders wholesale on every SSE event and reads dirView, so the chosen mode also
+// survives live updates without re-wiring anything.
 function buildViewToggle(repaint) {
-  const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Task view" });
-  const defs = [["tree", "Tree"], ["list", "List"], ["graph", "Graph"], ["board", "Board"]];
+  const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Work view" });
+  const defs = [["list", "List"], ["graph", "Graph"], ["board", "Board"]];
   const btns = {};
   for (const [v, label] of defs) {
     const b = el("button", {
