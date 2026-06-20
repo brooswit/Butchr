@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.142] - 2026-06-20
+
 - **Fixed: the SSE keepalive `setInterval` no longer leaks one timer per disconnected client.** In `src/server.ts` the 25s keepalive timer was only cleared via a dead `(controller as any)._cleanup` assignment that was never read anywhere, while the stream's `cancel()` (fired by Bun on client disconnect) called only `unsub()`. So every EventSource that dropped (tab navigate/refresh, network blip, laptop sleep — both the webapp EventSource and the MCP bridge auto-reconnect) left a 25s timer firing forever on a closed controller, each tick throwing into the swallowing try/catch — invisible but unbounded accumulation over a long-lived process. Fix: `ka` is hoisted into the closure scope alongside `unsub` and `cancel()` now calls `clearInterval(ka)` (then `unsub()`); the dead `_cleanup` block is deleted. The SSE stream factory is extracted as an exported `sseStream()` for testability. Regression test (`test/sse-keepalive.test.ts`): a simulated connect-then-disconnect (drive the stream's `cancel()`) asserts the keepalive interval is cleared exactly once and is the same timer `start()` created — no leaked timer keeps firing on the closed controller. No `package.json`/version edit.
 
 ## [0.9.141] - 2026-06-20
