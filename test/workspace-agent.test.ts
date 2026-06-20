@@ -405,6 +405,84 @@ describe("leader teardown on node-Work completion (unified)", () => {
       expect(dbMod.getWorkspaceAgentRow(`ws-${status}`)!.desired).toBe(1);
     }
   });
+
+  // ---- ADOPT-PATH startup auto-confirm (story st-a57a552e, subtask A) -------------------
+  // An operator workspace can be ADOPTED while still parked at a blocking startup prompt
+  // (butchr restarted during the launch auto-confirm window, leaving the operator frozen at
+  // the dev-channels consent / folder-trust dialog with 0 children). The adopt branch must
+  // run the SAME one-shot, de-bounced auto-confirm the launch path uses — but ONLY ever send
+  // a keystroke while a prompt is actually on screen, so a working leader is never disturbed.
+
+  test("adopt while PARKED at the dev-channels consent → exactly ONE confirming keystroke, then quiet", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    const sends: Array<{ name: string; input: unknown }> = [];
+    // The pane is parked at the dev-channels consent box, then goes quiet after the confirm.
+    const screens = [
+      "❯ 1. I am using this for local development\n--dangerously-load-development-channels",
+      "",
+      "",
+    ];
+    let readIdx = 0;
+    runner.agentRead = async () => screens[Math.min(readIdx++, screens.length - 1)];
+    runner.send = async (name, input) => { sends.push({ name, input }); };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    // Let the de-bounce loop run more than the default single poll (then restore).
+    const savedMax = cfgMod.config.ctoPromptMaxPolls;
+    const savedQuiet = cfgMod.config.ctoPromptQuietPolls;
+    cfgMod.config.ctoPromptMaxPolls = 6;
+    cfgMod.config.ctoPromptQuietPolls = 2;
+    try {
+      dbMod.saveWorkspaceAgentRow("w-adopt", { kind: "cto", directory_id: DIR, session_id: "sess-adopt" });
+      // The operator's pane is already registered/alive → the adopt branch is taken.
+      live.add(wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("w-adopt")!));
+
+      const status = await wa.startWorkspaceAgent("w-adopt");
+
+      expect(calls.launch.length).toBe(0); // adopted, NOT relaunched
+      expect(status.running).toBe(true);
+      // Exactly ONE confirming keystroke (the consent's option 1), then nothing more once quiet.
+      expect(sends.length).toBe(1);
+      expect(sends[0].input).toEqual({ text: "1", enter: true });
+    } finally {
+      cfgMod.config.ctoPromptMaxPolls = savedMax;
+      cfgMod.config.ctoPromptQuietPolls = savedQuiet;
+    }
+  });
+
+  test("adopt while already QUIET/working → NO keystroke is ever sent (a working leader is never disturbed)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    const sends: Array<{ name: string; input: unknown }> = [];
+    runner.agentRead = async () => ""; // already past startup — quiet/working pane
+    runner.send = async (name, input) => { sends.push({ name, input }); };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    const savedMax = cfgMod.config.ctoPromptMaxPolls;
+    const savedQuiet = cfgMod.config.ctoPromptQuietPolls;
+    cfgMod.config.ctoPromptMaxPolls = 6;
+    cfgMod.config.ctoPromptQuietPolls = 2;
+    try {
+      insertTask("st-quiet"); // FK target for the leader's work_id
+      dbMod.saveWorkspaceAgentRow("w-quiet", {
+        kind: "leader",
+        directory_id: DIR,
+        work_id: "st-quiet",
+        session_id: "sess-quiet",
+      });
+      live.add(wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("w-quiet")!));
+
+      const status = await wa.startWorkspaceAgent("w-quiet");
+
+      expect(calls.launch.length).toBe(0); // adopted
+      expect(status.running).toBe(true);
+      expect(sends.length).toBe(0); // the quiet-poll de-bounce gate held — nothing sent
+    } finally {
+      cfgMod.config.ctoPromptMaxPolls = savedMax;
+      cfgMod.config.ctoPromptQuietPolls = savedQuiet;
+    }
+  });
 });
 
 /** Build a full WorkspaceAgentRow for the pure-helper cases (no DB write). */

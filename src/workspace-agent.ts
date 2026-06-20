@@ -51,6 +51,7 @@ import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
 import { claudeLiveness } from "./liveness.ts";
 import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
+import type { AutoConfirmResult } from "./startup-confirm.ts";
 
 /** Is the unified-workspace supervisor ENABLED? OFF by default (fully inert when off). */
 export function isUnifiedWorkspaceEnabled(): boolean {
@@ -219,6 +220,30 @@ function buildWorkspaceArgv(
  * and auto-confirms any blocking startup prompt. Throws for kind='build' (its worktree/
  * branch provisioning lands at the step-6 cutover). NOT guarded — callers hold the guard.
  */
+/**
+ * One-shot, best-effort startup auto-confirm for an OPERATOR workspace, shared by BOTH the
+ * fresh-launch path (defaultLauncher.launch) and the adopt path (adoptOrLaunch) so the two
+ * cannot drift. Mirrors dispatcher.ts `autoConfirmTaskStartup`: it polls the live pane and
+ * sends the safe confirming keystroke ONLY while a blocking startup prompt is actually on
+ * screen (dev-channels consent / folder-trust / numbered menu), de-bouncing the same
+ * contiguous prompt and stopping after `quietPolls` clean reads — so it is a strict NO-OP
+ * once the agent is past startup and NEVER injects a stray keystroke into a working leader.
+ * Best-effort: it never throws, so it can never fail a launch OR an adopt. Exported so the
+ * wiring is unit-testable directly. (The returned stuckScreen is intentionally ignored by
+ * both callers today — surfacing an unrecognized/stuck prompt is a separate subtask.)
+ */
+export function autoConfirmWorkspaceStartup(name: string): Promise<AutoConfirmResult> {
+  return autoConfirmStartupPrompts(name, {
+    read: (n) => harness.agentRead(n),
+    send: (n, input) => harness.send(n, input),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    pollMs: config.ctoPromptPollMs,
+    maxPolls: config.ctoPromptMaxPolls,
+    quietPolls: config.ctoPromptQuietPolls,
+    log: (m) => console.log(`[butchr] workspace startup ${name}: ${m}`),
+  }).catch(() => ({ answered: [] }));
+}
+
 const defaultLauncher: WorkspaceLauncher = {
   async launch(row, fresh) {
     if (row.kind === "build") {
@@ -274,15 +299,7 @@ const defaultLauncher: WorkspaceLauncher = {
         `(${isResume ? `--resume ${sessionId}` : `fresh session ${sessionId}`}, pane ${paneId})`,
     );
 
-    await autoConfirmStartupPrompts(name, {
-      read: (n) => harness.agentRead(n),
-      send: (n, input) => harness.send(n, input),
-      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-      pollMs: config.ctoPromptPollMs,
-      maxPolls: config.ctoPromptMaxPolls,
-      quietPolls: config.ctoPromptQuietPolls,
-      log: (m) => console.log(`[butchr] workspace ${row.id}: ${m}`),
-    }).catch(() => {});
+    await autoConfirmWorkspaceStartup(name);
   },
   async teardown(name) {
     await harness.teardownTask(name).catch(() => {});
@@ -331,6 +348,16 @@ async function adoptOrLaunch(row: WorkspaceAgentRow, fresh: boolean): Promise<"a
       });
       if (row.work_id) demoteSiblingWorkspaceAgents(row.work_id, row.id);
       console.log(`[butchr] adopted live ${row.kind} workspace ${row.id}`);
+      // The agent may have been ADOPTED while still parked at a blocking startup prompt
+      // (e.g. butchr restarted during the launch auto-confirm window, leaving an operator
+      // frozen at the dev-channels consent / folder-trust dialog). Run the SAME one-shot,
+      // de-bounced auto-confirm the launch path uses so it gets confirmed instead of hanging
+      // forever. Operator kinds only (the adopt branch is operator-only today, but be
+      // explicit). Best-effort: it can NEVER fail an adopt, and is a strict no-op (sends
+      // nothing) once the agent is past startup, so a working leader is never disturbed.
+      if (row.kind === "cto" || row.kind === "leader") {
+        await autoConfirmWorkspaceStartup(name).catch(() => {});
+      }
       return "adopted";
     }
     console.log(
