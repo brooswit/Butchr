@@ -973,7 +973,10 @@ async function renderWorkspace(id) {
       body.appendChild(renderGraph(work));
     } else if (dirView === "board") {
       body.appendChild(el("h2", {}, "Merge train"));
-      body.appendChild(renderBoard(tasks));
+      // The board is a KANBAN board of COLUMNS that folds in ALL work — stories AND
+      // tasks render as peer cards — so it consumes the FULL union (not workLeaves).
+      // (Graph stays leaves-only; it gets `tasks`.)
+      body.appendChild(renderBoard(work));
     } else {
       // search + status filter bar. Filter state lives in module-level vars
       // (taskSearch / statusFilter) so it survives the full re-render the app does
@@ -2059,59 +2062,106 @@ function buildGraphGenSlider(maxGen, onChange) {
 }
 
 // ---------- pipeline / merge-train board ----------
-// The board view: the workspace's active (in-flight) tasks grouped into lanes in
-// pipeline order — closest-to-landing first — so "what's happening / what's next"
-// reads at a glance. Lanes: Spec review · In review (ready to merge) · Needs info ·
+// The board view: a KANBAN board of COLUMNS holding the workspace's active (in-flight)
+// WORK — both tasks AND stories render as peer cards. Columns are pipeline stages in
+// pipeline order, LEFT-TO-RIGHT closest-to-landing first, so "what's happening / what's
+// next" reads at a glance. Columns: Spec review · In review (ready to merge) · Needs info ·
 // Rolling back (a mechanical revert merge in flight, only when present) · In progress
 // (running/idle) · Ready (inactive — queued to dispatch) · Blocked (each card shows the
-// blockers it's waiting on and their current status) · Idea. Terminal-state tasks
-// (merged/failed/rolled_back/aborted) aren't part of the pipeline and are omitted —
+// blockers it's waiting on and their current status) · Idea.
+// A TASK (leaf) maps to the column matching its status; a STORY (node) maps by story
+// status — open with unmet blockers → Blocked, open → In progress, merging/merge_blocked
+// → In review, done/aborted → omitted (terminal). Terminal-state tasks
+// (merged/failed/rolled_back/aborted) aren't part of the pipeline and are likewise omitted —
 // they live in the List view's Finished section. Re-rendered wholesale on every
 // SSE event by the workspace view, so it live-updates for free.
 const BOARD_LANES = [
-  { key: "spec_review", title: "Spec review", hint: "spec review", match: (t) => t.status === "spec_review" },
-  { key: "in_review", title: "In review", hint: "in review", match: (t) => t.status === "in_review" },
-  { key: "needs_info", title: "Needs info", hint: "needs info", match: (t) => t.status === "needs_info" },
-  { key: "rolling_back", title: "Rolling back", hint: "rolling back", match: (t) => t.status === "rolling_back" },
-  { key: "in_progress", title: "In progress", hint: "in progress", match: (t) => t.status === "in_progress" },
-  { key: "inactive", title: "Ready", hint: "ready", match: (t) => t.status === "inactive" },
-  { key: "blocked", title: "Blocked", hint: "blocked", match: (t) => t.status === "blocked" },
-  { key: "idea", title: "Idea", hint: "idea", match: (t) => t.status === "idea" },
+  { key: "spec_review", title: "Spec review", hint: "spec review" },
+  { key: "in_review", title: "In review", hint: "in review" },
+  { key: "needs_info", title: "Needs info", hint: "needs info" },
+  { key: "rolling_back", title: "Rolling back", hint: "rolling back" },
+  { key: "in_progress", title: "In progress", hint: "in progress" },
+  { key: "inactive", title: "Ready", hint: "ready" },
+  { key: "blocked", title: "Blocked", hint: "blocked" },
+  { key: "idea", title: "Idea", hint: "idea" },
 ];
+const BOARD_LANE_KEYS = new Set(BOARD_LANES.map((l) => l.key));
 
-function renderBoard(tasks) {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
-  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
-  if (active.length === 0) {
-    return el("div", { class: "empty" }, "No active tasks in the pipeline.");
+// A blocker is SATISFIED only once the blocking work has LANDED — a leaf task that
+// merged, or a story (node) that's done. Anything else (in flight, queued, failed,
+// aborted, or an unknown/unresolved id) is still UNMET, so a story waiting on it
+// belongs in the Blocked column.
+function boardBlockerLanded(w) {
+  if (!w) return false;
+  return w.work_kind === "node" ? w.status === "done" : w.status === "merged";
+}
+function boardHasUnmetBlockers(w, byId) {
+  return (w.blocked_by || []).some((bid) => !boardBlockerLanded(byId.get(bid)));
+}
+
+// Which board COLUMN a work item belongs in, or null to OMIT it (terminal / not in the
+// pipeline). A leaf maps to the column matching its status (the lane keys mirror the task
+// statuses); a node (story) maps by story status — open-with-unmet-blockers → Blocked,
+// open → In progress, merging/merge_blocked → In review, done/aborted → omitted.
+function boardLaneKey(w, byId) {
+  if (w.work_kind === "node") {
+    if (w.status === "open") return boardHasUnmetBlockers(w, byId) ? "blocked" : "in_progress";
+    if (w.status === "merging" || w.status === "merge_blocked") return "in_review";
+    return null; // done / aborted / anything terminal → omitted
+  }
+  // leaf task: only active (non-terminal) statuses appear, in their own-named column.
+  if (!ACTIVE_STATUSES.includes(w.status)) return null;
+  return BOARD_LANE_KEYS.has(w.status) ? w.status : null;
+}
+
+function renderBoard(work) {
+  const items = (Array.isArray(work) ? work : []).filter(Boolean);
+  // byId spans BOTH leaves and nodes so cross-type blocked_by resolves — a task blocked
+  // by a story, or a story blocked by a task, both look up correctly.
+  const byId = new Map(items.map((w) => [w.id, w]));
+
+  // Bucket every work item into its column; null-key items (terminal / unmatched) drop out.
+  const buckets = new Map(BOARD_LANES.map((l) => [l.key, []]));
+  for (const w of items) {
+    const key = boardLaneKey(w, byId);
+    if (key && buckets.has(key)) buckets.get(key).push(w);
+  }
+  const total = BOARD_LANES.reduce((n, l) => n + buckets.get(l.key).length, 0);
+  if (total === 0) {
+    return el("div", { class: "empty" }, "No active work in the pipeline.");
   }
 
-  // Oldest-first within a lane: the longest-waiting (review/queued) and the
+  // Oldest-first within a column: the longest-waiting (review/queued) and the
   // earliest-started (running) bubble to the top — the next thing to act on.
   const byCreated = (a, b) =>
     new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
 
-  // One-line "what's happening" caption from the populated lanes.
-  const counts = BOARD_LANES.map((l) => ({ l, n: active.filter(l.match).length }));
-  const summary = counts.filter((x) => x.n > 0).map((x) => `${x.n} ${x.l.hint}`);
+  // One-line "what's happening" caption from the populated columns.
+  const summary = BOARD_LANES
+    .filter((l) => buckets.get(l.key).length)
+    .map((l) => `${buckets.get(l.key).length} ${l.hint}`);
 
   const board = el("div", { class: "board" });
   board.appendChild(el("div", { class: "board-summary muted" },
     summary.length ? summary.join(" · ") : "Idle."));
 
+  // The horizontal COLUMN track (left-to-right = pipeline order; scrolls if it overflows).
+  const cols = el("div", { class: "board-cols" });
   for (const lane of BOARD_LANES) {
-    const items = active.filter(lane.match).sort(byCreated);
-    // Always render the core lanes so the pipeline skeleton stays visible;
-    // the rolling_back and spec_review lanes only appear when something is present.
-    if ((lane.key === "rolling_back" || lane.key === "spec_review") && items.length === 0) continue;
-    board.appendChild(boardLane(lane, items, byId));
+    const laneItems = buckets.get(lane.key).sort(byCreated);
+    // Always render the core columns so the pipeline skeleton stays visible;
+    // the rolling_back and spec_review columns only appear when something is present.
+    if ((lane.key === "rolling_back" || lane.key === "spec_review") && laneItems.length === 0) continue;
+    cols.appendChild(boardLane(lane, laneItems, byId));
   }
+  board.appendChild(cols);
   return board;
 }
 
-// One lane: a header (title + count) over a responsive grid of task cards, with a
-// status-colored left accent. Empty core lanes render a placeholder so the
-// pipeline structure reads even when a stage is clear.
+// One COLUMN: a header (title + count) over a vertical stack of work cards, with a
+// status-colored left accent. Empty core columns render a placeholder so the
+// pipeline structure reads even when a stage is clear. Cards are tasks OR stories
+// (peers): a node renders a story card, a leaf a task card.
 function boardLane(lane, items, byId) {
   const sec = el("div", { class: "board-lane lane-" + lane.key });
   sec.appendChild(el("div", { class: "board-lane-head" }, [
@@ -2123,16 +2173,39 @@ function boardLane(lane, items, byId) {
     return sec;
   }
   const cards = el("div", { class: "board-cards" });
-  for (const t of items) cards.appendChild(boardCard(t, lane, byId));
+  for (const w of items) {
+    cards.appendChild(w.work_kind === "node" ? boardStoryCard(w, lane, byId) : boardCard(w, lane, byId));
+  }
   sec.appendChild(cards);
   return sec;
 }
 
+// The blocker list shared by task and story cards: in the Blocked column, each blocker id
+// with its current status — resolved from sibling WORK in this workspace (leaf or node) via
+// byId, "unknown" if absent. Aborted blockers will never merge, so they're flagged as stuck.
+function boardAppendBlockers(card, w, byId) {
+  const ids = w.blocked_by || [];
+  if (!ids.length) return;
+  const blk = el("div", { class: "bc-blockers" });
+  blk.appendChild(el("span", { class: "bc-blk-label muted" }, "blocked by"));
+  for (const bid of ids) {
+    const b = byId.get(bid);
+    const st = b ? effStatus(b) : "unknown";
+    const stuck = st === "aborted";
+    const row = el("a", {
+      class: "bc-blocker" + (stuck ? " stuck" : ""),
+      href: "#/task/" + esc(bid),
+      title: stuck ? "will never merge — edit blocked_by to proceed" : bid,
+    });
+    row.innerHTML = `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
+    blk.appendChild(row);
+  }
+  card.appendChild(blk);
+}
+
 // One task card: id (links to the detail page), status chip(s), created time, and
 // a live-terminal link when the agent pane is up. Blocked cards additionally list
-// each blocker with its current status — read from sibling tasks in this
-// workspace (a blocker not in this list shows as "unknown"). Aborted/rejected
-// blockers will never merge, so they're flagged as stuck.
+// each blocker with its current status (boardAppendBlockers).
 function boardCard(t, lane, byId) {
   const card = el("div", { class: "board-card" });
   const termLink = termLinkMarkup(t);
@@ -2148,28 +2221,33 @@ function boardCard(t, lane, byId) {
     ${tagChips(t) ? `<div class="bc-tags">${tagChips(t)}</div>` : ""}
     ${pulseMarkup(t)}`;
 
-  if (lane.key === "blocked") {
-    const ids = t.blocked_by || [];
-    if (ids.length) {
-      const blk = el("div", { class: "bc-blockers" });
-      blk.appendChild(el("span", { class: "bc-blk-label muted" }, "blocked by"));
-      for (const bid of ids) {
-        const b = byId.get(bid);
-        const st = b ? effStatus(b) : "unknown";
-        const stuck = st === "aborted";
-        const row = el("a", {
-          class: "bc-blocker" + (stuck ? " stuck" : ""),
-          href: "#/task/" + esc(bid),
-          title: stuck ? "will never merge — edit blocked_by to proceed" : bid,
-        });
-        row.innerHTML = `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
-        blk.appendChild(row);
-      }
-      card.appendChild(blk);
-    }
-  }
+  if (lane.key === "blocked") boardAppendBlockers(card, t, byId);
 
   wireTermLink(card, t.id);
+  return card;
+}
+
+// One STORY card — a PEER of the task card, same visual language, distinguished only by a
+// subtle "story" badge. A story has NO detail route, so the id is plain text (not a link)
+// and the card does not navigate. Shows: badge + id, status chip, and a meta line of the
+// subtask rollup (workRollup) + leader state. Blocked stories list their blockers exactly
+// like a task card does (boardAppendBlockers).
+function boardStoryCard(s, lane, byId) {
+  const card = el("div", { class: "board-card story-card" });
+  const leader = s.leader || {};
+  const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
+  const meta = workRollup(s.counts) + " · " + leaderState;
+  card.innerHTML = `
+    <div class="bc-top">
+      <span class="bc-id"><span class="story-badge">story</span><span class="bc-story-id">${esc(s.id)}</span></span>
+      <span class="bc-chips">${chip(effStatus(s))}</span>
+    </div>
+    <div class="bc-meta">
+      <span class="bc-when" title="${esc(meta)}">${esc(meta)}</span>
+    </div>`;
+
+  if (lane.key === "blocked") boardAppendBlockers(card, s, byId);
+
   return card;
 }
 

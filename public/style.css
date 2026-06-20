@@ -826,12 +826,20 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-node.rejected .tg-rect     { fill: var(--rejected); }
 .tg-node.failed .tg-rect       { fill: var(--failed); }
 
-/* pipeline / merge-train board (workspace view) — active tasks grouped into
-   pipeline-order lanes, each with a status-colored left accent. */
-.board { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+/* pipeline / merge-train board (workspace view) — a KANBAN board of COLUMNS holding
+   active WORK (tasks AND stories as peer cards), one column per pipeline stage in
+   pipeline order left-to-right, each with a status-colored left accent. */
+.board { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .board-summary { font-size: 13px; margin-bottom: 2px; }
 
+/* the horizontal COLUMN track — scrolls sideways if the columns overflow the viewport. */
+.board-cols {
+  display: flex; align-items: flex-start; gap: 14px;
+  overflow-x: auto; padding-bottom: 6px;
+}
+
 .board-lane {
+  flex: 0 0 288px;
   background: var(--panel); border: 1px solid var(--border);
   border-left: 3px solid var(--in_progress); border-radius: 8px;
   padding: 12px 14px;
@@ -859,10 +867,8 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .board-empty { font-size: 13px; padding: 2px 0; }
 
-.board-cards {
-  display: grid; gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-}
+/* cards stack vertically within their column */
+.board-cards { display: flex; flex-direction: column; gap: 10px; }
 .board-card {
   display: flex; flex-direction: column; gap: 6px;
   background: var(--bg); border: 1px solid var(--border);
@@ -870,6 +876,20 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .board-card .bc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .board-card .bc-id { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+
+/* STORY card — a PEER of the task card (same shape), marked only by a subtle "story"
+   badge; its id is plain (non-navigating) text since a story has no detail route. */
+.board-card.story-card .bc-id {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.board-card.story-card .bc-story-id { color: var(--muted); }
+.story-badge {
+  font-family: var(--font); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 1px 6px;
+}
 .board-card .bc-chips { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 .board-card .bc-meta {
   display: flex; align-items: center; gap: 10px;
