@@ -40,6 +40,7 @@ import {
   workspaceVersionFile,
 } from "./workspaces.ts";
 import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
+import { sleep } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
 import { publish } from "./events.ts";
@@ -1987,6 +1988,10 @@ export type ApproveOutcome = {
   task: TaskView;
   conflictSentBack?: boolean;
   revertedOnRed?: boolean;
+  // The PRE-FF re-gate (verifyDefaultBranch on the REBASED tip) came back RED, so the
+  // fast-forward was REFUSED: the default branch is untouched and the task is held in review
+  // with an actionable review_note (stale-base distance + gate output). Did NOT land.
+  gateRed?: boolean;
   // release_mode + version_bump='major': the task is PARKED awaiting the human
   // double-confirm ritual and did NOT merge. `major_confirm_count` on the task view
   // carries the streak (0/1/2); the merge only runs once two consecutive `confirm-major`
@@ -2446,6 +2451,33 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     });
   }
 
+  // F3 — CI-IN-FLIGHT DRAIN. The CI gate is fired fire-and-forget on review entry
+  // (void triggerCi) and runs the workspace build/test IN the task worktree. A human
+  // approve before it settles would make the rebase (git.merge) + teardownAndDiscard below
+  // mutate / remove that worktree WHILE the CI subprocess is still executing there — a
+  // spurious CI fail + files changed under a running process. Wait for it to settle FIRST,
+  // BEFORE we take the global merge lock, so one task's in-flight CI never blocks the merge
+  // queue (this mirrors maybeAutoMerge, which only ever runs AFTER CI settles). CI self-kills
+  // at config.verifyTimeoutMs, so bounding the wait at that + a margin effectively always
+  // lets it finish; on the (defensive) timeout we log and proceed rather than hang the approve.
+  if (ciGateInFlight(id)) {
+    console.log(
+      `[butchr] approve of ${id}: CI gate in flight — deferring the merge until it settles`,
+    );
+    const deadlineMs = config.verifyTimeoutMs + 30_000;
+    let waitedMs = 0;
+    while (ciGateInFlight(id) && waitedMs < deadlineMs) {
+      await sleep(250);
+      waitedMs += 250;
+    }
+    if (ciGateInFlight(id)) {
+      console.warn(
+        `[butchr] approve of ${id}: CI gate STILL in flight after ${Math.round(waitedMs / 1000)}s; ` +
+          `proceeding with the merge (CI should have self-killed at verifyTimeoutMs)`,
+      );
+    }
+  }
+
   // Resolve the MERGE CONTEXT — the ff-target (worktree to fast-forward in + the branch it
   // advances) and the rebase base. For an ISOLATED story member this is the STORY worktree /
   // story branch (the subtask ff's into the story worktree, the post-merge verify runs THERE,
@@ -2468,11 +2500,18 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     verify?: { ok: boolean; output: string };
     reverted?: boolean;
     priorTip?: string | null;
+    // How far the task branch was behind its merge base BEFORE the rebase — advisory
+    // context folded into the approver-facing note if the pre-ff re-gate fails.
+    behind?: number;
   };
   const gate: Gate = await runExclusiveMerge<Gate>(async () => {
     // Capture the ff-target tip (story branch for an isolated member, else main) in the
     // ff-target worktree BEFORE the ff so we can restore it on RED.
     const priorTip = await git.headSha(mctx.ffWorktree).catch(() => null);
+    // Measure how far behind the task branch is against its merge base BEFORE git.merge's
+    // rebase makes it linear atop base (after the rebase this is always 0). Advisory only —
+    // surfaced to the approver in the gateRed note below; the re-gate is the real guard.
+    const behind = await git.commitsBehind(dir.path, id, mctx.base).catch(() => 0);
     // Pass the workspace's resolved version file so git.merge bumps it itself (inside
     // this merge lock, after the rebase) when the workspace opted in — EMPTY disables the
     // bump (the default). In release_mode, also pass the declared bump level + changelog
@@ -2491,8 +2530,20 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       base: mctx.base,
       ffWorktree: mctx.ffWorktree,
       ffTargetBranch: mctx.targetBranch,
+      // F1 — RE-GATE the REBASED tip BEFORE the ff. git.merge calls this after its internal
+      // rebase + version bump, on the rebase worktree, BEFORE it fast-forwards the ff-target.
+      // (1) invalidateStaleGates clears any CI/conformance green now bound to the OLD tip —
+      //     the rebase moved HEAD, so a stored ci_tip ≠ live HEAD is stale (mirrors
+      //     maybeAutoMerge's staleness guard); DB hygiene, done here so it lands before the ff.
+      // (2) verifyDefaultBranch BUILDS+TESTS the rebased tip — a RED here REFUSES the ff
+      //     (mirrors mergeWorkBranch:1245 / mergeStoryBranch:2889, but on the POST-rebase tip
+      //     so a silent 3-way auto-resolve of newer base content can't slip a broken build in).
+      onRebased: async (rebaseDir) => {
+        await invalidateStaleGates(id);
+        return verifyDefaultBranch(rebaseDir, workspaceGateCmd(dir.id));
+      },
     });
-    if (!mr.ok) return { mr };
+    if (!mr.ok) return { mr, behind };
     // Merge stuck (ff'd into the ff-target branch). Gate the new tip in the ff-target
     // worktree (the story worktree for an isolated member, else the repo root): the
     // workspace's build/test gate command must be GREEN (its own gate_cmd, or the default
@@ -2521,6 +2572,28 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
 
   const result = gate.mr;
   if (!result.ok) {
+    if (result.gateRed) {
+      // F1 — PRE-FF RE-GATE RED. The rebased tip failed the workspace build/test, so
+      // git.merge REFUSED the fast-forward: the default branch is UNTOUCHED and the task's
+      // worktree + branch are intact (NO teardown — the work survives for a fixup or a
+      // fresh re-queue). Hold the task in review and surface the ACTIONABLE verdict to the
+      // approver via review_note: the stale-base distance (why the rebase pulled in content
+      // the task's own tests didn't cover) + the gate output tail. The post-merge verify
+      // backstop never runs (nothing landed); this is the EARLIER guard, catching the break
+      // before main ever moves.
+      const tail = (result.gateOutput || "").trim() || "(no gate output captured)";
+      const behind = gate.behind ?? 0;
+      const note =
+        `stale base (${behind} commit${behind === 1 ? "" : "s"} behind ${mctx.targetBranch}) — ` +
+        `rebased tip FAILS the build — abort+requeue fresh\n\n${tail}`;
+      db.query(`UPDATE tasks SET conflict=1, review_note=? WHERE id=?`).run(note, id);
+      emitUpdated(id);
+      console.error(
+        `[butchr] task ${id} merge BLOCKED: post-rebase re-gate RED; ${mctx.targetBranch} ` +
+          `left untouched (task was ${behind} commit(s) behind).\n${tail}`,
+      );
+      return { task: taskView(id)!, gateRed: true };
+    }
     if (result.conflict) {
       // Content conflict — git.merge already aborted, so the tree is CLEAN.
       // Don't dump the conflict on the human: send it back to the agent (the
@@ -3793,13 +3866,16 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
     // finalizeMerge does the full sequence.
     const outcome = await finalizeMerge(id);
     // Only a genuine merge counts. A conflict bounced back to inactive
-    // (conflictSentBack) or a post-merge-verify revert (revertedOnRed) did NOT land.
-    if (outcome.conflictSentBack || outcome.revertedOnRed) {
+    // (conflictSentBack), a pre-ff re-gate RED (gateRed — held in review for a human), or a
+    // post-merge-verify revert (revertedOnRed) all did NOT land.
+    if (outcome.conflictSentBack || outcome.gateRed || outcome.revertedOnRed) {
       console.log(
         `[butchr] auto-merge of ${id} did NOT land ` +
           (outcome.conflictSentBack
             ? "(merge conflict — sent back to the agent)"
-            : "(post-merge verify failed — reverted off main)"),
+            : outcome.gateRed
+              ? "(rebased tip failed the re-gate — held for review)"
+              : "(post-merge verify failed — reverted off main)"),
       );
       return false;
     }

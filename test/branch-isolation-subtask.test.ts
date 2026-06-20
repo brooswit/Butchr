@@ -189,7 +189,13 @@ describe("isolated story member — branches off + merges into the STORY worktre
     const storyTipBeforeC = g(["rev-parse", "HEAD"], storyWt());
 
     const cId = await seed(REPO_ISO, WS_ISO, STORY_ISO, "c.txt", "c\n");
-    verifyMod.setVerifyRunner(async () => ({ ok: false, output: "red gate\nboom" }));
+    // finalizeMerge now gates TWICE: the F1 pre-ff RE-GATE in the MEMBER's own worktree
+    // (the rebased tip), then the post-merge backstop in the STORY worktree (the ff-target).
+    // This test targets the post-merge reset, so pass the re-gate (green in the member
+    // worktree) and fail only the backstop (red in the story worktree).
+    verifyMod.setVerifyRunner(async (dir: string) =>
+      dir === storyWt() ? { ok: false, output: "red gate\nboom" } : { ok: true, output: "" },
+    );
     const outC = await tasksMod.finalizeMerge(cId);
 
     // Reverted, not merged → terminal `failed` (an execution failure).

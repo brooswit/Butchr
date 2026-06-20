@@ -71,6 +71,18 @@ function dbRow(id: string) {
 }
 
 /**
+ * A verify runner that FAILS only the POST-MERGE backstop, not the pre-ff re-gate.
+ * finalizeMerge now runs verifyDefaultBranch TWICE: first the F1 pre-ff RE-GATE in the
+ * TASK worktree (`<root>/<id>`), then the post-merge backstop in the ff-target worktree
+ * (the repo root). These tests target the post-merge revert specifically, so the re-gate
+ * must PASS (green in the task worktree) and only the backstop fails (red at the repo root).
+ */
+function redOnlyPostMerge(output: string) {
+  return async (dir: string) =>
+    dir === REPO_ROOT ? { ok: false, output } : { ok: true, output: "" };
+}
+
+/**
  * Create a REAL task (worktree + branch + task.md + DB row), have the "agent"
  * commit a file in the worktree, and move it to `review` so it's approvable.
  * Returns the task id and the filename it added at the repo root.
@@ -90,7 +102,7 @@ async function seedReviewTaskWithWork(file: string, content: string): Promise<st
 
 describe("post-merge verify gate", () => {
   test("RED verify auto-reverts the merge off main and flags the task", async () => {
-    verifyMod.setVerifyRunner(async () => ({ ok: false, output: "FAIL: 2 tests failed\nboom" }));
+    verifyMod.setVerifyRunner(redOnlyPostMerge("FAIL: 2 tests failed\nboom"));
     const id = await seedReviewTaskWithWork("feature.txt", "feature\n");
     const tipBefore = g(["rev-parse", "HEAD"]);
 
@@ -147,7 +159,7 @@ describe("post-merge verify gate", () => {
     // Two sequential approvals through the serialized merge queue: a RED one is
     // reverted and a following GREEN one still merges cleanly onto the restored
     // tip (the revert left main in a mergeable state for the next task).
-    verifyMod.setVerifyRunner(async () => ({ ok: false, output: "still red" }));
+    verifyMod.setVerifyRunner(redOnlyPostMerge("still red"));
     const redId = await seedReviewTaskWithWork("red.txt", "red\n");
     const tip0 = g(["rev-parse", "HEAD"]);
     const redOut = await tasksMod.approveTask(redId);

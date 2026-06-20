@@ -61,6 +61,10 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  // Restore the default CI runner so the never-resolving fake injected here (to hold a CI
+  // gate 'in flight') can't leak into a later test file — finalizeMerge now DRAINS in-flight
+  // CI before merging, and an inherited never-settling runner would hang that drain.
+  tasksMod.setCiRunner();
   rmSync(DATA_DIR, { recursive: true, force: true });
   rmSync(REPO_ROOT, { recursive: true, force: true });
 });

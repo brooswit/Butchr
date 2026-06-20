@@ -561,6 +561,13 @@ export type MergeResult = {
   // written into both the version file and the changelog's new versioned heading. Unset
   // for a non-release merge, or when no version file/field could be bumped.
   version?: string;
+  // Set true when the `onRebased` hook (the caller's pre-ff RE-GATE) returned RED on the
+  // REBASED tip: the fast-forward was REFUSED, so the ff-target branch is UNTOUCHED — the
+  // rebased task branch + its worktree are left intact for inspection. Distinct from a
+  // `conflict` (the rebase itself failed). `gateOutput` carries the gate's output tail so
+  // the caller can surface the verdict to the approver. ok=false on this result.
+  gateRed?: boolean;
+  gateOutput?: string;
 };
 
 /**
@@ -867,6 +874,15 @@ export type MergeOptions = {
   ffWorktree?: string;
   ffTargetBranch?: string;
   sourceWorktree?: string;
+  // RE-GATE HOOK: run by the caller (tasks.finalizeMerge) on the REBASED (+bumped) task
+  // tip — AFTER the rebase/version-bump, BEFORE the fast-forward. Receives the rebase
+  // worktree dir so the caller can build/test that exact tip. A `false` result REFUSES
+  // the ff (the ff-target branch is left UNTOUCHED) and merge returns `{ ok:false,
+  // gateRed:true, gateOutput }`. This is the spot — and the ONLY spot — that gates the
+  // true tip that would land: git's 3-way rebase can silently auto-resolve newer
+  // non-overlapping base content the task's own (stale) tests never exercise, so a tip
+  // that was green pre-rebase can be red post-rebase. Omitted = today's merge, unchanged.
+  onRebased?: (rebaseDir: string) => Promise<{ ok: boolean; output: string }>;
 };
 
 export async function merge(
@@ -948,6 +964,27 @@ export async function merge(
       changelogPath: opts.changelogPath,
       dateISO: opts.dateISO,
     });
+  }
+
+  // RE-GATE the REBASED (+bumped) tip BEFORE the fast-forward. This is the crux of the
+  // stale-base guard: the rebase above may have silently folded in newer base content the
+  // task's own tests don't cover, so a tip that was green when the agent submitted can be
+  // red now. Run the caller's gate on the rebase worktree (where the linear tip lives); a
+  // RED result REFUSES the ff so a broken commit never reaches the ff-target branch — the
+  // target is left exactly where it was. Mirrors mergeWorkBranch/mergeStoryBranch's re-gate,
+  // but inserted on the POST-rebase tip (those gate the pre-rebase tip in their wrapper).
+  if (opts.onRebased) {
+    const gate = await opts.onRebased(rebaseDir);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        conflict: false,
+        gateRed: true,
+        gateOutput: gate.output,
+        message: "rebased tip failed the re-gate; fast-forward refused",
+        conflictFiles: [],
+      };
+    }
   }
 
   // Capture the ff-target branch tip BEFORE the fast-forward: it's the exclusive lower
