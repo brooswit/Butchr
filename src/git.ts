@@ -40,6 +40,60 @@ export async function defaultBranch(dir: string): Promise<string> {
   return "main";
 }
 
+/**
+ * F4 GUARD — assert the ff-target worktree is safe to fast-forward BEFORE we advance it.
+ * `git merge --ff-only` advances whatever HEAD `ffWorktree` currently points at; the
+ * ff-target branch name is otherwise only used for the rev-parse capture/reset. So if the
+ * worktree is left DETACHED or on the WRONG branch, the ff (and the post-merge verify +
+ * auto-revert, which operate on that same checkout) would silently act on the wrong ref.
+ * We refuse loudly instead (a 409-style hard refusal upstream). Returns {ok:false,message}
+ * when:
+ *  (a) DETACHED HEAD — `symbolic-ref --short HEAD` fails (the dangerous case: defaultBranch()
+ *      falls back to "main", so ffTargetBranch looks valid while HEAD is detached);
+ *  (b) WRONG BRANCH — the checked-out branch ≠ the expected ffTargetBranch;
+ *  (c) DIRTY TRACKED tree — uncommitted TRACKED changes. Untracked files are IGNORED on
+ *      purpose: butchr legitimately leaves an untracked `<root>/.butchr/tasks/.../task.md`
+ *      in the repo root during normal operation, so a naive clean-check would refuse every
+ *      merge. (ff-only already fails-safe on a tree dirty enough to block the ff; this just
+ *      turns the tracked-dirty case into a clear message.)
+ * Generic over both flows: the default-main ff (ffWorktree=root, ffTargetBranch=default) and
+ * the isolated story-member ff (ffWorktree=story worktree, ffTargetBranch=story branch). The
+ * SOURCE worktree where the bump commits is never the ff worktree, so (c) won't false-trip.
+ */
+async function assertFfTargetReady(
+  ffWorktree: string,
+  ffTargetBranch: string,
+): Promise<{ ok: boolean; message: string }> {
+  const head = await run([git, "-C", ffWorktree, "symbolic-ref", "--short", "HEAD"]);
+  const cur = head.ok ? head.stdout.trim() : "";
+  if (!cur) {
+    return {
+      ok: false,
+      message:
+        `ff-target worktree ${ffWorktree} is in a DETACHED HEAD state ` +
+        `(expected branch '${ffTargetBranch}'); merge refused to avoid advancing the wrong ref`,
+    };
+  }
+  if (cur !== ffTargetBranch) {
+    return {
+      ok: false,
+      message:
+        `ff-target worktree ${ffWorktree} is on '${cur}', not the expected ` +
+        `'${ffTargetBranch}'; merge refused`,
+    };
+  }
+  const st = await run([git, "-C", ffWorktree, "status", "--porcelain", "--untracked-files=no"]);
+  if (st.ok && st.stdout.trim().length > 0) {
+    return {
+      ok: false,
+      message:
+        `ff-target branch '${ffTargetBranch}' has uncommitted tracked changes in ` +
+        `${ffWorktree}; merge refused`,
+    };
+  }
+  return { ok: true, message: "" };
+}
+
 // ---- STALE-BASE PROBES -------------------------------------------------------
 // Two cheap reads that answer "where is the task branch relative to the default
 // tip?" — shared by every place that has to reason about a possibly-stale base
@@ -799,6 +853,8 @@ async function bumpVersionFile(
 
   writeFileSync(pkgPath, bumped.text, "utf8");
   await run([git, "-C", wt, "add", rel]);
+  // Track exactly the paths WE staged so we can revert precisely if the commit fails (F2).
+  const stagedPaths = [rel];
 
   // release_mode: stamp the changelog in the SAME commit so the version file + the
   // versioned `## [X.Y.Z]` heading land atomically. Best-effort on the changelog write
@@ -812,13 +868,32 @@ async function bumpVersionFile(
       const stamped = promoteUnreleased(readFileSync(clogPath, "utf8"), bumped.to, date);
       writeFileSync(clogPath, stamped, "utf8");
       await run([git, "-C", wt, "add", relClog]);
+      stagedPaths.push(relClog);
     }
   }
 
   const msg = opts.releaseMode
     ? `butchr: release ${bumped.to} (${level} bump from ${bumped.from}, task ${taskId})`
     : `butchr: bump version ${bumped.from} → ${bumped.to} (task ${taskId})`;
-  await run([git, "-C", wt, "commit", "-m", msg]);
+  // F2 — the commit can FAIL (no user.email/name, a rejecting commit hook, disk error).
+  // If we ignored that and returned bumped.to, merge() would ff WITHOUT this version/
+  // changelog commit yet still report a version → finalizeMerge records a PHANTOM release
+  // whose bump never landed, and the teardown discards the stranded staged edit. So check
+  // `.ok` and, on failure, FAIL the merge (throw — merge() converts this to ok:false and
+  // refuses the ff; no version is returned, no release recorded). Before throwing, REVERT
+  // our own staged edits (`git checkout HEAD -- <paths>` restores both index + worktree)
+  // so a re-queue starts from a CLEAN tree: otherwise a later merge()'s dangling-changes
+  // step would commit them as "finalize task" and THEN bump a SECOND time — a double patch
+  // jump + a duplicate `## [X.Y.Z]` heading. At this point the rest of the tree is already
+  // clean (dangling committed, rebase done), so this touches only the files we dirtied.
+  const commit = await run([git, "-C", wt, "commit", "-m", msg]);
+  if (!commit.ok) {
+    await run([git, "-C", wt, "checkout", "HEAD", "--", ...stagedPaths]);
+    throw new Error(
+      `version bump commit failed (task ${taskId}): ` +
+        ((commit.stderr || commit.stdout).trim() || "git commit returned non-zero"),
+    );
+  }
   return bumped.to;
 }
 
@@ -904,6 +979,20 @@ export async function merge(
   // byte-for-byte today's merge.
   const wt = opts.sourceWorktree ?? worktreePath(dir, taskId);
 
+  // F4 — assert the ff-target worktree is on the EXPECTED branch (not detached / not the
+  // wrong branch) and tracked-clean BEFORE we mutate anything. Done at the TOP — ahead of
+  // the dangling-changes commit, the rebase, the version bump, and the ff — so a detached
+  // or wrong-branch ff-target refuses the merge without touching the source worktree (in
+  // particular before the bump commits onto the task branch, which would otherwise leave a
+  // bump commit that re-bumps on a later re-queue). The ff-target's state is independent of
+  // the rebase (which runs in the SOURCE worktree), so checking here is equivalent to
+  // checking right before the ff but wastes no work. Refusal returns a non-conflict failure
+  // → finalizeMerge's 409 hard-refusal path (ff-target untouched, no teardown).
+  const ffReady = await assertFfTargetReady(ffWorktree, ffTargetBranch);
+  if (!ffReady.ok) {
+    return { ok: false, conflict: false, message: ffReady.message, conflictFiles: [] };
+  }
+
   // Auto-commit any dangling worktree changes so they're part of the rebase.
   if (existsSync(wt)) {
     const st = await run([git, "-C", wt, "status", "--porcelain"]);
@@ -916,7 +1005,13 @@ export async function merge(
     // human review instead (worktree left staged, base untouched).
     const poisoned = await findConflictMarkers(wt);
     if (poisoned.length > 0) return poisonedResult(taskId, poisoned);
-    // Clean — commit the (now staged) dangling changes onto the task branch.
+    // Clean — commit the (now staged) dangling changes onto the task branch. The commit
+    // result is intentionally unchecked: it's FAIL-SAFE. If this commit fails (e.g. a
+    // rejecting hook / missing identity), the staged changes stay in the worktree, so the
+    // very next `git rebase base` refuses on a dirty tree (rb.ok=false) and we bounce down
+    // the conflict/abort path below with the base UNTOUCHED — no half-merged tip escapes.
+    // (Contrast the version-bump commit in bumpVersionFile, which we DO check: it runs after
+    // the rebase, so a dirty tree wouldn't be caught by anything downstream.)
     if (dirty) {
       await run([
         git, "-C", wt, "commit", "-m", `butchr: finalize task ${taskId}`,
@@ -958,12 +1053,25 @@ export async function merge(
   // the versioned heading in the same commit, and returns the assigned version.
   let assignedVersion: string | undefined;
   if (existsSync(wt)) {
-    assignedVersion = await bumpVersionFile(dir, wt, taskId, base, opts.versionFile ?? "", {
-      releaseMode: opts.releaseMode,
-      bumpLevel: opts.bumpLevel,
-      changelogPath: opts.changelogPath,
-      dateISO: opts.dateISO,
-    });
+    try {
+      assignedVersion = await bumpVersionFile(dir, wt, taskId, base, opts.versionFile ?? "", {
+        releaseMode: opts.releaseMode,
+        bumpLevel: opts.bumpLevel,
+        changelogPath: opts.changelogPath,
+        dateISO: opts.dateISO,
+      });
+    } catch (e) {
+      // F2 — the version-bump commit FAILED (bumpVersionFile already reverted its own staged
+      // edits, leaving the worktree clean). REFUSE the ff: returning ok:false with NO version
+      // means finalizeMerge records no phantom release and tears nothing down (the work
+      // survives for a fixup / re-queue). Routes through finalizeMerge's 409 hard-refusal.
+      return {
+        ok: false,
+        conflict: false,
+        conflictFiles: [],
+        message: e instanceof Error ? e.message : `version bump failed: ${String(e)}`,
+      };
+    }
   }
 
   // RE-GATE the REBASED (+bumped) tip BEFORE the fast-forward. This is the crux of the
