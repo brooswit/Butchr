@@ -9,10 +9,12 @@ import {
   ATTENTION_STATES,
   AttentionBridge,
   CONNECTIVITY_ONLY_INSTRUCTIONS,
+  type ChannelNotification,
   channelInitializeResult,
   channelNotificationMessage,
   handleRpc,
   makeSseParser,
+  resyncAttention,
   runSseLoop,
 } from "../src/channel.ts";
 
@@ -51,6 +53,27 @@ function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
       c.close();
     },
   });
+}
+
+// A fake `fetch` serving the REST surface resyncAttention reads: the scoped work LIST at
+// `/api/work` and per-item full TaskViews at `/api/work/:id`. Records every requested URL so a
+// test can assert scoping + that only attention-surface leaves were fetched.
+function makeFakeFetch(
+  list: unknown[],
+  views: Record<string, unknown>,
+): { f: typeof fetch; urls: string[] } {
+  const urls: string[] = [];
+  const f = (async (input: unknown) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.includes("/api/work/")) {
+      const id = decodeURIComponent(url.split("/api/work/")[1]!);
+      const v = views[id];
+      return { ok: v != null, status: v != null ? 200 : 404, json: async () => v };
+    }
+    return { ok: true, status: 200, json: async () => list };
+  }) as unknown as typeof fetch;
+  return { f, urls };
 }
 
 describe("channel: attention transitions → notifications", () => {
@@ -850,6 +873,32 @@ describe("channel: SSE reconnect on drop", () => {
     expect(received.length).toBe(1);
   });
 
+  test("runSseLoop runs onConnect on the FIRST open AND every reconnect (before draining)", async () => {
+    const connects: number[] = [];
+    let openCount = 0;
+    const ev = (n: number) => `data: ${JSON.stringify({ type: "hello", n })}\n\n`;
+    const received: string[] = [];
+
+    await runSseLoop({
+      url: "http://test/api/events",
+      onData: (p) => received.push(p),
+      open: async () => {
+        openCount++;
+        return streamOf([ev(openCount)]);
+      },
+      // Record the open# at the moment onConnect fires — proves it runs BEFORE draining
+      // (the event for this open has not been pushed yet) and on EVERY connect.
+      onConnect: () => {
+        connects.push(openCount);
+      },
+      shouldStop: () => received.length >= 2,
+      sleep: async () => {},
+    });
+
+    // Fired on the first open (1) and again on the reconnect (2) — not reconnect-only.
+    expect(connects).toEqual([1, 2]);
+  });
+
   test("makeSseParser extracts data payloads and skips keepalive comments", () => {
     const out: string[] = [];
     const feed = makeSseParser((p) => out.push(p));
@@ -965,5 +1014,137 @@ describe("channel: connectivity-only mode (worker bridge)", () => {
       result: { instructions: string };
     };
     expect(res.result.instructions).toBe(CONNECTIVITY_ONLY_INSTRUCTIONS);
+  });
+});
+
+describe("channel: re-sync scoped attention on (re)connect", () => {
+  test("re-emits a transition MISSED during the gap, and does NOT re-emit a delivered one", async () => {
+    const bridge = new AttentionBridge("dir-1");
+
+    // t-delivered: its in_review transition was already PUSHED before the gap, so it is
+    // already reflected in the bridge's in-memory maps.
+    expect(
+      bridge.consume(
+        taskUpdated({ id: "t-delivered", workspace_id: "dir-1", status: "in_review", summary: "old diff" }),
+      ),
+    ).not.toBeNull();
+
+    // The REST snapshot at reconnect time: both attention tasks still outstanding, plus an
+    // active (non-attention) leaf, a different-workspace task, and a story node — all of which
+    // must NOT trigger a per-item fetch.
+    const list = [
+      { work_kind: "leaf", id: "t-delivered", workspace_id: "dir-1", status: "in_review" },
+      { work_kind: "leaf", id: "t-missed", workspace_id: "dir-1", status: "needs_info" },
+      { work_kind: "leaf", id: "t-active", workspace_id: "dir-1", status: "in_progress", idle: 0 },
+      { work_kind: "node", id: "st-x", workspace_id: "dir-1", status: "in_review" },
+    ];
+    const views: Record<string, unknown> = {
+      "t-delivered": {
+        id: "t-delivered", workspace_id: "dir-1", status: "in_review",
+        summary: "old diff", pending_responder: "cto",
+      },
+      "t-missed": {
+        id: "t-missed", workspace_id: "dir-1", status: "needs_info",
+        question: "which db?", pending_responder: "cto",
+      },
+    };
+
+    const { f, urls } = makeFakeFetch(list, views);
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+
+    // Only the MISSED transition is recovered; the already-delivered one is NOT duplicated.
+    expect(emitted.map((n) => n.meta.task_id)).toEqual(["t-missed"]);
+    expect(emitted[0]!.meta.state).toBe("needs_info");
+    expect(emitted[0]!.content).toContain("which db?");
+    // The list fetch was scoped to the bridge's workspace; only attention-surface LEAVES were
+    // fetched per-item (no active leaf, no different-workspace task, no story node).
+    expect(urls[0]).toContain("/api/work?workspace=dir-1");
+    expect(urls.some((u) => u.includes("/api/work/t-active"))).toBe(false);
+    expect(urls.some((u) => u.includes("/api/work/st-x"))).toBe(false);
+
+    // A SECOND re-sync (e.g. a later reconnect) with the maps now populated emits nothing new.
+    const { f: f2 } = makeFakeFetch(list, views);
+    const emitted2: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => emitted2.push(n), fetchImpl: f2,
+    });
+    expect(emitted2).toEqual([]);
+  });
+
+  test("a story-leader bridge re-syncs only ITS story's subtasks", async () => {
+    const bridge = new AttentionBridge("dir-1", false, "st-1");
+    const list = [
+      // belongs to this story → owned by the leader (subtask feedback resolves to 'story')
+      { work_kind: "leaf", id: "t-mine", workspace_id: "dir-1", story_id: "st-1", status: "needs_info" },
+      // a different story's subtask → filtered out (no per-item fetch)
+      { work_kind: "leaf", id: "t-other", workspace_id: "dir-1", story_id: "st-2", status: "needs_info" },
+    ];
+    const views: Record<string, unknown> = {
+      "t-mine": {
+        id: "t-mine", workspace_id: "dir-1", story_id: "st-1", status: "needs_info",
+        question: "branch?", pending_responder: "story",
+      },
+    };
+    const { f, urls } = makeFakeFetch(list, views);
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1", scopeStory: "st-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+    expect(emitted.map((n) => n.meta.task_id)).toEqual(["t-mine"]);
+    expect(emitted[0]!.meta.story_id).toBe("st-1");
+    expect(urls.some((u) => u.includes("/api/work/t-other"))).toBe(false);
+  });
+
+  test("re-emits a DEAD_BLOCKED transition missed during the gap, and does NOT duplicate it", async () => {
+    const bridge = new AttentionBridge("dir-1");
+    // A leaf that entered the dead_blocked surface during the gap (status='blocked' with a dead
+    // blocker) — the bridge has never seen it, so its maps are pre-attention.
+    const list = [
+      { work_kind: "leaf", id: "t-dead", workspace_id: "dir-1", status: "blocked", deadBlockers: ["t-gone"] },
+      // a plain blocked leaf with NO dead blockers is NOT on the surface → no per-item fetch.
+      { work_kind: "leaf", id: "t-live-block", workspace_id: "dir-1", status: "blocked", deadBlockers: [] },
+    ];
+    const views: Record<string, unknown> = {
+      "t-dead": {
+        id: "t-dead", workspace_id: "dir-1", status: "blocked",
+        deadBlockers: ["t-gone"], pending_responder: null,
+      },
+    };
+    const { f, urls } = makeFakeFetch(list, views);
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+    // The dead_blocked transition is recovered; the live-blocked leaf is never fetched.
+    expect(emitted.map((n) => n.meta.task_id)).toEqual(["t-dead"]);
+    expect(emitted[0]!.meta.state).toBe("dead_blocked");
+    expect(emitted[0]!.content).toContain("t-gone");
+    expect(urls.some((u) => u.includes("/api/work/t-live-block"))).toBe(false);
+
+    // A SECOND re-sync with the maps now populated emits nothing new (no duplicate).
+    const { f: f2 } = makeFakeFetch(list, views);
+    const emitted2: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => emitted2.push(n), fetchImpl: f2,
+    });
+    expect(emitted2).toEqual([]);
+  });
+
+  test("a failed list fetch is swallowed (best-effort) — no throw, no emit", async () => {
+    const bridge = new AttentionBridge("dir-1");
+    const f = (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch;
+    const emitted: ChannelNotification[] = [];
+    await expect(
+      resyncAttention({ baseUrl: "http://test", bridge, scopeDir: "dir-1", emit: (n) => emitted.push(n), fetchImpl: f }),
+    ).resolves.toBeUndefined();
+    expect(emitted).toEqual([]);
   });
 });

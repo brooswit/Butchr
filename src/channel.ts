@@ -606,6 +606,18 @@ export type SseLoopOpts = {
   shouldStop?: () => boolean;
   /** Open the stream (overridable in tests). Resolves null/throws to trigger retry. */
   open?: (url: string) => Promise<ReadableStream<Uint8Array> | null>;
+  /**
+   * Invoked after EVERY successful open() — the first connect AND every reconnect —
+   * BEFORE draining begins. The bridge uses this to RE-SYNC scoped attention from REST
+   * so a transition fired during the gap (a reconnect, or across a butchr restart that
+   * relaunches the agent → a fresh bridge with empty maps) is re-detected and pushed.
+   * It runs on the FIRST open too: a fresh process must surface the currently-outstanding
+   * attention (the headline case is missing an escalation ACROSS a restart — the SSE
+   * stream only carries FUTURE transitions, so a task already sitting in needs_info/failed
+   * at (re)start would otherwise never push). Best-effort — runSseLoop catches a throw and
+   * proceeds to drain regardless. Overridable in tests.
+   */
+  onConnect?: () => Promise<void> | void;
   /** Sleep between reconnect attempts (overridable in tests). */
   sleep?: (ms: number) => Promise<void>;
   /** Reconnect backoff in ms (fixed; SSE on loopback rarely drops). */
@@ -662,12 +674,128 @@ export async function runSseLoop(opts: SseLoopOpts): Promise<void> {
   while (!opts.shouldStop?.()) {
     try {
       const stream = await open(opts.url);
-      if (stream) await drainStream(stream, opts.onData, opts.shouldStop);
+      if (stream) {
+        // RE-SYNC scoped attention from REST on every (re)connect BEFORE draining, so a
+        // transition missed during the gap is re-detected. Best-effort: a throw here must
+        // not skip the drain (we still want the live stream). Ordering open→re-sync→drain
+        // means any transition between the REST read and drain start is still buffered in
+        // the SSE stream and de-dups through the same bridge maps.
+        if (opts.onConnect) {
+          try {
+            await opts.onConnect();
+          } catch (e) {
+            log(`re-sync on connect failed (continuing): ${(e as Error).message}`);
+          }
+        }
+        await drainStream(stream, opts.onData, opts.shouldStop);
+      }
     } catch (e) {
       log(`sse error (will reconnect): ${(e as Error).message}`);
     }
     if (opts.shouldStop?.()) break;
     await sleep(backoff); // stream ended/dropped → back off, then reconnect
+  }
+}
+
+// --- reconnect re-sync (recover pushes missed during the gap) ----------------
+
+/** Is a list item currently on a TASK attention surface? Mirrors ALL THREE surface gates in
+ * AttentionBridge.consume — an attention STATUS, the IDLE condition on a live agent, or the
+ * DEAD-BLOCKED condition (a `blocked` task with a non-empty deadBlockers set) — so the re-sync
+ * fetches a full view for every task that could actually push. The /api/work leaf list rows
+ * carry both `idle` and `deadBlockers`, so the pre-filter evaluates them without the per-:id fetch. */
+function isOnAttentionSurface(item: Record<string, unknown>): boolean {
+  const status = item.status;
+  if (isAttentionState(status)) return true;
+  if (status === "in_progress" && (item.idle === 1 || item.idle === true)) return true;
+  return (
+    status === "blocked" &&
+    Array.isArray(item.deadBlockers) &&
+    item.deadBlockers.length > 0
+  );
+}
+
+/**
+ * ONE-SHOT REST re-sync run on every (re)connect (see SseLoopOpts.onConnect): re-detect any
+ * TASK attention transition that fired while the bridge was mid-reconnect — or that was
+ * already outstanding when a fresh bridge started (e.g. across a butchr restart) — and push
+ * the ones still outstanding, WITHOUT double-emitting a transition already delivered.
+ *
+ * The de-dup comes for FREE by re-feeding the current REST state back through the SAME
+ * `bridge.consume()` and its SAME in-memory maps: consume emits only when a task's status
+ * actually CHANGED into an attention surface (or its responder changed), so a transition the
+ * maps already reflect (delivered before the gap, or already re-synced on a prior connect)
+ * yields null, while a transition the maps DON'T yet reflect (missed during the gap, or never
+ * seen by a fresh process) emits exactly once. Ownership routing (routeOwns) is likewise
+ * inherited unchanged from consume.
+ *
+ * SCOPE: this recovers ALL LEAF (task) attention surfaces — attention status, idle, AND
+ * dead_blocked — including a story-leader bridge's OWN subtasks' feedback/failures, via the
+ * scopeStory routing inside consume (the candidate pre-filter mirrors all three). STORY-CONTAINER
+ * notifications (story.attention: completion-review / story asks / gate-red / etc.) are NOT
+ * re-synced: consume handles them STATELESSLY (no de-dup map), so re-feeding them would
+ * double-emit on every reconnect; safely re-syncing them would need a de-dup key consume does
+ * not have — out of proportionate scope for this fix (flagged as a possible follow-up).
+ *
+ * DB-free: it reads the SAME REST surface the dashboard does (GET /api/work + GET /api/work/:id),
+ * scoped to this bridge's workspace/story. Fully best-effort — per-item and whole-fn failures are
+ * caught and logged, never thrown, so a still-restarting butchr just means the next connect retries.
+ */
+export async function resyncAttention(args: {
+  baseUrl: string;
+  bridge: AttentionBridge;
+  emit: (n: ChannelNotification) => void;
+  scopeDir?: string;
+  scopeStory?: string;
+  fetchImpl?: typeof fetch;
+  log?: (msg: string) => void;
+}): Promise<void> {
+  const { baseUrl, bridge, emit } = args;
+  const f = args.fetchImpl ?? fetch;
+  const log = args.log ?? (() => {});
+  const scopeDir = (args.scopeDir ?? "").trim();
+  const scopeStory = (args.scopeStory ?? "").trim();
+  try {
+    // Scope the list to this bridge's workspace when set (mirrors the SSE scoping); a
+    // story-leader bridge also has its workspace set, then narrows to its story below.
+    const listUrl =
+      `${baseUrl}/api/work` + (scopeDir ? `?workspace=${encodeURIComponent(scopeDir)}` : "");
+    const res = await f(listUrl, { headers: { accept: "application/json" } });
+    if (!res.ok) {
+      log(`re-sync list fetch failed: HTTP ${res.status}`);
+      return;
+    }
+    const items = await res.json();
+    if (!Array.isArray(items)) return;
+
+    // Bound the per-item fetches to LEAF tasks currently on an attention surface (and, for a
+    // story bridge, this story's subtasks) — routeOwns drops the rest, but pre-filtering keeps
+    // the full-view fetches to only outstanding-attention tasks.
+    const candidates = (items as Array<Record<string, unknown>>).filter((it) => {
+      if (it.work_kind !== "leaf") return false;
+      if (scopeStory && it.story_id !== scopeStory) return false;
+      return isOnAttentionSurface(it);
+    });
+
+    for (const item of candidates) {
+      const id = item.id;
+      if (typeof id !== "string" || !id) continue;
+      try {
+        // The light list view omits prompt/question/etc. that attentionText needs, so fetch
+        // the full TaskView per candidate and feed it through consume exactly like an SSE event.
+        const r = await f(`${baseUrl}/api/work/${encodeURIComponent(id)}`, {
+          headers: { accept: "application/json" },
+        });
+        if (!r.ok) continue;
+        const view = await r.json();
+        const note = bridge.consume({ type: "task.updated", task: view });
+        if (note) emit(note);
+      } catch (e) {
+        log(`re-sync item ${id} failed: ${(e as Error).message}`);
+      }
+    }
+  } catch (e) {
+    log(`re-sync failed: ${(e as Error).message}`);
   }
 }
 
@@ -796,13 +924,29 @@ export async function main(): Promise<void> {
     }
   };
 
-  // SSE subscription with auto-reconnect (runs for the life of the process).
+  // SSE subscription with auto-reconnect (runs for the life of the process). On every
+  // (re)connect we RE-SYNC scoped attention from REST so a transition fired during the gap
+  // — or already outstanding when this fresh bridge started, e.g. across a butchr restart —
+  // is recovered (see resyncAttention). Skipped for a connectivity-only worker bridge: it
+  // delivers no attention, so there is nothing to re-sync.
+  const base = url.replace(/\/api\/events.*$/, "");
   elog(`subscribing to ${url}`);
   const sse = runSseLoop({
     url,
     onData,
     shouldStop: () => stopped,
     log: elog,
+    onConnect: connectivityOnly
+      ? undefined
+      : () =>
+          resyncAttention({
+            baseUrl: base,
+            bridge,
+            scopeDir,
+            scopeStory,
+            emit: (n) => writeMessage(channelNotificationMessage(n)),
+            log: elog,
+          }),
   });
 
   // Read stdin: newline-delimited JSON-RPC. Answer initialize/ping; ignore the rest.
