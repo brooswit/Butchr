@@ -3386,9 +3386,15 @@ async function resumeWithAnswer(
 ): Promise<void> {
   appendAnswer(dirPath, id, row.question ?? "", answer, nowIso());
   await herdr.teardownTask(id);
-  // The caller (respondToFeedback) only routes a needs_info task here, so the
-  // unconditional re-arm to inactive records the needs_info → inactive event.
+  // GUARD against a resurrection race: a concurrent abortTask can flip this row to a
+  // TERMINAL status during the `await teardownTask` above. `from:"needs_info"` makes this
+  // re-arm a no-op (setStatus returns false) once the row has left needs_info, so an
+  // aborted task is never forced back to `inactive` → re-dispatched as a zombie. This is
+  // the SINGLE chokepoint for all three resume entrypoints (answer / approvePlan /
+  // rejectPlan), which ALL route here from a needs_info row (plan-preview tasks are
+  // status=needs_info + plan_preview), so one guard protects every path.
   setStatus(id, "inactive", {
+    from: "needs_info",
     note: "question answered by operator",
     set: {
       answer,
