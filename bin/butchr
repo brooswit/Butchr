@@ -342,23 +342,22 @@ async function cmdGate(positionals, flags) {
 }
 
 async function cmdLs(flags) {
-  let dirIds;
-  if (flags.workspace) {
-    dirIds = [await resolveWorkspaceId(flags.workspace)];
-  } else {
-    const dirs = await api("GET", "/api/workspaces");
-    dirIds = dirs.map((d) => d.id);
-  }
-  // --search <text> is a SERVER-SIDE full-text filter (?q=) over each task's
+  // The unified work list (GET /api/work) returns a leaf|node UNION across all
+  // workspaces, already merged + sorted newest-first server-side. --workspace (id
+  // or path) and --search map to the ?workspace= / ?q= QUERY params; blank → no
+  // filter, so the no-workspace path is a single GET spanning every workspace.
+  // --search is a SERVER-SIDE full-text filter over each task's
   // prompt/summary/review notes/id — the prompt lives in task.md on the server, so
-  // matching it has to happen there, not in this client. Blank → no filter.
+  // matching it has to happen there, not in this client.
+  const params = new URLSearchParams();
+  if (flags.workspace) params.set("workspace", await resolveWorkspaceId(flags.workspace));
   const search = (flags.search ?? "").trim();
-  const qs = search ? `?q=${encodeURIComponent(search)}` : "";
-  let tasks = [];
-  for (const id of dirIds) {
-    const list = await api("GET", `/api/workspaces/${encodeURIComponent(id)}/tasks${qs}`);
-    tasks.push(...list);
-  }
+  if (search) params.set("q", search);
+  const qs = params.toString();
+  const work = await api("GET", `/api/work${qs ? `?${qs}` : ""}`);
+  // ls lists TASKS (leaves) only — drop the story NODES the union also returns so
+  // the table stays byte-identical to the old per-workspace task listing.
+  let tasks = work.filter((t) => t.work_kind === "leaf");
   if (flags.status) tasks = tasks.filter((t) => t.status === flags.status);
   // --tag a,b keeps tasks carrying ANY of the given labels (OR semantics), matching
   // the webapp's tag filter. An empty --tag '' is a no-op.
@@ -384,7 +383,7 @@ async function cmdStory(positionals, flags) {
   const brief = flags.message;
   if (!brief) fail("story: missing -m <brief>");
   const dirId = await resolveWorkspaceId(dir);
-  const story = await api("POST", `/api/workspaces/${encodeURIComponent(dirId)}/stories`, { brief });
+  const story = await api("POST", `/api/workspaces/${encodeURIComponent(dirId)}/work`, { brief });
   return emit(flags, story, `created story ${story.id} (${story.status})\n`);
 }
 
@@ -394,8 +393,8 @@ async function cmdNew(positionals, flags) {
   // AUTHORITY FLIP: `new` no longer creates standalone work tasks — new work flows through
   // STORIES (`butchr story`), and the tasks themselves are created by story LEADERS. The ONE
   // task still creatable here is a ROLLBACK (revert a merged task's commit), mirroring the API
-  // gate exactly (POST /api/workspaces/:id/tasks admits only kind=rollback). Anything else
-  // errors, pointing at `story`.
+  // gate exactly (POST /api/workspaces/:id/work admits a workspace-level LEAF only when
+  // kind=rollback; otherwise it creates a story NODE). Anything else errors, pointing at `story`.
   if (flags.template !== "rollback") {
     fail(
       'new: standalone task creation is disabled — create a STORY instead: ' +
@@ -416,7 +415,11 @@ async function cmdNew(positionals, flags) {
   // that strays outside it. Omitted (empty) leaves the gate inert. Reuses parseIdList's
   // split/trim/drop-blanks (the list shape is identical, just different semantics).
   const allowlist = parseIdList(flags.allowlist);
-  const reqBody = { blocked_by: blockedBy, tags, allowlist };
+  // `kind:'rollback'` is the discriminator the unified create route keys on
+  // (POST /api/workspaces/:id/work treats body.kind==='rollback' || template==='rollback'
+  // as a workspace-level ROLLBACK LEAF; anything else is a story NODE create). `new` only
+  // ever creates a rollback (guarded above), so it is always carried.
+  const reqBody = { kind: "rollback", blocked_by: blockedBy, tags, allowlist };
   // Optional dispatch priority — higher dispatches sooner; omit to default to 0.
   if (flags.priority !== undefined) reqBody.priority = parsePriority(flags.priority);
   // Optional plan-preview gate — the agent proposes a plan and pauses for operator
@@ -439,7 +442,7 @@ async function cmdNew(positionals, flags) {
   }
   const task = await api(
     "POST",
-    `/api/workspaces/${encodeURIComponent(dirId)}/tasks`,
+    `/api/workspaces/${encodeURIComponent(dirId)}/work`,
     reqBody,
   );
   return emit(flags, task, `created ${task.id} (${task.status})\n`);
@@ -460,7 +463,7 @@ async function cmdTemplates(flags) {
 
 async function cmdShow(positionals, flags) {
   const id = requireId(positionals, "show");
-  const t = await api("GET", `/api/tasks/${encodeURIComponent(id)}`);
+  const t = await api("GET", `/api/work/${encodeURIComponent(id)}`);
   const lines = [
     `id:        ${t.id}`,
     `workspace: ${t.workspace_id}`,
@@ -490,7 +493,7 @@ async function cmdShow(positionals, flags) {
 
 async function cmdApprove(positionals, flags) {
   const id = requireId(positionals, "approve");
-  const r = await api("POST", `/api/tasks/${encodeURIComponent(id)}/approve`, {});
+  const r = await api("POST", `/api/work/${encodeURIComponent(id)}/approve`, {});
   // approve returns either the task view directly, or {task, conflictSentBack} /
   // {task, revertedOnRed} when the merge couldn't complete cleanly.
   let text;
@@ -511,7 +514,7 @@ async function cmdApprove(positionals, flags) {
 // view (carrying released_version) once it lands, or the conflict/revert flags.
 async function cmdConfirmMajor(positionals, flags) {
   const id = requireId(positionals, "confirm-major");
-  const r = await api("POST", `/api/tasks/${encodeURIComponent(id)}/confirm-major`, {});
+  const r = await api("POST", `/api/work/${encodeURIComponent(id)}/confirm-major`, {});
   let text;
   if (r.conflictSentBack) {
     text = `${id}: merge conflict — sent back to the agent for resolution\n`;
@@ -532,7 +535,7 @@ async function cmdReject(positionals, flags) {
   const id = requireId(positionals, "reject");
   const note = flags.message;
   if (!note) fail("reject: missing -m <note>");
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/reject`, { note });
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/reject`, { note });
   return emit(flags, t, `rejected ${id} → ${t.status} (agent will resume with your note)\n`);
 }
 
@@ -540,28 +543,28 @@ async function cmdAnswer(positionals, flags) {
   const id = requireId(positionals, "answer");
   const answer = flags.message;
   if (!answer) fail("answer: missing -m <text>");
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/answer`, { answer });
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/answer`, { answer });
   return emit(flags, t, `answered ${id} → ${t.status} (agent will resume with your answer)\n`);
 }
 
 // Structured plan-approval: approve a plan-preview task's proposed plan (the agent resumes
 // to implement). An optional -m adds steering notes. Distinct from `answer` — it 409s unless
-// the task is at the plan-approval step. See POST /api/tasks/:id/plan/approve.
+// the task is at the plan-approval step. See POST /api/work/:id/plan/approve.
 async function cmdPlanApprove(positionals, flags) {
   const id = requireId(positionals, "plan-approve");
   const body = flags.message ? { note: flags.message } : {};
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/plan/approve`, body);
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/plan/approve`, body);
   const how = flags.message ? "approved with steering notes" : "approved";
   return emit(flags, t, `plan ${how} for ${id} → ${t.status} (agent will implement)\n`);
 }
 
 // Structured plan-rejection: send a proposed plan back for revision with required feedback
-// (the agent re-proposes via propose_plan). See POST /api/tasks/:id/plan/reject.
+// (the agent re-proposes via propose_plan). See POST /api/work/:id/plan/reject.
 async function cmdPlanReject(positionals, flags) {
   const id = requireId(positionals, "plan-reject");
   const note = flags.message;
   if (!note) fail("plan-reject: missing -m <feedback>");
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/plan/reject`, { note });
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/plan/reject`, { note });
   return emit(flags, t, `plan rejected for ${id} → ${t.status} (agent will revise + re-propose)\n`);
 }
 
@@ -574,7 +577,7 @@ async function cmdSpec(positionals, flags) {
     spec = (await Bun.stdin.text()).trim();
   }
   if (!spec) fail("spec: provide the spec via -m <text> or pipe it on stdin");
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/spec`, { spec });
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/spec`, { spec });
   return emit(flags, t, `spec submitted for ${id} → ${t.status} (awaiting approval)\n`);
 }
 
@@ -584,14 +587,14 @@ async function cmdSpec(positionals, flags) {
 async function cmdNudge(positionals, flags) {
   const id = requireId(positionals, "nudge");
   const body = flags.message ? { text: flags.message } : {};
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/nudge`, body);
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/nudge`, body);
   const what = flags.message ? `guidance sent` : `sent 'continue'`;
   return emit(flags, t, `nudged ${id} → ${t.status} (${what})\n`);
 }
 
 async function cmdRequeue(positionals, flags) {
   const id = requireId(positionals, "requeue");
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/requeue`, {});
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/requeue`, {});
   return emit(flags, t, `requeued ${id} (${t.status})\n`);
 }
 
@@ -599,7 +602,7 @@ async function cmdBlock(positionals, flags) {
   const id = requireId(positionals, "block");
   if (flags.on === undefined) fail("block: missing --on id,id (use --on '' to clear)");
   const blockedBy = parseIdList(flags.on);
-  const t = await api("PUT", `/api/tasks/${encodeURIComponent(id)}/blocked_by`, {
+  const t = await api("PUT", `/api/work/${encodeURIComponent(id)}/blocked_by`, {
     blocked_by: blockedBy,
   });
   const onStr = blockedBy.length ? blockedBy.join(", ") : "(cleared)";
@@ -610,7 +613,7 @@ async function cmdPriority(positionals, flags) {
   const id = requireId(positionals, "priority");
   if (positionals[1] === undefined) fail("priority: missing <N> (the integer priority)");
   const priority = parsePriority(positionals[1]);
-  const t = await api("POST", `/api/tasks/${encodeURIComponent(id)}/priority`, { priority });
+  const t = await api("POST", `/api/work/${encodeURIComponent(id)}/priority`, { priority });
   return emit(flags, t, `${id} priority = ${t.priority} (${t.status})\n`);
 }
 
@@ -721,7 +724,7 @@ function parseSeconds(raw, name, fallbackMs) {
 // Block until a task reaches `--until <state>` (replacing hand-rolled curl+sleep loops).
 // `<state>` matches the task's status, plus the synthetic `idle` (a running agent gone
 // quiet). Exits 0 when reached; non-zero on a timeout or if the task lands in a DIFFERENT
-// terminal state first. Polls GET /api/tasks/:id every `--interval` (default 2s).
+// terminal state first. Polls GET /api/work/:id every `--interval` (default 2s).
 async function cmdWait(positionals, flags) {
   const id = requireId(positionals, "wait");
   const until = (flags.until ?? "").trim();
@@ -732,7 +735,7 @@ async function cmdWait(positionals, flags) {
   // `idle` is a flag on a running agent, not a status — match it explicitly.
   const reached = (t) => (until === "idle" ? t.status === "in_progress" && t.idle : t.status === until);
   for (;;) {
-    const t = await api("GET", `/api/tasks/${encodeURIComponent(id)}`);
+    const t = await api("GET", `/api/work/${encodeURIComponent(id)}`);
     if (reached(t)) {
       return emit(flags, t, `${id} reached ${until} (status=${t.status}${t.idle ? ", idle" : ""})\n`);
     }
@@ -858,6 +861,30 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  fail(e instanceof ApiError ? e.message : (e && e.message) || String(e));
-});
+// Only auto-run as a CLI when invoked directly (`bun bin/butchr …`). When imported
+// (e.g. by the integration test that drives the real handlers against a booted
+// server), DON'T run main — the importer calls the exported handlers itself. BASE
+// is read from BUTCHR_URL at import time, which the test sets before importing.
+if (import.meta.main) {
+  main().catch((e) => {
+    fail(e instanceof ApiError ? e.message : (e && e.message) || String(e));
+  });
+}
+
+// Minimal export surface for tests: the raw HTTP helper, the arg parser, and the
+// command handlers exercised end-to-end against live /api/work routes. Importing
+// this module has no side effects (main is import.meta.main-guarded above).
+export {
+  api,
+  ApiError,
+  parseArgs,
+  cmdLs,
+  cmdStory,
+  cmdNew,
+  cmdShow,
+  cmdApprove,
+  cmdReject,
+  cmdAnswer,
+  cmdSpec,
+  cmdWait,
+};

@@ -1030,8 +1030,8 @@ route("POST", "/api/workspaces/:id/cto/terminal", async (_req, p) => {
   return attachAgentTerminal(ctoAgentName(p.id!));
 });
 
-/** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. */
-export function startServer(): void {
+/** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. Returns the running server so callers/tests can `.stop()` it. */
+export function startServer(): ReturnType<typeof Bun.serve> {
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
@@ -1091,4 +1091,5 @@ export function startServer(): void {
   console.log(
     `[butchr] listening on http://${server.hostname}:${server.port}`,
   );
+  return server;
 }

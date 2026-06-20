@@ -380,7 +380,7 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
         `story↔main merge conflict${fileList} — resolve in the story worktree: ` +
         `cd ${storyWt} && git rebase $(git -C ${dir?.path ?? "<repo>"} branch --show-current || echo main); ` +
         `resolve + 'git add' each file, 'git rebase --continue'; then re-PATCH the story 'done' ` +
-        `(PATCH /api/stories/${storyId} {"status":"done"}) to re-attempt the land. Branch: ${branch}.`,
+        `(PATCH /api/work/${storyId} {"status":"done"}) to re-attempt the land. Branch: ${branch}.`,
     });
   } else {
     // A rare non-conflict git failure — main untouched; surface loud, no spurious attention event.
