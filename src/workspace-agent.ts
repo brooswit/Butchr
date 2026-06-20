@@ -29,7 +29,7 @@
 // coexistence/cutover that replaces them with this loop is the separately-authorized step 6,
 // out of scope here. Turning the flag on today exercises this loop (and the tests) WITHOUT
 // removing the old supervisors.
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { config } from "./config.ts";
@@ -45,14 +45,20 @@ import {
   nowIso,
   saveWorkspaceAgentRow,
 } from "./db.ts";
+// The mid-session probe reuses the build-agent safety net's pure helpers AS-IS (genuine-idle
+// threshold + throttle gate). dispatcher.ts does NOT import workspace-agent.ts (directly or
+// transitively — its only workspace-agent-importing dependency would be stories.ts, which the
+// dispatcher never imports), so this introduces NO import cycle and no shared module is needed.
+import { isGenuinelyIdle, shouldProbeTick } from "./dispatcher.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
 import { isCtoEnabled } from "./cto-agent.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
+import type { SendInput } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
 import { claudeLiveness } from "./liveness.ts";
-import { autoConfirmStartupPrompts } from "./startup-confirm.ts";
-import type { AutoConfirmResult } from "./startup-confirm.ts";
+import { autoConfirmStartupPrompts, classifyStartupScreen } from "./startup-confirm.ts";
+import type { AutoConfirmResult, ConfirmRule } from "./startup-confirm.ts";
 
 /** Is the unified-workspace supervisor ENABLED? OFF by default (fully inert when off). */
 export function isUnifiedWorkspaceEnabled(): boolean {
@@ -120,12 +126,14 @@ type SupState = {
   launchInFlight: Promise<WorkspaceAgentStatus> | null;
   consecutiveFailures: number;
   nextRetryAt: number;
+  /** Supervise-tick counter for the throttled operator mid-session pane probe. */
+  superviseTicks: number;
 };
 const supStates = new Map<string, SupState>();
 function supState(id: string): SupState {
   let s = supStates.get(id);
   if (!s) {
-    s = { launchInFlight: null, consecutiveFailures: 0, nextRetryAt: 0 };
+    s = { launchInFlight: null, consecutiveFailures: 0, nextRetryAt: 0, superviseTicks: 0 };
     supStates.set(id, s);
   }
   return s;
@@ -585,6 +593,149 @@ export async function reconcileWorkspaceAgents(
   return { adopted, launched, skipped };
 }
 
+// ---- MID-SESSION PANE PROBE (operator workspaces: kind 'cto'/'leader') ----------------
+// The supervisor above is /proc-liveness-ONLY: it relaunches a DEAD agent but never reads a
+// LIVE one's pane. So an operator parked at a blocking startup/permission dialog AFTER launch
+// (or once the launch/adopt auto-confirm window has closed) is "running" by liveness yet hangs
+// silently with 0 progress. This is the ongoing MID-SESSION safety net — the operator-workspace
+// analogue of the build-agent watcher's mid-session probe (dispatcher.probeAgentForPrompt): a
+// single throttled, genuine-idle-gated read+classify+act on the live pane.
+
+/**
+ * Sentinel prefix marking a `last_error` value the MID-SESSION probe wrote to SURFACE an
+ * unrecognized blocking prompt (operator workspaces have no needs_user_input flag, so the row's
+ * last_error is the lightweight attention signal). It scopes the probe's self-clear (on a `rule`
+ * or `quiet` read) to ITS OWN signals so a genuine launch/relaunch error written by
+ * superviseWorkspace / reconcile is never clobbered (and a successful (re)start, which writes
+ * last_error:null, naturally clears a stale stuck signal).
+ */
+export const WORKSPACE_STUCK_PREFIX = "[needs-input] ";
+
+/** Truncate a captured stuck-screen snapshot to a short, last-lines window for last_error. */
+function stuckSnapshot(screen: string): string {
+  const tail = screen.split("\n").slice(-12).join("\n").trim();
+  return tail.length > 800 ? tail.slice(-800) : tail;
+}
+
+/**
+ * GENUINE-IDLE quiet duration for an operator workspace: now - agent.log mtime, mirroring
+ * dispatcher.refreshIdle EXACTLY (minus the setIdle side-effect). The log is the launcher's
+ * logFile (workspaceDir/agent.log). Returns null when idle detection is off (idleMs<=0) OR the
+ * log is missing — a missing log means the agent is still spinning up, which the caller treats
+ * as NOT idle so a just-launched agent is never probed/keystroked.
+ */
+function workspaceQuietMs(id: string): number | null {
+  if (config.idleMs <= 0) return null;
+  try {
+    return Date.now() - statSync(join(workspaceDir(id), "agent.log")).mtimeMs;
+  } catch {
+    return null; // no log yet — agent is still spinning up
+  }
+}
+
+/** Injectable seams for the operator mid-session probe (the harness/DB in production; fakes in tests). */
+export type WorkspaceProbeDeps = {
+  /** Read the agent's live pane (ANSI-stripped). */
+  read: (name: string) => Promise<string>;
+  /** Push a confirming input to the agent's pane. */
+  send: (name: string, input: SendInput) => Promise<void>;
+  /**
+   * Is the agent GENUINELY IDLE (agent.log quiet past idleMs)? The probe takes NO action — no
+   * read, no signal, no keystroke — unless this is true, so an actively-working operator (still
+   * producing output) is left completely alone and benign active-turn text can never be
+   * mis-detected as a blocking dialog.
+   */
+  idle: () => boolean;
+  /** The workspace row's current last_error (the attention-signal store). */
+  getError: (id: string) => string | null;
+  /** Persist (or clear, with null) the workspace row's last_error. */
+  setError: (id: string, msg: string | null) => void;
+  /** Extra/overriding rule table (defaults to STARTUP_CONFIRM_RULES). */
+  rules?: ConfirmRule[];
+  /** Optional diagnostics sink. */
+  log?: (msg: string) => void;
+};
+
+/**
+ * MID-SESSION SAFETY NET — one pane-CONTENT probe for a single LIVE operator workspace, the
+ * counterpart to launch/adopt auto-confirm for prompts that appear AFTER startup. Mirrors
+ * dispatcher.probeAgentForPrompt: reads the live pane once and classifies it via the SAME
+ * three-way classifier as the launch path:
+ *   - `rule`  → a known prompt we can auto-confirm: send the safe response and CLEAR any prior
+ *               (probe-set) attention signal — we are handling it, so the user no longer needs to;
+ *   - `stuck` → an unrecognized but prompt-like pane → SURFACE it: persist a truncated snapshot
+ *               to the row's last_error (sentinel-prefixed) + console.warn, send nothing;
+ *   - `quiet` → past any prompt → CLEAR any prior (probe-set) attention signal (self-clearing).
+ *
+ * GENUINE-IDLE GATE: the WHOLE probe is a no-op unless `deps.idle()`. An actively-working agent
+ * (log fresh, mid-turn) is left completely untouched — no pane read, no signal, no keystroke.
+ * SELF-CLEAR SCOPE: clears last_error ONLY when it currently holds a probe-written signal
+ * (WORKSPACE_STUCK_PREFIX), so a genuine launch/relaunch error is never clobbered.
+ * BEST-EFFORT: a read failure does nothing; a send failure is swallowed — this must NEVER throw
+ * or disrupt supervision. Exported so the probe is unit-testable without the supervise loop.
+ */
+export async function probeWorkspaceForPrompt(
+  id: string,
+  name: string,
+  deps: WorkspaceProbeDeps,
+): Promise<void> {
+  // GENUINE-IDLE GATE: leave an active agent completely alone (no read/signal/keystroke).
+  if (!deps.idle()) return;
+  let screen = "";
+  try {
+    screen = await deps.read(name);
+  } catch {
+    return; // best-effort: a pane we cannot read tells us nothing — leave state as-is
+  }
+  const cls = classifyStartupScreen(screen, deps.rules);
+
+  // Clear ONLY a signal THIS probe set (sentinel-prefixed) — never a genuine launch error.
+  const clearOwnSignal = () => {
+    const cur = deps.getError(id);
+    if (cur && cur.startsWith(WORKSPACE_STUCK_PREFIX)) deps.setError(id, null);
+  };
+
+  if (cls.kind === "rule") {
+    try {
+      await deps.send(name, cls.rule.response);
+      deps.log?.(`auto-confirmed mid-session prompt '${cls.rule.name}'`);
+    } catch {
+      /* best-effort — a send to a dead pane is a no-op */
+    }
+    // We can handle this prompt ourselves → clear any prior unrecognized-prompt signal.
+    clearOwnSignal();
+    return;
+  }
+
+  if (cls.kind === "stuck") {
+    // An unhandled blocking prompt appeared mid-session: SURFACE it (operator workspaces have no
+    // needs_user_input flag — the row's last_error is the attention signal). Idempotent re-set.
+    deps.setError(id, WORKSPACE_STUCK_PREFIX + stuckSnapshot(screen));
+    deps.log?.("mid-session prompt not auto-confirmable — surfaced via last_error");
+    return;
+  }
+
+  // cls.kind === "quiet": past any prompt → clear any prior (probe-set) signal.
+  clearOwnSignal();
+}
+
+/**
+ * The supervise-tick wiring for `probeWorkspaceForPrompt`: build the production deps (live pane
+ * read/send via the harness, last_error get/set via the workspace row) and run one probe. Kept
+ * thin + best-effort so superviseWorkspace can call it without risk (it never throws). The
+ * genuine-idle gate reads the agent.log mtime (workspaceQuietMs) through dispatcher.isGenuinelyIdle.
+ */
+export function probeWorkspaceMidSession(id: string, name: string): Promise<void> {
+  return probeWorkspaceForPrompt(id, name, {
+    read: (n) => harness.agentRead(n),
+    send: (n, input) => harness.send(n, input),
+    idle: () => isGenuinelyIdle(workspaceQuietMs(id)),
+    getError: (wid) => getWorkspaceAgentRow(wid)?.last_error ?? null,
+    setError: (wid, msg) => saveWorkspaceAgentRow(wid, { last_error: msg }),
+    log: (m) => console.warn(`[butchr] workspace ${id}: ${m}`),
+  }).catch(() => {});
+}
+
 // One supervision tick over ALL workspaces (mirrors cto-agent.superviseTick). Gated OFF →
 // a no-op (nothing is supervised). Each desired-up-but-dead workspace is relaunched
 // (RESUMING the same session) with bounded per-workspace exponential backoff.
@@ -612,6 +763,17 @@ async function superviseWorkspace(id: string): Promise<void> {
     if (st.consecutiveFailures !== 0) {
       st.consecutiveFailures = 0; // healthy → reset backoff
       st.nextRetryAt = 0;
+    }
+    // MID-SESSION SAFETY NET: the agent is registered/live (a parked-at-dialog agent IS live),
+    // so additionally read its pane on a THROTTLED cadence to auto-confirm / surface a blocking
+    // prompt it hit after startup. Operator kinds only; genuine-idle gated inside the probe so an
+    // actively-working agent is never read/keystroked. Awaited (best-effort, never throws) so a
+    // single supervise tick drives one probe deterministically.
+    if (row.kind === "cto" || row.kind === "leader") {
+      st.superviseTicks++;
+      if (shouldProbeTick(st.superviseTicks, config.ctoMidProbeEverySupervisions)) {
+        await probeWorkspaceMidSession(id, name);
+      }
     }
     return;
   }

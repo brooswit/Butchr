@@ -699,6 +699,26 @@ export const config = {
   ctoRestartBackoffCapMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_CAP_MS", 60000),
 
   /**
+   * MID-SESSION PROMPT PROBE cadence for OPERATOR workspaces (kind 'cto'/'leader'),
+   * in SUPERVISE ticks. The unified workspace supervisor (src/workspace-agent.ts)
+   * polls every `ctoSuperviseMs` and is /proc-liveness-only; it never reads pane
+   * CONTENT. To catch an operator agent parked at a blocking startup/permission
+   * dialog AFTER launch (once the launch/adopt auto-confirm window has closed), the
+   * supervisor additionally reads the live pane every `ctoMidProbeEverySupervisions`
+   * ticks (genuine-idle gated off the agent.log mtime) and runs it through the same
+   * startup-prompt classifier as the build-agent probe: a known prompt is
+   * auto-confirmed; an unrecognized-but-prompt-like pane is surfaced via the
+   * workspace row's last_error; a clean pane clears that signal.
+   *
+   * This is a DEDICATED supervise-cadence knob — NOT the build watcher's
+   * `midProbeEveryTicks` (which counts ~1s watcher ticks). The supervisor ticks at
+   * `ctoSuperviseMs` (default 5s), so the default 3 here is ≈15s between pane reads,
+   * keeping `agentRead` (which shells out to herdr) off the hot path. `<=0` disables
+   * the probe entirely. See workspace-agent.probeWorkspaceForPrompt / shouldProbeTick.
+   */
+  ctoMidProbeEverySupervisions: envInt("BUTCHR_CTO_MID_PROBE_SUPERVISIONS", 3),
+
+  /**
    * UNIFIED-WORK ROUTING GATE (story st-540ba705 — DEFAULT ON as of step 6a). The feature
    * flag for the unified self-referential WORK model + the RECURSIVE parent-chain feedback
    * responder (src/work.ts, docs/rfc-work-workspace-unification.md §2.1). FLIPPED ON at the

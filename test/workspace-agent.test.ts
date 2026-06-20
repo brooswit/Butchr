@@ -11,10 +11,10 @@
 // (claudeLiveness) is driven via setCmdlineLister. config fields are set DIRECTLY on the
 // imported singleton (robust to bun's shared-import order).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentRunner, PaneInfo, StartedAgent } from "../src/harness.ts";
+import type { AgentRunner, PaneInfo, SendInput, StartedAgent } from "../src/harness.ts";
 import type { WorkspaceAgentRow } from "../src/db.ts";
 import type { WorkspaceLauncher } from "../src/workspace-agent.ts";
 
@@ -77,6 +77,11 @@ beforeAll(async () => {
   cfgMod.config.ctoPromptPollMs = 1;
   cfgMod.config.ctoPromptMaxPolls = 1;
   cfgMod.config.ctoPromptQuietPolls = 1;
+  // Mid-session probe knobs (deterministic): a 60s idle threshold (the controllable agent.log
+  // mtime seam sets the pane "idle" or "active" relative to it) and probe-every-tick by default
+  // (individual cases override the cadence for the throttle test).
+  cfgMod.config.idleMs = 60_000;
+  cfgMod.config.ctoMidProbeEverySupervisions = 1;
 
   insertDir(DIR);
 });
@@ -152,6 +157,7 @@ beforeEach(() => {
   dbMod.db.query(`DELETE FROM tasks`).run();
   dbMod.db.query(`DELETE FROM stories`).run();
   wa._resetSupervisionStateForTest();
+  cfgMod.config.ctoMidProbeEverySupervisions = 1; // probe every tick unless a case overrides
   livenessMod.setCmdlineLister(() => []); // default: "unknown" liveness → adopt-safe
 });
 
@@ -687,6 +693,259 @@ describe("CTO enable/disable/stop authority via the unified workspace table (st-
     // And the supervisor does not relaunch the desired-down row.
     await wa._superviseTickForTest(WS_CTO);
     expect(calls.launch.length).toBe(0);
+  });
+});
+
+// ---- MID-SESSION PANE PROBE for OPERATOR workspaces (story st-a57a552e, subtask B) --------
+// The supervisor is /proc-liveness-only and never reads a live pane, so an operator (cto/leader)
+// parked at a blocking startup/permission dialog AFTER launch hangs silently with 0 progress.
+// This is the ongoing mid-session safety net: a throttled, genuine-idle-gated read+classify+act
+// mirroring the build-agent probe — a recognized dialog is auto-confirmed, an unrecognized one is
+// surfaced via the workspace row's last_error, an active agent is left completely alone.
+describe("operator mid-session pane probe (probeWorkspaceForPrompt — logic)", () => {
+  // A minimal in-memory deps over a fake last_error store. `idle` defaults to true so the
+  // classify→act cases run; an idle=false deps leaves the agent untouched.
+  function makeDeps(
+    screen: string | (() => Promise<string>),
+    err = { v: null as string | null },
+    idle = true,
+  ) {
+    const calls = { reads: 0, sends: [] as SendInput[], setError: [] as Array<string | null> };
+    return {
+      err,
+      calls,
+      deps: {
+        read: typeof screen === "function" ? screen : async () => { calls.reads++; return screen; },
+        send: async (_n: string, input: SendInput) => { calls.sends.push(input); },
+        idle: () => idle,
+        getError: () => err.v,
+        setError: (_id: string, msg: string | null) => { err.v = msg; calls.setError.push(msg); },
+      },
+    };
+  }
+
+  test("auto-confirms a MATCHED prompt (sends the safe response)", async () => {
+    const { deps, calls } = makeDeps(
+      "WARNING: Loading development channels\n  1. I am using this for local development\n  2. Exit",
+    );
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.sends).toEqual([{ text: "1", enter: true }]);
+  });
+
+  test("SURFACES an UNMATCHED prompt-like pane via last_error (sentinel-prefixed snapshot)", async () => {
+    const stuck = "Some tool wants permission:\n  1. Accept\n  2. Reject";
+    const { deps, calls, err } = makeDeps(stuck);
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.sends).toEqual([]); // no rule → no safe keystroke
+    expect(err.v?.startsWith(wa.WORKSPACE_STUCK_PREFIX)).toBe(true);
+    expect(err.v).toContain("Accept");
+  });
+
+  test("a 'quiet' read CLEARS a prior probe-set signal (self-clearing lifecycle)", async () => {
+    const { deps, calls } = makeDeps("● running normally — no prompt", {
+      v: wa.WORKSPACE_STUCK_PREFIX + "old stuck screen",
+    });
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.sends).toEqual([]);
+    expect(calls.setError).toEqual([null]);
+  });
+
+  test("a 'quiet' read NEVER clobbers a genuine (non-sentinel) launch error", async () => {
+    const { deps, calls, err } = makeDeps("● running normally", { v: "launch boom" });
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.setError).toEqual([]); // left intact — not our signal
+    expect(err.v).toBe("launch boom");
+  });
+
+  test("auto-confirming a matched prompt ALSO clears a stale probe-set signal", async () => {
+    const { deps, calls } = makeDeps("Do you trust the files in this folder?\n  1. Yes\n  2. No", {
+      v: wa.WORKSPACE_STUCK_PREFIX + "earlier stuck",
+    });
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.sends).toEqual([{ text: "1", enter: true }]);
+    expect(calls.setError).toEqual([null]);
+  });
+
+  test("GENUINE-IDLE GATE: an ACTIVE agent (idle=false) is a COMPLETE no-op (never read)", async () => {
+    const stuck = "Some tool wants permission:\n  1. Accept\n  2. Reject";
+    const { deps, calls } = makeDeps(stuck, { v: null }, /* idle */ false);
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.reads).toBe(0); // not even read — the agent is producing output
+    expect(calls.sends).toEqual([]);
+    expect(calls.setError).toEqual([]);
+  });
+
+  test("best-effort: a READ failure does nothing (no send, no signal change)", async () => {
+    const { deps, calls } = makeDeps(async () => { throw new Error("pane gone"); });
+    await expect(wa.probeWorkspaceForPrompt("w", "n", deps)).resolves.toBeUndefined();
+    expect(calls.sends).toEqual([]);
+    expect(calls.setError).toEqual([]);
+  });
+
+  test("best-effort: a SEND failure on a matched prompt is swallowed (still clears stale signal)", async () => {
+    const err = { v: wa.WORKSPACE_STUCK_PREFIX + "earlier" };
+    const setError: Array<string | null> = [];
+    const deps = {
+      read: async () => "  1. I am using this for local development\n  2. Exit",
+      send: async () => { throw new Error("dead pane"); },
+      idle: () => true,
+      getError: () => err.v as string | null,
+      setError: (_id: string, msg: string | null) => { err.v = msg as string; setError.push(msg); },
+    };
+    await expect(wa.probeWorkspaceForPrompt("w", "n", deps)).resolves.toBeUndefined();
+    expect(setError).toEqual([null]);
+  });
+});
+
+describe("operator mid-session pane probe (superviseWorkspace wiring)", () => {
+  /**
+   * Set the workspace's agent.log mtime to `agoMs` in the past — the genuine-idle seam.
+   * Writes under `config.dataDir` (what `workspaceQuietMs` reads), NOT the local DATA_DIR:
+   * bun shares the `config` singleton across test files, so config.dataDir may be a different
+   * file's temp dir in the full suite — using it directly keeps the seam robust to import order.
+   */
+  function setAgentLog(id: string, agoMs: number): void {
+    const dir = join(cfgMod.config.dataDir, "workspace", id);
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, "agent.log");
+    writeFileSync(f, "x");
+    const t = (Date.now() - agoMs) / 1000;
+    utimesSync(f, t, t);
+  }
+  const IDLE = 600_000; // quietMs (600s) >> idleMs (60s) → genuinely idle
+  const ACTIVE = 0; //      quietMs (~0) <= idleMs → actively working
+
+  // The supervisor gates kind='cto' rows on directory.cto_enabled (st-93384200, Bug 1), short-
+  // circuiting BEFORE the live/probe branch — so a cto-kind probe case must enable it; reset after
+  // so the flag never leaks into sibling tests that rely on the default-off behaviour.
+  afterEach(() => {
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=NULL WHERE id=?`).run(DIR);
+  });
+
+  /** Seed a LIVE, desired-up operator workspace and register its name so agentExists is true. */
+  function seedLive(id: string, kind: "cto" | "leader", live: Set<string>): string {
+    dbMod.saveWorkspaceAgentRow(id, {
+      kind,
+      directory_id: DIR,
+      desired: 1,
+      has_agent: 1,
+      session_id: `sess-${id}`,
+    });
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(id)!);
+    live.add(name);
+    return name;
+  }
+
+  test("1. RECOGNIZED dialog on a genuinely-idle operator → exactly ONE confirming keystroke", async () => {
+    const { runner, launcher, live } = makeFake();
+    const sends: Array<{ name: string; input: unknown }> = [];
+    runner.agentRead = async () => "  1. I am using this for local development\n  2. Exit";
+    runner.send = async (name, input) => { sends.push({ name, input }); };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR); // cto-kind: pass the cto_enabled gate
+    const name = seedLive("w-rule", "cto", live);
+    setAgentLog("w-rule", IDLE);
+
+    await wa._superviseTickForTest("w-rule");
+
+    expect(sends).toEqual([{ name, input: { text: "1", enter: true } }]);
+    expect(dbMod.getWorkspaceAgentRow("w-rule")!.last_error).toBeNull();
+  });
+
+  test("2. UNRECOGNIZED prompt on a genuinely-idle operator → last_error SET, no keystroke", async () => {
+    const { runner, launcher, live } = makeFake();
+    const sends: unknown[] = [];
+    const stuck = "An unknown mid-run consent:\n  1. Foo\n  2. Bar";
+    runner.agentRead = async () => stuck;
+    runner.send = async (_n, input) => { sends.push(input); };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    seedLive("w-stuck", "leader", live);
+    setAgentLog("w-stuck", IDLE);
+
+    await wa._superviseTickForTest("w-stuck");
+
+    const err = dbMod.getWorkspaceAgentRow("w-stuck")!.last_error;
+    expect(err?.startsWith(wa.WORKSPACE_STUCK_PREFIX)).toBe(true);
+    expect(err).toContain("Foo");
+    expect(sends).toEqual([]); // no rule → nothing sent
+  });
+
+  test("3. an ACTIVE leader (log fresh) → COMPLETE no-op: pane is NEVER read, no keystroke/signal", async () => {
+    const { runner, launcher, live } = makeFake();
+    const reads: string[] = [];
+    const sends: unknown[] = [];
+    runner.agentRead = async (name) => { reads.push(name); return "  1. Accept\n  2. Reject"; };
+    runner.send = async (_n, input) => { sends.push(input); };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    seedLive("w-active", "leader", live);
+    setAgentLog("w-active", ACTIVE); // fresh log → not genuinely idle
+
+    await wa._superviseTickForTest("w-active");
+
+    expect(reads).toEqual([]); // the genuine-idle gate held — pane never read
+    expect(sends).toEqual([]);
+    expect(dbMod.getWorkspaceAgentRow("w-active")!.last_error).toBeNull();
+  });
+
+  test("4. THROTTLE: the pane is read only on the cadence, not every supervise tick", async () => {
+    cfgMod.config.ctoMidProbeEverySupervisions = 3;
+    const { runner, launcher, live } = makeFake();
+    const reads: number[] = [];
+    runner.agentRead = async () => { reads.push(1); return "● working, no prompt"; };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    seedLive("w-throttle", "leader", live); // leader kind → kind-agnostic throttle, no cto_enabled gate
+    setAgentLog("w-throttle", IDLE);
+
+    for (let i = 0; i < 7; i++) await wa._superviseTickForTest("w-throttle");
+
+    // every=3 over 7 ticks → reads fire on ticks 3 and 6 only.
+    expect(reads.length).toBe(2);
+  });
+
+  test("5. SELF-CLEAR: a stuck signal is cleared once a later read goes quiet", async () => {
+    const { runner, launcher, live } = makeFake();
+    let screen = "Unhandled dialog:\n  1. A\n  2. B";
+    runner.agentRead = async () => screen;
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    seedLive("w-selfclear", "leader", live); // leader kind → kind-agnostic, no cto_enabled gate
+    setAgentLog("w-selfclear", IDLE);
+
+    // First tick: stuck dialog up + genuinely idle → surfaced via last_error.
+    await wa._superviseTickForTest("w-selfclear");
+    expect(dbMod.getWorkspaceAgentRow("w-selfclear")!.last_error?.startsWith(wa.WORKSPACE_STUCK_PREFIX)).toBe(true);
+
+    // The agent moves past it; the pane is now quiet → next probe clears the signal.
+    screen = "● back to work, no prompt";
+    await wa._superviseTickForTest("w-selfclear");
+    expect(dbMod.getWorkspaceAgentRow("w-selfclear")!.last_error).toBeNull();
+  });
+
+  test("a BUILD-kind workspace is never pane-probed (operator kinds only)", async () => {
+    const { runner, launcher, live } = makeFake();
+    const reads: string[] = [];
+    runner.agentRead = async (name) => { reads.push(name); return "  1. Accept\n  2. Reject"; };
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertTask("task-probe");
+    dbMod.saveWorkspaceAgentRow("w-build", {
+      kind: "build",
+      directory_id: DIR,
+      work_id: "task-probe",
+      desired: 1,
+      has_agent: 1,
+      session_id: "sess-build",
+    });
+    live.add(wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("w-build")!));
+    setAgentLog("w-build", IDLE);
+
+    await wa._superviseTickForTest("w-build");
+
+    expect(reads).toEqual([]); // build kind → no mid-session pane probe here
   });
 });
 
