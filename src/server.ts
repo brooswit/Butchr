@@ -687,7 +687,7 @@ route("POST", "/api/workspaces", async (req) => {
 route("PATCH", "/api/workspaces/:id", async (req, p) => {
   const body = await readJson(req);
   let view;
-  if ("cto_enabled" in body) view = setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
+  if ("cto_enabled" in body) view = await setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
   if ("version_file" in body) view = updateWorkspaceVersionFile(p.id!, body.version_file);
   if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
   if ("release_mode" in body) view = setWorkspaceReleaseMode(p.id!, body.release_mode);

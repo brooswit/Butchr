@@ -11,10 +11,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { config } from "./config.ts";
-import { stopCtoAgent } from "./cto-agent.ts";
+import { isCtoEnabled, stopCtoAgent } from "./cto-agent.ts";
+import {
+  ensureWorkspaceAgentRow,
+  isUnifiedWorkspaceEnabled,
+  stopWorkspaceAgent,
+} from "./workspace-agent.ts";
 import { stopWorkspaceStoryAgents } from "./story-agent.ts";
-import { stopWorkspaceAgent } from "./workspace-agent.ts";
-import { ALL_STATUSES, db, nowIso, REVIEW_STATES, sumStatuses } from "./db.ts";
+import { ALL_STATUSES, db, nowIso, REVIEW_STATES, saveWorkspaceAgentRow, sumStatuses } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
@@ -415,14 +419,33 @@ export function updateWorkspaceChangelogPath(id: string, changelogPath: unknown)
  * neither a boolean nor null. Takes effect on the next boot reconcile / supervision
  * tick (and is reflected immediately in the workspace's CTO status). See
  * cto-agent.isCtoEnabled.
+ *
+ * UNIFIED MIRROR (story st-93384200, Bug 1): after writing directory.cto_enabled, mirror the
+ * EFFECTIVE state into the unified `workspace` runtime row (id `ws-cto-<id>`) so the unified
+ * supervisor honors it — DISABLED → stopWorkspaceAgent (immediate teardown + desired=0);
+ * ENABLED → ensure the row exists + desired=1 so the supervisor relaunches it. The unified path
+ * is AUTHORITATIVE; the legacy cto_agent.desired writes are KEPT as a mirror (MIRROR-AND-DEFER).
+ * The mirror is itself gated on isUnifiedWorkspaceEnabled() (the master switch) so it stays
+ * fully inert in production while the unified supervisor is off, matching stopWorkspaceAgent's
+ * own self-gating. Async because the disable teardown is awaited.
  */
-export function setWorkspaceCtoEnabled(id: string, value: unknown): WorkspaceView {
+export async function setWorkspaceCtoEnabled(id: string, value: unknown): Promise<WorkspaceView> {
   if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
   let stored: number | null;
   if (value === undefined || value === null) stored = null;
   else if (typeof value === "boolean") stored = value ? 1 : 0;
   else throw new HttpError(400, "cto_enabled must be a boolean (or null to use the default)");
-  return updateWorkspaceColumn(id, "cto_enabled", stored);
+  const view = updateWorkspaceColumn(id, "cto_enabled", stored);
+  if (isUnifiedWorkspaceEnabled()) {
+    const wsId = `ws-cto-${id}`;
+    if (isCtoEnabled(id)) {
+      ensureWorkspaceAgentRow(wsId, { kind: "cto", directory_id: id });
+      saveWorkspaceAgentRow(wsId, { desired: 1 });
+    } else {
+      await stopWorkspaceAgent(wsId);
+    }
+  }
+  return view;
 }
 
 /**

@@ -26,6 +26,7 @@ let livenessMod: typeof import("../src/liveness.ts");
 let wa: typeof import("../src/workspace-agent.ts");
 let storiesMod: typeof import("../src/stories.ts");
 let dirsMod: typeof import("../src/workspaces.ts");
+let ctoMod: typeof import("../src/cto-agent.ts");
 let originalRunner: AgentRunner;
 
 /** Let fire-and-forget teardowns (updateStory's `void teardownLeaderWorkspaceForWork`) settle. */
@@ -66,6 +67,7 @@ beforeAll(async () => {
   wa = await import("../src/workspace-agent.ts");
   storiesMod = await import("../src/stories.ts");
   dirsMod = await import("../src/workspaces.ts");
+  ctoMod = await import("../src/cto-agent.ts");
   originalRunner = harnessMod.getRunner();
 
   // Deterministic supervision knobs (the unified loop reuses the CTO knobs).
@@ -223,6 +225,9 @@ describe("unified workspace supervisor", () => {
     const { runner, launcher, calls } = makeFake();
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
+    // The supervisor now gates cto-kind rows on directory.cto_enabled (st-93384200) — enable it
+    // so the cto workspace is supervised like the leader/build kinds.
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
     insertTask("story-1");
     insertTask("task-1");
     dbMod.saveWorkspaceAgentRow("w-cto", { kind: "cto", directory_id: DIR, desired: 1 });
@@ -241,6 +246,9 @@ describe("unified workspace supervisor", () => {
     const { runner, launcher, calls } = makeFake({ throwOnLaunch: true });
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
+    // Enable the directory's CTO so the cto-kind gate (st-93384200) doesn't short-circuit the
+    // relaunch path under test here.
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
     dbMod.saveWorkspaceAgentRow("w1", { kind: "cto", directory_id: DIR, desired: 1 });
 
     // Each tick relaunches (and fails) until ctoMaxRestarts (3) consecutive failures.
@@ -568,6 +576,117 @@ describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
     expect(
       dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(UDIR),
     ).toMatchObject({ n: 0 });
+  });
+});
+
+// ── CTO enable/disable/stop authority through the unified workspace table ────
+// (story st-93384200, Bug 1) The unified supervisor must HONOR directory.cto_enabled, and
+// the CTO enable/disable/stop flows must drive the unified `workspace` row's `desired` so a
+// stray desired=1 row can't keep a disabled CTO alive. MIRROR-AND-DEFER: the legacy
+// cto_agent.desired writes are KEPT alongside the (authoritative) unified path.
+describe("CTO enable/disable/stop authority via the unified workspace table (st-93384200)", () => {
+  const WS_CTO = `ws-cto-${DIR}`;
+  let savedGlobalCtoEnabled: boolean;
+
+  /** Set the DIRECTORY's cto_enabled tri-state (the `workspaces`/directory config column). */
+  function setDirCtoEnabled(val: number | null): void {
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=? WHERE id=?`).run(val, DIR);
+  }
+
+  beforeEach(() => {
+    savedGlobalCtoEnabled = cfgMod.config.ctoAgentEnabled;
+    cfgMod.config.ctoAgentEnabled = false; // global default OFF — deterministic inherit
+    setDirCtoEnabled(null); // no per-dir override unless a test sets one
+    dbMod.db.query(`DELETE FROM cto_agent`).run(); // legacy mirror table — clean slate
+  });
+
+  afterEach(() => {
+    cfgMod.config.ctoAgentEnabled = savedGlobalCtoEnabled;
+    setDirCtoEnabled(null);
+  });
+
+  test("disabling a CTO (setWorkspaceCtoEnabled false) sets unified desired=0 and the supervisor does NOT relaunch", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    setDirCtoEnabled(1); // currently ENABLED
+    dbMod.saveWorkspaceAgentRow(WS_CTO, {
+      kind: "cto", directory_id: DIR, desired: 1, has_agent: 1, session_id: "sess-c",
+    });
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(WS_CTO)!);
+    live.add(name);
+
+    await dirsMod.setWorkspaceCtoEnabled(DIR, false);
+
+    // Unified row driven DESIRED-down + torn down immediately.
+    expect(dbMod.getWorkspaceAgentRow(WS_CTO)!.desired).toBe(0);
+    expect(calls.teardown).toContain(name);
+    // Supervisor does NOT relaunch it.
+    await wa._superviseTickForTest(WS_CTO);
+    expect(calls.launch.length).toBe(0);
+    // Reconcile reports it stopped (the cto-kind gate).
+    expect((await wa.reconcileWorkspaceAgent(WS_CTO, true)).action).toBe("stopped");
+  });
+
+  test("a stray desired=1 ws-cto row with cto_enabled effectively false is NOT launched (the gate stops it)", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    // Global default OFF, no per-dir override → effectively disabled, yet a leaked desired=1.
+    dbMod.saveWorkspaceAgentRow(WS_CTO, { kind: "cto", directory_id: DIR, desired: 1 });
+
+    // The supervise gate short-circuits BEFORE the dead-while-desired relaunch branch.
+    await wa._superviseTickForTest(WS_CTO);
+    expect(calls.launch.length).toBe(0);
+
+    // Reconcile stops the stray row (desired zeroed).
+    expect((await wa.reconcileWorkspaceAgent(WS_CTO, true)).action).toBe("stopped");
+    expect(dbMod.getWorkspaceAgentRow(WS_CTO)!.desired).toBe(0);
+  });
+
+  test("re-enabling a CTO (setWorkspaceCtoEnabled true) ensures the row + sets desired=1 and the supervisor launches it", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    // No ws-cto row yet — re-enable must CREATE it (ensureWorkspaceAgentRow) and set desired=1.
+    expect(dbMod.getWorkspaceAgentRow(WS_CTO)).toBeNull();
+
+    await dirsMod.setWorkspaceCtoEnabled(DIR, true);
+
+    const row = dbMod.getWorkspaceAgentRow(WS_CTO)!;
+    expect(row).not.toBeNull();
+    expect(row.kind).toBe("cto");
+    expect(row.directory_id).toBe(DIR);
+    expect(row.desired).toBe(1);
+    // The supervisor now launches the dead-but-desired, enabled row.
+    await wa._superviseTickForTest(WS_CTO);
+    expect(calls.launch.map((c) => c.id)).toEqual([WS_CTO]);
+  });
+
+  test("the cto/stop path sets unified desired=0 AND keeps the legacy cto_agent.desired=0 mirror (transient — cto_enabled unchanged)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    setDirCtoEnabled(1); // ENABLED — a transient stop must NOT flip this
+    dbMod.saveWorkspaceAgentRow(WS_CTO, {
+      kind: "cto", directory_id: DIR, desired: 1, has_agent: 1, session_id: "sess-s",
+    });
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(WS_CTO)!);
+    live.add(name);
+    dbMod.saveCtoAgentRow(DIR, { desired: 1 }); // legacy mirror row, desired-up
+
+    await ctoMod.stopCtoAgent(DIR);
+
+    // Unified row driven DESIRED-down + torn down.
+    expect(dbMod.getWorkspaceAgentRow(WS_CTO)!.desired).toBe(0);
+    expect(calls.teardown).toContain(name);
+    // MIRROR INVARIANT: the legacy cto_agent.desired=0 mirror is STILL written.
+    expect(dbMod.getCtoAgentRow(DIR)!.desired).toBe(0);
+    // Transient: cto_enabled is unchanged (re-enable/boot can bring it back up).
+    expect(ctoMod.isCtoEnabled(DIR)).toBe(true);
+    // And the supervisor does not relaunch the desired-down row.
+    await wa._superviseTickForTest(WS_CTO);
+    expect(calls.launch.length).toBe(0);
   });
 });
 

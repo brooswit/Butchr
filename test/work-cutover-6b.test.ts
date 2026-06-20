@@ -104,6 +104,10 @@ beforeAll(async () => {
   // live CTO agent + an open story with a live leader. desired=1 (both up). updated_at is
   // stamped by save*AgentRow.
   insertDir(DIR);
+  // A directory with a LIVE CTO agent was, by definition, cto-enabled — reflect that so the
+  // unified supervisor's cto_enabled gate (st-93384200) adopts the migrated cto rather than
+  // tearing it down.
+  dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
   insertStory(STORY, DIR);
   dbMod.saveCtoAgentRow(DIR, {
     session_id: CTO_SESSION,

@@ -51,6 +51,7 @@ import {
   saveCtoAgentRow,
 } from "./db.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
+import { stopWorkspaceAgent } from "./workspace-agent.ts";
 import { publish } from "./events.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
@@ -568,6 +569,12 @@ export function startCtoAgent(workspaceId: string, opts: { fresh?: boolean } = {
  * STOP a workspace's CTO agent: mark it DESIRED-down (the supervisor leaves it down,
  * and this survives a restart) and tear down its tab/pane + free its agent name.
  * Idempotent.
+ *
+ * UNIFIED MIRROR (story st-93384200, Bug 1): in ADDITION to the legacy cto_agent.desired=0
+ * mirror, set the unified `workspace` row (`ws-cto-<id>`) DESIRED-down via stopWorkspaceAgent
+ * so the unified supervisor stops relaunching it. This is a TRANSIENT stop — it does NOT flip
+ * directory.cto_enabled (re-enable/boot can bring it back up). stopWorkspaceAgent self-gates on
+ * the unified flag, so it is a no-op in production while the unified supervisor is off.
  */
 export function stopCtoAgent(workspaceId: string): Promise<CtoStatus> {
   return guarded(workspaceId, async () => {
@@ -579,6 +586,7 @@ export function stopCtoAgent(workspaceId: string): Promise<CtoStatus> {
     await harness.teardownTask(name).catch(() => {});
     await harness.agentDeregister(name).catch(() => {});
     saveCtoAgentRow(workspaceId, { started_at: null });
+    await stopWorkspaceAgent(`ws-cto-${workspaceId}`).catch(() => {});
     console.log(`[butchr] stopped CTO agent for ${workspaceId}`);
     return publishStatus(workspaceId);
   });

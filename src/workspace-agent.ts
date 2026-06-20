@@ -46,6 +46,7 @@ import {
   saveWorkspaceAgentRow,
 } from "./db.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
+import { isCtoEnabled } from "./cto-agent.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
@@ -393,6 +394,32 @@ function ensureStarted(
 }
 
 /**
+ * ENSURE a unified-workspace row EXISTS (without launching anything). If no row is registered
+ * under `id`, INSERT one with the create-time shape a fresh row needs (kind + directory_id/
+ * work_id, has_agent=0, desired untouched) — mirroring the migrateWorkspaceAgentRows row shape
+ * (db.ts) so a row created here is indistinguishable from a migrated one. Returns the row.
+ *
+ * A thin wrapper over saveWorkspaceAgentRow (which is ALREADY an upsert that requires `kind` on
+ * create); it does NOT set `desired` — the caller does, so this stays a pure create primitive.
+ * NOT gated on the unified flag (a plain DB helper). EXPORTED for reuse: story subtask S2 calls
+ * it to create create-time rows, and setWorkspaceCtoEnabled uses it to materialize a ws-cto row.
+ */
+export function ensureWorkspaceAgentRow(
+  id: string,
+  fields: { kind: WorkspaceAgentRow["kind"]; directory_id?: string | null; work_id?: string | null },
+): WorkspaceAgentRow {
+  if (!getWorkspaceAgentRow(id)) {
+    saveWorkspaceAgentRow(id, {
+      kind: fields.kind,
+      directory_id: fields.directory_id ?? null,
+      work_id: fields.work_id ?? null,
+      has_agent: 0,
+    });
+  }
+  return getWorkspaceAgentRow(id)!;
+}
+
+/**
  * START (or adopt) a workspace's agent. No-op (returns the current status) when the unified
  * supervisor is gated OFF, so this is inert in production. Marks it DESIRED-up; adopts a
  * live agent (single-instance) or launches — RESUMING the persisted session unless `fresh`.
@@ -512,6 +539,16 @@ export async function reconcileWorkspaceAgent(
     await stopWorkspaceAgent(id);
     return { action: "stopped" };
   }
+  // A CTO whose directory has it DISABLED must NEVER be adopted/relaunched (mirror legacy
+  // reconcileCtoAgent's `if (!isCtoEnabled) return disabled`). Resolved via the directory's
+  // cto_enabled tri-state vs the global default (default OFF), so the global default-off and
+  // a per-directory disable are AUTHORITATIVE even against a stray desired=1 row: tear it down
+  // — desired-down + free the name — so neither this reconcile NOR the supervisor revives it.
+  // ADDED ALONGSIDE the leader gate (does not touch any other kind's path).
+  if (row.kind === "cto" && !isCtoEnabled(row.directory_id ?? "")) {
+    await stopWorkspaceAgent(id);
+    return { action: "stopped" };
+  }
   if (!herdrUp) return { action: "skipped" };
   if (row.desired === 0 && row.updated_at) {
     // Explicitly stopped before this restart — honor it.
@@ -562,6 +599,11 @@ async function superviseWorkspace(id: string): Promise<void> {
   if (!isUnifiedWorkspaceEnabled()) return;
   const row = getWorkspaceAgentRow(id);
   if (!row || row.desired !== 1) return; // wanted down (or gone)
+  // A DISABLED CTO is never relaunched — short-circuit BEFORE the dead-while-desired relaunch/
+  // backoff branch below (mirrors cto-agent.superviseWorkspace's top `if (!isCtoEnabled) return`).
+  // A stray desired=1 ws-cto row whose directory has cto_enabled effectively false thus never
+  // triggers a launch attempt. ADDED ALONGSIDE existing gates; touches no other kind.
+  if (row.kind === "cto" && !isCtoEnabled(row.directory_id ?? "")) return;
   const st = supState(id);
   if (st.launchInFlight) return; // a start/stop/restart is mid-flight — don't race it
 
