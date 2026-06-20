@@ -40,6 +40,7 @@ import {
   demoteSiblingWorkspaceAgents,
   getWorkspaceAgentRow,
   listWorkspaceAgentRows,
+  listWorkspaceAgentRowsForWork,
   liveWorkspaceForWork,
   nowIso,
   saveWorkspaceAgentRow,
@@ -432,6 +433,41 @@ export function liveWorkspaceFor(workId: string): WorkspaceAgentRow | null {
   return liveWorkspaceForWork(workId);
 }
 
+/**
+ * Is a node-Work GENUINELY terminal? Read ONLY from the AUTHORITATIVE `stories.status` (==
+ * getStory().status — the same value /api/work/:id + storyView report). Terminal == `done`
+ * or `aborted`; `open`/`merging`/`merge_blocked` are NOT terminal (the leader is KEPT up).
+ *
+ * NEVER decide this from the node's `tasks` row: a materialized story node ALWAYS reads
+ * tasks.status='merged' regardless of its real story status, so a raw-status check would
+ * tear down leaders for ACTIVE stories. (Read the stories table directly to avoid a
+ * stories.ts import cycle — workspace-agent.ts owns no story import.)
+ */
+function nodeWorkIsTerminal(workId: string | null): boolean {
+  if (!workId) return false;
+  const status = db
+    .query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`)
+    .get(workId)?.status;
+  return status === "done" || status === "aborted";
+}
+
+/**
+ * COMPLETION TEARDOWN (unified path): a node-Work reached a terminal state (done/aborted), so
+ * tear down its LEADER workspace(s) — desired-down + close the pane + free the name — so the
+ * supervisor stops relaunching them. The unified counterpart of onStoryStatusChanged's
+ * stopStoryAgent (an unconditional desired-down, robust whether or not currently live). No-op
+ * when the gate is OFF (the legacy story-agent path owns teardown then) or the node has no
+ * leader workspace row. Best-effort per row; never throws to the caller. Only LEADER rows are
+ * touched — a node's cto/build workspaces are left alone.
+ */
+export async function teardownLeaderWorkspaceForWork(workId: string): Promise<void> {
+  if (!isUnifiedWorkspaceEnabled()) return;
+  for (const row of listWorkspaceAgentRowsForWork(workId)) {
+    if (row.kind !== "leader") continue;
+    await stopWorkspaceAgent(row.id).catch(() => {});
+  }
+}
+
 /** Reconcile ONE workspace toward its desired state (mirrors cto-agent.reconcileCtoAgent). */
 export async function reconcileWorkspaceAgent(
   id: string,
@@ -440,6 +476,15 @@ export async function reconcileWorkspaceAgent(
   if (!isUnifiedWorkspaceEnabled()) return { action: "disabled" };
   const row = getWorkspaceAgentRow(id);
   if (!row) return { action: "disabled" };
+  // A LEADER for a TERMINAL node-Work must NEVER be adopted/relaunched (mirror legacy
+  // isStoryLeaderDesired: a non-open story has no leader). Tear it down — desired-down +
+  // free the name — so neither this reconcile NOR the supervisor revives it, then skip.
+  // Terminal-ness reads the AUTHORITATIVE story status, never the node's tasks row. Done
+  // even with herdr down so a leaked desired=1 row is corrected. Only leader rows.
+  if (row.kind === "leader" && nodeWorkIsTerminal(row.work_id)) {
+    await stopWorkspaceAgent(id);
+    return { action: "stopped" };
+  }
   if (!herdrUp) return { action: "skipped" };
   if (row.desired === 0 && row.updated_at) {
     // Explicitly stopped before this restart — honor it.

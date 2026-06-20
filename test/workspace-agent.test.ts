@@ -24,7 +24,11 @@ let cfgMod: typeof import("../src/config.ts");
 let harnessMod: typeof import("../src/harness.ts");
 let livenessMod: typeof import("../src/liveness.ts");
 let wa: typeof import("../src/workspace-agent.ts");
+let storiesMod: typeof import("../src/stories.ts");
 let originalRunner: AgentRunner;
+
+/** Let fire-and-forget teardowns (updateStory's `void teardownLeaderWorkspaceForWork`) settle. */
+const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
 const DIR = "dir-wstest1";
 
@@ -59,6 +63,7 @@ beforeAll(async () => {
   harnessMod = await import("../src/harness.ts");
   livenessMod = await import("../src/liveness.ts");
   wa = await import("../src/workspace-agent.ts");
+  storiesMod = await import("../src/stories.ts");
   originalRunner = harnessMod.getRunner();
 
   // Deterministic supervision knobs (the unified loop reuses the CTO knobs).
@@ -141,6 +146,7 @@ beforeEach(() => {
   cfgMod.config.unifiedWorkspaceEnabled = true; // ON for most cases; the inert case flips it off
   dbMod.db.query(`DELETE FROM workspace`).run();
   dbMod.db.query(`DELETE FROM tasks`).run();
+  dbMod.db.query(`DELETE FROM stories`).run();
   wa._resetSupervisionStateForTest();
   livenessMod.setCmdlineLister(() => []); // default: "unknown" liveness → adopt-safe
 });
@@ -276,6 +282,128 @@ describe("unified workspace supervisor", () => {
     expect(recon).toEqual({ adopted: 0, launched: 0, skipped: 0 });
     // The row is untouched — never marked live by the gated-off path.
     expect(dbMod.getWorkspaceAgentRow("w1")!.has_agent).toBe(0);
+  });
+});
+
+// ── leader teardown on node-Work completion (unified) ────────────────────────
+// A node-Work (story) has a `stories` row (AUTHORITATIVE status) AND a materialized `tasks`
+// row whose status is ALWAYS 'merged'. Terminal-ness of a node must be read from the story
+// status, never the tasks row. These tests prove (1) completing a node tears its leader
+// workspace down, (2) boot reconcile won't revive a terminal node's leader, and (3) the
+// REQUIRED trap: an OPEN node whose RAW tasks.status='merged' is NOT treated as terminal.
+describe("leader teardown on node-Work completion (unified)", () => {
+  /** Seed a `stories` row (AUTHORITATIVE status). isolated=0 so a `done` PATCH lands immediately. */
+  function insertStory(id: string, status: string): void {
+    dbMod.db
+      .query(
+        `INSERT OR IGNORE INTO stories (id, workspace_id, brief, status, created_at, isolated)
+         VALUES (?, ?, ?, ?, ?, 0)`,
+      )
+      .run(id, DIR, `brief ${id}`, status, dbMod.nowIso());
+  }
+
+  /** Seed a LIVE leader `workspace` row for a story node (+ the FK-target materialized `tasks` row). */
+  function seedLiveLeader(wsId: string, storyId: string, live: Set<string>): string {
+    insertTask(storyId); // the materialized story node — FK target of the leader's work_id
+    dbMod.saveWorkspaceAgentRow(wsId, {
+      kind: "leader",
+      directory_id: DIR,
+      work_id: storyId,
+      desired: 1,
+      has_agent: 1,
+      session_id: `sess-${wsId}`,
+    });
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(wsId)!);
+    live.add(name); // the leader's pane is registered/alive
+    return name;
+  }
+
+  test("completing a node-Work (done) tears its leader workspace down (desired=0, not running)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertStory("st-done", "open");
+    const name = seedLiveLeader("ws-leader-st-done", "st-done", live);
+
+    storiesMod.updateStory("st-done", { status: "done" });
+
+    // desired=0 lands SYNCHRONOUSLY (stopWorkspaceAgent writes it before its first await)…
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-done")!.desired).toBe(0);
+    // …the async pane teardown settles on the next tick (per the steering note, await it).
+    await flush();
+    expect(calls.teardown).toContain(name);
+    expect((await wa.workspaceAgentStatus("ws-leader-st-done")).running).toBe(false);
+  });
+
+  test("aborting a node-Work tears its leader workspace down (desired=0, not running)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertStory("st-abort", "open");
+    const name = seedLiveLeader("ws-leader-st-abort", "st-abort", live);
+
+    storiesMod.updateStory("st-abort", { status: "aborted" });
+
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-abort")!.desired).toBe(0);
+    await flush();
+    expect(calls.teardown).toContain(name);
+    expect((await wa.workspaceAgentStatus("ws-leader-st-abort")).running).toBe(false);
+  });
+
+  test("boot reconcile does NOT adopt/relaunch a leader whose node-Work is terminal (sets desired=0)", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertStory("st-term", "done"); // AUTHORITATIVE terminal
+    seedLiveLeader("ws-leader-st-term", "st-term", live); // pane survived the restart
+
+    const res = await wa.reconcileWorkspaceAgents(true);
+
+    expect(res.adopted).toBe(0);
+    expect(res.launched).toBe(0);
+    expect(calls.launch.length).toBe(0); // never relaunched
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-term")!.desired).toBe(0); // desired zeroed
+  });
+
+  test("REQUIRED: an OPEN node whose RAW tasks.status='merged' is NOT terminal — leader is KEPT", async () => {
+    const { runner, launcher, calls, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertStory("st-trap", "open"); // AUTHORITATIVE: open (ACTIVE)
+    seedLiveLeader("ws-leader-st-trap", "st-trap", live);
+    // The materialized node's RAW tasks row reads 'merged' — the exact trap. A raw-status check
+    // would wrongly tear the ACTIVE story's leader down.
+    dbMod.db.query(`UPDATE tasks SET status='merged' WHERE id=?`).run("st-trap");
+
+    // Boot reconcile must ADOPT (keep) the leader, NOT stop it.
+    const res = await wa.reconcileWorkspaceAgents(true);
+
+    expect(res.adopted).toBe(1);
+    expect(calls.launch.length).toBe(0);
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-trap")!.desired).toBe(1); // STILL desired-up
+    expect((await wa.workspaceAgentStatus("ws-leader-st-trap")).running).toBe(true); // still alive
+    // (Completion-teardown can't be fooled by the raw status either: it's gated by the CALLER on
+    // a `done`/`aborted` PATCH, which never fires for this `open` story.)
+  });
+
+  test("a node in a TRANSIENT state (merging / merge_blocked) KEEPS its leader (not terminal)", async () => {
+    for (const status of ["merging", "merge_blocked"] as const) {
+      dbMod.db.query(`DELETE FROM workspace`).run();
+      dbMod.db.query(`DELETE FROM tasks`).run();
+      dbMod.db.query(`DELETE FROM stories`).run();
+      wa._resetSupervisionStateForTest();
+      const { runner, launcher, calls, live } = makeFake();
+      harnessMod.setRunner(runner);
+      wa.setLauncherForTest(launcher);
+      insertStory(`st-${status}`, status);
+      seedLiveLeader(`ws-${status}`, `st-${status}`, live);
+
+      const res = await wa.reconcileWorkspaceAgents(true);
+
+      expect(res.adopted).toBe(1); // KEPT (adopted), not stopped
+      expect(calls.launch.length).toBe(0);
+      expect(dbMod.getWorkspaceAgentRow(`ws-${status}`)!.desired).toBe(1);
+    }
   });
 });
 

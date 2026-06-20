@@ -21,6 +21,7 @@ import {
 import type { StoryAgentStatus } from "./story-agent.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
+import { teardownLeaderWorkspaceForWork } from "./workspace-agent.ts";
 import { HttpError, getWorkspace, listWorkspaces, workspaceBranchIsolation } from "./workspaces.ts";
 
 // The three valid story statuses (mirrors the StoryStatus union in db.ts). Used to
@@ -174,6 +175,14 @@ export function updateStory(
   // leader (desired-down + teardown); `open` (re)launches it. Thin hook into story-agent.ts.
   if (patch.status !== undefined && typeof patch.status === "string") {
     onStoryStatusChanged(id, patch.status);
+  }
+  // UNIFIED-PATH completion teardown: a genuine story terminal (`done`/`aborted`) tears the
+  // node's leader WORKSPACE row down too (the legacy onStoryStatusChanged only zeroes the
+  // story_agent table), so the unified supervisor stops relaunching a finished story's leader.
+  // `open` (reopen) must NOT tear down; the isolated-`done` land request returned early above
+  // (landStory tears down on the actual land). Best-effort; no-op when the unified gate is OFF.
+  if (patch.status === "done" || patch.status === "aborted") {
+    void teardownLeaderWorkspaceForWork(id).catch(() => {});
   }
   return getStory(id)!;
 }
@@ -330,6 +339,9 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
       detail: story.brief ?? null,
     });
     onStoryStatusChanged(storyId, "done");
+    // Unified-path teardown of the node's leader workspace row (mirrors the updateStory
+    // terminal branch) — only a landed-and-green isolated story reaches `done` here.
+    void teardownLeaderWorkspaceForWork(storyId).catch(() => {});
     return getStory(storyId);
   }
 
@@ -400,6 +412,11 @@ export function deleteStory(id: string): void {
   // tab/pane + free its name) so the DELETE below — which cascade-removes its story_agent
   // row — can't strand an orphaned leader pane. Best-effort; never blocks delete.
   void stopStoryAgent(id).catch(() => {});
+  // Same for the UNIFIED leader workspace row. Fired BEFORE the DELETEs: the helper's
+  // synchronous prefix snapshots the leader rows + writes desired=0 before the `tasks`-row
+  // DELETE below cascade-removes the workspace row, while the by-name pane teardown still
+  // completes afterward — so no leader pane is orphaned. No-op when the unified gate is OFF.
+  void teardownLeaderWorkspaceForWork(id).catch(() => {});
   // Detach member tasks (keep the tasks — only the grouping is removed). Clear BOTH the
   // legacy story_id AND the unified parent_id (step 6a — they move in lock-step) so a detached
   // member becomes a standalone top-level Work and no longer points at the about-to-be-removed
