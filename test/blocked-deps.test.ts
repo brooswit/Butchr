@@ -35,6 +35,8 @@ const DIR_ID = "blocked-dir";
 let tasksMod: typeof import("../src/tasks.ts");
 let dbMod: typeof import("../src/db.ts");
 let taskmdMod: typeof import("../src/taskmd.ts");
+let eventsMod: typeof import("../src/events.ts");
+let channelMod: typeof import("../src/channel.ts");
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-blocked-data-"));
@@ -56,6 +58,8 @@ beforeAll(async () => {
   dbMod = await import("../src/db.ts");
   taskmdMod = await import("../src/taskmd.ts");
   tasksMod = await import("../src/tasks.ts");
+  eventsMod = await import("../src/events.ts");
+  channelMod = await import("../src/channel.ts");
 
   dbMod.db
     .query(
@@ -295,6 +299,50 @@ describe("dead blockers", () => {
     const t = seed({ id: "dead-escape-task", status: "blocked", blockedBy: [dead] });
     const view = await tasksMod.setBlockedBy(t, []);
     expect(view.status).toBe("inactive");
+  });
+
+  // F3: a task that becomes dead-blocked WHILE quietly blocked (its blocker aborts under it)
+  // never emitted an SSE event, so the CTO push-channel never raised an attention — it sat stuck
+  // with no push, only a console.warn. reevaluateBlockedTask now emits a task.updated on the
+  // newly-discovered dead blocker, and the channel surfaces it as a `dead_blocked` push.
+  test("a freshly dead-blocked task emits a task.updated the channel pushes as attention", async () => {
+    const blocker = seed({ id: "f3-blocker", status: "in_progress" });
+    const t = seed({ id: "f3-task", status: "blocked", blockedBy: [blocker] });
+
+    // The blocker aborts (will never merge) UNDER the already-blocked task.
+    setStatus(blocker, "aborted");
+
+    // Capture the SSE events the per-tick re-evaluation publishes.
+    const got: Array<Record<string, unknown>> = [];
+    const unsub = eventsMod.subscribe((e) => {
+      const ev = e as Record<string, unknown>;
+      if (
+        (ev.type === "task.updated" || ev.type === "task.created") &&
+        (ev.task as any)?.id === t
+      ) {
+        got.push(ev);
+      }
+    });
+    try {
+      // Stays blocked (BY DESIGN — no auto-promote), but now surfaces via an event.
+      expect(tasksMod.reevaluateBlockedTask(t)).toBe(false);
+    } finally {
+      unsub();
+    }
+    expect(row(t).status).toBe("blocked");
+
+    // An SSE task.updated fired, carrying the dead-blocker set the channel keys on.
+    expect(got.length).toBeGreaterThanOrEqual(1);
+    const view = got.at(-1)!.task as Record<string, unknown>;
+    expect(view.deadBlockers).toContain(blocker);
+
+    // Feeding that event to the CTO push-channel raises a `dead_blocked` attention.
+    const bridge = new channelMod.AttentionBridge();
+    const note = bridge.consume(got.at(-1)!);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toMatchObject({ task_id: t, state: "dead_blocked" });
+    expect(note!.content).toContain("never-merging");
+    expect(note!.content).toContain(blocker);
   });
 });
 

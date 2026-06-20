@@ -419,17 +419,24 @@ function blockerStatesOf(ids: string[]): Record<string, string> {
 // Remember which (task, dead-blocker) pairs we've already warned about so the
 // per-tick re-evaluation doesn't spam the log every second for a stuck task.
 const loggedDeadBlockers = new Set<string>();
-function logDeadBlockers(taskId: string, ids: string[]): void {
+// Returns whether it discovered a NEW (not-yet-logged) dead blocker for this task — i.e. the
+// task just became permanently stuck on a never-merging dependency. Callers use that to surface
+// the freshly-dead-blocked task ONCE via SSE (see reevaluateBlockedTask), so the CTO push-channel
+// — which keys on the TaskView's `deadBlockers` set — raises a dead-blocked attention (F3).
+function logDeadBlockers(taskId: string, ids: string[]): boolean {
+  let loggedNew = false;
   for (const bid of deadBlockerIds(ids)) {
     const key = `${taskId}:${bid}`;
     if (loggedDeadBlockers.has(key)) continue;
     loggedDeadBlockers.add(key);
+    loggedNew = true;
     const b = getTask(bid);
     console.warn(
       `[butchr] task ${taskId} blocked on ${bid} which is ${b ? b.status : "gone"} ` +
         `and will never merge; edit blocked_by to proceed`,
     );
   }
+  return loggedNew;
 }
 
 /**
@@ -1450,6 +1457,15 @@ function setStatus(
   const dir = getWorkspace(row.workspace_id);
   if (dir) updateTaskMdStatus(dir.path, id, to);
   emitUpdated(id);
+  // STORY READINESS (F4): a member landing in a terminal FAILED/ABORTED state can leave its story
+  // stuck OPEN — it can never reach all-merged, so the merge-path completion check never fires for
+  // it. Run the readiness re-check here (once, on the real transition) so the leader is pinged
+  // (`member-blocked`) when the story has settled with a dead member — fixing the asymmetry where a
+  // merge fires a check but an abort/fail fired none. Guarded to actual story members; the story-
+  // status + settled-state gating lives in notifyStoryReadiness.
+  if (row.status !== to && (to === "failed" || to === "aborted") && row.story_id) {
+    notifyStoryReadiness(row.story_id);
+  }
   return true;
 }
 
@@ -1841,8 +1857,14 @@ export function reevaluateBlockedTask(id: string): boolean {
     console.log(`[butchr] task ${id} unblocked → inactive (all blockers merged)`);
     return true;
   }
-  // Still blocked — surface any dead (never-merging) blockers.
-  logDeadBlockers(id, ids);
+  // Still blocked — surface any dead (never-merging) blockers. A NEWLY-discovered dead blocker
+  // means the task just became PERMANENTLY stuck (its blocker will never merge). This per-tick
+  // path is the only one that learns of it WITHOUT a status change (the blocker aborted/failed
+  // under a quietly-blocked task), so it never emitted an SSE event — leaving the task stuck with
+  // no push (F3). Emit one task.updated now so the CTO push-channel (which keys on the TaskView's
+  // `deadBlockers` set) raises a dead-blocked attention. BY DESIGN we do NOT auto-promote — the
+  // escape is an operator editing blocked_by.
+  if (logDeadBlockers(id, ids)) emitUpdated(id);
   return false;
 }
 
@@ -2700,10 +2722,11 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // other blockers are also merged) to queued right away, rather than waiting for
   // the next dispatcher tick to notice.
   reevaluateAllBlocked();
-  // STORY COMPLETION (Phase 6): if this was a STORY member, the story may now be fully
-  // delivered (every member merged/rolled_back) — fire the leader's completion-review
-  // attention event. story_id-guarded so STANDALONE tasks never trigger it (no regression).
-  if (row.story_id) notifyStoryCompletionIfReady(row.story_id);
+  // STORY READINESS (Phase 6 + F4): if this was a STORY member, the story may now be fully
+  // delivered (every member merged/rolled_back → completion-review) OR settled-but-stuck (a
+  // sibling already failed/aborted → member-blocked). story_id-guarded so STANDALONE tasks never
+  // trigger it (no regression).
+  if (row.story_id) notifyStoryReadiness(row.story_id);
   return { task: taskView(id)! };
 }
 
@@ -2893,6 +2916,57 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
     detail: story.brief ?? null,
   });
   return true;
+}
+
+/**
+ * The DEAD-MEMBER analog of notifyStoryCompletionIfReady (F4). A story whose members all reach
+ * a terminal state but where ≥1 is failed/aborted can NEVER reach all-merged on its own, yet it
+ * is not complete — so it sits OPEN with a live leader and nothing in flight to finish it, and
+ * (because completion only fires on the merge-success path) it never re-pings. This fires a
+ * `member-blocked` LEADER ('story' target) attention exactly once the story has SETTLED that way,
+ * so the leader acts (add a replacement subtask or abandon the story). GUARDS:
+ *  - story must be live-leader (open/merge_blocked) — a done/aborted/merging story never re-pings;
+ *  - ≥1 member, EVERY member terminal (nothing in flight), and ≥1 member failed/aborted.
+ * The all-merged|rolled_back case is the COMPLETION path's, not ours (so the two never both fire).
+ * Visibility ONLY — it changes NO story state and does NOT auto-complete.
+ */
+export function notifyStoryBlockedIfStuck(storyId: string): boolean {
+  const story = db
+    .query<{ workspace_id: string; brief: string | null; status: string }, [string]>(
+      `SELECT workspace_id, brief, status FROM stories WHERE id=?`,
+    )
+    .get(storyId);
+  if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
+  const members = db
+    .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
+    .all(storyId);
+  if (members.length === 0) return false;
+  const allTerminal = members.every((m) => isTerminal(m.status));
+  const anyDead = members.some((m) => m.status === "failed" || m.status === "aborted");
+  if (!allTerminal || !anyDead) return false;
+  publish({
+    type: "story.attention",
+    story_id: storyId,
+    workspace_id: story.workspace_id,
+    target: "story",
+    reason: "member-blocked",
+    detail: story.brief ?? null,
+  });
+  return true;
+}
+
+/**
+ * STORY READINESS RE-CHECK — the single seam called whenever a story member reaches a TERMINAL
+ * state: the merge-success path (finalizeMerge) AND, fixing the merge-fires-a-check-but-abort-
+ * fires-none asymmetry (F4), every failed/aborted transition (setStatus). It routes to the right
+ * leader attention: `completion-review` when the story is fully merged (notifyStoryCompletionIfReady),
+ * else `member-blocked` when it has settled with a dead member (notifyStoryBlockedIfStuck), else
+ * nothing (a member is still in flight — a later transition re-checks). Returns whether an event
+ * fired. story-less callers must guard before calling (the publishers no-op on a missing story).
+ */
+export function notifyStoryReadiness(storyId: string): boolean {
+  if (notifyStoryCompletionIfReady(storyId)) return true;
+  return notifyStoryBlockedIfStuck(storyId);
 }
 
 // --- STORY → MAIN MERGE MECHANICS (CONTRIBUTING §11.4/§11.5/§11.6 — Phase E) -------

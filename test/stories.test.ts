@@ -271,6 +271,83 @@ describe("Phase 6: all-subtasks-merged completion detection", () => {
   });
 });
 
+// --- F4: a story stuck OPEN on a failed/aborted member -----------------------
+// The merge-success path fires a completion check, but an abort/fail fired NONE — so a story
+// with some merged + one aborted/failed member sat OPEN forever with a live leader and no
+// re-ping. notifyStoryReadiness fixes that asymmetry: once the story has SETTLED (every member
+// terminal) but is NOT all-merged (≥1 dead member), it fires a `member-blocked` LEADER attention.
+// It does NOT auto-complete a story that still has unfinished members.
+describe("F4: story stuck on a failed/aborted member", () => {
+  test("one merged + one aborted member → member-blocked fires to the leader feed (not silence)", async () => {
+    const story = storiesMod.createStory(WS_A, "Stuck story");
+    seedMember("f4-stuck-1", WS_A, story.id, "merged");
+    seedMember("f4-stuck-2", WS_A, story.id, "aborted");
+
+    // Not complete (a dead member) → the completion path stays silent...
+    expect(tasksMod.isStoryComplete(story.id)).toBe(false);
+    expect(tasksMod.notifyStoryCompletionIfReady(story.id)).toBe(false);
+
+    // ...but the story has SETTLED on a dead member, so the readiness check fires member-blocked.
+    let fired = false;
+    const events = await captureStoryEvents(story.id, () => {
+      fired = tasksMod.notifyStoryReadiness(story.id);
+    });
+    expect(fired).toBe(true);
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({
+      type: "story.attention",
+      story_id: story.id,
+      workspace_id: WS_A,
+      target: "story",
+      reason: "member-blocked",
+    });
+  });
+
+  test("a failed (vs aborted) dead member is treated identically", async () => {
+    const story = storiesMod.createStory(WS_A, "Failed-member stuck story");
+    seedMember("f4-fail-1", WS_A, story.id, "merged");
+    seedMember("f4-fail-2", WS_A, story.id, "failed");
+    expect(tasksMod.notifyStoryBlockedIfStuck(story.id)).toBe(true);
+  });
+
+  test("a member still IN FLIGHT does NOT fire member-blocked yet (a later transition re-checks)", async () => {
+    const story = storiesMod.createStory(WS_A, "Still-in-flight story");
+    seedMember("f4-flight-1", WS_A, story.id, "aborted");
+    seedMember("f4-flight-2", WS_A, story.id, "in_progress");
+    let fired = true;
+    const events = await captureStoryEvents(story.id, () => {
+      fired = tasksMod.notifyStoryReadiness(story.id);
+    });
+    expect(fired).toBe(false);
+    expect(events.length).toBe(0);
+    expect(tasksMod.notifyStoryBlockedIfStuck(story.id)).toBe(false);
+  });
+
+  test("a fully merged|rolled_back story routes to completion-review, NOT member-blocked", async () => {
+    const story = storiesMod.createStory(WS_A, "Clean story");
+    seedMember("f4-clean-1", WS_A, story.id, "merged");
+    seedMember("f4-clean-2", WS_A, story.id, "rolled_back");
+    const events = await captureStoryEvents(story.id, () => {
+      expect(tasksMod.notifyStoryReadiness(story.id)).toBe(true);
+    });
+    expect(events.map((e) => e.reason)).toEqual(["completion-review"]);
+  });
+
+  test("a done story never re-pings member-blocked (no live leader)", () => {
+    const story = storiesMod.createStory(WS_A, "Done-but-dead story");
+    seedMember("f4-done-1", WS_A, story.id, "merged");
+    seedMember("f4-done-2", WS_A, story.id, "aborted");
+    dbMod.db.query(`UPDATE stories SET status='done' WHERE id=?`).run(story.id);
+    expect(tasksMod.notifyStoryBlockedIfStuck(story.id)).toBe(false);
+    expect(tasksMod.notifyStoryReadiness(story.id)).toBe(false);
+  });
+
+  test("a story with NO members fires nothing", () => {
+    const story = storiesMod.createStory(WS_A, "Empty stuck story");
+    expect(tasksMod.notifyStoryBlockedIfStuck(story.id)).toBe(false);
+  });
+});
+
 describe("Phase 6: member-task rollup + leader status surfacing", () => {
   test("storyCounts reports per-status member counts", () => {
     const story = storiesMod.createStory(WS_A, "Rollup story");

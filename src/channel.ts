@@ -96,12 +96,24 @@ const STATE_PHRASE: Record<AttentionState, string> = {
 // `idle-handling` responder to act on gracefully (nudge-with-guidance, requeue, or abort).
 const IDLE_PHRASE = "agent idle — needs idle-handling";
 
+// The DEAD-BLOCKED condition (F3) is, like idle, ORTHOGONAL to the attention STATES: a `blocked`
+// task whose precomputed `deadBlockers` set is non-empty is PERMANENTLY stuck on a never-merging
+// dependency (an aborted/failed/rolled_back or deleted blocker). butchr never auto-promotes it —
+// by design the escape is an operator editing blocked_by — so without a push it would sit stuck
+// silently. We do NOT fold `blocked` into ATTENTION_STATES (that would push EVERY blocked task);
+// instead it is a CONDITIONAL surface keyed on the deadBlockers set, with its own phrase +
+// `meta.state="dead_blocked"`. It surfaces the stuck task to the CTO/operator to unblock it.
+const DEAD_BLOCKED_PHRASE =
+  "blocked on a DEAD (never-merging) dependency — edit blocked_by to proceed";
+
 // STORY-LEVEL attention phrases (STORIES epic — the story→main merge model, CONTRIBUTING
 // §11, plus the responder-redesign ask seam, §4b). These are NOT task status transitions but
 // story-scoped notifications routed by `target` (see AttentionBridge.consumeStoryAttention),
 // SPLIT by who can act:
 //   - LEADER feed (target:'story'): `completion-review` (all subtasks merged → verify the
-//     goal), `gate-red` (the assembled story failed its re-gate / post-merge verify — the
+//     goal), `member-blocked` (the story settled with a failed/aborted member, so it is stuck
+//     OPEN and can never all-merge on its own — the leader adds a replacement subtask or abandons
+//     it, F4), `gate-red` (the assembled story failed its re-gate / post-merge verify — the
 //     leader fixes it with more subtasks, §11.5), and `ask-answered` (the leader's open ask
 //     was answered).
 //   - WORKSPACE/CTO feed (target:'cto'): `complete` (the leader marked the story done),
@@ -112,10 +124,17 @@ const IDLE_PHRASE = "agent idle — needs idle-handling";
 // Each carries its own `meta.state` so a recipient can branch on the surface, mirroring
 // STATE_PHRASE/IDLE_PHRASE for the task surfaces.
 const STORY_ATTENTION: Record<
-  "completion-review" | "complete" | "gate-red" | "merge-conflict" | "ask" | "ask-answered",
+  | "completion-review"
+  | "complete"
+  | "gate-red"
+  | "merge-conflict"
+  | "ask"
+  | "ask-answered"
+  | "member-blocked",
   { phrase: string; state: string }
 > = {
   "completion-review": { phrase: "story ready for completion review", state: "story_completion_review" },
+  "member-blocked": { phrase: "story BLOCKED — a member failed/aborted; add a replacement subtask or abandon the story", state: "story_member_blocked" },
   complete: { phrase: "story complete", state: "story_complete" },
   "gate-red": { phrase: "story gate RED — fix with more subtasks", state: "story_gate_red" },
   "merge-conflict": { phrase: "story↔main MERGE CONFLICT — resolve in the story worktree", state: "story_merge_conflict" },
@@ -242,6 +261,10 @@ export class AttentionBridge {
   // 0→1 flip (mirrors the lastStatus "entering" logic, so a re-render of an
   // already-idle task does not re-notify).
   private lastIdle = new Map<string, boolean>();
+  // Per-task last-seen DEAD-BLOCKED flag (status==='blocked' with a non-empty deadBlockers set),
+  // tracked like lastIdle: a CONDITIONAL attention surface, not a status, so we emit only on the
+  // 0→1 flip (a re-render of an already-dead-blocked task does not re-notify). See DEAD_BLOCKED_PHRASE.
+  private lastDeadBlocked = new Map<string, boolean>();
   // Per-task last-seen RESOLVED RESPONDER ('story'|'cto'|'user'|null), tracked alongside
   // status/idle so a RESPONDER TRANSITION fires even when the status itself did not change:
   // a non-story task's cto→user escalation (escalated_to_user) must (re)notify so the user
@@ -339,6 +362,7 @@ export class AttentionBridge {
     if (e.type === "task.deleted" && typeof e.id === "string") {
       this.lastStatus.delete(e.id);
       this.lastIdle.delete(e.id);
+      this.lastDeadBlocked.delete(e.id);
       this.lastResponder.delete(e.id);
       return null;
     }
@@ -373,14 +397,26 @@ export class AttentionBridge {
     const idlePrev = this.lastIdle.get(id) ?? false;
     this.lastIdle.set(id, idleNow);
 
-    // The ATTENTION SURFACE the task is currently on: an attention STATUS, or the IDLE
-    // condition on a live agent, or neither. The two surfaces share ONE emit path (below) so
-    // a RESPONDER transition fires even when the status itself did not change.
-    const surface: "status" | "idle" | null = isAttentionState(status)
+    // The DEAD-BLOCKED condition (F3) is, like idle, a CONDITIONAL surface rather than a status: a
+    // `blocked` task whose precomputed `deadBlockers` set is non-empty is permanently stuck on a
+    // never-merging dependency. Tracked separately so we emit only on the 0→1 flip.
+    const deadBlockers = Array.isArray(t.deadBlockers)
+      ? (t.deadBlockers as unknown[]).filter((x): x is string => typeof x === "string")
+      : [];
+    const deadBlockedNow = status === "blocked" && deadBlockers.length > 0;
+    const deadBlockedPrev = this.lastDeadBlocked.get(id) ?? false;
+    this.lastDeadBlocked.set(id, deadBlockedNow);
+
+    // The ATTENTION SURFACE the task is currently on: an attention STATUS, the IDLE condition on a
+    // live agent, the DEAD-BLOCKED condition on a blocked task, or none. The surfaces share ONE
+    // emit path (below) so a RESPONDER transition fires even when the status itself did not change.
+    const surface: "status" | "idle" | "dead_blocked" | null = isAttentionState(status)
       ? "status"
       : idleNow
         ? "idle"
-        : null;
+        : deadBlockedNow
+          ? "dead_blocked"
+          : null;
     if (!surface) return null;
 
     // EMIT TRIGGER: emit when the task newly ENTERED this surface (status changed into an
@@ -389,14 +425,19 @@ export class AttentionBridge {
     // fresh feedback event). Both maps are updated above, so a same-status/already-idle
     // re-render with an unchanged responder never re-notifies, and a real change fires once.
     const enteredSurface =
-      surface === "status" ? prevStatus !== status : idleNow && !idlePrev;
+      surface === "status"
+        ? prevStatus !== status
+        : surface === "idle"
+          ? idleNow && !idlePrev
+          : deadBlockedNow && !deadBlockedPrev;
     const responderChanged = prevResponder !== responder;
     if (!enteredSurface && !responderChanged) return null;
 
     // OWNERSHIP: does THIS bridge's scope own the item right now (STORY-leader feed vs
     // WORKSPACE/CTO feed)? A non-owning bridge drops it — and we still updated the tracking
     // maps above, so the OTHER bridge's de-dup stays correct.
-    if (!this.routeOwns(storyId, responder, status, dirId)) return null;
+    if (!this.routeOwns(storyId, responder, status, dirId, surface === "dead_blocked"))
+      return null;
 
     const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
     // ADD story_id to meta ONLY when the task has one, so a STANDALONE task's meta stays
@@ -408,6 +449,15 @@ export class AttentionBridge {
       return {
         content,
         meta: { task_id: id, workspace: dirId, state: "idle", ...storyMeta },
+      };
+    }
+    if (surface === "dead_blocked") {
+      const content =
+        `[${id}] ${label} — ${DEAD_BLOCKED_PHRASE}` +
+        (deadBlockers.length ? `: ${deadBlockers.join(", ")}` : "");
+      return {
+        content,
+        meta: { task_id: id, workspace: dirId, state: "dead_blocked", ...storyMeta },
       };
     }
     const attentionStatus = status as AttentionState;
@@ -446,7 +496,8 @@ export class AttentionBridge {
       e.reason === "gate-red" ||
       e.reason === "merge-conflict" ||
       e.reason === "ask" ||
-      e.reason === "ask-answered"
+      e.reason === "ask-answered" ||
+      e.reason === "member-blocked"
         ? e.reason
         : null;
     if (!storyId || !target || !reason) return null;
@@ -480,25 +531,32 @@ export class AttentionBridge {
    *    FAILED (failed/aborted — a failure has no responder, hence the explicit status check).
    *    A non-story task ESCALATED to the user (responder 'user' from escalated_to_user) is
    *    DROPPED here — the webapp/dashboard surfaces it to the user.
+   * A DEAD-BLOCKED task (F3) has no responder and is not failed/aborted, so it is owned the same
+   * way a failure is — by the leader for a story member, by the CTO for a non-story task — via the
+   * explicit `deadBlocked` flag.
    */
   private routeOwns(
     storyId: string | null,
     responder: string | null,
     status: string,
     dirId: string,
+    deadBlocked: boolean,
   ): boolean {
     if (this.scopeStory) {
       return (
         storyId === this.scopeStory &&
-        (responder === "story" || status === "failed" || status === "aborted")
+        (responder === "story" ||
+          status === "failed" ||
+          status === "aborted" ||
+          deadBlocked)
       );
     }
     if (this.scopeDir && dirId !== this.scopeDir) return false;
-    // NON-STORY tasks only — awaiting the CTO ('cto') or a non-story failure. A non-story
-    // 'user' escalation falls through to false (dropped → the webapp surfaces it).
+    // NON-STORY tasks only — awaiting the CTO ('cto'), a non-story failure, or dead-blocked. A
+    // non-story 'user' escalation falls through to false (dropped → the webapp surfaces it).
     return (
       storyId == null &&
-      (responder === "cto" || status === "failed" || status === "aborted")
+      (responder === "cto" || status === "failed" || status === "aborted" || deadBlocked)
     );
   }
 }

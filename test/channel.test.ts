@@ -527,6 +527,72 @@ describe("channel: routeOwns (structural — responder-redesign §5)", () => {
   });
 });
 
+describe("channel: dead-blocked attention (F3 — a `blocked` task stuck on a never-merging dep)", () => {
+  // The serialized TaskView a blocked task emits: status `blocked` with a non-empty deadBlockers
+  // set (its aborted/failed/rolled_back/gone blockers). A blocked task is not awaiting feedback,
+  // so pending_responder is null — the dead-blocked surface is purely the deadBlockers set.
+  const deadBlocked = (over: Record<string, unknown> = {}) => ({
+    id: "t-dead",
+    workspace_id: "dir-1",
+    status: "blocked",
+    deadBlockers: ["t-blocker"],
+    pending_responder: null,
+    ...over,
+  });
+
+  test("a blocked task with a non-empty deadBlockers set pushes a dead_blocked notification", () => {
+    const bridge = new AttentionBridge();
+    bridge.seedWorkspaceLabels([{ id: "dir-1", label: "webapp" }]);
+    const note = bridge.consume(taskUpdated(deadBlocked()));
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({ task_id: "t-dead", workspace: "dir-1", state: "dead_blocked" });
+    expect(note!.content).toContain("blocked on a DEAD (never-merging) dependency");
+    // Names the offending blocker so the operator knows what to edit out of blocked_by.
+    expect(note!.content).toContain("t-blocker");
+  });
+
+  test("a blocked task with NO dead blockers (still-pending deps) is NOT a surface", () => {
+    const bridge = new AttentionBridge();
+    expect(bridge.consume(taskUpdated(deadBlocked({ deadBlockers: [] })))).toBeNull();
+    expect(bridge.consume(taskUpdated(deadBlocked({ deadBlockers: undefined })))).toBeNull();
+  });
+
+  test("dead-blocked emits only on the 0→1 flip — a re-render does not re-notify", () => {
+    const bridge = new AttentionBridge();
+    expect(bridge.consume(taskUpdated(deadBlocked()))).not.toBeNull(); // first time → push
+    expect(bridge.consume(taskUpdated(deadBlocked()))).toBeNull(); // unchanged re-render → silent
+  });
+
+  test("clearing the dead block (operator edits blocked_by → inactive) stops surfacing", () => {
+    const bridge = new AttentionBridge();
+    expect(bridge.consume(taskUpdated(deadBlocked()))).not.toBeNull();
+    // Unblocked to inactive → no longer a surface; a fresh dead-block later would flip 0→1 again.
+    expect(
+      bridge.consume(taskUpdated(deadBlocked({ status: "inactive", deadBlockers: [] }))),
+    ).toBeNull();
+  });
+
+  test("the connectivity-only WORKER bridge never sees a dead-blocked task", () => {
+    const worker = new AttentionBridge("dir-1", /* connectivityOnly */ true);
+    expect(worker.consume(taskUpdated(deadBlocked()))).toBeNull();
+  });
+
+  test("a dead-blocked STORY member routes to its LEADER, not the CTO feed", () => {
+    const member = deadBlocked({ id: "t-dead-member", story_id: "st-1" });
+    // The st-1 leader bridge owns its member's dead-block...
+    const leaderNote = new AttentionBridge("dir-1", false, "st-1").consume(taskUpdated(member));
+    expect(leaderNote).not.toBeNull();
+    expect(leaderNote!.meta).toEqual({
+      task_id: "t-dead-member",
+      workspace: "dir-1",
+      state: "dead_blocked",
+      story_id: "st-1",
+    });
+    // ...and the CTO feed (non-story only) never owns a story member's dead-block.
+    expect(new AttentionBridge("dir-1").consume(taskUpdated(member))).toBeNull();
+  });
+});
+
 describe("channel: story-level attention (Phase 6 — completion + report-up routing)", () => {
   // The story-leader bridge for st-1 (in dir-1) and the workspace/CTO bridge for dir-1.
   const storyBridge = () => new AttentionBridge("dir-1", false, "st-1");
@@ -578,6 +644,27 @@ describe("channel: story-level attention (Phase 6 — completion + report-up rou
   test("a completion-review for a DIFFERENT story is dropped by an st-1 leader bridge", () => {
     const other = { ...completionReview, story_id: "st-2" };
     expect(storyBridge().consume(other)).toBeNull();
+  });
+
+  test("a member-blocked event (F4) routes to the LEADER feed (target 'story'), not the CTO", () => {
+    const memberBlocked = {
+      type: "story.attention",
+      story_id: "st-1",
+      workspace_id: "dir-1",
+      target: "story",
+      reason: "member-blocked",
+      detail: "Ship the widget",
+    };
+    const note = storyBridge().consume(memberBlocked);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({
+      story_id: "st-1",
+      workspace: "dir-1",
+      state: "story_member_blocked",
+    });
+    expect(note!.content).toContain("story BLOCKED");
+    // The CTO feed never sees a leader-targeted member-blocked.
+    expect(ctoBridge().consume(memberBlocked)).toBeNull();
   });
 
   test("a complete for a DIFFERENT workspace is dropped by a dir-1 CTO bridge", () => {
