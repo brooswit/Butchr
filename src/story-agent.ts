@@ -45,8 +45,12 @@ import {
   listStoryAgentRows,
   nowIso,
   saveStoryAgentRow,
+  saveWorkspaceAgentRow,
 } from "./db.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
+// Runtime-only use inside onStoryCreated (never at module top-level), so the
+// workspaces↔workspace-agent↔story-agent ESM cycle resolves via live bindings.
+import { ensureWorkspaceAgentRow, startWorkspaceAgent } from "./workspace-agent.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
@@ -671,7 +675,39 @@ export function stopStoryAgentSupervisor(): void {
  * never fails/blocks story creation; a launch error is recorded on the row).
  */
 export function onStoryCreated(storyId: string): void {
-  saveRow(storyId, { desired: 1 });
+  saveRow(storyId, { desired: 1 }); // legacy story_agent MIRROR (kept; unified row is authoritative)
+  if (config.unifiedWorkspaceEnabled) {
+    // UNIFIED CREATE-TIME ROW (story st-93384200, Bug 3): materialize this leader's unified
+    // `workspace` row NOW so the unified supervisor — the SOLE launcher when the flag is ON —
+    // launches AND relaunches-on-death it immediately, without waiting for a restart to re-seed
+    // it from the legacy table. We early-RETURN so the legacy DIRECT launch below does NOT also
+    // fire: exactly one launcher → no double-launch / herdr-name collision (the legacy story
+    // superviseTick already self-gates while unified is ON — see reconcileStoryAgents above).
+    const story = getStoryRow(storyId);
+    if (!story) {
+      // A story ALWAYS has a workspace_id; a missing row here is a real error, NOT a
+      // null-directory_id row to insert silently — such a row would be invisible to
+      // unregisterWorkspace's `directory_id=? AND kind IN ('cto','leader')` enumeration (story
+      // st-93384200 Bug 2), reintroducing the leak/race that fix closed. Record + bail.
+      saveRow(storyId, { last_error: `onStoryCreated: story ${storyId} not found — skipped unified ws-leader row` });
+      console.error(`[butchr] story leader create skipped for ${storyId}: story row not found`);
+      return;
+    }
+    const wsId = `ws-leader-${storyId}`;
+    // directory_id = the story's workspace (NEVER null — guarded above), so the row is visible to
+    // unregister enumeration; work_id binds it to the story node; has_agent 0 on create.
+    ensureWorkspaceAgentRow(wsId, { kind: "leader", work_id: storyId, directory_id: story.workspace_id });
+    saveWorkspaceAgentRow(wsId, { desired: 1 });
+    // Optional low-latency kick: launch NOW instead of waiting for the next supervise tick.
+    // startWorkspaceAgent serializes through the SAME per-id launchInFlight guard the supervisor
+    // uses (workspace-agent.guarded), so a kick racing a concurrent supervise tick JOINS the
+    // in-flight launch rather than double-launching.
+    void startWorkspaceAgent(wsId).catch((e) => {
+      saveRow(storyId, { last_error: (e as Error).message });
+      console.error(`[butchr] story leader launch failed for ${storyId}: ${(e as Error).message}`);
+    });
+    return;
+  }
   void launchStoryAgent(storyId).catch((e) => {
     saveRow(storyId, { last_error: (e as Error).message });
     console.error(`[butchr] story leader launch failed for ${storyId}: ${(e as Error).message}`);

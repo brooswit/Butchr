@@ -15,6 +15,7 @@ import { isCtoEnabled, stopCtoAgent } from "./cto-agent.ts";
 import {
   ensureWorkspaceAgentRow,
   isUnifiedWorkspaceEnabled,
+  startWorkspaceAgent,
   stopWorkspaceAgent,
 } from "./workspace-agent.ts";
 import { stopWorkspaceStoryAgents } from "./story-agent.ts";
@@ -594,6 +595,34 @@ export function dashboard(): Dashboard {
   return { workspaces, totals };
 }
 
+/**
+ * CREATE-TIME unified `workspace` cto row for a directory (story st-93384200, Bug 3). Called by
+ * registerWorkspace right after the directory row is inserted so the unified supervisor — the
+ * SOLE launcher when the flag is ON — owns this directory's CTO immediately (launch AND
+ * relaunch-on-death) WITHOUT waiting for a restart to re-seed it from the legacy cto_agent table.
+ * `desired` reflects whether the CTO is ENABLED (the per-workspace override resolved against the
+ * global default); a disabled / globally-off CTO gets desired=0 and is NOT launched (the unified
+ * reconcile/supervise already tears down any stray desired=1 cto row for a disabled directory).
+ * The legacy cto_agent path has NO direct CTO start at registration (the CTO comes up via the
+ * supervisor), so there is nothing to gate off here. The optional low-latency launch kick is
+ * serialized behind the SAME per-id launchInFlight guard the supervisor uses
+ * (workspace-agent.guarded), so it can't double-launch with a racing supervise tick. No-op while
+ * the unified supervisor is gated OFF (mirror-and-defer; the legacy directory row is unaffected).
+ * EXPORTED for direct testing — registerWorkspace itself needs a live herdr to drive end-to-end.
+ */
+export function ensureCtoWorkspaceRow(directoryId: string): void {
+  if (!isUnifiedWorkspaceEnabled()) return;
+  const wsId = `ws-cto-${directoryId}`;
+  const ctoOn = isCtoEnabled(directoryId);
+  ensureWorkspaceAgentRow(wsId, { kind: "cto", directory_id: directoryId }); // work_id NULL, has_agent 0
+  saveWorkspaceAgentRow(wsId, { desired: ctoOn ? 1 : 0 });
+  if (ctoOn) {
+    void startWorkspaceAgent(wsId).catch((e) => {
+      console.error(`[butchr] CTO launch failed for ${directoryId}: ${(e as Error).message}`);
+    });
+  }
+}
+
 export async function registerWorkspace(
   rawPath: string,
   label?: string,
@@ -655,6 +684,11 @@ export async function registerWorkspace(
     id, path, finalLabel, workspaceId, paneId,
     finalGateCmd, finalVersionFile, finalChangelogPath, created,
   );
+
+  // UNIFIED CREATE-TIME ROW (story st-93384200, Bug 3): materialize this directory's unified
+  // `workspace` cto row NOW so the unified supervisor owns its CTO immediately — no restart
+  // needed to re-seed it from the legacy cto_agent table. See ensureCtoWorkspaceRow.
+  ensureCtoWorkspaceRow(id);
 
   const row = getWorkspace(id)!;
   const view: WorkspaceView = { ...row, counts: counts(id) };
