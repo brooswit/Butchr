@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.136] - 2026-06-20
+
 - Operator workspaces (CTO/leader) now get a throttled, genuine-idle-gated mid-session pane probe in the unified workspace supervisor (`src/workspace-agent.ts`) that auto-confirms recognized startup/permission dialogs and surfaces unrecognized ones (via the workspace row's `last_error`) instead of hanging silently at 0 progress after the launch/adopt auto-confirm window has closed (story st-a57a552e, subtask B). New `ctoMidProbeEverySupervisions` config knob (`BUTCHR_CTO_MID_PROBE_SUPERVISIONS`, default 3 ≈ 15s).
 
 ## [0.9.135] - 2026-06-20
