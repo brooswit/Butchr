@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.144] - 2026-06-20
+
 - **Fixed: a concurrently-aborted task can no longer be RESURRECTED by the feedback-resume path (story st-059a67ec, F1).** `resumeWithAnswer` (`src/tasks.ts`) — the single chokepoint all three feedback-resume entrypoints funnel through (`answerTask` via `respondToFeedback`, and the structured `approvePlan`/`rejectPlan`) — re-armed the task to `inactive` with a WHERE-id-only `setStatus`, AFTER `await herdr.teardownTask(id)`. The top-of-function `needs_info` validation runs on a row read BEFORE that await, so a task answered while concurrently aborted could have `abortTask` flip it to the terminal `aborted` status DURING the teardown, after which the unguarded re-arm forced the aborted task back to `inactive` → re-dispatched as a zombie whose worktree was already discarded. Fix: add `from:"needs_info"` to that `setStatus` so the re-arm becomes a NO-OP once the row has left `needs_info`. All three entrypoints resume from `needs_info` (plan-preview tasks are `status=needs_info` + `plan_preview`), so the ONE guard at the shared helper protects every path with no per-call-site drift. Regression test (`test/resume-after-abort.test.ts`): a `needs_info` task aborted DURING the resume's teardown await (reproduced deterministically — teardownTask's subprocess spawn genuinely suspends the resume) stays `aborted` with no re-arm, across all three entrypoints (answer, approvePlan, rejectPlan); a positive control proves the guard doesn't break a normal resume. No `package.json`/version edit.
 
 ## [0.9.143] - 2026-06-20
