@@ -362,6 +362,40 @@ export function validateAllowlist(allowlist: unknown): string[] {
 }
 
 /**
+ * Hard cap on a task `prompt`/brief, in characters. The brief is written verbatim to
+ * task.md and handed to the LLM, so it must be bounded — generous (a brief can carry a
+ * long spec) but finite, in the same spirit as the tag(40)/allowlist(200) caps.
+ */
+export const MAX_PROMPT_LEN = 100_000;
+
+/**
+ * Validate + sanitize a task `prompt`/brief from an API/CLI body. It must be a string
+ * that is non-empty after trimming. NUL (0x00) and other C0/C1 control characters are
+ * STRIPPED — a NUL can truncate the brief once it is written to task.md or handed to the
+ * LLM, and stray control chars corrupt the rendered file — while ordinary whitespace
+ * (tab, newline, carriage return) is preserved. The sanitized result is length-capped at
+ * MAX_PROMPT_LEN (mirroring the tag/allowlist validators). Returns the cleaned brief.
+ */
+export function validatePrompt(prompt: unknown): string {
+  if (typeof prompt !== "string") {
+    throw new HttpError(400, "prompt is required");
+  }
+  // Drop NUL + control chars (C0 0x00-0x1F, DEL 0x7F, C1 0x80-0x9F) but KEEP the normal
+  // whitespace a brief legitimately contains: tab (0x09), LF (0x0A), CR (0x0D).
+  const sanitized = prompt.replace(
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g,
+    "",
+  );
+  if (!sanitized.trim()) {
+    throw new HttpError(400, "prompt is required");
+  }
+  if (sanitized.length > MAX_PROMPT_LEN) {
+    throw new HttpError(400, `prompt must be ${MAX_PROMPT_LEN} characters or fewer`);
+  }
+  return sanitized;
+}
+
+/**
  * Validate + normalize the `context` field for the in-place task EDIT (editTask): an
  * array of context-file path strings, each trimmed, with blanks dropped. Order is
  * preserved and duplicates are kept as-is (unlike tags/allowlist — a context list is an
@@ -1600,9 +1634,9 @@ export async function createTask(
 ): Promise<TaskView> {
   const dir = getWorkspace(workspaceId);
   if (!dir) throw new HttpError(404, `workspace not found: ${workspaceId}`);
-  if (!prompt || !prompt.trim()) {
-    throw new HttpError(400, "prompt is required");
-  }
+  // Validate, sanitize (strip NUL/control chars), and length-cap the brief BEFORE it is
+  // written to task.md / handed to the LLM. Reuse the cleaned value downstream.
+  prompt = validatePrompt(prompt);
   // STORY MEMBERSHIP (Phase 5): an optional story_id grouping this task as a SUBTASK of a
   // story. Validated by a DIRECT db read of the stories table (NOT importing stories.ts —
   // that would close an import cycle, the same reason story-agent.ts reads story rows
@@ -1803,10 +1837,8 @@ export function editTask(
   if (!dir) throw new HttpError(404, "workspace not found");
 
   if (hasPrompt) {
-    if (typeof edits.prompt !== "string" || !edits.prompt.trim()) {
-      throw new HttpError(400, "prompt must be a non-empty string");
-    }
-    updateTaskMdPrompt(dir.path, id, edits.prompt);
+    // Same sanitize/length-cap guard as createTask — the edited brief lands in task.md too.
+    updateTaskMdPrompt(dir.path, id, validatePrompt(edits.prompt));
   }
   if (hasContext) {
     updateTaskMdContext(dir.path, id, validateContext(edits.context));

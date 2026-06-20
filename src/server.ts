@@ -1040,6 +1040,10 @@ export function startServer(): ReturnType<typeof Bun.serve> {
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
+    // Cap request bodies at 1 MiB. No API body (a task brief, context list, etc.) is
+    // legitimately larger; this bounds memory and rejects an oversized/abusive payload
+    // before readJson buffers it. Bun answers an over-cap request with 413.
+    maxRequestBodySize: 1024 * 1024,
     async fetch(req) {
       const url = new URL(req.url);
       const { pathname } = url;
