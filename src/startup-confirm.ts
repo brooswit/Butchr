@@ -114,6 +114,29 @@ export function looksLikePrompt(screen: string): boolean {
 }
 
 /**
+ * Pure POSITIVE anchor: does `screen` show the tell-tale of a LIVE, working Claude session
+ * turn — as opposed to a frozen blocking startup dialog? An active turn renders the working
+ * spinner with an "esc to interrupt" affordance in its status bar; a blocking dialog NEVER
+ * shows it. Verified against a REAL operator pane (2026-06-19): an in-flight turn's footer is
+ * `⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt`, an IDLE pane's footer is
+ * `… (shift+tab to cycle) · ctrl+t to hide tasks · ← for agents` (no such phrase), and the
+ * genuine dev-channels consent / folder-trust dialogs show `Enter to confirm · Esc to cancel`
+ * (or nothing) — the literal `esc to interrupt` is absent from every blocking dialog and
+ * present throughout an active turn, so it is clean on BOTH sides.
+ *
+ * This is the missing "active session ⇒ quiet" anchor: it lets `classifyStartupScreen` treat a
+ * working operator pane as QUIET even when its scrolling output incidentally contains a numbered
+ * list (`1.`/`2.`), the word "proceed", or yes/no-ish prose. It is intentionally anchored on the
+ * spinner affordance and NOT on the bare `❯` input box — the `❯` (and even the word "Esc") also
+ * appear in the genuine dev-channels dialog (`❯ 1. I am using this for local development` /
+ * `Esc to cancel`), so a `❯` anchor would wrongly quiet a real dialog. Blank/whitespace → false.
+ */
+export function looksLikeActiveSession(screen: string): boolean {
+  if (!screen || !screen.trim()) return false;
+  return /esc to interrupt/i.test(screen);
+}
+
+/**
  * The THREE-way classification of a startup pane — the fix for `detectStartupPrompt`'s
  * null-ambiguity (a clean screen and an unrecognized-but-blocking prompt both used to read as
  * null, so an unhandled consent dialog was miscounted as "quiet" and the launch proceeded
@@ -134,6 +157,14 @@ export function classifyStartupScreen(
 ): StartupClassification {
   const rule = detectStartupPrompt(screen, rules);
   if (rule) return { kind: "rule", rule };
+  // POSITIVE active-session anchor: a live, working Claude turn is QUIET even when its
+  // streaming output incidentally looks prompt-ish. Checked AFTER the rules (so a genuine
+  // dev-channels/folder-trust dialog is STILL detected + auto-confirmed — rule wins) but
+  // BEFORE the loose `looksLikePrompt` heuristics (so an incidental numbered list / 'proceed'
+  // / yes-no prose in active output is never misread as a stuck blocking prompt). This is the
+  // 2026-06-19 false-positive fix: a leader mid-review burned the whole poll budget and spammed
+  // 'not auto-confirmable' because there was no "active ⇒ quiet" anchor.
+  if (looksLikeActiveSession(screen)) return { kind: "quiet" };
   if (looksLikePrompt(screen)) return { kind: "stuck" };
   return { kind: "quiet" };
 }

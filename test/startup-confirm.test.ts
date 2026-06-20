@@ -9,10 +9,44 @@ import {
   autoConfirmStartupPrompts,
   classifyStartupScreen,
   detectStartupPrompt,
+  looksLikeActiveSession,
   looksLikePrompt,
 } from "../src/startup-confirm.ts";
 
 const noSleep = async () => {};
+
+// ── REAL captured pane fixtures (grounded against a live operator pane, 2026-06-19) ──────────
+// The active-session anchor must match what the CURRENT Claude Code build actually renders, not
+// a synthetic string. These are faithful to `herdr agent read` snapshots of live operator panes.
+
+// A live, WORKING operator turn: a working-spinner line + the real status-bar footer carrying the
+// literal `esc to interrupt` affordance. Captured verbatim from an in-flight turn.
+const ACTIVE_TURN_FOOTER =
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt";
+
+// An IDLE operator pane footer (turn finished, awaiting input): note it does NOT contain
+// `esc to interrupt` — captured verbatim from the two real idle CTO panes.
+const IDLE_FOOTER =
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ctrl+t to hide tasks · ← for agents";
+
+// A faithful active leader/CTO pane mid-review whose scrolling output INCIDENTALLY contains a
+// numbered list and the words 'proceed'/'yes' — exactly the 2026-06-19 false-positive shape. The
+// numbered items are deliberately NOT `1. yes`/`1. proceed` so they match no confirm RULE; the
+// prompt-ish content is purely incidental to a normal turn.
+const ACTIVE_PANE_WITH_INCIDENTAL_PROMPTY_OUTPUT = [
+  "● Reviewing the diff. My plan has three steps:",
+  "  1. Anchor the classifier on the active-turn affordance",
+  "  2. Wire it into classifyStartupScreen before the loose heuristics",
+  "  3. Extend the regression tests",
+  "  I'll proceed now — yes, the design holds and the rule path is unchanged.",
+  "",
+  "✻ Cogitating… (12s · ↓ 1.5k tokens)",
+  "",
+  "─────────────────────────────────────────────",
+  "❯ ",
+  "─────────────────────────────────────────────",
+  ACTIVE_TURN_FOOTER,
+].join("\n");
 
 describe("detectStartupPrompt (generic, extensible — not hardcoded strings)", () => {
   test("matches the dev-channels consent (numbered local-development option)", () => {
@@ -279,5 +313,102 @@ describe("broadened rule table (enter-to-confirm + folder-trust variants)", () =
   // mid-session probe inject a spurious "1\n" into a working agent.
   test("a bare 'proceed?' matches NO rule (folder-trust no longer over-matches it)", () => {
     expect(detectStartupPrompt("Shall I proceed?")).toBeNull();
+  });
+});
+
+// ── ACTIVE-SESSION ANCHOR (the 2026-06-19 false-positive fix, story st-a57a552e Bug 2) ───────
+// A live, working operator pane must be a STRICT NO-OP for the startup classifier, while a
+// genuine blocking dialog STILL auto-confirms. The anchor is grounded on the REAL `esc to
+// interrupt` status-bar affordance present during an active turn and absent from every blocking
+// dialog (verified against live operator panes — see the fixtures at the top of this file).
+describe("looksLikeActiveSession (positive 'active turn ⇒ quiet' anchor)", () => {
+  test("true on the REAL active-turn footer ('esc to interrupt' affordance)", () => {
+    expect(looksLikeActiveSession(ACTIVE_TURN_FOOTER)).toBe(true);
+    expect(looksLikeActiveSession(ACTIVE_PANE_WITH_INCIDENTAL_PROMPTY_OUTPUT)).toBe(true);
+  });
+
+  test("false on a blank/whitespace screen", () => {
+    expect(looksLikeActiveSession("")).toBe(false);
+    expect(looksLikeActiveSession("   \n  ")).toBe(false);
+  });
+
+  test("false on an IDLE operator footer (no active-turn affordance)", () => {
+    expect(looksLikeActiveSession(IDLE_FOOTER)).toBe(false);
+  });
+
+  // The CRITICAL discriminator: the genuine blocking dialogs render `Esc to cancel` (or
+  // nothing) — never `esc to interrupt` — so the anchor never quiets a real dialog.
+  test("false on the genuine dev-channels consent + folder-trust dialogs", () => {
+    const devChannels =
+      "WARNING: Loading development channels\n❯ 1. I am using this for local development\n" +
+      "  2. Exit\n  Enter to confirm · Esc to cancel";
+    const folderTrust =
+      "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No\n  Enter to confirm · Esc to cancel";
+    expect(looksLikeActiveSession(devChannels)).toBe(false);
+    expect(looksLikeActiveSession(folderTrust)).toBe(false);
+  });
+});
+
+describe("classifyStartupScreen anchors an ACTIVE operator pane as QUIET (false-positive fix)", () => {
+  // (b) An active leader/CTO pane — input box + spinner + 'esc to interrupt' + ordinary tool
+  // output that INCIDENTALLY contains a numbered list and the words 'proceed'/'yes' — is QUIET.
+  test("(b) active pane with incidental numbered list + 'proceed'/'yes' classifies QUIET", () => {
+    expect(classifyStartupScreen(ACTIVE_PANE_WITH_INCIDENTAL_PROMPTY_OUTPUT).kind).toBe("quiet");
+    // Bare active footer alone is also quiet.
+    expect(classifyStartupScreen(ACTIVE_TURN_FOOTER).kind).toBe("quiet");
+  });
+
+  // (b) Through the poll loop: a normal working pane sends NO keystroke, sets NO stuckScreen,
+  // and logs NO 'not auto-confirmable' line (it must not burn budget flagging a live agent).
+  test("(b) autoConfirmStartupPrompts is a strict no-op on an active operator pane", async () => {
+    const sent: SendInput[] = [];
+    const logs: string[] = [];
+    const result = await autoConfirmStartupPrompts("agent-active", {
+      read: async () => ACTIVE_PANE_WITH_INCIDENTAL_PROMPTY_OUTPUT,
+      send: async (_n, input) => { sent.push(input); },
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 8,
+      quietPolls: 2,
+      log: (m) => logs.push(m),
+    });
+    expect(sent).toEqual([]); // no keystroke into a working pane
+    expect(result.answered).toEqual([]);
+    expect(result.stuckScreen).toBeUndefined(); // no last_error / stuckScreen surfaced
+    expect(logs.some((m) => /not auto-confirmable/i.test(m))).toBe(false);
+  });
+
+  // (c) The genuine dialogs STILL classify as a rule and STILL auto-confirm — the rule path is
+  // matched BEFORE the active-session guard, so the legit st-a57a552e purpose is preserved.
+  test("(c) a real dev-channels consent dialog STILL classifies as a rule and confirms", async () => {
+    const devChannels =
+      "WARNING: Loading development channels\n❯ 1. I am using this for local development\n" +
+      "  2. Exit\n  Enter to confirm · Esc to cancel";
+    const cls = classifyStartupScreen(devChannels);
+    expect(cls.kind).toBe("rule");
+    if (cls.kind === "rule") expect(cls.rule.name).toBe("dev-channels-consent");
+
+    const sent: Array<{ name: string; input: SendInput }> = [];
+    const screens = [devChannels, "● ready — awaiting your prompt", "● ready — awaiting your prompt"];
+    let i = 0;
+    const result = await autoConfirmStartupPrompts("agent-devc", {
+      read: async () => screens[Math.min(i++, screens.length - 1)]!,
+      send: async (name, input) => { sent.push({ name, input }); },
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 10,
+      quietPolls: 2,
+    });
+    expect(result.answered).toEqual(["dev-channels-consent"]);
+    expect(sent.map((s) => s.input)).toEqual([{ text: "1", enter: true }]);
+  });
+
+  // (c) A folder-trust dialog also stays a rule (auto-confirm), unaffected by the active-session guard.
+  test("(c) a real folder-trust dialog STILL classifies as a rule and confirms", () => {
+    const cls = classifyStartupScreen(
+      "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No\n  Enter to confirm · Esc to cancel",
+    );
+    expect(cls.kind).toBe("rule");
+    if (cls.kind === "rule") expect(cls.rule.name).toBe("folder-trust");
   });
 });
