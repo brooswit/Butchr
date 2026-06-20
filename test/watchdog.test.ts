@@ -136,6 +136,61 @@ describe("runawayExceeded (the watchdog trip decision)", () => {
   });
 });
 
+describe("runningElapsedMs (running-since from DB started_at — restart-continuous budget)", () => {
+  test("elapsed is measured from started_at, so the budget does NOT reset across a restart", () => {
+    // A task that entered LIVE in_progress 2*maxRunMs ago. This is the running-since
+    // the watcher now reads from the DB instead of a watcher-local Date.now().
+    const startedAt = new Date(Date.now() - cfg.maxRunMs * 2).toISOString();
+    const id = seedTask({
+      id: "continuity-running",
+      status: "in_progress",
+      startedAt,
+      hasAgent: true,
+    });
+    const row = dbRow(id);
+
+    // Two SEPARATE "now"s — simulating the original watcher and a fresh watcher spawned
+    // after a butchr restart/re-adoption. Both derive elapsed from the SAME fixed
+    // started_at, so neither resets to ~0: the stuck agent keeps tripping the guard.
+    const nowA = Date.now();
+    const nowB = nowA + 5 * 60_000; // 5 min later (a later restart)
+    const elapsedA = dispatchMod.runningElapsedMs(row.started_at, nowA);
+    const elapsedB = dispatchMod.runningElapsedMs(row.started_at, nowB);
+
+    expect(elapsedA).not.toBeNull();
+    expect(elapsedB).not.toBeNull();
+    expect(elapsedA!).toBeGreaterThan(cfg.maxRunMs);
+    expect(elapsedB!).toBeGreaterThan(elapsedA!); // budget keeps growing, never reset
+    // The real restart-continuity property: the guard STAYS tripped across both "now"s
+    // rather than getting a fresh ~0 budget after a restart.
+    expect(dispatchMod.runawayExceeded(elapsedA!, cfg.maxRunMs)).toBe(true);
+    expect(dispatchMod.runawayExceeded(elapsedB!, cfg.maxRunMs)).toBe(true);
+  });
+
+  test("a freshly-started task is under budget (does not trip)", () => {
+    const id = seedTask({
+      id: "continuity-fresh",
+      status: "in_progress",
+      startedAt: new Date().toISOString(),
+      hasAgent: true,
+    });
+    const elapsed = dispatchMod.runningElapsedMs(dbRow(id).started_at, Date.now());
+    expect(elapsed).not.toBeNull();
+    expect(dispatchMod.runawayExceeded(elapsed!, cfg.maxRunMs)).toBe(false);
+  });
+
+  test("a missing/unparseable started_at is UNKNOWN (null) — never trips the guard", () => {
+    expect(dispatchMod.runningElapsedMs(null, Date.now())).toBeNull();
+    expect(dispatchMod.runningElapsedMs(undefined, Date.now())).toBeNull();
+    expect(dispatchMod.runningElapsedMs("", Date.now())).toBeNull();
+    expect(dispatchMod.runningElapsedMs("not-a-date", Date.now())).toBeNull();
+    // The watcher guards on `elapsed !== null` before runawayExceeded, so an unknown
+    // running-since is never force-rescued — assert that combined contract.
+    const elapsed = dispatchMod.runningElapsedMs(null, Date.now());
+    expect(elapsed !== null && dispatchMod.runawayExceeded(elapsed, cfg.maxRunMs)).toBe(false);
+  });
+});
+
 describe("watchdog rescue → in_review", () => {
   test("a stuck LIVE in_progress task is force-moved to in_review with a time-exceeded note (not aborted)", () => {
     // LIVE `in_progress`: has_agent=1 (agent is running).

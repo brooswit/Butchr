@@ -965,7 +965,8 @@ export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> 
 // Returns how long (ms) the agent has been QUIET (now - log mtime) so the caller
 // can drive the stall auto-nudge off the same single stat() — or null when idle
 // detection is disabled or the log hasn't appeared yet (nothing to nudge against).
-function refreshIdle(taskId: string, logFile: string): number | null {
+// Exported for the clock-skew regression test (a future log mtime → null).
+export function refreshIdle(taskId: string, logFile: string): number | null {
   if (config.idleMs <= 0) return null;
   let mtimeMs: number;
   try {
@@ -974,6 +975,13 @@ function refreshIdle(taskId: string, logFile: string): number | null {
     return null; // no log yet — agent is still spinning up
   }
   const quietMs = Date.now() - mtimeMs;
+  // CLOCK-SKEW GUARD: a backward system-clock jump or a log mtime in the FUTURE yields a
+  // NEGATIVE quietMs. That value is neither null nor > idleMs, so left unclamped it would
+  // fall through clearNeedsUserInputOnResume (wrongly CLEARING a set needs_user_input flag)
+  // and make isGenuinelyIdle/handleIdleAgent read the agent as active. Treat it as "unknown"
+  // (null) at the SOURCE — exactly like a missing log — so EVERY downstream consumer is
+  // protected at once. Returns before setIdle, so the idle flag is left untouched.
+  if (quietMs < 0) return null;
   // On the 0→1 flip, capture the run-log tail as idle_context so the idle-handling
   // responder sees what the agent was doing. The capture thunk is invoked by setIdle
   // ONLY when the flag actually flips to idle (never on the per-second no-op poll), so
@@ -1032,6 +1040,13 @@ export async function handleIdleAgent(
   // Alive but quiet — a genuine idle agent. Nothing to do here: nudge/attach resolve the
   // live pane BY NAME at action time, so we just leave it flagged `idle` (with context)
   // for the idle-handling responder to act on.
+  //
+  // HUNG-BUT-ALIVE backstop: a deadlocked/syscall-stuck claude reads as `alive` forever via
+  // the /proc UUID-token probe (claudeAlive — correct, /proc presence is the only ground
+  // truth), so it is never auto-resumed here and a responder nudge can't unstick it. The
+  // recovery path is the now-CONTINUOUS runaway timer (runningElapsedMs from DB started_at):
+  // it trips on maxRunMs regardless of restarts and force-rescues the task to review. No
+  // separate long-idle-alive surface is added here by design — that backstop covers it.
 }
 
 /**
@@ -1049,6 +1064,30 @@ export async function handleIdleAgent(
 export function runawayExceeded(elapsedMs: number, maxRunMs: number): boolean {
   if (maxRunMs <= 0) return false; // guard disabled
   return elapsedMs > maxRunMs;
+}
+
+/**
+ * RUNNING-SINCE elapsed for the runaway watchdog, measured from the DB's
+ * `tasks.started_at` (the TRUE running-since: stamped once via keep() and preserved
+ * across resumes/restarts) rather than a watcher-local Date.now(). This keeps the
+ * maxRunMs budget CONTINUOUS across a butchr restart / re-adoption — a stuck agent
+ * that has been running past maxRunMs still trips after a restart instead of being
+ * handed a FRESH budget every time a new watcher spawns for it.
+ *
+ *  - `startedAt` is the ISO string from `tasks.started_at` (or null/missing if the
+ *    task somehow never stamped one). `now` is injected so the boundary is pure +
+ *    unit-testable.
+ *  - Returns `null` when started_at is absent or unparseable — an UNKNOWN running-since
+ *    that callers must NOT treat as a trip (never force-rescue on a missing timestamp).
+ */
+export function runningElapsedMs(
+  startedAt: string | null | undefined,
+  now: number,
+): number | null {
+  if (!startedAt) return null; // never stamped → unknown, don't trip the guard
+  const since = Date.parse(startedAt);
+  if (Number.isNaN(since)) return null; // unparseable → unknown
+  return now - since;
 }
 
 /**
@@ -1141,8 +1180,13 @@ function spawnWatcher(
       // (below) rather than letting it hold its tab forever. Trips before the
       // longer agentTimeoutMs by default; disabled when maxRunMs <= 0.
       {
-        const elapsed = Date.now() - startedAt;
-        if (runawayExceeded(elapsed, config.maxRunMs)) {
+        // Measure runaway elapsed from the DB's `started_at` (running-since), NOT the
+        // watcher-local `startedAt` — so the maxRunMs budget is CONTINUOUS across a
+        // butchr restart / re-adoption (a fresh watcher recomputing from its own
+        // Date.now() would hand a stuck agent a brand-new budget on every restart). A
+        // null/unknown running-since (missing/unparseable started_at) never trips.
+        const elapsed = runningElapsedMs(curTask!.started_at, Date.now());
+        if (elapsed !== null && runawayExceeded(elapsed, config.maxRunMs)) {
           runaway = true;
           runawayMs = elapsed;
           break;
