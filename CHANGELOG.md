@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.132] - 2026-06-20
+
 - **Fixed: an operator workspace ADOPTED while parked at a startup prompt could hang forever.** When the unified workspace supervisor (`src/workspace-agent.ts`) adopted an already-live `cto`/`leader` workspace (e.g. butchr restarted during the launch auto-confirm window), the adopt branch marked it desired-up and returned WITHOUT running any startup auto-confirm — so an operator still parked at the dev-channels consent / folder-trust dialog was never confirmed and stayed frozen with 0 children (the observed live ws-leader incident). Fix: the adopt branch now runs the SAME one-shot, de-bounced startup auto-confirm the fresh-launch path uses, factored into a single shared `autoConfirmWorkspaceStartup(name)` helper (one deps definition, called from BOTH the launch path and the adopt branch so they cannot drift). Guarded to operator kinds (`cto`/`leader`) and best-effort (it can never fail an adopt). It is a strict no-op once the agent is past startup — `autoConfirmStartupPrompts` only sends a keystroke while a blocking prompt is actually on screen, de-bounces the same contiguous prompt, and stops after the quiet-poll budget — so a working leader is never disturbed. Regression tests cover both the consent-box adopt (exactly one confirming keystroke, then quiet) and the already-quiet adopt (nothing ever sent).
 
 ## [0.9.131] - 2026-06-20
