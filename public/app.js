@@ -961,15 +961,16 @@ async function renderWorkspace(id) {
   // List / Graph / Board view selector — the PRIMARY control of the main view, sitting
   // directly under the launcher row and above the body. The toggle bar persists while the
   // body is swapped; the chosen mode lives in dirView (module scope + localStorage) so it
-  // survives SSE re-renders and reloads. The LIST view (default) shows ALL work — stories
-  // AND tasks — as peer rows; Graph and Board stay leaves-only (reworked by sibling
-  // subtasks), so they receive workLeaves(work) while the list receives the full union.
+  // survives SSE re-renders and reloads. The LIST and GRAPH views both show ALL work —
+  // stories AND tasks — as peers (the graph draws stories as first-class peer nodes with
+  // their subtasks enclosed in a cluster box); only Board stays leaves-only (reworked by
+  // sibling subtasks), so it receives workLeaves(work) while List and Graph get the union.
   const body = el("div", { class: "ws-body" });
   const paintBody = () => {
     body.innerHTML = "";
     if (dirView === "graph") {
       body.appendChild(el("h2", {}, "Dependency graph"));
-      body.appendChild(renderGraph(tasks));
+      body.appendChild(renderGraph(work));
     } else if (dirView === "board") {
       body.appendChild(el("h2", {}, "Merge train"));
       body.appendChild(renderBoard(tasks));
@@ -1757,7 +1758,12 @@ function gatedSubtree(rootId, dependentsOf) {
 // finished-task-id → generation (>= 1); active tasks are intentionally absent.
 function finishedGenerations(tasks) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  const isActive = (t) => t && ACTIVE_STATUSES.includes(t.status);
+  // Active = part of the tip, for BOTH kinds. isHistoryItem encodes the split: a NODE
+  // (story) is finished once done/aborted (open/merging/merge_blocked stay tip); a LEAF by
+  // the server's terminal set. Story statuses aren't in ACTIVE_STATUSES, so keying off
+  // !isHistoryItem (rather than ACTIVE_STATUSES) is what folds finished stories into the
+  // finished generations and keeps open stories on the active frontier.
+  const isActive = (t) => t && !isHistoryItem(t);
   const gen = new Map();
   // Frontier starts at the active tip (generation 0); these are not recorded in
   // `gen` (they always render) but seed the walk into their blockers.
@@ -1807,28 +1813,32 @@ function graphLevels(nodeIds, edges) {
   return level;
 }
 
-// Draw a DAG of the workspace's non-terminal tasks and their blockers: nodes are
-// tasks (label = id, colored by effective status), edges are blocker→blocked
-// arrows pointing left→right across topological levels. Inline SVG, no library.
-// Clicking a node opens its task detail. Re-rendered wholesale on each SSE event
-// by the workspace view, so it live-updates for free.
+// Draw a DAG of the workspace's non-terminal WORK (stories + tasks) and their blockers:
+// nodes are work items (label = id, colored by effective status), edges are blocker→blocked
+// arrows pointing left→right across topological levels. Inline SVG, no library. A STORY is a
+// first-class PEER node — it participates in blocked_by edges both ways — and its subtasks are
+// enclosed in a subtle cluster box (drawGraphSvg) rather than connected by parent/child edges.
+// Clicking a TASK node opens its detail; STORY nodes are inert (no detail route). Re-rendered
+// wholesale on each SSE event by the workspace view, so it live-updates for free.
 //
-// The active/in-flight tasks (the "tip") always render; how much of the FINISHED
-// dependency history behind them shows is controlled by a generations slider (see
-// finishedGenerations + buildGraphGenSlider) so deep merge trains stay readable.
-function renderGraph(tasks) {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
-  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status));
+// The active/in-flight work (the "tip") always renders; how much of the FINISHED dependency
+// history behind it shows is controlled by a generations slider (see finishedGenerations +
+// buildGraphGenSlider) so deep merge trains stay readable. `work` is the full leaf|node union.
+function renderGraph(work) {
+  const byId = new Map(work.map((t) => [t.id, t]));
+  // Active tip for BOTH kinds via !isHistoryItem (story statuses aren't in ACTIVE_STATUSES):
+  // an OPEN story joins the tip, a done/aborted story folds into finished history like a task.
+  const active = work.filter((t) => !isHistoryItem(t));
   // Reversed edges over the WHOLE list (not just the graphed subset) so a node's
   // sub-tree progress counts dependents that have already merged off the graph.
-  const dependentsOf = reverseDeps(tasks);
+  const dependentsOf = reverseDeps(work);
 
   if (active.length === 0) {
-    return el("div", { class: "empty" }, "No active tasks to graph.");
+    return el("div", { class: "empty" }, "No active work to graph.");
   }
 
-  // Finished-task generations back from the active tip, and the deepest one present.
-  const gen = finishedGenerations(tasks);
+  // Finished-work generations back from the active tip, and the deepest one present.
+  const gen = finishedGenerations(work);
   let maxGen = 0;
   for (const g of gen.values()) if (g > maxGen) maxGen = g;
 
@@ -1903,7 +1913,44 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
   ]);
   root.appendChild(defs);
 
-  // edges first so nodes paint on top of them
+  // Cluster bounding-box layer, drawn FIRST so it sits BEHIND the edges + nodes: for each
+  // STORY (node-kind) present, a subtle translucent rounded-rect enclosing the story node +
+  // its VISIBLE child subtasks (children = leaves in the node set whose parent_id||story_id
+  // matches the story), with a small story-id label. Parent/child ownership is shown by this
+  // ENCLOSURE, not by edges. The layered topological layout is left UNTOUCHED, so a story's
+  // children may be scattered and its box may grow or overlap neighbours — an accepted
+  // tradeoff (translucent, behind everything); we do NOT re-layout to force child adjacency.
+  // A story with no visible child draws no box (the bare node suffices). CPAD ≤ PAD keeps the
+  // box (and its label band) inside the svg's PAD margin, so nothing clips.
+  const CPAD = 12;
+  const clusterLayer = svg("g", { class: "tg-clusters" });
+  for (const id of nodeIds) {
+    const story = byId.get(id);
+    if (!story || story.work_kind !== "node") continue;
+    const members = [id];
+    for (const cid of nodeIds) {
+      const c = byId.get(cid);
+      if (c && c.work_kind === "leaf" && (c.parent_id || c.story_id) === id) members.push(cid);
+    }
+    if (members.length < 2) continue; // no visible children → just the node, no box
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const m of members) {
+      const p = pos.get(m);
+      if (!p) continue;
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + NW); maxY = Math.max(maxY, p.y + NH);
+    }
+    const bx = minX - CPAD, by = minY - CPAD;
+    const bw = (maxX - minX) + CPAD * 2, bh = (maxY - minY) + CPAD * 2;
+    const cg = svg("g", { class: "tg-cluster" });
+    cg.appendChild(svg("title", {}, `story ${id}`));
+    cg.appendChild(svg("rect", { class: "tg-cluster-rect", x: bx, y: by, width: bw, height: bh, rx: 10, ry: 10 }));
+    cg.appendChild(svg("text", { class: "tg-cluster-label", x: bx + 8, y: by + 2 }, id));
+    clusterLayer.appendChild(cg);
+  }
+  root.appendChild(clusterLayer);
+
+  // edges next so nodes paint on top of them
   const edgeLayer = svg("g", { class: "tg-edges" });
   for (const e of edges) {
     const a = pos.get(e.from), b = pos.get(e.to);
@@ -1924,6 +1971,7 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     const t = byId.get(id);
     const p = pos.get(id);
     const st = effStatus(t);
+    const isStory = t.work_kind === "node";
     // Sub-tree this node gates: how many of its transitive dependents have merged.
     // Nodes that gate nothing get no bar and keep the plain two-line layout.
     const subIds = gatedSubtree(id, dependentsOf);
@@ -1934,11 +1982,17 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     // When a bar is present the two text lines shift up to make room for it.
     const idY = NH / 2 - (subTotal ? 5 : 3);
     const stY = NH / 2 + (subTotal ? 8 : 11);
+    // A STORY is a first-class PEER node drawn distinct (tg-story: heavier/accent border) but
+    // INERT — stories have no detail route, so it does not navigate (role=group, no tabindex,
+    // default cursor). A TASK node still links to its detail page (role=link, keyboard-focusable).
     const g = svg("g", {
-      class: "tg-node " + st, transform: `translate(${p.x},${p.y})`,
-      tabindex: "0", role: "link", "aria-label": `${id} — ${st}${prog}`,
+      class: "tg-node " + st + (isStory ? " tg-story" : ""),
+      transform: `translate(${p.x},${p.y})`,
+      tabindex: isStory ? null : "0",
+      role: isStory ? "group" : "link",
+      "aria-label": `${isStory ? "story " : ""}${id} — ${st}${prog}`,
     });
-    g.appendChild(svg("title", {}, `${id} · ${st}${prog}`));
+    g.appendChild(svg("title", {}, `${isStory ? "story " : ""}${id} · ${st}${prog}`));
     g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
     g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: idY }, id));
     g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY }, st));
@@ -1950,11 +2004,13 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
         width: Math.round((bw * subMerged) / subTotal),
       }));
     }
-    const go = () => { location.hash = "#/task/" + id; };
-    g.addEventListener("click", go);
-    g.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
-    });
+    if (!isStory) {
+      const go = () => { location.hash = "#/task/" + id; };
+      g.addEventListener("click", go);
+      g.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
+      });
+    }
     root.appendChild(g);
   }
 

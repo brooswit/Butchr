@@ -796,6 +796,27 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-node.rolled_back .tg-rect { fill: var(--rolled_back); }
 .tg-node.failed .tg-rect      { fill: var(--failed); }
 .tg-node.aborted .tg-rect     { fill: var(--aborted); }
+/* Story (node-kind) graph statuses — same palette mapping as the .chip story colors */
+.tg-node.open .tg-rect          { fill: var(--idea); }
+.tg-node.merging .tg-rect       { fill: var(--in_progress); }
+.tg-node.merge_blocked .tg-rect { fill: var(--blocked); }
+.tg-node.done .tg-rect          { fill: var(--merged); }
+/* A STORY node is a distinct, INERT peer: heavier accent border + default cursor (no nav). */
+.tg-node.tg-story { cursor: default; }
+.tg-node.tg-story .tg-rect { stroke: var(--accent); stroke-width: 2; }
+.tg-node.tg-story:hover .tg-rect { filter: none; }
+/* Story subtask CLUSTER — a subtle translucent enclosure behind the edges + nodes, with a
+   small story-id label. Non-interactive (the nodes on top own all pointer events). */
+.tg-clusters { pointer-events: none; }
+.tg-cluster-rect {
+  fill: var(--accent); fill-opacity: 0.05;
+  stroke: var(--accent); stroke-opacity: 0.35; stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.tg-cluster-label {
+  fill: var(--muted); font-family: var(--mono); font-size: 8.5px; font-weight: 600;
+  dominant-baseline: hanging; text-transform: none; opacity: 0.85;
+}
 /* Legacy graph nodes — kept for backward-compat */
 .tg-node.finalizing .tg-rect  { fill: var(--finalizing); }
 .tg-node.queued .tg-rect       { fill: var(--queued); }
