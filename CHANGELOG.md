@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.148] - 2026-06-20
+
 - **Input bounding on the task brief + the HTTP request body (edge-case audit F5).** Two layers cap untrusted input before it reaches task.md / the LLM: (1) `Bun.serve` now sets `maxRequestBodySize` to **1 MiB** — no legitimate API body (a brief, context list, etc.) is larger, so an oversized/abusive POST is rejected with a 413 by the transport before `readJson` buffers it. (2) A new `validatePrompt` (`src/tasks.ts`, mirroring the existing tag(40)/allowlist(200) validators) replaces the bare non-empty check in `createTask` (and the duplicate check in `editTask`): it STRIPS NUL (0x00) and C0/C1 control characters — a NUL can truncate the brief once written to task.md or handed to the LLM — while KEEPING ordinary whitespace (tab, newline, carriage return), rejects a brief that is empty after the strip, and length-caps the brief at **100 000 characters** (`MAX_PROMPT_LEN`). Regression tests (`test/input-bounding.test.ts`): control/NUL chars are stripped end-to-end through `createTask` (verified clean ON DISK in task.md) while newlines/tabs survive, an over-cap brief is a 400, and against a real server an oversized body is a 413 while a small body is not. No `package.json`/version edit.
 
 ## [0.9.147] - 2026-06-20
