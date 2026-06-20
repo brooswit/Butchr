@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.133] - 2026-06-20
+
 - **Board: a STORY blocker no longer renders a dead `#/task/<id>` link (story st-52f42ac5).** In the Blocked column, `boardAppendBlockers` linked every blocker chip to `#/task/<id>`, but a blocker can now resolve to a STORY (`work_kind === 'node'`), which has no detail route — so a story blocker pointed at a non-existent page. It now renders as a non-navigating `<span>` with a `story` badge + id + status chip (matching how stories are shown everywhere else); LEAF and unresolved/unknown blockers keep the `#/task/<id>` link exactly as before. Client-side only — `public/app.js` (new `.bc-blocker.is-story` non-interactive styling in `public/style.css`). Also corrected the stale `paintBody` comment that still claimed the Board stays leaves-only: List, Graph AND Board all consume the full work union. No `package.json` edit.
 
 ## [0.9.132] - 2026-06-20
