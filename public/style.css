@@ -911,6 +911,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .bc-blocker:hover { background: var(--panel-2); text-decoration: none; }
 .bc-blocker .bk-id { font-family: var(--mono); font-size: 11.5px; }
 .bc-blocker.stuck { border-color: var(--rejected); }
+/* A story blocker has no detail route — render it non-interactive (no link). */
+.bc-blocker.is-story { cursor: default; }
+.bc-blocker.is-story:hover { background: transparent; }
 
 /* LIVE ACTIVITY PULSE — a read-only one-line "what the agent is doing right now"
    on running task cards/rows: a soft-pulsing dot, the latest action (clipped to one

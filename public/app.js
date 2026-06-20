@@ -961,10 +961,10 @@ async function renderWorkspace(id) {
   // List / Graph / Board view selector — the PRIMARY control of the main view, sitting
   // directly under the launcher row and above the body. The toggle bar persists while the
   // body is swapped; the chosen mode lives in dirView (module scope + localStorage) so it
-  // survives SSE re-renders and reloads. The LIST and GRAPH views both show ALL work —
+  // survives SSE re-renders and reloads. The LIST, GRAPH and BOARD views all show ALL work —
   // stories AND tasks — as peers (the graph draws stories as first-class peer nodes with
-  // their subtasks enclosed in a cluster box); only Board stays leaves-only (reworked by
-  // sibling subtasks), so it receives workLeaves(work) while List and Graph get the union.
+  // their subtasks enclosed in a cluster box; the board renders stories as peer cards), so
+  // all three receive the full work union.
   const body = el("div", { class: "ws-body" });
   const paintBody = () => {
     body.innerHTML = "";
@@ -2192,12 +2192,20 @@ function boardAppendBlockers(card, w, byId) {
     const b = byId.get(bid);
     const st = b ? effStatus(b) : "unknown";
     const stuck = st === "aborted";
-    const row = el("a", {
-      class: "bc-blocker" + (stuck ? " stuck" : ""),
-      href: "#/task/" + esc(bid),
-      title: stuck ? "will never merge — edit blocked_by to proceed" : bid,
-    });
-    row.innerHTML = `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
+    const isStory = b && b.work_kind === "node";
+    const title = stuck ? "will never merge — edit blocked_by to proceed" : bid;
+    // A story blocker has NO detail route, so it renders as a non-navigating span (with the
+    // story badge, mirroring boardStoryCard); leaf/unknown blockers keep the #/task link.
+    const row = isStory
+      ? el("span", { class: "bc-blocker is-story" + (stuck ? " stuck" : ""), title })
+      : el("a", {
+          class: "bc-blocker" + (stuck ? " stuck" : ""),
+          href: "#/task/" + esc(bid),
+          title,
+        });
+    row.innerHTML = isStory
+      ? `<span class="story-badge">story</span><span class="bk-id">${esc(bid)}</span>${chip(st)}`
+      : `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
     blk.appendChild(row);
   }
   card.appendChild(blk);
