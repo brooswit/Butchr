@@ -12,11 +12,12 @@
 // config object (read at call-time by maybeAutoMerge) and restores it afterwards.
 //
 // BUTCHR_HERDR_BIN points at `true` so every herdr probe is a harmless no-op.
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as git from "../src/git.ts";
 
 let DATA_DIR: string;
 let REPO_ROOT: string;
@@ -210,6 +211,54 @@ describe("maybeAutoMerge", () => {
 
     expect(merged).toBe(false);
     expect(dbRow(id).status).toBe("in_review");
+  });
+
+  test("two concurrent calls run finalizeMerge exactly ONCE (dedup TOCTOU)", async () => {
+    // Regression for the auto-merge dedup race: the guard was READ (autoMerging.has) before
+    // the pre-merge awaits (git.headSha / git.diffStat) but only SET afterwards, so a second
+    // caller (the dispatcher backstop racing the CI-settle hook) could slip past has() during
+    // those awaits and ALSO reach finalizeMerge/git.merge against the now-merged/deleted
+    // branch. The fix claims the guard SYNCHRONOUSLY, before any await.
+    enableAutoMerge();
+
+    // Gate the post-merge verify so the WINNER holds the global merge lock (and the guard)
+    // while the loser is in flight. With the bug, the loser would reach git.merge here too;
+    // with the fix it short-circuits synchronously at has() before doing any git work.
+    let releaseVerify!: () => void;
+    const verifyGate = new Promise<void>((res) => {
+      releaseVerify = res;
+    });
+    verifyMod.setVerifyRunner(async () => {
+      await verifyGate;
+      return { ok: true, output: "" };
+    });
+
+    // git.merge is invoked once per finalizeMerge that actually merges; counting it counts
+    // finalizeMerge entries that reached the merge. spyOn calls through by default.
+    const mergeSpy = spyOn(git, "merge");
+
+    const id = await seedGreenReviewTask({ "public/dedup.html": "<p>dedup</p>\n" });
+    const tipBefore = g(["rev-parse", "HEAD"]);
+
+    // Fire both concurrently in the SAME tick — the first runs synchronously up to its first
+    // await (claiming the guard on the way, post-fix); the second is invoked synchronously
+    // right after and must observe that claim.
+    const pair = Promise.all([tasksMod.maybeAutoMerge(id), tasksMod.maybeAutoMerge(id)]);
+    // Hold long enough for the winner to take the merge lock + reach the gated verify, and
+    // for any racing loser to clear its getTask status-check, THEN let the merge complete.
+    await new Promise((r) => setTimeout(r, 100));
+    releaseVerify();
+    const results = await pair;
+
+    // Exactly one finalizeMerge merged; the other never touched git.
+    expect(mergeSpy.mock.calls.length).toBe(1);
+    expect(results.filter(Boolean).length).toBe(1);
+    const row = dbRow(id);
+    expect(row.status).toBe("merged");
+    expect(row.auto_merged).toBe(1);
+    expect(g(["rev-parse", "HEAD"])).not.toBe(tipBefore);
+
+    mergeSpy.mockRestore();
   });
 
   test("a CONFLICT never auto-merges — it routes back to the agent, not main", async () => {

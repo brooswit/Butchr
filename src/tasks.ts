@@ -3881,98 +3881,104 @@ export function isLowRiskChange(
  */
 export async function maybeAutoMerge(id: string): Promise<boolean> {
   if (!config.autoMergeEnabled) return false;
+  // Claim the dedupe guard SYNCHRONOUSLY, before any await below. maybeAutoMerge is invoked
+  // from BOTH the CI-settle hook (triggerCi) and the dispatcher tick backstop; a guard READ
+  // here followed by the awaits below (headSha / diffStat) would let both callers pass has()
+  // and reach finalizeMerge — the loser then runs spurious git ops against a deleted branch.
+  // try/finally releases the claim on every early-return / throw path below.
   if (autoMerging.has(id)) return false;
-
-  const row = getTask(id);
-  if (!row) return false;
-  if (row.status !== "in_review") return false;
-  if (row.ci_status !== "pass") return false;
-  if (row.conflict) return false; // already-known conflict → human handles it
-  if (row.auto_merged) return false; // already auto-merged (defensive)
-
-  const dir = getWorkspace(row.workspace_id);
-  if (!dir) return false;
-
-  // STALE-GREEN GUARD: trust ci_status='pass' ONLY when it was gated on the CURRENT branch
-  // tip. If the tip moved since CI settled (ci_tip ≠ live HEAD), the green is bound to a
-  // DIFFERENT tip — never auto-merge on it. Re-run CI (its settle re-evaluates auto-merge)
-  // and bail this pass. A missing worktree / git error is treated as "can't confirm" → bail.
-  const head = await git.headSha(git.worktreePath(dir.path, id)).catch(() => null);
-  if (!head || row.ci_tip !== head) {
-    console.log(
-      `[butchr] auto-merge: CI green for ${id} is stale (gated tip ${row.ci_tip ?? "?"} ≠ ` +
-        `current ${head ? head.slice(0, 8) : "?"}); re-running CI before any merge`,
-    );
-    void triggerCi(id);
-    return false;
-  }
-
-  // The MAJOR version gate is ALWAYS the human: a release_mode major-bump task needs two
-  // consecutive `confirm-major` calls (see confirmMajor) and must NEVER be auto-confirmed.
-  // Bail before doing any merge work. (patch/minor in release_mode still auto-merge — the
-  // version is assigned/stamped inside finalizeMerge.)
-  if (row.version_bump === "major" && workspaceReleaseMode(dir.id)) return false;
-
-  // Footprint check (a + b). Measured vs the resolved base — the STORY branch for an
-  // isolated member (so sibling work already on the story branch can't over-count a
-  // genuinely small member change and wrongly block its auto-merge), else the default
-  // branch (resolveBase → defaultBranch, so non-isolated is unchanged). On any git error,
-  // bail safely (leave for a human).
-  let stat: git.DiffStat;
-  try {
-    stat = await git.diffStat(dir.path, id, await resolveBase(row));
-  } catch (e) {
-    console.warn(`[butchr] auto-merge: diffStat failed for ${id}: ${(e as Error).message}`);
-    return false;
-  }
-  if (
-    !isLowRiskChange(stat.files, stat.changedLines, {
-      allowlist: config.autoMergeAllowlist,
-      maxChangedLines: config.autoMergeMaxChangedLines,
-    })
-  ) {
-    return false;
-  }
-
   autoMerging.add(id);
   try {
-    console.log(
-      `[butchr] auto-merging task ${id}: CI green + low-risk ` +
-        `(${stat.files.length} file(s), ${stat.changedLines} changed line(s) ` +
-        `<= ${config.autoMergeMaxChangedLines}); running the mechanical merge`,
-    );
-    // Land it directly via the SAME mechanical merge a human approve runs (rebase +
-    // post-merge-verify gate), skipping the human. The task is in_review, so
-    // finalizeMerge does the full sequence.
-    const outcome = await finalizeMerge(id);
-    // Only a genuine merge counts. A conflict bounced back to inactive
-    // (conflictSentBack), a pre-ff re-gate RED (gateRed — held in review for a human), or a
-    // post-merge-verify revert (revertedOnRed) all did NOT land.
-    if (outcome.conflictSentBack || outcome.gateRed || outcome.revertedOnRed) {
+    const row = getTask(id);
+    if (!row) return false;
+    if (row.status !== "in_review") return false;
+    if (row.ci_status !== "pass") return false;
+    if (row.conflict) return false; // already-known conflict → human handles it
+    if (row.auto_merged) return false; // already auto-merged (defensive)
+
+    const dir = getWorkspace(row.workspace_id);
+    if (!dir) return false;
+
+    // STALE-GREEN GUARD: trust ci_status='pass' ONLY when it was gated on the CURRENT branch
+    // tip. If the tip moved since CI settled (ci_tip ≠ live HEAD), the green is bound to a
+    // DIFFERENT tip — never auto-merge on it. Re-run CI (its settle re-evaluates auto-merge)
+    // and bail this pass. A missing worktree / git error is treated as "can't confirm" → bail.
+    const head = await git.headSha(git.worktreePath(dir.path, id)).catch(() => null);
+    if (!head || row.ci_tip !== head) {
       console.log(
-        `[butchr] auto-merge of ${id} did NOT land ` +
-          (outcome.conflictSentBack
-            ? "(merge conflict — sent back to the agent)"
-            : outcome.gateRed
-              ? "(rebased tip failed the re-gate — held for review)"
-              : "(post-merge verify failed — reverted off main)"),
+        `[butchr] auto-merge: CI green for ${id} is stale (gated tip ${row.ci_tip ?? "?"} ≠ ` +
+          `current ${head ? head.slice(0, 8) : "?"}); re-running CI before any merge`,
       );
+      void triggerCi(id);
       return false;
     }
-    if (outcome.task.status === "merged" || outcome.task.status === "rolled_back") {
-      // Stamp the auto-merged flag on the now-landed row (it survives — landed tasks
-      // keep their row) so the webapp can distinguish auto- from human-merges.
-      db.query(`UPDATE tasks SET auto_merged=1 WHERE id=?`).run(id);
-      emitUpdated(id);
-      console.log(`[butchr] task ${id} AUTO-MERGED (CI green + low-risk)`);
-      return true;
+
+    // The MAJOR version gate is ALWAYS the human: a release_mode major-bump task needs two
+    // consecutive `confirm-major` calls (see confirmMajor) and must NEVER be auto-confirmed.
+    // Bail before doing any merge work. (patch/minor in release_mode still auto-merge — the
+    // version is assigned/stamped inside finalizeMerge.)
+    if (row.version_bump === "major" && workspaceReleaseMode(dir.id)) return false;
+
+    // Footprint check (a + b). Measured vs the resolved base — the STORY branch for an
+    // isolated member (so sibling work already on the story branch can't over-count a
+    // genuinely small member change and wrongly block its auto-merge), else the default
+    // branch (resolveBase → defaultBranch, so non-isolated is unchanged). On any git error,
+    // bail safely (leave for a human).
+    let stat: git.DiffStat;
+    try {
+      stat = await git.diffStat(dir.path, id, await resolveBase(row));
+    } catch (e) {
+      console.warn(`[butchr] auto-merge: diffStat failed for ${id}: ${(e as Error).message}`);
+      return false;
     }
-    return false;
-  } catch (e) {
-    // finalizeMerge can throw on an unusual/unsafe merge failure (e.g. non-conflict).
-    // Don't crash the caller — leave the task in review for a human.
-    console.warn(`[butchr] auto-merge of ${id} failed: ${(e as Error).message}`);
-    return false;
+    if (
+      !isLowRiskChange(stat.files, stat.changedLines, {
+        allowlist: config.autoMergeAllowlist,
+        maxChangedLines: config.autoMergeMaxChangedLines,
+      })
+    ) {
+      return false;
+    }
+
+    try {
+      console.log(
+        `[butchr] auto-merging task ${id}: CI green + low-risk ` +
+          `(${stat.files.length} file(s), ${stat.changedLines} changed line(s) ` +
+          `<= ${config.autoMergeMaxChangedLines}); running the mechanical merge`,
+      );
+      // Land it directly via the SAME mechanical merge a human approve runs (rebase +
+      // post-merge-verify gate), skipping the human. The task is in_review, so
+      // finalizeMerge does the full sequence.
+      const outcome = await finalizeMerge(id);
+      // Only a genuine merge counts. A conflict bounced back to inactive
+      // (conflictSentBack), a pre-ff re-gate RED (gateRed — held in review for a human), or a
+      // post-merge-verify revert (revertedOnRed) all did NOT land.
+      if (outcome.conflictSentBack || outcome.gateRed || outcome.revertedOnRed) {
+        console.log(
+          `[butchr] auto-merge of ${id} did NOT land ` +
+            (outcome.conflictSentBack
+              ? "(merge conflict — sent back to the agent)"
+              : outcome.gateRed
+                ? "(rebased tip failed the re-gate — held for review)"
+                : "(post-merge verify failed — reverted off main)"),
+        );
+        return false;
+      }
+      if (outcome.task.status === "merged" || outcome.task.status === "rolled_back") {
+        // Stamp the auto-merged flag on the now-landed row (it survives — landed tasks
+        // keep their row) so the webapp can distinguish auto- from human-merges.
+        db.query(`UPDATE tasks SET auto_merged=1 WHERE id=?`).run(id);
+        emitUpdated(id);
+        console.log(`[butchr] task ${id} AUTO-MERGED (CI green + low-risk)`);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      // finalizeMerge can throw on an unusual/unsafe merge failure (e.g. non-conflict).
+      // Don't crash the caller — leave the task in review for a human.
+      console.warn(`[butchr] auto-merge of ${id} failed: ${(e as Error).message}`);
+      return false;
+    }
   } finally {
     autoMerging.delete(id);
   }
