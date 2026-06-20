@@ -974,8 +974,8 @@ async function renderWorkspace(id) {
     } else if (dirView === "board") {
       body.appendChild(el("h2", {}, "Merge train"));
       // The board is a KANBAN board of COLUMNS that folds in ALL work — stories AND
-      // tasks render as peer cards — so it consumes the FULL union (not workLeaves).
-      // (Graph stays leaves-only; it gets `tasks`.)
+      // tasks render as peer cards — so it consumes the FULL union (not workLeaves),
+      // same as the List and Graph views.
       body.appendChild(renderBoard(work));
     } else {
       // search + status filter bar. Filter state lives in module-level vars
