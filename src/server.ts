@@ -259,9 +259,14 @@ export function csrfGuard(req: Request, url: URL): Response | null {
 }
 
 // ---- SSE ----
-function sseResponse(): Response {
+// Exported for tests: returns the ReadableStream so a test can drive start()/cancel()
+// directly and assert the keepalive timer is cleared on disconnect.
+export function sseStream(): ReadableStream {
+  // Hoisted into the closure so cancel() (which has no `controller` access) can
+  // tear down BOTH the subscription and the keepalive timer on client disconnect.
   let unsub: () => void = () => {};
-  const stream = new ReadableStream({
+  let ka: ReturnType<typeof setInterval> | undefined;
+  return new ReadableStream({
     start(controller) {
       const enc = new TextEncoder();
       const send = (e: ButchrEvent) => {
@@ -273,7 +278,7 @@ function sseResponse(): Response {
       };
       send({ type: "hello", now: new Date().toISOString() });
       // keepalive comment every 25s to defeat idle timeouts
-      const ka = setInterval(() => {
+      ka = setInterval(() => {
         try {
           controller.enqueue(enc.encode(`: keepalive\n\n`));
         } catch {
@@ -281,17 +286,16 @@ function sseResponse(): Response {
         }
       }, 25000);
       unsub = subscribe(send);
-      // store cleanup on the controller via closure
-      (controller as any)._cleanup = () => {
-        clearInterval(ka);
-        unsub();
-      };
     },
     cancel() {
+      clearInterval(ka);
       unsub();
     },
   });
-  return new Response(stream, {
+}
+
+function sseResponse(): Response {
+  return new Response(sseStream(), {
     headers: {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
