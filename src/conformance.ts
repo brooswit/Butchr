@@ -140,21 +140,64 @@ export function buildReviewPrompt(input: ConformanceInput): string {
 const VALID: ReadonlySet<string> = new Set(["yes", "partial", "no"]);
 
 /**
+ * Scan stdout for every top-level balanced `{...}` object and return their substrings,
+ * in source order. STRING-AWARE: braces inside a JSON string literal (delimited by `"`,
+ * honoring `\` escapes) are NOT counted toward brace balance, so an object whose value
+ * quotes code — e.g. `{"reason":"... returns {} ..."}` or even an UNBALANCED brace inside
+ * the string (`"returns { instead"`) — is captured whole instead of being split. A naive
+ * brace counter would mishandle exactly those, which is the bug this fixes.
+ */
+function balancedObjects(stdout: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < stdout.length; i++) {
+    const ch = stdout[i]!;
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+    } else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          out.push(stdout.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Extract the structured verdict from the reviewer's stdout. The reviewer is asked to
  * end with a single-line JSON object, but headless models wrap output in prose, so we
- * scan for the LAST `{...}` containing a "conforms" field and parse it. Returns NULL
- * if nothing parseable / valid is found (best-effort — caller leaves conformance NULL).
+ * scan for the LAST balanced `{...}` that JSON-parses to an object with a valid "conforms"
+ * field and use it. Parsing the JSON properly (rather than a brace-free regex) means a
+ * verdict whose `reason` quotes braces/code is captured, not silently dropped. Returns
+ * NULL if nothing parseable / valid is found (best-effort — caller leaves conformance
+ * NULL). Never throws.
  */
 export function parseConformanceVerdict(stdout: string): ConformanceResult | null {
   if (!stdout) return null;
-  // Find candidate JSON objects mentioning "conforms"; prefer the last (the verdict
-  // line the reviewer was told to put last). A non-greedy object match avoids
-  // swallowing surrounding prose.
-  const matches = stdout.match(/\{[^{}]*"conforms"[^{}]*\}/g);
-  if (!matches) return null;
-  for (let i = matches.length - 1; i >= 0; i--) {
+  // Candidate JSON objects, in source order; prefer the LAST valid one (the verdict line
+  // the reviewer was told to put last). The format-example line in the prompt echo
+  // (`{"conforms": "yes" | "partial" | "no", ...}`) is not valid JSON, so JSON.parse
+  // rejects it naturally.
+  const candidates = balancedObjects(stdout);
+  for (let i = candidates.length - 1; i >= 0; i--) {
     try {
-      const obj = JSON.parse(matches[i]!) as { conforms?: unknown; reason?: unknown };
+      const obj = JSON.parse(candidates[i]!) as { conforms?: unknown; reason?: unknown };
       const conforms = String(obj.conforms ?? "").toLowerCase();
       if (!VALID.has(conforms)) continue;
       const reason = typeof obj.reason === "string" ? obj.reason.trim() : "";

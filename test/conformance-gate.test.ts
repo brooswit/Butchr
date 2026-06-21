@@ -270,6 +270,45 @@ describe("pure helpers", () => {
     expect(confMod.parseConformanceVerdict("")).toBeNull();
   });
 
+  // (a) a verdict whose `reason` quotes braces/code must be CAPTURED, not dropped to null
+  // — this is the exact bug the old brace-free regex caused on the "no"/"partial" verdicts
+  // that matter most.
+  test("parseConformanceVerdict captures a verdict whose reason contains braces", () => {
+    const out = 'verdict: {"conforms":"no","reason":"the handler returns {} instead of the parsed object"}';
+    expect(confMod.parseConformanceVerdict(out)).toEqual({
+      conforms: "no",
+      reason: "the handler returns {} instead of the parsed object",
+    });
+  });
+
+  // (b) with multiple objects in the output — including an early non-conforms object AND an
+  // early VALID `{"conforms":"yes"}` — the LAST valid verdict wins (the reviewer is told to
+  // put its verdict last).
+  test("parseConformanceVerdict prefers the LAST valid verdict among several objects", () => {
+    const out = [
+      'some context {"foo":1}',
+      '{"conforms":"yes","reason":""}',
+      'final answer: {"conforms":"no","reason":"missing the retry path"}',
+    ].join("\n");
+    expect(confMod.parseConformanceVerdict(out)).toEqual({
+      conforms: "no",
+      reason: "missing the retry path",
+    });
+  });
+
+  // (c) the format-EXAMPLE line from the prompt echo is not valid JSON (the `|` union) → skipped.
+  test("parseConformanceVerdict skips the non-JSON format-example line → null", () => {
+    const example = '{"conforms": "yes" | "partial" | "no", "reason": "<short reason>"}';
+    expect(confMod.parseConformanceVerdict(example)).toBeNull();
+  });
+
+  // (d) plain prose with no JSON object at all → null.
+  test("parseConformanceVerdict returns null on plain prose with no JSON", () => {
+    expect(
+      confMod.parseConformanceVerdict("The change looks complete and on-spec to me."),
+    ).toBeNull();
+  });
+
   test("buildReviewPrompt includes the prompt, summary, diff, and the JSON instruction", () => {
     const p = confMod.buildReviewPrompt({
       taskId: "t",
