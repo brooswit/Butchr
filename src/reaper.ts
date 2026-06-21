@@ -6,11 +6,12 @@
 // conservative — it NEVER touches the main worktree or a worktree whose task is
 // still live (inactive/in_progress/in_review/rolling_back/blocked/...).
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { config } from "./config.ts";
 import { ALL_STATUSES, db, isTerminal } from "./db.ts";
-import type { WorkspaceRow, TaskRow } from "./db.ts";
+import type { StoryRow, StoryStatus, WorkspaceRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
+import { storyBranchName } from "./git.ts";
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
 import { recoverStuckGates, requeueForResume } from "./tasks.ts";
@@ -25,6 +26,21 @@ const git = config.gitBin;
 // run. The terminal membership is sourced ONCE from db (isTerminal / ALL_STATUSES) — no
 // open-coded status list here.
 const TERMINAL_STATUSES = ALL_STATUSES.filter(isTerminal);
+
+// The dir-name prefix of a STORY's worktree (`<repo>/butchr-story-<storyId>` — see
+// git.storyWorktreePath). A story worktree is a DIRECT child of the repo root, exactly like
+// a task worktree, so the worktree sweep below must tell them apart and resolve a story
+// worktree against the STORIES table (not the tasks table).
+const STORY_WORKTREE_PREFIX = "butchr-story-";
+
+// A STORY is TERMINAL (its worktree/branch are safe to reap) only in `done`/`aborted`. The
+// live states open/merging/merge_blocked must be left ALONE — their worktree carries the
+// isolated story's checkout (subtasks branch off / ff into it). `merging` is already re-driven
+// by stories.recoverMergingStories before reapOrphans runs, but we still treat it as live for
+// safety (the exposure this guards is the OPEN / merge_blocked story).
+function isStoryTerminal(status: StoryStatus): boolean {
+  return status === "done" || status === "aborted";
+}
 
 // Most recent reapOrphans outcome, retained so /health can surface self-heal
 // activity at a glance (see server.healthResponse). `at` is null until the first
@@ -49,15 +65,41 @@ function parseWorktreePaths(porcelain: string): string[] {
 }
 
 /**
+ * Remove one orphaned worktree + delete its branch, best-effort. `branch` is the branch
+ * name to delete — the task id for a task worktree, but `butchr/story/<id>` for a story
+ * worktree (which differs from its dir name). Errors are swallowed (the worktree may be
+ * partly gone, the branch already deleted, etc.); a failed `worktree remove` is followed
+ * by a `prune` so a stale admin entry doesn't linger. Logs a `[butchr]` line on every reap.
+ */
+async function reapWorktree(
+  dir: string,
+  wtPath: string,
+  branch: string,
+  reason: string,
+): Promise<void> {
+  const rm = await run([git, "-C", dir, "worktree", "remove", "--force", wtPath]);
+  await run([git, "-C", dir, "branch", "-D", branch]).catch(() => {});
+  if (!rm.ok) {
+    await run([git, "-C", dir, "worktree", "prune"]).catch(() => {});
+  }
+  console.log(`[butchr] reaped orphaned worktree ${wtPath} (${reason})`);
+}
+
+/**
  * Reap orphaned worktrees + herdr husks across every registered workspace.
  *
  * Worktrees: for each registered repo, `git worktree list --porcelain` enumerates
  * its worktrees. We only consider DIRECT children of the repo root (that's where
- * butchr puts task worktrees — `<repo>/<taskId>`), which naturally skips the main
- * worktree (whose path IS the repo root). A child worktree is reaped when its
- * task id (the directory/branch basename) is in a TERMINAL state OR has no task
- * row at all; an active task's worktree is left untouched. Each reap removes the
- * worktree (`--force`) and deletes its branch, best-effort.
+ * butchr puts task AND story worktrees), which naturally skips the main worktree
+ * (whose path IS the repo root). Two kinds of child worktree, told apart by dir name:
+ *   - STORY worktrees (`<repo>/butchr-story-<storyId>`) resolve against the STORIES
+ *     table — reaped only when no LIVE story owns them (gone, or terminal done/aborted).
+ *     A live open/merge_blocked story's checkout is left untouched (the bug this fixes:
+ *     they used to be force-removed on every boot). Their branch is `butchr/story/<id>`.
+ *   - TASK worktrees (`<repo>/<taskId>`) resolve against the tasks table — reaped when
+ *     the task id is in a TERMINAL state OR has no task row at all; an active task's
+ *     worktree is left untouched. Their branch IS the task id.
+ * Each reap removes the worktree (`--force`) and deletes its branch, best-effort.
  *
  * herdr husks: any TERMINAL-state task whose agent name is still registered with
  * herdr gets deregistered (clears the name + closes its pane/tab) so dead tasks
@@ -76,31 +118,38 @@ export async function reapOrphans(
     const list = await run([git, "-C", dir.path, "worktree", "list", "--porcelain"]);
     if (!list.ok) continue; // repo gone / not a git repo right now — skip
     for (const wtPath of parseWorktreePaths(list.stdout)) {
-      // Only butchr-style task worktrees: a direct child of the repo root. This
-      // skips the main worktree (path === repo root → dirname is the parent) and
-      // any unrelated nested worktree.
+      // Only butchr-style worktrees: a direct child of the repo root. This skips the
+      // main worktree (path === repo root → dirname is the parent) and any unrelated
+      // nested worktree.
       if (dirname(wtPath) !== dir.path) continue;
-      const taskId = wtPath.slice(dir.path.length + 1); // basename relative to root
+      const name = basename(wtPath); // dir name relative to the repo root
 
+      // STORY worktree (`<repo>/butchr-story-<storyId>`): a direct child of the repo root
+      // like a task worktree, so it must NOT be treated as a task id (no tasks row → it
+      // would be force-removed on every boot, destroying a LIVE open/merge_blocked story's
+      // checkout). Resolve it against the STORIES table instead and reap only when no LIVE
+      // story owns it. Its branch is `butchr/story/<id>` (storyBranchName), NOT the dir name.
+      if (name.startsWith(STORY_WORKTREE_PREFIX)) {
+        const storyId = name.slice(STORY_WORKTREE_PREFIX.length);
+        const story = db
+          .query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`)
+          .get(storyId);
+        if (story && !isStoryTerminal(story.status)) continue; // live story — leave alone
+        const reason = story ? `story ${story.status}` : "no story row";
+        await reapWorktree(dir.path, wtPath, storyBranchName(storyId), reason);
+        worktrees++;
+        continue;
+      }
+
+      const taskId = name; // task worktree: the dir name IS the task id / branch
       const task = db
         .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=?`)
         .get(taskId);
       if (task && !isTerminal(task.status)) continue; // live task — leave alone
 
       const reason = task ? `task ${task.status}` : "no task row";
-      // Remove the worktree, then delete its branch. Best-effort: swallow errors
-      // (the worktree may be partly gone, the branch already deleted, etc.).
-      const rm = await run([git, "-C", dir.path, "worktree", "remove", "--force", wtPath]);
-      await run([git, "-C", dir.path, "branch", "-D", taskId]).catch(() => {});
-      // `worktree remove` can fail if git's metadata is stale; prune so the entry
-      // doesn't linger and we still consider the reap done.
-      if (!rm.ok) {
-        await run([git, "-C", dir.path, "worktree", "prune"]).catch(() => {});
-      }
+      await reapWorktree(dir.path, wtPath, taskId, reason);
       worktrees++;
-      console.log(
-        `[butchr] reaped orphaned worktree ${wtPath} (${reason})`,
-      );
     }
   }
 
