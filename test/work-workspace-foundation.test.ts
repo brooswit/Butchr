@@ -154,7 +154,7 @@ describe("step 1 — the new `workspace` table", () => {
     expect(out.workspaceTableExists).toBe(true);
     expect(out.workspaceCols.sort()).toEqual(
       [
-        "created_at", "desired", "directory_id", "has_agent", "herdr_workspace",
+        "created_at", "desired", "directory_id", "gave_up", "has_agent", "herdr_workspace",
         "id", "idle", "idle_context", "kind", "last_error", "name", "restarts",
         "session_id", "started_at", "updated_at", "work_id",
       ].sort(),

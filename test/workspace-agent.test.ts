@@ -277,6 +277,50 @@ describe("unified workspace supervisor", () => {
 
     expect(calls.launch.length).toBe(3); // stopped trying at the cap
     expect(dbMod.getWorkspaceAgentRow("w1")!.last_error).toContain("launch boom");
+    // (a) The give-up is now DURABLE: the row carries the gave_up marker (st-a4cc6082 S1).
+    expect(dbMod.getWorkspaceAgentRow("w1")!.gave_up).toBe(1);
+  });
+
+  test("gave_up CLEARS on a subsequent healthy tick", async () => {
+    const { runner, launcher, live } = makeFake({ throwOnLaunch: true });
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
+    dbMod.saveWorkspaceAgentRow("w1", { kind: "cto", directory_id: DIR, desired: 1 });
+
+    // Drive to the cap → gave_up set.
+    for (let i = 0; i < 6; i++) await wa._superviseTickForTest("w1");
+    expect(dbMod.getWorkspaceAgentRow("w1")!.gave_up).toBe(1);
+
+    // (b) The agent comes back to life → the next healthy tick clears the marker.
+    live.add(wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("w1")!));
+    await wa._superviseTickForTest("w1");
+    expect(dbMod.getWorkspaceAgentRow("w1")!.gave_up).toBe(0);
+  });
+
+  test("an operator start CLEARS gave_up", async () => {
+    const { runner, launcher } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    // A row the supervisor previously abandoned.
+    dbMod.saveWorkspaceAgentRow("w1", { kind: "cto", directory_id: DIR, desired: 1, gave_up: 1 });
+
+    // (c) A deliberate operator start resets supervision and drops the marker.
+    await wa.startWorkspaceAgent("w1");
+    expect(dbMod.getWorkspaceAgentRow("w1")!.gave_up).toBe(0);
+  });
+
+  test("gave_up defaults to 0 and a normally-live agent never sets it", async () => {
+    const { runner, launcher, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    dbMod.saveWorkspaceAgentRow("w1", { kind: "cto", directory_id: DIR, desired: 1, has_agent: 1 });
+    live.add(wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("w1")!)); // alive from the start
+
+    // (d) Default is 0, and supervising a healthy agent never trips the marker.
+    expect(dbMod.getWorkspaceAgentRow("w1")!.gave_up).toBe(0);
+    for (let i = 0; i < 3; i++) await wa._superviseTickForTest("w1");
+    expect(dbMod.getWorkspaceAgentRow("w1")!.gave_up).toBe(0);
   });
 
   test("Work→Workspace 1:N — exactly ONE live workspace per Work (siblings demoted)", async () => {

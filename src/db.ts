@@ -518,6 +518,16 @@ ensureColumn("tasks", "idle", "INTEGER NOT NULL DEFAULT 0");
 // stale snapshot never lingers. Set/cleared alongside `idle` (see tasks.setIdle).
 ensureColumn("tasks", "idle_context", "TEXT");
 
+// `gave_up` is the DURABLE verdict that the unified-workspace supervisor has hit the
+// consecutive-relaunch cap (config.ctoMaxRestarts) for a desired-up agent and STOPPED
+// trying — i.e. the CTO/leader is dead-and-abandoned, awaiting an operator. The supervisor's
+// give-up was previously IN-MEMORY only (supState.consecutiveFailures) and surfaced only via
+// console.error, so nothing could DB-query stranded work (story st-a4cc6082). It is an
+// orthogonal MARKER on the workspace row — NOT a status — set when the cap is reached and
+// cleared the moment the agent becomes healthy again or an operator start/enable resets
+// supervision. Owned by workspace-agent.superviseWorkspace; default 0.
+ensureColumn("workspace", "gave_up", "INTEGER NOT NULL DEFAULT 0");
+
 // `needs_user_input` flags a running task whose agent is hung ALIVE at a pre-MCP OS/CLI
 // dialog (e.g. a channel-confirm prompt) that ONLY A HUMAN can answer by sending keystrokes
 // to the live pane. Like `idle`, it is an orthogonal FLAG on a LIVE in_progress agent — NOT
@@ -1919,6 +1929,9 @@ export type WorkspaceAgentRow = {
   has_agent: number; // honest owned-agent marker, generalized across agent kinds
   idle: number;
   idle_context: string | null;
+  // 1 = the supervisor gave up relaunching this desired-up agent at the restart cap
+  // (dead-and-abandoned); cleared when it becomes healthy or an operator restarts it.
+  gave_up: number;
   herdr_workspace: string | null;
   created_at: string;
   updated_at: string | null;
@@ -2234,6 +2247,7 @@ export function saveWorkspaceAgentRow(
     has_agent: cur?.has_agent ?? 0,
     idle: cur?.idle ?? 0,
     idle_context: cur?.idle_context ?? null,
+    gave_up: cur?.gave_up ?? 0,
     herdr_workspace: cur?.herdr_workspace ?? null,
     created_at: cur?.created_at ?? nowIso(),
     updated_at: cur?.updated_at ?? null,
@@ -2244,9 +2258,9 @@ export function saveWorkspaceAgentRow(
   db.query(
     `INSERT INTO workspace
        (id, name, kind, directory_id, work_id, session_id, desired, started_at,
-        restarts, last_error, has_agent, idle, idle_context, herdr_workspace,
+        restarts, last_error, has_agent, idle, idle_context, gave_up, herdr_workspace,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name=excluded.name,
        kind=excluded.kind,
@@ -2260,6 +2274,7 @@ export function saveWorkspaceAgentRow(
        has_agent=excluded.has_agent,
        idle=excluded.idle,
        idle_context=excluded.idle_context,
+       gave_up=excluded.gave_up,
        herdr_workspace=excluded.herdr_workspace,
        updated_at=excluded.updated_at`,
   ).run(
@@ -2276,6 +2291,7 @@ export function saveWorkspaceAgentRow(
     next.has_agent,
     next.idle,
     next.idle_context,
+    next.gave_up,
     next.herdr_workspace,
     next.created_at,
     nowIso(),

@@ -118,6 +118,8 @@ export type WorkspaceAgentStatus = {
   restarts: number;
   /** Most recent launch/supervision failure, if any. */
   lastError: string | null;
+  /** The supervisor gave up relaunching this desired-up agent at the restart cap (durable). */
+  gaveUp: boolean;
 };
 
 // ---- supervision state (in-memory, PER WORKSPACE ROW) ---------------------
@@ -413,7 +415,10 @@ function ensureStarted(
 ): Promise<{ action: "adopted" | "launched"; status: WorkspaceAgentStatus }> {
   let action: "adopted" | "launched" = "launched";
   const status = guarded(row.id, async () => {
-    saveWorkspaceAgentRow(row.id, { desired: 1 });
+    // A DELIBERATE operator start/enable resets supervision → drop any durable give-up marker
+    // so a re-enabled/restarted agent is no longer reported as dead-and-abandoned (st-a4cc6082).
+    const gaveUp = getWorkspaceAgentRow(row.id)?.gave_up === 1;
+    saveWorkspaceAgentRow(row.id, gaveUp ? { desired: 1, gave_up: 0 } : { desired: 1 });
     const st = supState(row.id);
     st.consecutiveFailures = 0;
     st.nextRetryAt = 0;
@@ -522,6 +527,7 @@ export async function workspaceAgentStatus(id: string): Promise<WorkspaceAgentSt
     since: row?.started_at ?? null,
     restarts: row?.restarts ?? 0,
     lastError: row?.last_error ?? null,
+    gaveUp: row?.gave_up === 1,
   };
 }
 
@@ -825,6 +831,9 @@ async function superviseWorkspace(id: string): Promise<void> {
       st.consecutiveFailures = 0; // healthy → reset backoff
       st.nextRetryAt = 0;
     }
+    // Healthy again → drop any durable give-up marker (st-a4cc6082). Guarded on the current
+    // row so a normally-live agent does NOT write every supervise tick.
+    if (row.gave_up === 1) saveWorkspaceAgentRow(id, { gave_up: 0 });
     // MID-SESSION SAFETY NET: the agent is registered/live (a parked-at-dialog agent IS live),
     // so additionally read its pane on a THROTTLED cadence to auto-confirm / surface a blocking
     // prompt it hit after startup. Operator kinds only; genuine-idle gated inside the probe so an
@@ -851,7 +860,12 @@ async function superviseWorkspace(id: string): Promise<void> {
   }
 
   // Dead while DESIRED up → relaunch with backoff.
-  if (st.consecutiveFailures >= config.ctoMaxRestarts) return; // gave up — await operator
+  if (st.consecutiveFailures >= config.ctoMaxRestarts) {
+    // Gave up — await operator. Persist the durable marker so the dashboard can pull-surface
+    // this stranded work (st-a4cc6082); idempotent so we don't write every parked tick.
+    if (row.gave_up !== 1) saveWorkspaceAgentRow(id, { gave_up: 1 });
+    return;
+  }
   const now = Date.now();
   if (now < st.nextRetryAt) return; // still backing off
   st.consecutiveFailures++;
@@ -871,11 +885,17 @@ async function superviseWorkspace(id: string): Promise<void> {
     // relaunch must win — do NOT let launcher.launch's desired=1 resurrect a terminal/stopped
     // leader. The relaunch path itself never clears stopRequested (an in-flight stop must win).
     if (await reassertStopAfterLaunch(id)) return workspaceAgentStatus(id);
-    saveWorkspaceAgentRow(id, { restarts: before + 1 });
+    // Successful supervised relaunch → clear any durable give-up marker (st-a4cc6082).
+    const cleared = getWorkspaceAgentRow(id)?.gave_up === 1 ? { gave_up: 0 } : {};
+    saveWorkspaceAgentRow(id, { restarts: before + 1, ...cleared });
     return workspaceAgentStatus(id);
   }).catch((e) => {
     const msg = (e as Error).message;
-    saveWorkspaceAgentRow(id, { last_error: msg });
+    // A relaunch attempt that fails AT/OVER the cap is the give-up point (the top-of-loop
+    // short-circuit only fires on the NEXT tick): persist the durable marker in the SAME
+    // write as last_error (st-a4cc6082).
+    const giveUp = st.consecutiveFailures >= config.ctoMaxRestarts;
+    saveWorkspaceAgentRow(id, giveUp ? { last_error: msg, gave_up: 1 } : { last_error: msg });
     console.error(`[butchr] workspace relaunch failed for ${id}: ${msg}`);
   });
 }
