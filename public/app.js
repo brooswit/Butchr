@@ -4005,6 +4005,7 @@ function connectSSE() {
 // state-change event arriving mid-typing doesn't lose the text, caret, focus, or
 // scroll. Targeted (only these inputs), and used ONLY on the SSE path — plain
 // navigation (hashchange / boot) intentionally starts fresh.
+// <test-extract:capture-ui-state> (fenced for test/app-restore-uistate.test.ts)
 function captureUiState() {
   const values = new Map();
   document.querySelectorAll("[data-restore-key]").forEach((node) => {
@@ -4027,10 +4028,12 @@ function captureUiState() {
   const activeKey = ae && ae.dataset ? (ae.dataset.restoreKey || null) : null;
   return { scrollY: window.scrollY, activeKey, values, inline };
 }
+// </test-extract:capture-ui-state>
 
 // Re-apply a captured snapshot. Resilient by design: any element/key may have vanished
 // between renders (the new view may not contain that input at all), so every lookup is
 // guarded and nothing here may throw — render() must stay green.
+// <test-extract:restore-ui-state> (fenced for test/app-restore-uistate.test.ts)
 function restoreUiState(snap) {
   if (!snap) return;
   try { window.scrollTo(0, snap.scrollY || 0); } catch (e) { /* ignore */ }
@@ -4045,7 +4048,9 @@ function restoreUiState(snap) {
   // so its line rows don't exist yet at this point).
   pendingInlineRestore = snap.inline || null;
 }
+// </test-extract:restore-ui-state>
 
+// <test-extract:apply-input-restore> (fenced for test/app-restore-uistate.test.ts)
 function applyInputRestore(key, st, focus) {
   // data-restore-key values are controlled constant slugs, safe in an attribute selector.
   const node = document.querySelector('[data-restore-key="' + key + '"]');
@@ -4060,6 +4065,7 @@ function applyInputRestore(key, st, focus) {
   }
   if (focus) { try { node.focus(); } catch (e) { /* ignore */ } }
 }
+// </test-extract:apply-input-restore>
 
 let refreshTimer = null;
 function refreshSoon() {

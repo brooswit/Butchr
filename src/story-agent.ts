@@ -399,7 +399,7 @@ async function performLaunch(storyId: string, fresh: boolean): Promise<void> {
 
   // LAUNCH SELF-COMPLETE: clear any blocking interactive startup prompt. Best-effort +
   // bounded — never fails the launch. Reuses the CTO prompt-poll knobs.
-  await autoConfirmStartupPrompts(name, {
+  void autoConfirmStartupPrompts(name, {
     read: (n) => harness.agentRead(n),
     send: (n, input) => harness.send(n, input),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),

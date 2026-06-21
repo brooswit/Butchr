@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **In-flight UI-state preservation (`public/app.js`) now has regression coverage,
+  and two legacy agent launchers no longer block on startup auto-confirm.** Added
+  `test/app-restore-uistate.test.ts`, which fences `captureUiState` /
+  `restoreUiState` / `applyInputRestore` with `// <test-extract:…>` sentinels and
+  exercises the real functions against a hand-rolled fake DOM (the fake-DOM path,
+  not the pure-helper fallback) — asserting the round-trip (value + caret restored
+  to an empty same-key field after an SSE re-render), the vanished-key no-op (no
+  throw when a captured field is gone), and the no-clobber rule (a captured value
+  never overwrites non-empty re-rendered content). Separately, the two legacy
+  (`BUTCHR_UNIFIED_WORKSPACE=0`) launchers in `src/cto-agent.ts` and
+  `src/story-agent.ts` now fire `autoConfirmStartupPrompts(...)` as
+  `void …catch(() => {})` instead of `await`ing it, so the launch returns
+  immediately while auto-confirm still runs in the background — matching the live
+  unified launcher (`src/workspace-agent.ts`) and dispatcher.
+
 ## [0.9.160] - 2026-06-21
 
 ### Fixed

@@ -440,7 +440,7 @@ async function performLaunch(workspaceId: string, fresh: boolean): Promise<void>
 
   // LAUNCH SELF-COMPLETE: clear any blocking interactive startup prompt so the agent
   // comes up READY unattended. Best-effort + bounded — never fails the launch.
-  await autoConfirmStartupPrompts(name, {
+  void autoConfirmStartupPrompts(name, {
     read: (n) => harness.agentRead(n),
     send: (n, input) => harness.send(n, input),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
