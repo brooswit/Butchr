@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.166] - 2026-06-21
+
 - **Fixed: three CLI polish nits in the `butchr` operator CLI (`bin/butchr`).** (F1) A bare negative integer is now accepted as a positional argument, so `butchr priority <id> -5` can deprioritize below 0 (the server stores a signed priority and help says "higher = sooner"); previously `-5` was rejected as an unknown flag at parse time, making negative priorities unreachable via the positional `priority` command. The new branch sits after the value-flag branch, so `--priority -5` still consumes `-5` as its value. (F2) An unknown `--flag=value` typo (e.g. `ls --workspac=foo`) now errors with `unknown flag` instead of being silently dropped and running the command with the intended option MISSING — mirroring the already-correct space-separated form's guard (the `--key=value` key is validated against the known value/boolean flag sets). (F3) `health` now reports a clean `non-JSON response … unreachable or degraded` error when the server returns a non-JSON body (e.g. an HTML 502 from a proxy, or a truncated/empty body during a crash), instead of surfacing a raw `SyntaxError` from `res.json()`; the existing connection-refused path and non-200 exit-code behavior are unchanged. Regression tests added in `test/cli-helpers.test.ts`. No `package.json` change.
 
 ## [0.9.165] - 2026-06-21
