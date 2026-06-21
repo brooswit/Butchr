@@ -106,13 +106,26 @@ function parseArgs(argv) {
       flags[tok.replace(/^--/, "")] = true;
     } else if (tok.startsWith("--") && tok.includes("=")) {
       const eq = tok.indexOf("=");
-      flags[tok.slice(2, eq)] = tok.slice(eq + 1);
+      const key = tok.slice(2, eq);
+      // Validate the key against the known-flags set, mirroring the space-form
+      // guard below: an unknown `--typo=value` must error rather than be silently
+      // dropped (which would run the command with the intended option MISSING).
+      if (!VALUE_FLAGS.has("--" + key) && !BOOLEAN_FLAGS.has("--" + key)) {
+        fail(`unknown flag: --${key}`);
+      }
+      flags[key] = tok.slice(eq + 1);
     } else if (VALUE_FLAGS.has(tok)) {
       const val = argv[++i];
       if (val === undefined) fail(`flag ${tok} needs a value`);
       // Normalize aliases to a canonical key.
       const key = tok === "-m" ? "message" : tok.replace(/^--/, "");
       flags[key] = val;
+    } else if (/^-\d+$/.test(tok)) {
+      // A bare negative integer (e.g. `-5`) is a POSITIONAL, not a flag, so the
+      // `priority <id> -5` form can deprioritize below 0 (parsePriority accepts
+      // negatives). Must sit AFTER the value-flag branch so `--priority -5` still
+      // consumes `-5` as --priority's value.
+      positionals.push(tok);
     } else if (tok.startsWith("-")) {
       fail(`unknown flag: ${tok}`);
     } else {
@@ -267,7 +280,17 @@ async function cmdHealth(flags) {
   } catch (e) {
     throw new ApiError(`could not reach butchr at ${BASE} — is it running? (${e.message})`);
   }
-  const body = await res.json();
+  // A non-JSON body (e.g. an HTML 502 from a proxy, or a truncated/empty body
+  // during a crash) makes res.json() throw a raw SyntaxError; surface a clear
+  // unreachable/degraded message instead, mirroring fetchHealth's safety.
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    throw new ApiError(
+      `butchr server at ${BASE} returned a non-JSON response (status ${res.status}) — unreachable or degraded`,
+    );
+  }
   const t = body.tasks || {};
   const counts = Object.keys(t).length
     ? Object.entries(t).map(([k, v]) => `${k}=${v}`).join(" ")

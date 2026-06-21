@@ -9,9 +9,11 @@
 // needed. The rename is asserted by reading the source (a cross-surface grep trap:
 // public/app.js has an unrelated DOM ciBadge that must NOT be touched here).
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 const ROOT = join(import.meta.dir, "..");
 const CLI = join(ROOT, "bin", "butchr");
@@ -26,6 +28,30 @@ function runCli(args: string[]): { stdout: string; stderr: string; code: number 
       stdout: e.stdout?.toString() ?? "",
       stderr: e.stderr?.toString() ?? "",
       code: e.status ?? 1,
+    };
+  }
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Async variant of runCli with a custom environment. Used by the F3 test, which
+ * must keep this process's event loop FREE to serve an in-process http server
+ * while the CLI runs (execFileSync would block it). MERGE process.env so PATH /
+ * bun resolution isn't lost when overriding BUTCHR_URL.
+ */
+async function runCliEnv(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  try {
+    const { stdout, stderr } = await execFileAsync("bun", [CLI, ...args], { encoding: "utf8", env });
+    return { stdout, stderr, code: 0 };
+  } catch (e: any) {
+    return {
+      stdout: e.stdout?.toString() ?? "",
+      stderr: e.stderr?.toString() ?? "",
+      code: typeof e.code === "number" ? e.code : 1,
     };
   }
 }
@@ -111,6 +137,58 @@ test("ciBadge is renamed to ciCell in bin/butchr (and app.js is untouched)", () 
   // The unrelated DOM helper in public/app.js keeps its name — not our file to edit.
   const app = readFileSync(join(ROOT, "public", "app.js"), "utf8");
   expect(app).toContain("function ciBadge(");
+});
+
+// F1 — a bare negative integer is reachable as a POSITIONAL, not rejected as an
+// unknown flag, so `priority <id> -5` can deprioritize below 0. The parse layer
+// must accept `-5`; with no server up the command proceeds past parsing and fails
+// at the API layer (connection refused) — so we assert only that it did NOT fail
+// with the parse-time `unknown flag` message.
+test("priority <id> -N: a negative priority is accepted as a positional (not an unknown flag)", () => {
+  const { stderr } = runCli(["priority", "some-id", "-5"]);
+  expect(stderr).not.toContain("unknown flag");
+});
+
+// F2 — an unknown `--flag=value` key now errors at the parse layer (before any
+// network call), mirroring the space-separated form's guard. Previously such a
+// typo was silently dropped, running the command with the option MISSING.
+test("ls --bogus=x errors with 'unknown flag' at the parse layer", () => {
+  const { stderr, code } = runCli(["ls", "--bogus=x"]);
+  expect(code).toBe(1);
+  expect(stderr).toContain("unknown flag");
+});
+
+// ...and a VALID `--key=value` is still accepted by parsing: it reaches the API
+// and fails on the connection (or whatever the server says), NOT on flag parsing —
+// proving the new validation rejects ONLY unknown keys.
+test("ls --workspace=foo is accepted by parsing (fails later, not on the flag)", () => {
+  const { stderr } = runCli(["ls", "--workspace=foo"]);
+  expect(stderr).not.toContain("unknown flag");
+});
+
+// F3 — `health` against a server returning a non-JSON body (e.g. an HTML 502 from
+// a proxy) must report a CLEAN unreachable/degraded message and exit non-zero,
+// rather than surfacing a raw SyntaxError from res.json(). Stand up a throwaway
+// http server on an ephemeral port and point the CLI at it via BUTCHR_URL.
+test("health surfaces a clean error on a non-JSON server response (no raw SyntaxError)", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(502, { "content-type": "text/html" });
+    res.end("<html>502</html>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  try {
+    const { port } = server.address() as { port: number };
+    const { stderr, code } = await runCliEnv(["health"], {
+      ...process.env,
+      BUTCHR_URL: `http://127.0.0.1:${port}`,
+    });
+    expect(code).not.toBe(0);
+    expect(stderr).toMatch(/non-JSON|unreachable|degraded/);
+    expect(stderr).not.toContain("SyntaxError");
+    expect(stderr).not.toContain("JSON.parse");
+  } finally {
+    server.close();
+  }
 });
 
 test("the shared requireId + emit helpers are defined once", () => {
