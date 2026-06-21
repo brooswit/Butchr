@@ -1214,7 +1214,7 @@ function storyAskPanel(s) {
     <div class="sa-question">${esc(s.pending_ask)}</div>
     <label class="field" style="margin:8px 0 0">
       <span class="lbl">your answer</span>
-      <textarea class="sa-answer" placeholder="Answer the story-level ask. It goes back to the story leader, which continues from your response."></textarea>
+      <textarea class="sa-answer" data-restore-key="story-answer" placeholder="Answer the story-level ask. It goes back to the story leader, which continues from your response."></textarea>
     </label>
     <div class="row" style="margin-top:8px">
       <button class="btn success sa-submit">Submit answer</button>
@@ -2903,7 +2903,7 @@ async function renderTask(id) {
       <h2 style="margin-top:0">Review</h2>
       <label class="field" style="margin-bottom:6px">
         <span class="lbl">change request note</span>
-        <textarea id="rnote" placeholder="What needs to change? The note (plus any inline comments above) goes back to the same live agent, which keeps working in-context (no restart)."></textarea>
+        <textarea id="rnote" data-restore-key="reject" placeholder="What needs to change? The note (plus any inline comments above) goes back to the same live agent, which keeps working in-context (no restart)."></textarea>
       </label>
       <div id="inline-comment-summary" class="inline-comment-summary hint"></div>
       <div class="row">
@@ -2979,7 +2979,7 @@ async function renderTask(id) {
       <p class="muted" style="margin:0 0 10px">${specResponderCopy}</p>
       <label class="field" style="margin-bottom:6px">
         <span class="lbl">spec (required)</span>
-        <textarea id="spec" placeholder="Write the full spec for this brief — what to build, where, and how it should be verified."></textarea>
+        <textarea id="spec" data-restore-key="spec" placeholder="Write the full spec for this brief — what to build, where, and how it should be verified."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="submitSpec">Submit spec</button>
@@ -3002,7 +3002,7 @@ async function renderTask(id) {
       <p class="muted" style="margin:0 0 10px">A spec was submitted for this idea. Approve to dispatch the workspace agent, or request changes to revise the spec.</p>
       <label class="field" style="margin-bottom:6px">
         <span class="lbl">change request note (required if requesting changes)</span>
-        <textarea id="rnote" placeholder="What needs to change in the spec?"></textarea>
+        <textarea id="rnote" data-restore-key="spec-reject" placeholder="What needs to change in the spec?"></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="approve">Approve spec</button>
@@ -3041,7 +3041,7 @@ async function renderTask(id) {
       <p class="muted" style="margin:0 0 10px">Approve to let the agent implement this plan, or request changes with feedback — the agent revises and re-proposes. Both resume the same session in-context.</p>
       <label class="field">
         <span class="lbl">feedback (optional for approve · required to request changes)</span>
-        <textarea id="planNote" placeholder="On approve: optional steering notes folded into the implementation. On request-changes: what the plan must change before implementing."></textarea>
+        <textarea id="planNote" data-restore-key="plan-note" placeholder="On approve: optional steering notes folded into the implementation. On request-changes: what the plan must change before implementing."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="planApprove">Approve plan</button>
@@ -3065,7 +3065,7 @@ async function renderTask(id) {
       <h2 style="margin-top:0">Respond</h2>
       <label class="field">
         <span class="lbl">your response (required)</span>
-        <textarea id="answer" placeholder="Respond to what the agent raised. It goes back to the same agent, which butchr re-launches in-context (--resume) to continue."></textarea>
+        <textarea id="answer" data-restore-key="answer" placeholder="Respond to what the agent raised. It goes back to the same agent, which butchr re-launches in-context (--resume) to continue."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="sendAnswer">Send answer</button>
@@ -3093,7 +3093,7 @@ async function renderTask(id) {
       <p class="muted" style="margin:0 0 10px">This agent is alive but has gone quiet. Read the context above to judge why it stopped, then steer it with guidance (or a bare “continue”), re-queue it to relaunch its session, or abort it from the header.</p>
       <label class="field">
         <span class="lbl">guidance (optional — blank sends a bare “continue”)</span>
-        <textarea id="nudgeText" placeholder="Optional steering note, sent to the agent as if typed by a human. Leave blank to just nudge it to continue."></textarea>
+        <textarea id="nudgeText" data-restore-key="nudge" placeholder="Optional steering note, sent to the agent as if typed by a human. Leave blank to just nudge it to continue."></textarea>
       </label>
       <div class="row">
         <button class="btn success" id="nudge">Nudge</button>
@@ -3363,7 +3363,7 @@ function renderDiff(diff) {
             `<span class="dl-sign">${sign}</span>` +
             `<span class="dl-text">${highlightCode(text, lang)}</span></div>`;
         }).join("");
-    return `<div class="diff-file">
+    return `<div class="diff-file" data-file-key="${esc(name)}">
       <button class="diff-file-head" type="button">
         <span class="caret">▾</span>
         <span class="fname">${esc(name)}</span>
@@ -3387,8 +3387,21 @@ function renderDiff(diff) {
 // prompt — no change to the reject payload shape (see composeReviewNote).
 let inlineComments = new Map(); // key -> { path, line, side, ctx, text }
 let inlineCommentsTaskId = null;
+// Diff-file collapse state — module-persisted (keyed by file path) so a collapsed
+// file stays collapsed across the full re-render the app does on every SSE event,
+// mirroring inlineComments above. Reset alongside inlineComments when a different
+// task's diff is opened, so a new task doesn't inherit the prior task's collapse set.
+let collapsedDiffFiles = new Set();
+// An open (uncommitted) inline-comment editor lives inside the async-fetched diff, so
+// it isn't in the DOM right after render(); captureUiState() stashes it here and
+// wireDiff() re-opens + refills it once the diff is painted. Null when none is open.
+let pendingInlineRestore = null;
 function resetInlineComments(taskId) {
-  if (inlineCommentsTaskId !== taskId) { inlineComments = new Map(); inlineCommentsTaskId = taskId; }
+  if (inlineCommentsTaskId !== taskId) {
+    inlineComments = new Map();
+    collapsedDiffFiles = new Set();
+    inlineCommentsTaskId = taskId;
+  }
 }
 
 // Compose the freeform note + any inline comments into one change-request note.
@@ -3475,7 +3488,7 @@ function openCommentEditor(box, dl) {
   const existing = inlineComments.get(key);
   const wrap = el("div", { class: "dl-comment-edit" });
   wrap.appendChild(el("div", { class: "dlc-ctx" }, dl.dataset.ctx || ""));
-  const ta = el("textarea", { class: "dlc-input", placeholder: "Comment on this line — sent to the agent on Request change…" });
+  const ta = el("textarea", { class: "dlc-input", "data-restore-key": "inline-comment", placeholder: "Comment on this line — sent to the agent on Request change…" });
   ta.value = existing ? existing.text : "";
   wrap.appendChild(ta);
   const actions = el("div", { class: "dlc-actions" });
@@ -3506,13 +3519,41 @@ function openCommentEditor(box, dl) {
 function wireDiff(box, taskId) {
   resetInlineComments(taskId);
   box.querySelectorAll(".diff-file-head").forEach((head) => {
-    head.addEventListener("click", () => head.parentElement.classList.toggle("collapsed"));
+    head.addEventListener("click", () => {
+      const card = head.parentElement;
+      const collapsed = card.classList.toggle("collapsed");
+      // Persist the toggle so the file stays (un)collapsed across the next SSE re-render.
+      const fkey = card.dataset.fileKey;
+      if (fkey) { if (collapsed) collapsedDiffFiles.add(fkey); else collapsedDiffFiles.delete(fkey); }
+    });
+  });
+  // Re-apply any persisted collapse state to this freshly-rendered diff.
+  box.querySelectorAll(".diff-file[data-file-key]").forEach((card) => {
+    if (collapsedDiffFiles.has(card.dataset.fileKey)) card.classList.add("collapsed");
   });
   box.querySelectorAll(".dl[data-key] .dl-num").forEach((num) => {
     num.addEventListener("click", () => openCommentEditor(box, num.closest(".dl")));
   });
   for (const key of inlineComments.keys()) renderCommentRow(box, key);
   updateCommentSummary();
+  // Re-open an inline-comment editor that was mid-edit when an SSE re-render fired
+  // (captured by captureUiState before render; the diff is fetched async so this is
+  // the first point its line rows exist). No-op if the line is gone from this diff.
+  if (pendingInlineRestore) {
+    const { key, value, selStart, selEnd } = pendingInlineRestore;
+    pendingInlineRestore = null;
+    const dl = dlByKey(box, key);
+    if (dl) {
+      openCommentEditor(box, dl); // creates+focuses the .dlc-input editor row after dl
+      const ta = dl.nextElementSibling && dl.nextElementSibling.querySelector
+        ? dl.nextElementSibling.querySelector(".dlc-input") : null;
+      if (ta) {
+        ta.value = value || "";
+        try { if (typeof selStart === "number") ta.setSelectionRange(selStart, selEnd); } catch (e) { /* ignore */ }
+        ta.focus();
+      }
+    }
+  }
 }
 
 // ---------- topnav active state ----------
@@ -3843,10 +3884,80 @@ function connectSSE() {
   };
 }
 
+// ---------- in-flight UI state preservation across SSE re-renders ----------
+// The SSE path does a FULL re-render (mount() clears app.innerHTML), which would
+// otherwise discard the operator's scroll position, focus, and any text typed into a
+// not-yet-submitted input (answer / spec / reject / nudge / plan note / story answer /
+// inline comment). captureUiState() snapshots that before render(); restoreUiState()
+// re-applies it after, keyed by a stable data-restore-key on each input — so a
+// state-change event arriving mid-typing doesn't lose the text, caret, focus, or
+// scroll. Targeted (only these inputs), and used ONLY on the SSE path — plain
+// navigation (hashchange / boot) intentionally starts fresh.
+function captureUiState() {
+  const values = new Map();
+  document.querySelectorAll("[data-restore-key]").forEach((node) => {
+    const key = node.dataset.restoreKey;
+    // The inline-comment editor lives inside the async-fetched diff; it's captured
+    // separately below and restored via wireDiff, so skip it in the generic pass.
+    if (key === "inline-comment") return;
+    values.set(key, { value: node.value || "", selStart: node.selectionStart, selEnd: node.selectionEnd });
+  });
+  // An open (uncommitted) inline-comment editor: record the diff line it's attached to
+  // (by the line's stable data-key) plus its text + caret, for wireDiff to re-open.
+  let inline = null;
+  const ie = document.querySelector(".dl-comment-edit .dlc-input");
+  if (ie) {
+    const dl = ie.closest(".dl-comment-edit") && ie.closest(".dl-comment-edit").previousElementSibling;
+    const lineKey = dl && dl.dataset ? dl.dataset.key : null;
+    if (lineKey) inline = { key: lineKey, value: ie.value || "", selStart: ie.selectionStart, selEnd: ie.selectionEnd };
+  }
+  const ae = document.activeElement;
+  const activeKey = ae && ae.dataset ? (ae.dataset.restoreKey || null) : null;
+  return { scrollY: window.scrollY, activeKey, values, inline };
+}
+
+// Re-apply a captured snapshot. Resilient by design: any element/key may have vanished
+// between renders (the new view may not contain that input at all), so every lookup is
+// guarded and nothing here may throw — render() must stay green.
+function restoreUiState(snap) {
+  if (!snap) return;
+  try { window.scrollTo(0, snap.scrollY || 0); } catch (e) { /* ignore */ }
+  for (const [key, st] of snap.values) {
+    if (key === snap.activeKey) continue; // restore the focused one last so focus sticks
+    applyInputRestore(key, st, false);
+  }
+  if (snap.activeKey && snap.values.has(snap.activeKey)) {
+    applyInputRestore(snap.activeKey, snap.values.get(snap.activeKey), true);
+  }
+  // Hand any open inline-comment editor to wireDiff (the diff is fetched asynchronously,
+  // so its line rows don't exist yet at this point).
+  pendingInlineRestore = snap.inline || null;
+}
+
+function applyInputRestore(key, st, focus) {
+  // data-restore-key values are controlled constant slugs, safe in an attribute selector.
+  const node = document.querySelector('[data-restore-key="' + key + '"]');
+  if (!node) return;
+  // These are uncommitted fields — a fresh render produces them empty — so only restore
+  // when we captured text AND the rendered field is still empty (never clobber content).
+  if (st.value && !node.value) {
+    node.value = st.value;
+    try {
+      if (typeof st.selStart === "number" && node.setSelectionRange) node.setSelectionRange(st.selStart, st.selEnd);
+    } catch (e) { /* ignore */ }
+  }
+  if (focus) { try { node.focus(); } catch (e) { /* ignore */ } }
+}
+
 let refreshTimer = null;
 function refreshSoon() {
   clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(render, 150);
+  refreshTimer = setTimeout(async () => {
+    // Preserve in-flight UI state across the full re-render (see captureUiState).
+    const snap = captureUiState();
+    await render(); // render() swallows its own errors, so this never rejects
+    restoreUiState(snap);
+  }, 150);
 }
 
 // ---------- theme toggle ----------
