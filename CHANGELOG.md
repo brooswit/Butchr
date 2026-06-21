@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.159] - 2026-06-21
+
 ### Fixed
 
 - **Channel: bound the story de-dup set and tighten the gate-red surface.** The
