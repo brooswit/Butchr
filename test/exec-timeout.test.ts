@@ -9,7 +9,7 @@
 //     code 124, timedOut:true, and TIMEOUT_MARKER in stderr.
 //   - A run that finishes within timeoutMs is unaffected by the (unused) bound.
 import { describe, expect, test } from "bun:test";
-import { run, TIMEOUT_MARKER } from "../src/exec.ts";
+import { KILL_GRACE_MS, run, TIMEOUT_MARKER } from "../src/exec.ts";
 
 describe("run() default (no timeout) is unchanged", () => {
   test("a fast command resolves with its real output and no timedOut flag", async () => {
@@ -52,5 +52,25 @@ describe("run() with timeoutMs", () => {
     expect(res.code).toBe(0);
     expect(res.stdout.trim()).toBe("done");
     expect(res.timedOut).toBeUndefined();
+  });
+
+  test("a SIGTERM-trapping child is escalated to SIGKILL after the grace (F3)", async () => {
+    // `trap '' TERM` makes the child IGNORE the timeout's SIGTERM, so the bare SIGTERM
+    // kill would hang to the full 30s sleep. The SIGKILL escalation must terminate it
+    // shortly after KILL_GRACE_MS — proving the bound holds even against a TERM-trapper.
+    // The inner sleep redirects its fds away from the captured stdout/stderr pipes, so once
+    // bash (the direct child) is SIGKILLed the pipes hit EOF and the run resolves — an
+    // orphaned grandchild holding the pipe open is a separate, pre-existing concern.
+    const startedAt = Date.now();
+    const res = await run(["bash", "-c", "trap '' TERM; sleep 30 >/dev/null 2>&1"], {
+      timeoutMs: 100,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    expect(res.timedOut).toBe(true);
+    expect(res.code).toBe(124);
+    expect(res.stderr).toContain(TIMEOUT_MARKER);
+    // Killed within grace+epsilon (NOT hanging to the 30s sleep). Generous upper bound to
+    // stay non-flaky on a loaded CI box while still far below the 30_000ms sleep.
+    expect(elapsedMs).toBeLessThan(100 + KILL_GRACE_MS + 5_000);
   });
 });

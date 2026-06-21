@@ -4378,8 +4378,13 @@ export async function requeueTask(id: string): Promise<TaskView> {
  *
  *  - Tears down the dead husk tab/pane BY NAME so the re-dispatch starts a fresh tab and
  *    nothing collides on `agent_name_taken`.
- *  - Clears `has_agent` → the task is READY again; the normal dispatch tick relaunches
- *    it. Because `started_at` is set and (usually) `session_id` is kept, the dispatcher's
+ *  - Resets the task to `inactive` (READY) → selectQueuedForDispatch (which selects ONLY
+ *    status='inactive') re-dispatches it on the next dispatch tick at RUNTIME — no restart
+ *    needed. Leaving it `in_progress`+has_agent=0 would STRAND it: nothing at runtime
+ *    re-dispatches that shape (the dispatcher queue, idle watcher, and reaper all skip it),
+ *    so only a boot-time re-bucket would rescue it. Because `started_at` is set (stamped
+ *    once via keep(), so the inactive→dispatch relaunch preserves it and the runaway budget
+ *    stays continuous) and (usually) `session_id` is kept, the dispatcher's
  *    resolveLaunchCommand picks `claude --resume <session_id>` — full prior context.
  *  - If the session TRANSCRIPT is gone (nothing to resume into), clears `session_id` so
  *    the relaunch is a FRESH run from the full prompt (resolveLaunchCommand's lostContext
@@ -4432,14 +4437,18 @@ export async function requeueForResume(
   const fresh = !hasTranscript;
 
   if (
-    !setStatus(id, "in_progress", {
+    !setStatus(id, "inactive", {
       from: "in_progress",
+      // Lands the task back in `inactive` (READY) so selectQueuedForDispatch re-launches it
+      // at RUNTIME — this LEAVES in_progress, so setStatus's central clear zeroes has_agent
+      // for us (no explicit has_agent:0 needed). started_at is NOT touched here, so the
+      // dispatch relaunch (markRunning keeps it via keep()) preserves the continuous runaway
+      // budget; session_id is likewise preserved unless this is the fresh/lost-context path.
+      note: fresh
+        ? `auto re-dispatch (${reason}); session transcript missing — FRESH run, prior in-session context lost ` +
+            `(attempt ${attempts}/${config.maxResumeAttempts})`
+        : `auto-resume via --resume (${reason}); attempt ${attempts}/${config.maxResumeAttempts}`,
       set: {
-        // The killed agent is gone — clear the ownership marker even though the task
-        // STAYS in_progress (awaiting the dispatcher's --resume relaunch). This is the
-        // one in_progress→in_progress transition where has_agent must drop to 0, so it
-        // is set explicitly (setStatus's central clear only fires when LEAVING in_progress).
-        has_agent: 0,
         output_snapshot: null,
         idle: 0,
         needs_user_input: 0,
@@ -4457,17 +4466,6 @@ export async function requeueForResume(
   ) {
     return "noop"; // moved out of in_progress under us (e.g. aborted) — don't claim a resume
   }
-  // Within-state audit marker (status is unchanged in_progress, so setStatus records no
-  // event — mirror the auto-nudge's explicit timeline entry).
-  recordTaskEvent(
-    id,
-    "in_progress",
-    "in_progress",
-    fresh
-      ? `auto re-dispatch (${reason}); session transcript missing — FRESH run, prior in-session context lost ` +
-          `(attempt ${attempts}/${config.maxResumeAttempts})`
-      : `auto-resume via --resume (${reason}); attempt ${attempts}/${config.maxResumeAttempts}`,
-  );
   console.log(
     `[butchr] task ${id} ${fresh ? "auto re-dispatched FRESH" : "auto-resumed (--resume)"} ` +
       `(${reason}); attempt ${attempts}/${config.maxResumeAttempts}`,

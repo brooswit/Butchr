@@ -175,13 +175,14 @@ describe("requeueForResume (the bounded auto-resume transition)", () => {
     const r = await tasksMod.requeueForResume("resume-ok", "test");
     expect(r).toBe("resumed");
     const row = tasksMod.getTask("resume-ok")!;
-    expect(row.status).toBe("in_progress");
-    // READY again → dispatcher relaunches it. The killed agent is gone: the honest
-    // marker drops to 0 even though the task STAYS in_progress (the one
-    // in_progress→in_progress transition that clears has_agent), so
-    // reconcile/reaper/setIdle/nudge all correctly read it as "no owned live agent".
+    // Lands in `inactive` (READY) → selectQueuedForDispatch re-launches it at RUNTIME (no
+    // restart). The killed agent is gone: has_agent dropped to 0 (setStatus's central clear
+    // on the transition OFF in_progress), so reconcile/reaper/setIdle/nudge all correctly
+    // read it as "no owned live agent".
+    expect(row.status).toBe("inactive");
     expect(row.has_agent).toBe(0);
     expect(row.session_id).toBe("sid-resume-ok"); // kept → resolveLaunchCommand uses --resume
+    expect(row.started_at).toBeTruthy(); // preserved → continuous runaway budget
     expect(row.resume_attempts).toBe(1);
   });
 
@@ -190,9 +191,10 @@ describe("requeueForResume (the bounded auto-resume transition)", () => {
     const r = await tasksMod.requeueForResume("resume-fresh", "test");
     expect(r).toBe("fresh");
     const row = tasksMod.getTask("resume-fresh")!;
-    expect(row.status).toBe("in_progress");
+    expect(row.status).toBe("inactive"); // READY → runtime re-dispatch
     expect(row.has_agent).toBe(0);
     expect(row.session_id).toBeNull(); // cleared → relaunch is a fresh run from the prompt
+    expect(row.started_at).toBeTruthy(); // preserved even on the fresh path
     expect(row.resume_attempts).toBe(1);
   });
 
@@ -204,6 +206,35 @@ describe("requeueForResume (the bounded auto-resume transition)", () => {
     const r = await tasksMod.requeueForResume("resume-capped", "test");
     expect(r).toBe("rescued");
     expect(tasksMod.getTask("resume-capped")!.status).toBe("in_review");
+  });
+
+  // THE INCIDENT FIX (F1): a task auto-resumed from a dead shell must be RE-DISPATCHED at
+  // RUNTIME — without a butchr restart. selectQueuedForDispatch picks ONLY status='inactive',
+  // so requeueForResume must land the task there (the old code left it in_progress+has_agent=0,
+  // which nothing at runtime re-dispatches → stranded until the next boot).
+  test("re-dispatchable at RUNTIME: landed in `inactive`, picked by selectQueuedForDispatch (resume branch)", async () => {
+    seedRunning("resume-redispatch", "sid-redispatch");
+    writeTranscript("sid-redispatch");
+    expect(await tasksMod.requeueForResume("resume-redispatch", "test")).toBe("resumed");
+    const row = tasksMod.getTask("resume-redispatch")!;
+    expect(row.status).toBe("inactive");
+    expect(row.session_id).toBe("sid-redispatch"); // preserved → --resume
+    const queued = dispatchMod
+      .selectQueuedForDispatch(dbMod.nowIso())
+      .map((t) => t.id);
+    expect(queued).toContain("resume-redispatch"); // dispatcher relaunches it, no restart
+  });
+
+  test("re-dispatchable at RUNTIME on the FRESH branch too (transcript gone → session cleared)", async () => {
+    seedRunning("fresh-redispatch", "sid-fresh-redispatch"); // no transcript written
+    expect(await tasksMod.requeueForResume("fresh-redispatch", "test")).toBe("fresh");
+    const row = tasksMod.getTask("fresh-redispatch")!;
+    expect(row.status).toBe("inactive");
+    expect(row.session_id).toBeNull(); // cleared → relaunch is a fresh run
+    const queued = dispatchMod
+      .selectQueuedForDispatch(dbMod.nowIso())
+      .map((t) => t.id);
+    expect(queued).toContain("fresh-redispatch");
   });
 });
 
@@ -223,7 +254,7 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
     expect(res.rescued).toBeGreaterThanOrEqual(1);
 
     const killed = tasksMod.getTask("recon-killed")!;
-    expect(killed.status).toBe("in_progress");
+    expect(killed.status).toBe("inactive"); // auto-resumed → READY for runtime re-dispatch
     expect(killed.has_agent).toBe(0); // auto-resumed (READY for --resume)
     expect(killed.resume_attempts).toBe(1);
 
@@ -282,7 +313,7 @@ describe("reconcileRunningTasks (startup self-heal, liveness-aware)", () => {
     const row = tasksMod.getTask("recon-nopane")!;
     // Auto-resumed (READY for --resume): pane cleared, attempt counted — NOT adopted at
     // a bogus "pane-recon-nopane"/task-id pane.
-    expect(row.status).toBe("in_progress");
+    expect(row.status).toBe("inactive");
     expect(row.has_agent).toBe(0);
     expect(row.resume_attempts).toBe(1);
   });

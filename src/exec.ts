@@ -164,6 +164,13 @@ export type ExecOpts = {
  */
 export const TIMEOUT_MARKER = "[exec] timed out";
 
+/**
+ * Grace (ms) between the timeout SIGTERM and the SIGKILL escalation. A child that
+ * traps/ignores SIGTERM can otherwise hang PAST its timeoutMs, defeating the bound;
+ * after this grace we send SIGKILL (uncatchable). Mirrors herdr.runHeadless.
+ */
+export const KILL_GRACE_MS = 2000;
+
 export async function run(
   cmd: string[],
   opts: ExecOpts = {},
@@ -179,14 +186,24 @@ export async function run(
   // collect/await path below is byte-for-byte the historical behavior.
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
   if (opts.timeoutMs && opts.timeoutMs > 0) {
     timer = setTimeout(() => {
       timedOut = true;
       try {
-        proc.kill();
+        proc.kill(); // SIGTERM first — let the child clean up
       } catch {
         /* already gone */
       }
+      // SIGKILL escalation: a child that traps/ignores SIGTERM would otherwise hang
+      // past timeoutMs (defeating the bound). After a short grace, force-kill it.
+      killTimer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }, KILL_GRACE_MS);
     }, opts.timeoutMs);
   }
 
@@ -202,6 +219,7 @@ export async function run(
     proc.exited,
   ]);
   if (timer) clearTimeout(timer);
+  if (killTimer) clearTimeout(killTimer);
 
   if (timedOut) {
     const marker = `${TIMEOUT_MARKER} after ${opts.timeoutMs}ms`;
