@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.153] - 2026-06-21
+
 - **Fixed: the startup reaper no longer force-removes LIVE story worktrees on every boot (`src/reaper.ts`).** A story's worktree lives at `<repo>/butchr-story-<storyId>` (`git.storyWorktreePath`) — a DIRECT child of the repo root, exactly like a task worktree (`<repo>/<taskId>`). So `reapOrphans`' direct-child filter did NOT skip it; it treated `butchr-story-<id>` as a task id, found no `tasks` row, and ran `git worktree remove --force` on an OPEN / merge_blocked story's LIVE checkout — destroying its working state on every restart (plus a false "reaped orphaned worktree" log; the story branch survived only because `branch -D` used the wrong, dir-derived name). The sweep now tells the two kinds apart by dir name: a `butchr-story-<id>` worktree resolves against the `stories` table and is reaped ONLY when no LIVE story owns it (gone, or terminal `done`/`aborted`) — a live `open`/`merge_blocked`/`merging` story's checkout is left untouched — and when it IS reaped its branch is deleted via the correct `git.storyBranchName` (`butchr/story/<id>`). Genuinely-orphaned TASK worktrees still reap exactly as before. (`merging` stories are already re-driven by `recoverMergingStories` before the reaper runs, but are treated as live here for safety.) Regression tests (`test/reaper-story-worktree.test.ts`): an OPEN story's worktree+branch survive the boot sweep; a no-task-row task worktree is still reaped. No `package.json`/version edit.
 
 ## [0.9.152] - 2026-06-21
