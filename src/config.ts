@@ -9,11 +9,32 @@ function env(name: string, fallback: string): string {
   return v && v.length > 0 ? v : fallback;
 }
 
-function envInt(name: string, fallback: number): number {
+/**
+ * Parse an integer env var, STRICTLY. The value must be a FULLY-numeric integer
+ * (optional sign, digits only) — a trailing-garbage value like `47800abc` is
+ * REJECTED (falls back + warns) rather than silently truncated to `47800` by
+ * `parseInt`, and a non-numeric value (`abc`) warns instead of silently falling
+ * back. `opts.min` floor-clamps the parsed value (used to keep interval / timeout
+ * knobs above a sane minimum so a 0/negative override can't create a tight loop or
+ * disable a timeout). Exported for unit tests.
+ */
+export function envInt(
+  name: string,
+  fallback: number,
+  opts: { min?: number } = {},
+): number {
+  const clamp = (n: number) => (opts.min !== undefined ? Math.max(opts.min, n) : n);
   const v = process.env[name];
-  if (!v) return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
+  if (!v) return clamp(fallback);
+  const t = v.trim();
+  if (!/^[+-]?\d+$/.test(t)) {
+    console.warn(
+      `[butchr] ${name}="${v}" is not a valid integer; using default ${fallback}`,
+    );
+    return clamp(fallback);
+  }
+  const n = parseInt(t, 10);
+  return Number.isFinite(n) ? clamp(n) : clamp(fallback);
 }
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -179,8 +200,26 @@ export const config = {
    */
   gitHealOnBoot: envBool("BUTCHR_GIT_HEAL", true),
 
-  /** Dispatcher poll interval (ms). */
-  tickMs: envInt("BUTCHR_TICK_MS", 1500),
+  /** Dispatcher poll interval (ms). Floor-clamped so a 0/negative override can't
+   * tight-loop the dispatcher (setInterval(fn,0) re-fires as fast as possible). */
+  tickMs: envInt("BUTCHR_TICK_MS", 1500, { min: 250 }),
+
+  /**
+   * HERDR CLI SHELL-OUT TIMEOUTS. Every herdr command (src/herdr.ts) is bounded so
+   * an alive-but-WEDGED herdr (stuck socket reply / hung `agent read` / `pane list`)
+   * can't stall the dispatcher tick, the per-task watcher mid-probe, or the cto/leader
+   * supervise loops FOREVER. A timed-out run returns code 124 / ok:false — exactly a
+   * herdr failure — so the soft/degrading callers map it to their default (null/""/[])
+   * and the hard callers throw it like any other failure (caught on the bounded-retry
+   * dispatch / supervised-relaunch paths). Floor-clamped (min 1s) so a 0/negative
+   * override can't disable the bound and reintroduce the unbounded hang.
+   *  - herdrTimeoutMs (SHORT): reads/lists/status/probes/sends/closes/get/deregister.
+   *    Kept to a few seconds since these run on the ~1.5s dispatcher tick.
+   *  - herdrStartTimeoutMs (LONG): resource creation that spawns processes
+   *    (agent start, workspace/tab create), which legitimately takes longer.
+   */
+  herdrTimeoutMs: envInt("BUTCHR_HERDR_TIMEOUT_MS", 5000, { min: 1000 }),
+  herdrStartTimeoutMs: envInt("BUTCHR_HERDR_START_TIMEOUT_MS", 60000, { min: 1000 }),
 
   /**
    * POST-MERGE VERIFY GATE (and the in-worktree CI gate share this command). After a
@@ -540,7 +579,7 @@ export const config = {
   connectivityUrl: env("BUTCHR_CONNECTIVITY_URL", "https://api.anthropic.com/"),
 
   /** How often (ms) to probe reachability. */
-  connectivityIntervalMs: envInt("BUTCHR_CONNECTIVITY_INTERVAL_MS", 15000),
+  connectivityIntervalMs: envInt("BUTCHR_CONNECTIVITY_INTERVAL_MS", 15000, { min: 1000 }),
 
   /** Per-probe timeout (ms): a probe that doesn't resolve within this counts as a failure. */
   connectivityProbeTimeoutMs: envInt("BUTCHR_CONNECTIVITY_TIMEOUT_MS", 5000),
@@ -693,7 +732,7 @@ export const config = {
    * failures (the operator must then start/restart it). A successful launch resets
    * the counter.
    */
-  ctoSuperviseMs: envInt("BUTCHR_CTO_SUPERVISE_MS", 5000),
+  ctoSuperviseMs: envInt("BUTCHR_CTO_SUPERVISE_MS", 5000, { min: 1000 }),
   ctoMaxRestarts: envInt("BUTCHR_CTO_MAX_RESTARTS", 5),
   ctoRestartBackoffBaseMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_BASE_MS", 2000),
   ctoRestartBackoffCapMs: envInt("BUTCHR_CTO_RESTART_BACKOFF_CAP_MS", 60000),

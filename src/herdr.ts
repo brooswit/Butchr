@@ -25,8 +25,11 @@ type Envelope = { id?: string; result?: any; error?: any };
 // We read `config.herdrBin` at each call site (rather than caching it once at
 // module load) so a test can repoint the bin — `config.herdrBin` never changes at
 // runtime in production, so this is byte-for-byte the same value either way.
-async function herdr(args: string[]): Promise<any> {
-  const res = await run([config.herdrBin, ...args]);
+async function herdr(
+  args: string[],
+  timeoutMs: number = config.herdrTimeoutMs,
+): Promise<any> {
+  const res = await run([config.herdrBin, ...args], { timeoutMs });
   if (!res.ok) {
     throw new Error(
       `herdr ${args.join(" ")} failed (${res.code}): ${res.stderr || res.stdout}`,
@@ -50,13 +53,18 @@ async function herdr(args: string[]): Promise<any> {
 /**
  * Soft sibling of `herdr()`: run a herdr command and unwrap its JSON envelope,
  * returning `null` instead of throwing on ANY failure — a non-zero exit, empty
- * output, non-JSON output, or an `error` field. The probe/read functions below
- * use this so a missing-or-broken herdr degrades to their default
- * (`undefined`/`[]`/`""`) rather than propagating. On success returns the
+ * output, non-JSON output, an `error` field, OR a TIMEOUT (a wedged herdr that
+ * doesn't reply within `timeoutMs` makes `run()` return code 124 / ok:false, which
+ * maps here to `null` just like any other failure). The probe/read functions below
+ * use this so a missing/broken/HUNG herdr degrades to their default
+ * (`undefined`/`[]`/`""`) rather than propagating or hanging. On success returns the
  * unwrapped `env.result ?? env` for the caller to field-probe.
  */
-async function herdrSoft(args: string[]): Promise<any | null> {
-  const res = await run([config.herdrBin, ...args]);
+async function herdrSoft(
+  args: string[],
+  timeoutMs: number = config.herdrTimeoutMs,
+): Promise<any | null> {
+  const res = await run([config.herdrBin, ...args], { timeoutMs });
   if (!res.ok) return null;
   const text = res.stdout.trim();
   if (!text) return null;
@@ -71,7 +79,9 @@ async function herdrSoft(args: string[]): Promise<any | null> {
 
 /** Is the herdr server reachable? */
 export async function isUp(): Promise<boolean> {
-  const res = await run([config.herdrBin, "status", "server"]);
+  const res = await run([config.herdrBin, "status", "server"], {
+    timeoutMs: config.herdrTimeoutMs,
+  });
   return res.ok && /status:\s*running/.test(res.stdout);
 }
 
@@ -83,7 +93,9 @@ export async function isUp(): Promise<boolean> {
  * crashed/unreachable herdr would falsely report the entity present).
  */
 async function existsByGet(args: string[]): Promise<boolean> {
-  const res = await run([config.herdrBin, ...args]);
+  const res = await run([config.herdrBin, ...args], {
+    timeoutMs: config.herdrTimeoutMs,
+  });
   return res.ok && !res.stdout.includes('"error"');
 }
 
@@ -94,7 +106,7 @@ export async function workspaceCreate(
 ): Promise<Workspace> {
   const r = await herdr([
     "workspace", "create", "--cwd", cwd, "--label", label, "--no-focus",
-  ]);
+  ], config.herdrStartTimeoutMs);
   return {
     workspaceId: r.workspace?.workspace_id ?? r.root_pane?.workspace_id,
     rootPaneId: r.root_pane?.pane_id,
@@ -131,7 +143,7 @@ export async function tabCreate(
   try {
     const args = ["tab", "create", "--cwd", cwd, "--label", label, "--no-focus"];
     if (workspaceId) args.push("--workspace", workspaceId);
-    const r = await herdr(args);
+    const r = await herdr(args, config.herdrStartTimeoutMs);
     return {
       tabId: r.tab?.tab_id ?? r.root_pane?.tab_id ?? r.tab_id,
       rootPaneId: r.root_pane?.pane_id ?? r.pane?.pane_id,
@@ -144,7 +156,9 @@ export async function tabCreate(
 /** Close a herdr tab (kills every pane/agent inside it and removes the tab). */
 export async function tabClose(tabId: string | null | undefined): Promise<void> {
   if (!tabId) return;
-  await run([config.herdrBin, "tab", "close", tabId]).catch(() => {});
+  await run([config.herdrBin, "tab", "close", tabId], {
+    timeoutMs: config.herdrTimeoutMs,
+  }).catch(() => {});
 }
 
 // Field-probes over a single `agent get` envelope. herdr response shapes vary
@@ -209,7 +223,7 @@ export async function agentStart(
   if (tabId) args.push("--tab", tabId);
   else if (workspaceId) args.push("--workspace", workspaceId);
   args.push("--", ...argv);
-  const r = await herdr(args);
+  const r = await herdr(args, config.herdrStartTimeoutMs);
   // Response shapes vary slightly by herdr version; probe common fields.
   let paneId =
     r.agent?.pane_id ?? r.pane?.pane_id ?? r.root_pane?.pane_id ?? r.pane_id ??
@@ -416,7 +430,9 @@ export async function send(name: string, input: SendInput): Promise<void> {
 /** Close a pane / terminate the agent terminal. */
 export async function paneClose(target: string): Promise<void> {
   if (!target) return;
-  await run([config.herdrBin, "pane", "close", target]);
+  await run([config.herdrBin, "pane", "close", target], {
+    timeoutMs: config.herdrTimeoutMs,
+  });
 }
 
 /**
@@ -466,9 +482,10 @@ export async function agentDeregister(name: string): Promise<void> {
   const info = await agentInfo(name);
   const tab = info?.tabId;
   const pane = info?.paneId;
-  await run([config.herdrBin, "agent", "rename", name, "--clear"]).catch(() => {});
-  if (pane) await run([config.herdrBin, "pane", "close", pane]).catch(() => {});
-  if (tab) await run([config.herdrBin, "tab", "close", tab]).catch(() => {});
+  const timeoutMs = config.herdrTimeoutMs;
+  await run([config.herdrBin, "agent", "rename", name, "--clear"], { timeoutMs }).catch(() => {});
+  if (pane) await run([config.herdrBin, "pane", "close", pane], { timeoutMs }).catch(() => {});
+  if (tab) await run([config.herdrBin, "tab", "close", tab], { timeoutMs }).catch(() => {});
 }
 
 /**
