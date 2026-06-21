@@ -99,36 +99,96 @@ let ACTIVE_STATUSES = [];   // non-terminal statuses (stay in the active list)
 // FILTER_STATUSES is ALL_STATUSES with the synthetic `idle` effStatus (an idle RUNNING
 // task — see effStatus) spliced in after in_progress, so it filters independently.
 let FILTER_STATUSES = [];
+// False until a /api/state-meta fetch SUCCEEDS. While false the tables hold the built-in
+// DEFAULT_STATE_META fallback (see below) and connectSSE retries the fetch on the next
+// event, so a transient meta hiccup self-heals without a page reload.
+let stateMetaLoaded = false;
 
-// Fetch the server-owned state metadata and (re)build every table above from it. Called
-// once at boot BEFORE the first render. On failure the tables stay empty and the helpers
-// degrade rather than crash (the page still loaded, so same-origin meta is rarely down).
-async function loadStateMeta() {
-  try {
-    applyStateMeta(await api("GET", "/state-meta"));
-  } catch (e) {
-    console.error("state-meta load failed; UI degrades to defaults", e);
-  }
-}
-function applyStateMeta(meta) {
-  const stateMeta = (meta && meta.stateMeta) || {};
-  const all = (meta && meta.allStatuses) || [];
-  const terminal = (meta && meta.terminalStatuses) || [];
-  STATE_KIND = {};
-  AGENT_TYPE = {};
+// <test-extract:state-meta> — pure, DOM-free helpers unit-tested in
+// test/state-meta-fallback.test.ts. Keep this block self-contained (no document / module
+// state) so the test can eval it in isolation.
+// SERVER-CANONICAL DEFAULTS — a hand-kept mirror of src/db.ts (STATE_META / ALL_STATUSES /
+// isTerminal) in the exact shape /api/state-meta serves. Used ONLY as a FALLBACK when that
+// fetch fails: without it the tables would be empty, and an empty ACTIVE_STATUSES makes
+// boardLaneKey map every leaf to null → the board falsely reads "No active work" while the
+// List view keeps everything "active". The served meta is authoritative and replaces these
+// the moment the fetch succeeds (see loadStateMeta), so this drift-prone copy is only ever
+// live during an outage. If db.ts's state model changes, update this mirror to match.
+const DEFAULT_STATE_META = {
+  stateMeta: {
+    idea: { kind: "feedback" },
+    spec_review: { kind: "feedback" },
+    blocked: { kind: "idle" },
+    needs_info: { kind: "feedback" },
+    inactive: { kind: "agent", agentType: "workspace-agent" },
+    in_progress: { kind: "agent", agentType: "workspace-agent" },
+    in_review: { kind: "feedback" },
+    merged: { kind: "idle" },
+    rolling_back: { kind: "idle" },
+    rolled_back: { kind: "idle" },
+    failed: { kind: "idle" },
+    aborted: { kind: "idle" },
+  },
+  allStatuses: [
+    "idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress",
+    "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted",
+  ],
+  terminalStatuses: ["merged", "aborted", "failed", "rolled_back"],
+};
+
+// Build the six status tables from the served meta — or, when `meta` is missing/empty (a
+// failed fetch), from DEFAULT_STATE_META so the returned sets are NEVER empty. Pure: returns
+// the tables, touches no module state and no DOM (applyStateMeta assigns them in).
+function statusSetsFrom(meta) {
+  const ok = meta && Array.isArray(meta.allStatuses) && meta.allStatuses.length > 0;
+  const src = ok ? meta : DEFAULT_STATE_META;
+  const stateMeta = src.stateMeta || {};
+  const all = src.allStatuses || [];
+  const terminal = src.terminalStatuses || [];
+  const STATE_KIND = {};
+  const AGENT_TYPE = {};
   for (const s of all) {
     const m = stateMeta[s] || {};
     STATE_KIND[s] = m.kind || "idle";
     if (m.agentType) AGENT_TYPE[s] = m.agentType;
   }
-  ALL_STATUSES = all.slice();
-  TERMINAL_STATUSES = terminal.slice();
-  ACTIVE_STATUSES = all.filter((s) => !terminal.includes(s));
-  FILTER_STATUSES = all.flatMap((s) => (s === "in_progress" ? [s, "needs_user_input", "idle"] : [s]));
+  const FILTER = all.flatMap((s) => (s === "in_progress" ? [s, "needs_user_input", "idle"] : [s]));
   // Story (node) statuses live alongside task statuses in the unified work list, so the
   // filter chips must narrow stories too. Append the story-specific statuses not already
   // present (`aborted` is shared with tasks, so it's already in the set).
-  for (const s of ["open", "done"]) if (!FILTER_STATUSES.includes(s)) FILTER_STATUSES.push(s);
+  for (const s of ["open", "done"]) if (!FILTER.includes(s)) FILTER.push(s);
+  return {
+    STATE_KIND,
+    AGENT_TYPE,
+    ALL_STATUSES: all.slice(),
+    TERMINAL_STATUSES: terminal.slice(),
+    ACTIVE_STATUSES: all.filter((s) => !terminal.includes(s)),
+    FILTER_STATUSES: FILTER,
+  };
+}
+// </test-extract:state-meta>
+
+// Fetch the server-owned state metadata and (re)build every table above from it. Called once
+// at boot BEFORE the first render, then re-tried on SSE events until it succeeds (see
+// connectSSE). On failure the tables fall back to the non-empty DEFAULT_STATE_META so the
+// board/list/filters keep working, and stateMetaLoaded stays false so the next event retries.
+async function loadStateMeta() {
+  try {
+    applyStateMeta(await api("GET", "/state-meta"));
+    stateMetaLoaded = true;
+  } catch (e) {
+    console.error("state-meta load failed; using built-in defaults, will retry on next event", e);
+    applyStateMeta(DEFAULT_STATE_META);
+  }
+}
+function applyStateMeta(meta) {
+  const sets = statusSetsFrom(meta);
+  STATE_KIND = sets.STATE_KIND;
+  AGENT_TYPE = sets.AGENT_TYPE;
+  ALL_STATUSES = sets.ALL_STATUSES;
+  TERMINAL_STATUSES = sets.TERMINAL_STATUSES;
+  ACTIVE_STATUSES = sets.ACTIVE_STATUSES;
+  FILTER_STATUSES = sets.FILTER_STATUSES;
 }
 
 // What an operator is AWAITING for each feedback state (chip hint). Pure UI copy — these
@@ -2075,6 +2135,9 @@ function buildGraphGenSlider(maxGen, onChange) {
 // (merged/failed/rolled_back/aborted) aren't part of the pipeline and are likewise omitted —
 // they live in the List view's Finished section. Re-rendered wholesale on every
 // SSE event by the workspace view, so it live-updates for free.
+// <test-extract:board> — pure, DOM-free board-lane classification (unit-tested in
+// test/state-meta-fallback.test.ts). boardLaneKeyFor takes activeStatuses explicitly so it
+// can be exercised without the module-level ACTIVE_STATUSES table or a DOM.
 const BOARD_LANES = [
   { key: "spec_review", title: "Spec review", hint: "spec review" },
   { key: "in_review", title: "In review", hint: "in review" },
@@ -2103,16 +2166,20 @@ function boardHasUnmetBlockers(w, byId) {
 // pipeline). A leaf maps to the column matching its status (the lane keys mirror the task
 // statuses); a node (story) maps by story status — open-with-unmet-blockers → Blocked,
 // open → In progress, merging/merge_blocked → In review, done/aborted → omitted.
-function boardLaneKey(w, byId) {
+function boardLaneKeyFor(w, byId, activeStatuses) {
   if (w.work_kind === "node") {
     if (w.status === "open") return boardHasUnmetBlockers(w, byId) ? "blocked" : "in_progress";
     if (w.status === "merging" || w.status === "merge_blocked") return "in_review";
     return null; // done / aborted / anything terminal → omitted
   }
   // leaf task: only active (non-terminal) statuses appear, in their own-named column.
-  if (!ACTIVE_STATUSES.includes(w.status)) return null;
+  if (!activeStatuses.includes(w.status)) return null;
   return BOARD_LANE_KEYS.has(w.status) ? w.status : null;
 }
+function boardLaneKey(w, byId) {
+  return boardLaneKeyFor(w, byId, ACTIVE_STATUSES);
+}
+// </test-extract:board>
 
 function renderBoard(work) {
   const items = (Array.isArray(work) ? work : []).filter(Boolean);
@@ -3875,6 +3942,10 @@ function connectSSE() {
     let e;
     try { e = JSON.parse(ev.data); } catch { return; }
     if (e.type === "hello") return;
+    // Self-heal a failed state-meta load: while we're still on the built-in DEFAULT_STATE_META
+    // fallback, retry the fetch on this event; once it succeeds the real server values land and
+    // we re-render so board/list/filters switch from defaults to the authoritative set.
+    if (!stateMetaLoaded) loadStateMeta().then(() => { refreshSoon(); updateAttention(); });
     // Re-render the current view on any relevant change. Cheap enough for a
     // single-operator local tool.
     refreshSoon();
