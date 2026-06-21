@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.152] - 2026-06-21
+
 - **Fixed: operator/build startup auto-confirm no longer GIVES UP before the dev-channels consent dialog renders (story st-2ef28e4f) (`src/startup-confirm.ts`).** The poll loop folded a blank/initializing pane into `quiet` and concluded "quiet ⇒ past startup ⇒ stop" after a few reads — but a leader/CTO launch takes several seconds to render the `--dangerously-load-development-channels` consent dialog, so the loop quit BEFORE it appeared and the operator hung forever at an unanswered prompt. `classifyStartupScreen` is now FOUR-way: a new `active` kind (the live `esc to interrupt` UI) is the ONLY signal that means "past startup → stop", and the loop breaks solely on `quietPolls` CONSECUTIVE `active` reads; a blank/initializing/pre-dialog pane stays `quiet` and KEEPS polling up to `maxPolls` so the dialog is still caught + auto-confirmed when it finally renders. Fire-and-forget preserved (never throws / never fails a launch). Regression tests added (`test/startup-confirm.test.ts`). No `package.json`/version edit.
 
 ## [0.9.151] - 2026-06-20
