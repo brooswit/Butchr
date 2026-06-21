@@ -775,7 +775,8 @@ export async function probeWorkspaceForPrompt(
     return;
   }
 
-  // cls.kind === "quiet": past any prompt → clear any prior (probe-set) signal.
+  // cls.kind === "quiet" | "active": past any prompt (blank/initializing, or a live working
+  // session) → clear any prior (probe-set) signal.
   clearOwnSignal();
 }
 

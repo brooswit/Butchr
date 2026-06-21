@@ -624,7 +624,8 @@ export async function probeAgentForPrompt(taskId: string, deps: MidProbeDeps): P
     return;
   }
 
-  // cls.kind === "quiet": past any prompt. Clear the flag iff it was set (no-op otherwise).
+  // cls.kind === "quiet" | "active": past any prompt (blank/initializing, or a live working
+  // session). Clear the flag iff it was set (no-op otherwise).
   if (deps.flagged(taskId)) deps.setFlag(taskId, false);
 }
 

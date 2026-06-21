@@ -543,11 +543,14 @@ describe("leader teardown on node-Work completion (unified)", () => {
   test("adopt while PARKED at the dev-channels consent → exactly ONE confirming keystroke, then quiet", async () => {
     const { runner, launcher, calls, live } = makeFake();
     const sends: Array<{ name: string; input: unknown }> = [];
-    // The pane is parked at the dev-channels consent box, then goes quiet after the confirm.
+    // The pane is parked at the dev-channels consent box, then loads its live working UI after
+    // the confirm — the `esc to interrupt` ACTIVE pane is the genuine past-startup signal that
+    // ends the poll (a BLANK pane would keep polling, per the dev-channels-give-up fix).
+    const ACTIVE = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt";
     const screens = [
       "❯ 1. I am using this for local development\n--dangerously-load-development-channels",
-      "",
-      "",
+      ACTIVE,
+      ACTIVE,
     ];
     let readIdx = 0;
     runner.agentRead = async () => screens[Math.min(readIdx++, screens.length - 1)];
@@ -587,7 +590,12 @@ describe("leader teardown on node-Work completion (unified)", () => {
     const { runner, launcher, calls, live } = makeFake();
     const sends: Array<{ name: string; input: unknown }> = [];
     let reads = 0;
-    runner.agentRead = async () => { reads++; return ""; }; // already past startup — quiet/working pane
+    // Already past startup — a live, WORKING leader pane (the `esc to interrupt` ACTIVE UI). This
+    // is the genuine past-startup signal that ends the poll; a working pane is `active`, not blank.
+    runner.agentRead = async () => {
+      reads++;
+      return "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt";
+    };
     runner.send = async (name, input) => { sends.push({ name, input }); };
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
@@ -639,7 +647,10 @@ describe("leader teardown on node-Work completion (unified)", () => {
       readEntered = true;
       await readGate; // block — the per-pane poll can never complete on its own
       readReturned = true;
-      return ""; // quiet once released, so the detached probe exits cleanly (no leak)
+      // ACTIVE once released (the live `esc to interrupt` UI), so the detached probe concludes
+      // at `quietPolls` and exits cleanly (no leak). A BLANK read would keep polling to maxPolls
+      // (the dev-channels-give-up fix), so we hand it the genuine past-startup signal instead.
+      return "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt";
     };
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);

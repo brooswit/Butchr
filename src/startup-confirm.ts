@@ -137,34 +137,46 @@ export function looksLikeActiveSession(screen: string): boolean {
 }
 
 /**
- * The THREE-way classification of a startup pane — the fix for `detectStartupPrompt`'s
+ * The FOUR-way classification of a startup pane — the fix for `detectStartupPrompt`'s
  * null-ambiguity (a clean screen and an unrecognized-but-blocking prompt both used to read as
  * null, so an unhandled consent dialog was miscounted as "quiet" and the launch proceeded
- * while the agent stayed frozen forever):
- *   - `rule`  → a known prompt we can auto-confirm (send `rule.response`);
- *   - `stuck` → no rule matched but the screen LOOKS like a blocking prompt → surface it;
- *   - `quiet` → genuinely past startup (blank / ordinary running output).
+ * while the agent stayed frozen forever), plus the 2026-06-20 BLANK-vs-active split:
+ *   - `rule`   → a known prompt we can auto-confirm (send `rule.response`);
+ *   - `stuck`  → no rule matched but the screen LOOKS like a blocking prompt → surface it;
+ *   - `active` → a live, working Claude session (the `esc to interrupt` UI) → GENUINELY past
+ *                startup; this is the ONLY signal that means "the agent is up, stop polling";
+ *   - `quiet`  → blank / whitespace / still-initializing / ordinary pre-dialog output. This is
+ *                NOT past startup — during a leader/CTO launch claude takes several seconds to
+ *                render the dev-channels consent dialog and the pane reads blank until it does.
+ *
+ * The `active`/`quiet` split is the dev-channels-give-up-before-render fix (st-2ef28e4f): the
+ * old three-way folded a blank/initializing pane into `quiet`, and the loop concluded "quiet ⇒
+ * past startup ⇒ stop" after a few reads — giving up BEFORE the consent dialog rendered, so the
+ * operator hung forever. Only `active` now ends the poll; a blank pane keeps polling.
  */
 export type StartupClassification =
   | { kind: "rule"; rule: ConfirmRule }
   | { kind: "stuck" }
+  | { kind: "active" }
   | { kind: "quiet" };
 
-/** Classify a startup `screen` into rule / stuck / quiet. Pure + unit-testable. */
+/** Classify a startup `screen` into rule / stuck / active / quiet. Pure + unit-testable. */
 export function classifyStartupScreen(
   screen: string,
   rules: ConfirmRule[] = STARTUP_CONFIRM_RULES,
 ): StartupClassification {
   const rule = detectStartupPrompt(screen, rules);
   if (rule) return { kind: "rule", rule };
-  // POSITIVE active-session anchor: a live, working Claude turn is QUIET even when its
-  // streaming output incidentally looks prompt-ish. Checked AFTER the rules (so a genuine
-  // dev-channels/folder-trust dialog is STILL detected + auto-confirmed — rule wins) but
-  // BEFORE the loose `looksLikePrompt` heuristics (so an incidental numbered list / 'proceed'
-  // / yes-no prose in active output is never misread as a stuck blocking prompt). This is the
+  // POSITIVE active-session anchor: a live, working Claude turn is genuinely PAST startup even
+  // when its streaming output incidentally looks prompt-ish. Checked AFTER the rules (so a
+  // genuine dev-channels/folder-trust dialog is STILL detected + auto-confirmed — rule wins) but
+  // BEFORE the loose `looksLikePrompt` heuristics (so an incidental numbered list / 'proceed' /
+  // yes-no prose in active output is never misread as a stuck blocking prompt). This is the
   // 2026-06-19 false-positive fix: a leader mid-review burned the whole poll budget and spammed
-  // 'not auto-confirmable' because there was no "active ⇒ quiet" anchor.
-  if (looksLikeActiveSession(screen)) return { kind: "quiet" };
+  // 'not auto-confirmable' because there was no "active ⇒ done" anchor. Returning a DEDICATED
+  // `active` kind (not `quiet`) is the 2026-06-20 fix: only an active pane means "past startup",
+  // so the poll loop can keep polling a blank pane until the dev-channels dialog finally renders.
+  if (looksLikeActiveSession(screen)) return { kind: "active" };
   if (looksLikePrompt(screen)) return { kind: "stuck" };
   return { kind: "quiet" };
 }
@@ -181,7 +193,9 @@ export type AutoConfirmDeps = {
   pollMs: number;
   /** Hard cap on poll iterations. */
   maxPolls: number;
-  /** Consecutive prompt-free reads that mean "the agent is past startup → stop". */
+  /** Consecutive ACTIVE reads (the live `esc to interrupt` UI) that mean "the agent is past
+   *  startup → stop". A BLANK / still-initializing pane does NOT count — the loop keeps polling
+   *  it (the dev-channels dialog may still render) up to `maxPolls`. */
   quietPolls: number;
   /** Re-send the SAME persistent prompt after this many polls (our first send may
    *  not have registered). Default 4. */
@@ -209,12 +223,18 @@ export type AutoConfirmResult = { answered: string[]; stuckScreen?: string };
  * of silently declared past-startup). Best-effort: a read/send error is swallowed and never
  * propagates — this must NEVER throw or fail a launch.
  *
- * Three-way per-poll via `classifyStartupScreen`:
- *   - `rule`  → send the safe response (de-bounced: sent once per contiguous prompt, re-sent
- *               only every `resendEvery` polls if it persists), reset the quiet counter;
- *   - `stuck` → an unhandled blocking prompt: reset the quiet counter (NOT past startup) and
- *               remember the screen, but send nothing (no rule → no safe keystroke);
- *   - `quiet` → count toward `quietPolls`; break once past startup.
+ * Four-way per-poll via `classifyStartupScreen`:
+ *   - `rule`   → send the safe response (de-bounced: sent once per contiguous prompt, re-sent
+ *                only every `resendEvery` polls if it persists), reset the active counter;
+ *   - `stuck`  → an unhandled blocking prompt: reset the active counter (NOT past startup) and
+ *                remember the screen, but send nothing (no rule → no safe keystroke);
+ *   - `active` → a live, working Claude UI: count toward `quietPolls`; break once we've seen
+ *                `quietPolls` CONSECUTIVE active reads (genuinely past startup);
+ *   - `quiet`  → a BLANK / still-initializing / pre-dialog pane: this is NOT past startup, so it
+ *                does NOT advance the done-counter — reset it and keep polling (the dev-channels
+ *                dialog may yet render) until `maxPolls`. This is the dev-channels-give-up fix
+ *                (st-2ef28e4f): giving up on a blank pane left the operator frozen at the
+ *                consent dialog that rendered seconds later with nobody polling.
  * If the loop ends while the last read was `stuck`, that screen is returned as `stuckScreen`.
  * Once the pane is prompt-free, nothing is sent — so no stray keystroke leaks into the session.
  */
@@ -226,8 +246,8 @@ export async function autoConfirmStartupPrompts(
   const resendEvery = deps.resendEvery ?? 4;
   let lastRule: string | null = null;
   let sameCount = 0;
-  let quiet = 0;
-  // The most recent unrecognized prompt-like screen, or undefined after a rule/quiet read.
+  let active = 0; // consecutive ACTIVE reads (the live `esc to interrupt` UI) → past startup
+  // The most recent unrecognized prompt-like screen, or undefined after a rule/active/quiet read.
   let stuckScreen: string | undefined;
 
   for (let i = 0; i < deps.maxPolls; i++) {
@@ -239,19 +259,35 @@ export async function autoConfirmStartupPrompts(
     }
     const cls = classifyStartupScreen(screen, deps.rules);
 
+    if (cls.kind === "active") {
+      // A live, working Claude session → GENUINELY past startup. Count consecutive active reads;
+      // once we have `quietPolls` of them the agent is up and we stop polling. An active pane is
+      // a strict no-op (we never keystroke a working session).
+      lastRule = null;
+      sameCount = 0;
+      stuckScreen = undefined; // a live session is not stuck
+      if (++active >= deps.quietPolls) break; // past startup → done
+      await deps.sleep(deps.pollMs);
+      continue;
+    }
+
     if (cls.kind === "quiet") {
+      // A BLANK / still-initializing / pre-dialog pane: NOT past startup. Do NOT advance the
+      // done-counter (the dev-channels-give-up bug: a blank pane was miscounted as past-startup
+      // and the loop broke before the consent dialog rendered). Reset the active streak and keep
+      // polling — the dialog may still appear — until `maxPolls`.
+      active = 0;
       lastRule = null;
       sameCount = 0;
       stuckScreen = undefined; // a clean read means it is not stuck right now
-      if (++quiet >= deps.quietPolls) break; // past startup → done
       await deps.sleep(deps.pollMs);
       continue;
     }
 
     if (cls.kind === "stuck") {
-      // An unhandled blocking prompt: it is NOT quiet, but we have no safe keystroke to send.
-      // Capture it and keep polling — it may yet clear or be answered by a human.
-      quiet = 0;
+      // An unhandled blocking prompt: it is NOT past startup, but we have no safe keystroke to
+      // send. Capture it and keep polling — it may yet clear or be answered by a human.
+      active = 0;
       lastRule = null;
       sameCount = 0;
       stuckScreen = screen;
@@ -262,7 +298,7 @@ export async function autoConfirmStartupPrompts(
 
     // cls.kind === "rule": a known prompt we can confirm.
     const rule = cls.rule;
-    quiet = 0;
+    active = 0;
     stuckScreen = undefined;
     const isNew = rule.name !== lastRule;
     // Re-send a persisted prompt periodically in case the first keystroke was dropped.

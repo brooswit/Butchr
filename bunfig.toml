@@ -14,3 +14,8 @@
 # a script. Keep the two in sync.
 [test]
 root = "./test"
+# Preload that sets a TIGHT startup-auto-confirm poll cadence (BUTCHR_CTO_PROMPT_*) for the whole
+# suite, so the FIRE-AND-FORGET launch probes integration tests spawn against blank fakes drain
+# within their own file instead of polling for ~30s under the production defaults and leaking
+# agentRead/send calls into later files. See test/test-setup.ts for the full rationale. Test-only.
+preload = "./test/test-setup.ts"

@@ -291,9 +291,14 @@ describe("classifyStartupScreen (rule / stuck / quiet — the null-ambiguity fix
     expect(classifyStartupScreen("Unknown consent:\n  1. Foo\n  2. Bar").kind).toBe("stuck");
   });
 
-  test("quiet: a blank screen or ordinary running output", () => {
+  test("quiet: a blank / whitespace / initializing / ordinary pre-dialog screen (NOT past startup)", () => {
     expect(classifyStartupScreen("").kind).toBe("quiet");
+    expect(classifyStartupScreen("   \n  ").kind).toBe("quiet");
     expect(classifyStartupScreen("● Running tests…\n  3 passed").kind).toBe("quiet");
+  });
+
+  test("active: a live working Claude session ('esc to interrupt') is its own kind (past startup)", () => {
+    expect(classifyStartupScreen(ACTIVE_TURN_FOOTER).kind).toBe("active");
   });
 });
 
@@ -349,13 +354,16 @@ describe("looksLikeActiveSession (positive 'active turn ⇒ quiet' anchor)", () 
   });
 });
 
-describe("classifyStartupScreen anchors an ACTIVE operator pane as QUIET (false-positive fix)", () => {
+describe("classifyStartupScreen anchors an ACTIVE operator pane as ACTIVE (false-positive fix)", () => {
   // (b) An active leader/CTO pane — input box + spinner + 'esc to interrupt' + ordinary tool
-  // output that INCIDENTALLY contains a numbered list and the words 'proceed'/'yes' — is QUIET.
-  test("(b) active pane with incidental numbered list + 'proceed'/'yes' classifies QUIET", () => {
-    expect(classifyStartupScreen(ACTIVE_PANE_WITH_INCIDENTAL_PROMPTY_OUTPUT).kind).toBe("quiet");
-    // Bare active footer alone is also quiet.
-    expect(classifyStartupScreen(ACTIVE_TURN_FOOTER).kind).toBe("quiet");
+  // output that INCIDENTALLY contains a numbered list and the words 'proceed'/'yes' — classifies
+  // ACTIVE (genuinely past startup), the dedicated kind that ends the poll. (Pre-2026-06-20 this
+  // was folded into `quiet`; the active/quiet split is the dev-channels-give-up fix — a BLANK
+  // pane is now `quiet` and keeps polling, while only a live session is `active` and stops it.)
+  test("(b) active pane with incidental numbered list + 'proceed'/'yes' classifies ACTIVE", () => {
+    expect(classifyStartupScreen(ACTIVE_PANE_WITH_INCIDENTAL_PROMPTY_OUTPUT).kind).toBe("active");
+    // Bare active footer alone is also active.
+    expect(classifyStartupScreen(ACTIVE_TURN_FOOTER).kind).toBe("active");
   });
 
   // (b) Through the poll loop: a normal working pane sends NO keystroke, sets NO stuckScreen,
@@ -410,5 +418,105 @@ describe("classifyStartupScreen anchors an ACTIVE operator pane as QUIET (false-
     );
     expect(cls.kind).toBe("rule");
     if (cls.kind === "rule") expect(cls.rule.name).toBe("folder-trust");
+  });
+});
+
+// ── DEV-CHANNELS GIVE-UP-BEFORE-RENDER fix (story st-2ef28e4f) ────────────────────────────────
+// THE BUG (proven live 2026-06-20: 4 leaders launched at once, all 4 hung): a leader/CTO launch
+// takes ~3-5s to load channels and RENDER the `--dangerously-load-development-channels` consent
+// dialog. The pane reads BLANK during that window. The old loop folded a blank pane into `quiet`
+// and concluded "past startup → done" after `quietPolls` reads — giving up BEFORE the dialog
+// rendered, so it appeared later with nobody polling and the operator hung forever. The fix: only
+// a genuinely ACTIVE pane (the live `esc to interrupt` UI) ends the poll; a BLANK pane keeps
+// polling (up to maxPolls) so the dialog is still caught when it renders.
+describe("auto-confirm does NOT give up during the BLANK pre-dialog window (st-2ef28e4f)", () => {
+  const CONSENT =
+    "WARNING: Loading development channels\n❯ 1. I am using this for local development\n  2. Exit";
+
+  // (a) THE CORE REGRESSION: the pane is BLANK for FAR MORE polls than quietPolls, THEN the
+  // dev-channels consent renders. The loop must STILL be polling (it did not give up in the blank
+  // window) and must auto-confirm the dialog once it appears.
+  test("(a) blank for the first N polls (N > quietPolls), then the dialog renders → STILL polling, auto-confirms it", async () => {
+    // Five blank reads — well past quietPolls=2 — before the consent renders, then the live UI.
+    const seq = ["", "", "", "", "", CONSENT, ACTIVE_TURN_FOOTER, ACTIVE_TURN_FOOTER, ACTIVE_TURN_FOOTER];
+    let reads = 0;
+    const sent: SendInput[] = [];
+    const result = await autoConfirmStartupPrompts("agent-blank-then-dialog", {
+      read: async () => seq[Math.min(reads++, seq.length - 1)]!,
+      send: async (_n, input) => { sent.push(input); },
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 30,
+      quietPolls: 2,
+    });
+    // It polled THROUGH the blank window (>quietPolls reads) to reach the dialog at index 5 — the
+    // old bug would have broken at poll 2 (blank==quiet==done) and NEVER reached the consent.
+    expect(reads).toBeGreaterThan(2);
+    // And it auto-confirmed the dialog once it rendered (exactly one option-1 keystroke).
+    expect(result.answered).toEqual(["dev-channels-consent"]);
+    expect(sent).toEqual([{ text: "1", enter: true }]);
+    expect(result.stuckScreen).toBeUndefined();
+  });
+
+  // A pane that stays BLANK forever (the dialog never renders) must NOT be declared past-startup —
+  // it keeps polling to maxPolls (sends nothing, reports no stuck). Cheap because it's fire-and-forget.
+  test("(a') a pane that is blank for the WHOLE budget never breaks early (polls to maxPolls, sends nothing)", async () => {
+    let reads = 0;
+    const sent: SendInput[] = [];
+    const result = await autoConfirmStartupPrompts("agent-blank-forever", {
+      read: async () => { reads++; return ""; },
+      send: async (_n, input) => { sent.push(input); },
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 8,
+      quietPolls: 2,
+    });
+    expect(reads).toBe(8); // never broke at quietPolls — polled the full budget waiting for the dialog
+    expect(sent).toEqual([]);
+    expect(result.answered).toEqual([]);
+    expect(result.stuckScreen).toBeUndefined();
+  });
+
+  // (b) A pane that goes genuinely ACTIVE (no dialog) concludes within ~quietPolls active reads —
+  // it does NOT poll forever / burn maxPolls now that blank no longer breaks the loop.
+  test("(b) a genuinely ACTIVE pane concludes after exactly quietPolls reads (no maxPolls burn)", async () => {
+    let reads = 0;
+    const sent: SendInput[] = [];
+    const result = await autoConfirmStartupPrompts("agent-active-only", {
+      read: async () => { reads++; return ACTIVE_TURN_FOOTER; },
+      send: async (_n, input) => { sent.push(input); },
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 100,
+      quietPolls: 3,
+    });
+    // Concluded at exactly quietPolls active reads — NOT maxPolls=100 (no infinite/over-long poll).
+    expect(reads).toBe(3);
+    expect(result.answered).toEqual([]);
+    expect(result.stuckScreen).toBeUndefined();
+    expect(sent).toEqual([]); // a live session is NEVER keystroked
+  });
+
+  // A blank stretch must RESET the active streak: active, active, blank, active, active needs a
+  // FRESH quietPolls of consecutive active reads to conclude (a flicker can't prematurely finish).
+  test("(b') a blank read between active reads resets the consecutive-active streak", async () => {
+    // active, active, BLANK, active, active, active(stick) with quietPolls=3:
+    // the streak resets at the blank, so it concludes only on the 3rd consecutive active AFTER it.
+    const A = ACTIVE_TURN_FOOTER;
+    const seq = [A, A, "", A, A, A, A];
+    let reads = 0;
+    const result = await autoConfirmStartupPrompts("agent-flicker", {
+      read: async () => seq[Math.min(reads++, seq.length - 1)]!,
+      send: async () => {},
+      sleep: noSleep,
+      pollMs: 0,
+      maxPolls: 30,
+      quietPolls: 3,
+    });
+    // Reads: A,A (streak 2), blank (reset 0), A,A,A (streak hits 3 → break) = 6 reads. Had the
+    // blank NOT reset the streak, it would have broken at read 3 (2 pre-blank + 1 post).
+    expect(reads).toBe(6);
+    expect(result.answered).toEqual([]);
+    expect(result.stuckScreen).toBeUndefined();
   });
 });

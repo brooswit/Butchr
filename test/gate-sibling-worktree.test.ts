@@ -25,6 +25,9 @@ import { join } from "node:path";
 import { runGate } from "../src/gate.ts";
 
 const REPO_BUNFIG = join(import.meta.dir, "..", "bunfig.toml");
+// The repo bunfig.toml's `[test] preload` references this file; a synthetic repo that copies the
+// bunfig must also carry the preload, or a bare `bun test` there fails resolving it.
+const REPO_PRELOAD = join(import.meta.dir, "test-setup.ts");
 
 /**
  * Build a synthetic "repo root" containing the repo's OWN ./test (a passing
@@ -48,7 +51,12 @@ function makeRepoWithSiblings(siblings: number, withBunfig: boolean): string {
         `test("SIBLING worktree test — must NOT be discovered", () => { expect(1).toBe(2); });\n`,
     );
   }
-  if (withBunfig) copyFileSync(REPO_BUNFIG, join(root, "bunfig.toml"));
+  if (withBunfig) {
+    copyFileSync(REPO_BUNFIG, join(root, "bunfig.toml"));
+    // Carry the preload the bunfig references (it sets test-only env defaults; it is not a
+    // *.test.ts so it is NOT discovered as a test — the scoped count stays "1 test across 1 file").
+    copyFileSync(REPO_PRELOAD, join(root, "test", "test-setup.ts"));
+  }
   return root;
 }
 
