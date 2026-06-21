@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Channel: bound the story de-dup set and tighten the gate-red surface.** The
+  notification bridge's `deliveredStory` de-dup set is now capped (FIFO eviction
+  of the oldest key) instead of growing without limit — each distinct CTO `ask`
+  marker (the full pending-ask text) previously added a permanent entry, a slow
+  leak on a long-lived bridge; a cap is used rather than a prune-on-delete handler
+  because there is no `story.deleted`/terminal event on the consume stream. Also
+  guard the `leaderStorySurfaces` gate-red push on `total > 0` so a degenerate
+  zero-member `merge_blocked` story no longer emits a stray gate-red, matching the
+  completion-review and member-blocked surfaces.
+
 ## [0.9.158] - 2026-06-21
 
 - **Fixed: STORY-CONTAINER notifications (`story.attention`) are now recovered on a CTO-channel reconnect/restart, delivered exactly once (story st-ad96e5c3, finishing st-fffc76a8) (`src/channel.ts`, `src/events.ts`, `src/stories.ts`, `src/tasks.ts`).** st-fffc76a8 re-synced LEAF attention on a bridge (re)connect but deliberately LEFT story-container notifications un-resynced — `consumeStoryAttention` handled them statelessly (no de-dup key), so a story ask / completion-review / gate-red / member-blocked that fired during a reconnect gap or across a butchr restart was silently dropped on the push channel. Now: (1) each story.attention publisher stamps a backward-safe, REST-derivable `marker` on the event (completion-review/gate-red = the merged+rolled_back member count, member-blocked = the failed+aborted count, the CTO `ask` = the durable `pending_ask` text) and `AttentionBridge` keys an in-memory de-dup set on `storyId|target|reason|marker` so a re-fed event is suppressed once delivered while a genuine re-fire (e.g. a fix-subtask landing raises the merged count) still emits; markerless reasons (ask-answered/complete/merge-conflict — never resynced) emit as before. (2) `resyncAttention` now re-derives the outstanding story-container surfaces from the already-fetched `GET /api/work` node rows (LEADER bridge: completion-review / member-blocked / gate-red from status + the `counts` rollup; CTO bridge: the open `ask` from `pending_ask`/`ask_responder`) and feeds synthesized story.attention objects through the same `bridge.consume()`, inheriting ownership routing + the de-dup key unchanged. DB-free + fully best-effort (per-item, story-block, and whole-fn try/catch — never throws). `ask-answered` (answer text unrecoverable) and the transient `complete`/`merge-conflict` are out of scope; a merge_blocked+all-merged story benignly re-derives both completion-review and gate-red once (distinct keys), the correct over-deliver bias for a recovery path. New regression tests in `test/channel.test.ts` cover gap-recovery exactly-once, no re-emit on a later reconnect, a legitimate re-fire, and leaf+story coexistence. No `package.json` change.

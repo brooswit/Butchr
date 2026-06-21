@@ -254,6 +254,31 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
  * (BUTCHR_CHANNEL_WORKSPACE, or unscoped) gets NON-STORY tasks awaiting the CTO. See
  * routeOwns.
  */
+
+// Insertion-ordered key set with a hard FIFO cap: on add past the cap, the OLDEST
+// key is evicted. Used to bound the story de-dup set (see deliveredStory). A re-add of
+// an evicted key is treated as new (it would re-emit) — acceptable because eviction only
+// happens after thousands of distinct markers, far beyond any live re-fire window.
+const DELIVERED_STORY_CAP = 2000;
+export class BoundedKeySet {
+  private set = new Set<string>();
+  constructor(private readonly cap: number) {}
+  has(key: string): boolean {
+    return this.set.has(key);
+  }
+  add(key: string): void {
+    if (!this.set.has(key) && this.set.size >= this.cap) {
+      // evict the oldest (first-inserted) entry — Set preserves insertion order
+      const oldest = this.set.keys().next().value;
+      if (oldest !== undefined) this.set.delete(oldest);
+    }
+    this.set.add(key);
+  }
+  get size(): number {
+    return this.set.size;
+  }
+}
+
 export class AttentionBridge {
   private lastStatus = new Map<string, string>();
   // Per-task last-seen IDLE flag, tracked SEPARATELY from status because idle is a flag
@@ -280,7 +305,11 @@ export class AttentionBridge {
   // never resynced, so it is emitted as before and never recorded. The marker MONOTONICALLY changes on
   // a legitimate re-fire (e.g. completion-review's rising merged-count), so a genuine re-fire gets a new
   // key and still emits, while a reconnect-resync re-derives the SAME key and is suppressed.
-  private deliveredStory = new Set<string>();
+  // BOUNDED with a FIFO cap (not pruned on story terminal): there is NO story.deleted/terminal
+  // event on this consume stream — `story.attention` is the only story-lifecycle signal — so there
+  // is nothing to hang a prune-on-delete handler off of. An `ask` marker is the full pending_ask
+  // text, so distinct asks accrete permanently; the cap evicts oldest to bound that slow leak.
+  private deliveredStory = new BoundedKeySet(DELIVERED_STORY_CAP);
   // workspace_id -> human label, populated from workspace.* events on the same
   // stream (and optionally seeded once at startup). Used only for the content line;
   // meta.workspace is always the stable workspace_id.
@@ -766,7 +795,7 @@ function storyMemberTotals(counts: Record<string, unknown>): {
  * stories.ts) so a synthesized event de-dups against an already-delivered live one. `ask-answered`
  * is OUT OF SCOPE (its answer text is unrecoverable from REST). Returns 0..2+ synthesized events.
  */
-function leaderStorySurfaces(node: Record<string, unknown>): Array<Record<string, unknown>> {
+export function leaderStorySurfaces(node: Record<string, unknown>): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   const storyId = typeof node.id === "string" ? node.id : "";
   if (!storyId) return out;
@@ -803,7 +832,7 @@ function leaderStorySurfaces(node: Record<string, unknown>): Array<Record<string
   // co-derives with completion-review; the two carry distinct `reason`s (distinct de-dup keys) so
   // both may push once on a recovering reconnect, and the set quiets repeats thereafter. Over-
   // delivering on a recovery path is the correct bias (steering note).
-  if (status === "merge_blocked") {
+  if (status === "merge_blocked" && total > 0) {
     out.push(mk("gate-red", null, String(merged)));
   }
   return out;
