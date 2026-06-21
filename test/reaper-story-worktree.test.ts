@@ -24,6 +24,17 @@ const WS = "reaper-story-ws";
 let dbMod: typeof import("../src/db.ts");
 let reaperMod: typeof import("../src/reaper.ts");
 let gitMod: typeof import("../src/git.ts");
+let storiesMod: typeof import("../src/stories.ts");
+
+/** Poll `pred` until true (the F5 worktree/branch cleanup is chained off the async member-abort
+ *  promise, so it lands a few microtasks after the abort/delete call returns). */
+async function waitFor(pred: () => boolean, tries = 200, ms = 10): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, ms));
+  }
+  throw new Error("waitFor timed out");
+}
 
 const g = (args: string[]) => execFileSync("git", ["-C", REPO_ROOT, ...args], { stdio: "ignore" });
 
@@ -45,6 +56,7 @@ beforeAll(async () => {
   dbMod = await import("../src/db.ts");
   reaperMod = await import("../src/reaper.ts");
   gitMod = await import("../src/git.ts");
+  storiesMod = await import("../src/stories.ts");
 
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
@@ -96,4 +108,83 @@ test("reaper STILL reaps a genuinely-orphaned task worktree (no task row)", asyn
     encoding: "utf8",
   });
   expect(branch.trim().length).toBe(0);
+});
+
+// --- st-a632b2cc F5: abort/delete tears down a leaked isolated story worktree+branch ---------
+// Before the fix, only the LANDED/done path (tasks.mergeStoryBranch → git.removeStoryBranch)
+// removed an isolated story's `<repo>/butchr-story-<id>` worktree + `butchr/story/<id>` branch.
+// The abort + delete paths left them to leak until the next boot reaper. F5 calls
+// git.removeStoryBranch inline on both paths, but ONLY for isolated stories, best-effort.
+
+const branchListed = (b: string) =>
+  execFileSync("git", ["-C", REPO_ROOT, "branch", "--list", b], { encoding: "utf8" }).trim().length > 0;
+
+test("F5: ABORTING an isolated story removes its worktree + branch", async () => {
+  const storyId = "st-f5-abort";
+  const storyBranch = gitMod.storyBranchName(storyId);
+  const storyWt = gitMod.storyWorktreePath(REPO_ROOT, storyId);
+  // An ISOLATED (isolated=1) open story that owns a real worktree + branch.
+  dbMod.db
+    .query(
+      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 1)`,
+    )
+    .run(storyId, WS, "ship it", dbMod.nowIso());
+  await gitMod.ensureStoryBranch(REPO_ROOT, storyBranch);
+  expect(existsSync(storyWt)).toBe(true);
+  expect(branchListed(storyBranch)).toBe(true);
+
+  storiesMod.updateStory(storyId, { status: "aborted" });
+
+  // The cleanup is chained off the (memberless) abort promise — poll until it lands.
+  await waitFor(() => !existsSync(storyWt) && !branchListed(storyBranch));
+  expect(existsSync(storyWt)).toBe(false);
+  expect(branchListed(storyBranch)).toBe(false);
+});
+
+test("F5: DELETING an isolated story removes its worktree + branch", async () => {
+  const storyId = "st-f5-delete";
+  const storyBranch = gitMod.storyBranchName(storyId);
+  const storyWt = gitMod.storyWorktreePath(REPO_ROOT, storyId);
+  dbMod.db
+    .query(
+      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 1)`,
+    )
+    .run(storyId, WS, "ship it", dbMod.nowIso());
+  await gitMod.ensureStoryBranch(REPO_ROOT, storyBranch);
+  expect(existsSync(storyWt)).toBe(true);
+  expect(branchListed(storyBranch)).toBe(true);
+
+  storiesMod.deleteStory(storyId);
+
+  await waitFor(() => !existsSync(storyWt) && !branchListed(storyBranch));
+  expect(existsSync(storyWt)).toBe(false);
+  expect(branchListed(storyBranch)).toBe(false);
+  // The story row is gone (delete completed).
+  expect(storiesMod.getStory(storyId)).toBeNull();
+});
+
+test("F5: a NON-isolated story abort + delete do NOT error (and touch no story branch)", () => {
+  // A non-isolated story has no story worktree/branch — abort/delete must skip removeStoryBranch
+  // entirely and never throw.
+  const abortId = "st-f5-noniso-abort";
+  dbMod.db
+    .query(
+      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 0)`,
+    )
+    .run(abortId, WS, "no iso", dbMod.nowIso());
+  expect(() => storiesMod.updateStory(abortId, { status: "aborted" })).not.toThrow();
+  expect(storiesMod.getStory(abortId)!.status).toBe("aborted");
+
+  const deleteId = "st-f5-noniso-delete";
+  dbMod.db
+    .query(
+      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 0)`,
+    )
+    .run(deleteId, WS, "no iso", dbMod.nowIso());
+  expect(() => storiesMod.deleteStory(deleteId)).not.toThrow();
+  expect(storiesMod.getStory(deleteId)).toBeNull();
+
+  // No isolated-story branches were created in this test.
+  expect(branchListed(gitMod.storyBranchName(abortId))).toBe(false);
+  expect(branchListed(gitMod.storyBranchName(deleteId))).toBe(false);
 });

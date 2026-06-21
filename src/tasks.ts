@@ -2586,6 +2586,22 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // open/merge_blocked accept; merging/done/aborted do not). The task is LEFT in_review (not lost)
   // so a human can re-home it; both the human-approve and auto-merge paths surface `storyClosed`
   // instead of retrying (maybeAutoMerge bails on the same condition before ever reaching here).
+  // MEMBER-ABORT LATCH (story st-a632b2cc F3) — checked FIRST, alongside the F1 parent guard.
+  // A member being torn down by a story cascade-abort/delete is latched `aborting=1` synchronously
+  // the instant teardown begins (stories.abortInflightMembers). REFUSE it here, BEFORE the merge
+  // lock + resolveMergeContext, so a human approval landing mid-teardown can't merge it to main as
+  // a standalone orphan. This is the LOAD-BEARING guard for the DELETE path: deleteStory removes
+  // the story row + NULLs story_id, so the F1 parentStoryStatus guard below sees no parent — but
+  // the member-level latch survives the detach. Held in_review (not lost). A one-way latch, so a
+  // member whose best-effort abort FAILED stays non-mergeable (correct: a member of a deleted/
+  // aborted story must never merge). Surfaced via the same storyClosed shape S1 added.
+  if (row.aborting) {
+    const message =
+      `subtask ${id} is being aborted (its story is being torn down) — merge refused ` +
+      `(task held in_review)`;
+    console.warn(`[butchr] finalizeMerge(${id}): ${message}`);
+    return { task: taskView(id)!, storyClosed: true, message };
+  }
   const storyStatus = parentStoryStatus(row);
   if (storyStatus && !STORY_ACCEPTS_MEMBERS.has(storyStatus)) {
     const message =
@@ -4107,6 +4123,10 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
     if (row.ci_status !== "pass") return false;
     if (row.conflict) return false; // already-known conflict → human handles it
     if (row.auto_merged) return false; // already auto-merged (defensive)
+    // MEMBER-ABORT LATCH (story st-a632b2cc F3): never auto-merge a member being torn down by a
+    // story cascade-abort/delete — finalizeMerge would REFUSE it anyway. Bail SILENTLY (no re-log)
+    // so the CI-settle hook + dispatcher-tick backstop don't re-attempt every pass.
+    if (row.aborting) return false;
 
     const dir = getWorkspace(row.workspace_id);
     if (!dir) return false;

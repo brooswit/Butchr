@@ -546,6 +546,18 @@ ensureColumn("tasks", "needs_user_input", "INTEGER NOT NULL DEFAULT 0");
 // `needs_user_input` (see tasks.setNeedsUserInput), exactly like idle_context tracks idle.
 ensureColumn("tasks", "needs_user_input_context", "TEXT");
 
+// `aborting` is a one-way, member-level NON-MERGEABLE latch (story st-a632b2cc F3): set 1
+// SYNCHRONOUSLY on a story's LIVE members the instant a cascade-abort/delete begins tearing
+// them down (stories.abortInflightMembers' pre-await prefix, only for the abort+delete callers).
+// It closes the orphan-merge WINDOW: deleteStory REMOVES the story row + NULLs each member's
+// story_id, so the story-level F1 parent-status guard (which reads the `stories` row) can no
+// longer see the parent — a human approval landing mid-teardown would otherwise merge the member
+// to main as a STANDALONE orphan. finalizeMerge/maybeAutoMerge refuse any `aborting` member
+// BEFORE the merge lock, so it can never reach main. A one-way latch on purpose: a member of a
+// deleted/aborted story must NEVER merge, so even a best-effort abort that FAILS (member left
+// in_review) stays permanently non-mergeable. Owned by stories.ts; default 0.
+ensureColumn("tasks", "aborting", "INTEGER NOT NULL DEFAULT 0");
+
 // `session_id` is the Claude Code session UUID butchr assigns to the agent at
 // launch (`--session-id <uuid>`). It is what makes the review handshake durable:
 // once set, butchr can re-launch the SAME session with full prior context via
@@ -1573,6 +1585,12 @@ export type TaskRow = {
   // ANSI-stripped run-log tail captured when `needs_user_input` flips on, surfaced to the
   // user; NULL whenever the flag is clear. See tasks.setNeedsUserInput.
   needs_user_input_context: string | null;
+  // NON-MERGEABLE latch (story st-a632b2cc F3): 1 ⇔ this member is being torn down by a
+  // story cascade-abort/delete; finalizeMerge/maybeAutoMerge refuse it so it can never merge
+  // to main as an orphan once its story row/story_id is gone. Set synchronously in
+  // stories.abortInflightMembers' pre-await prefix; one-way (never cleared). See the
+  // `aborting` ensureColumn comment.
+  aborting: number;
   review_note: string | null;
   summary: string | null;
   // RAISE handshake (see the `question`/`answer` ensureColumn block above): `question`

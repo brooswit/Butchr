@@ -654,6 +654,121 @@ describe("terminal transitions clear a stale story-level ask (hygiene)", () => {
   });
 });
 
+// --- st-a632b2cc F4: assignTaskToStory story-status guard --------------------
+// assignTaskToStory checked existence + same-workspace but NEVER the story's status, so an
+// in-flight task could be assigned into a merging/done/aborted story and merge into its
+// already-closed branch. The guard mirrors createSubtask's creation guard: open|merge_blocked
+// accept new members; merging/done/aborted reject (409). Clearing membership (null) stays open.
+describe("st-a632b2cc F4: assignTaskToStory story-status guard", () => {
+  test("assign into open/merge_blocked works; into merging/done/aborted is 409", () => {
+    // open → assignable
+    const open = storiesMod.createStory(WS_A, "F4 open");
+    seedTask("f4-open", WS_A);
+    expect(storiesMod.assignTaskToStory("f4-open", open.id).story_id).toBe(open.id);
+
+    // merge_blocked → assignable (merge_blocked is butchr-owned; set it directly)
+    const mb = storiesMod.createStory(WS_A, "F4 merge_blocked");
+    dbMod.db.query(`UPDATE stories SET status='merge_blocked' WHERE id=?`).run(mb.id);
+    seedTask("f4-mb", WS_A);
+    expect(storiesMod.assignTaskToStory("f4-mb", mb.id).story_id).toBe(mb.id);
+
+    // done → rejected, task untouched
+    const done = storiesMod.createStory(WS_A, "F4 done");
+    storiesMod.updateStory(done.id, { status: "done" });
+    seedTask("f4-done", WS_A);
+    expect(() => storiesMod.assignTaskToStory("f4-done", done.id)).toThrow(
+      /cannot assign a task to a done story/,
+    );
+    expect(tasksMod.getTask("f4-done")!.story_id).toBeNull();
+
+    // aborted → rejected
+    const aborted = storiesMod.createStory(WS_A, "F4 aborted");
+    storiesMod.updateStory(aborted.id, { status: "aborted" });
+    seedTask("f4-aborted", WS_A);
+    expect(() => storiesMod.assignTaskToStory("f4-aborted", aborted.id)).toThrow(
+      /cannot assign a task to a aborted story/,
+    );
+
+    // merging → rejected (transient; set it directly)
+    const merging = storiesMod.createStory(WS_A, "F4 merging");
+    dbMod.db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(merging.id);
+    seedTask("f4-merging", WS_A);
+    expect(() => storiesMod.assignTaskToStory("f4-merging", merging.id)).toThrow(
+      /cannot assign a task to a merging story/,
+    );
+  });
+
+  test("clearing membership (null) stays UNGUARDED even when the story is terminal", () => {
+    const story = storiesMod.createStory(WS_A, "F4 clear");
+    seedTask("f4-clear", WS_A);
+    storiesMod.assignTaskToStory("f4-clear", story.id);
+    // The story goes terminal AFTER the task joined; detaching must still be allowed.
+    storiesMod.updateStory(story.id, { status: "done" });
+    expect(storiesMod.assignTaskToStory("f4-clear", null).story_id).toBeNull();
+  });
+});
+
+// --- st-a632b2cc F3: cascade-abort/delete orphan-merge window ----------------
+// A subtask is reviewable/mergeable DURING the story's teardown. Before the fix, a human
+// approval landing in that window merged the member to main as a STANDALONE orphan (the DELETE
+// path NULLs story_id, blinding S1's F1 parent-status guard). F3 latches the LIVE members
+// `aborting=1` SYNCHRONOUSLY (before any await), and finalizeMerge/maybeAutoMerge refuse any
+// latched member — so it can never reach main.
+describe("st-a632b2cc F3: cascade-abort/delete orphan-merge window", () => {
+  test("deleteStory latches live members aborting=1 synchronously + NULLs story_id (merged member untouched)", () => {
+    const story = storiesMod.createStory(WS_A, "F3 delete window");
+    seedMember("f3-del-live", WS_A, story.id, "in_review");
+    seedMember("f3-del-merged", WS_A, story.id, "merged"); // historical — must NOT be latched
+
+    storiesMod.deleteStory(story.id);
+
+    // The live in_review member is latched non-mergeable + detached — SYNCHRONOUSLY, before the
+    // async abort cascade can complete (no await crossed since deleteStory returned).
+    const live = tasksMod.getTask("f3-del-live")!;
+    expect(live.aborting).toBe(1);
+    expect(live.story_id).toBeNull();
+    // The already-merged member is preserved and NOT latched (don't mark a historical record).
+    const merged = tasksMod.getTask("f3-del-merged")!;
+    expect(merged.aborting).toBe(0);
+    expect(merged.status).toBe("merged");
+  });
+
+  test("updateStory(aborted) latches live members aborting=1 (merged member untouched)", () => {
+    const story = storiesMod.createStory(WS_A, "F3 abort window");
+    seedMember("f3-ab-live", WS_A, story.id, "in_review");
+    seedMember("f3-ab-merged", WS_A, story.id, "merged");
+
+    storiesMod.updateStory(story.id, { status: "aborted" });
+
+    expect(tasksMod.getTask("f3-ab-live")!.aborting).toBe(1);
+    expect(tasksMod.getTask("f3-ab-merged")!.aborting).toBe(0);
+  });
+
+  test("finalizeMerge REFUSES a latched member mid-DELETE — held in_review, never merged to main", async () => {
+    // Simulate the DELETE window precisely: a member approved AFTER deleteStory NULLed its
+    // story_id + removed the story row, but BEFORE its abort completed.
+    const story = storiesMod.createStory(WS_A, "F3 finalize refusal");
+    seedMember("f3-fin", WS_A, story.id, "in_review");
+
+    storiesMod.deleteStory(story.id);
+    // Latched + detached synchronously; the story row is gone, so S1's F1 parent-status guard
+    // (which reads the `stories` row) can no longer see the parent — the member-level latch is
+    // what holds. (No await between deleteStory and the finalizeMerge guard, so the async abort
+    // has NOT yet flipped the member to `aborted`.)
+    const before = tasksMod.getTask("f3-fin")!;
+    expect(before.aborting).toBe(1);
+    expect(before.story_id).toBeNull();
+    expect(before.status).toBe("in_review");
+
+    // A human approval landing now is REFUSED before the merge lock / any git op (main untouched).
+    const out = await tasksMod.finalizeMerge("f3-fin");
+    expect(out.storyClosed).toBe(true);
+    // Held in_review (not lost) and NEVER reached `merged`.
+    expect(tasksMod.getTask("f3-fin")!.status).toBe("in_review");
+    expect(tasksMod.getTask("f3-fin")!.status).not.toBe("merged");
+  });
+});
+
 describe("workspace deletion cascade-deletes its stories", () => {
   test("removing a workspace removes its stories (FK cascade)", () => {
     const WS_C = "stories-ws-c";

@@ -122,6 +122,35 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
 }
 
 /**
+ * F5 (story st-a632b2cc) — tear down a leaked ISOLATED story's worktree + branch AFTER its
+ * member cascade settles (so no member worktree is still checked out against the story branch).
+ * Mirrors the landed path (tasks.mergeStoryBranch → git.removeStoryBranch), but for the
+ * abort/delete paths, which previously left `<repo>/butchr-story-<id>` + `butchr/story/<id>`
+ * to leak until the next boot reaper. Best-effort + idempotent (git.removeStoryBranch tolerates
+ * an already-removed / never-materialized branch); a no-op for a NON-isolated story (its abort/
+ * delete must not error). Always swallows the abort-promise rejection so it never blocks abort/
+ * delete. Chained off the member-abort promise so the story worktree is removed only after the
+ * members are torn down.
+ */
+function cleanupIsolatedStoryBranch(
+  story: { id: string; workspace_id: string; isolated: number },
+  afterMembers: Promise<unknown>,
+): void {
+  if (story.isolated !== 1) {
+    void afterMembers.catch(() => {});
+    return;
+  }
+  const dir = getWorkspace(story.workspace_id);
+  if (!dir) {
+    void afterMembers.catch(() => {});
+    return;
+  }
+  void afterMembers
+    .then(() => git.removeStoryBranch(dir.path, git.storyBranchName(story.id)))
+    .catch(() => {});
+}
+
+/**
  * Apply a PARTIAL update to a story (brief and/or status), by KEY PRESENCE so updating
  * one field never clobbers the other. `brief` must be a non-empty string; `status` must
  * be one of open|done|aborted (400 otherwise — `merging`/`merge_blocked` are butchr-owned
@@ -239,7 +268,11 @@ export function updateStory(
   // (mirrors this file's `void landStory` fire-and-forget idiom). Already-MERGED members are
   // PRESERVED untouched.
   if (target === "aborted") {
-    void abortInflightMembers(id).catch(() => {});
+    // F3: pass `hold` so the live members are latched non-mergeable SYNCHRONOUSLY here (belt-and-
+    // suspenders alongside S1's F1 parent-status guard — the story is provably `aborted` by the
+    // CAS above, but the latch closes the window at the member level too). F5: after the cascade,
+    // remove the leaked isolated story worktree + branch.
+    cleanupIsolatedStoryBranch(story, abortInflightMembers(id, { hold: true }));
   }
   // STORY COMPLETION REPORTED UP (Phase 6): on the ENTRY into `done` (the CAS proved the row
   // actually moved open→done, so a no-op re-PATCH never re-notifies), report completion UP to
@@ -540,14 +573,22 @@ export async function recoverMergingStories(): Promise<number> {
  * stories wholesale.)
  */
 export function deleteStory(id: string): void {
-  if (!getStory(id)) throw new HttpError(404, `story not found: ${id}`);
+  const story = getStory(id);
+  if (!story) throw new HttpError(404, `story not found: ${id}`);
   // FIRST abort the LIVE members so none is orphaned by the detach/DELETE below. Fire-and-forget
   // (deleteStory is deliberately synchronous — see story-agent.ts stopStoryAgent's note), but the
   // member SELECT inside the cascade runs synchronously NOW (before its first await), so it
   // captures every in-flight member while story_id is still set — the subsequent NULLing can't
   // hide a live member from the abort. abortTask works by task id, so the detach below never
   // races it. Terminal/merged members are skipped (preserved). Best-effort; never blocks delete.
-  void abortInflightMembers(id).catch(() => {});
+  //
+  // F3 ORPHAN-MERGE WINDOW: `hold` latches `aborting=1` on the live members in this call's
+  // SYNCHRONOUS prefix (before its first await) — so by the time the NULLing/DELETE below runs,
+  // a concurrent finalizeMerge can no longer merge a member to main as a standalone orphan. The
+  // latch is the load-bearing guard HERE: deleting the story row + NULLing story_id blinds S1's
+  // F1 parent-status guard (it reads the now-gone `stories` row), but the member-level `aborting`
+  // latch survives the detach. Keep the promise to sequence the F5 branch cleanup after teardown.
+  const aborting = abortInflightMembers(id, { hold: true });
   // Tear down the story's managed STORY-LEADER agent FIRST (desired-down + close its
   // tab/pane + free its name) so the DELETE below — which cascade-removes its story_agent
   // row — can't strand an orphaned leader pane. Best-effort; never blocks delete.
@@ -567,6 +608,11 @@ export function deleteStory(id: string): void {
   // no-op when the story was never materialized (no member was ever created/assigned).
   db.query(`DELETE FROM tasks WHERE id=?`).run(id);
   db.query(`DELETE FROM stories WHERE id=?`).run(id);
+  // F5: after the member cascade settles, tear down the leaked isolated story worktree + branch.
+  // The workspace is NOT deleted here, so getWorkspace (inside the helper) still resolves; the
+  // story row is gone but we captured `story` up front. Best-effort; a no-op for a non-isolated
+  // story (its delete must not error).
+  cleanupIsolatedStoryBranch(story, aborting);
 }
 
 /**
@@ -589,6 +635,15 @@ export function assignTaskToStory(taskId: string, storyId: string | null): TaskV
     if (!story) throw new HttpError(404, `story not found: ${storyId}`);
     if (story.workspace_id !== task.workspace_id) {
       throw new HttpError(400, "story belongs to a different workspace than the task");
+    }
+    // STORY-STATUS GUARD (story st-a632b2cc F4): only an ASSIGNABLE story accepts new members —
+    // mirror createSubtask's creation guard (open|merge_blocked accept; merging/done/aborted
+    // reject). Without this, an in-flight task could be assigned into a terminal/merging story and
+    // (via F1's isolated branch resolution) merge into a branch its container already stopped
+    // accepting work into. Applies ONLY on the ASSIGN branch; clearing (storyId===null) below
+    // stays unguarded — detaching a member is always allowed.
+    if (story.status !== "open" && story.status !== "merge_blocked") {
+      throw new HttpError(409, `cannot assign a task to a ${story.status} story`);
     }
   }
 
@@ -748,13 +803,38 @@ export type MemberAbortOutcome = {
  * The member SELECT runs synchronously at call time (before the first `await`), so a fire-and-
  * forget caller (`void abortInflightMembers(id)`) captures the full member set BEFORE it mutates
  * the node (e.g. deleteStory NULLing story_id) — no live member can slip the capture.
+ *
+ * `opts.hold` (story st-a632b2cc F3) — when set, SYNCHRONOUSLY latches `aborting=1` on the LIVE
+ * members (the same ones this is about to abort — NOT the skipped terminal/merged/rolling_back
+ * ones) in this pre-await prefix, so a fire-and-forget caller closes the orphan-merge WINDOW
+ * BEFORE its next line runs (deleteStory NULLing story_id / removing the story row). With the
+ * story row gone, the F1 parent-status guard can't see the parent; the member-level `aborting`
+ * latch is what finalizeMerge/maybeAutoMerge then refuse on. ONLY the abort+delete callers pass
+ * it; resetStory does not (its story stays open — members abort normally, no latch).
  */
-export async function abortInflightMembers(storyId: string): Promise<MemberAbortOutcome> {
+export async function abortInflightMembers(
+  storyId: string,
+  opts: { hold?: boolean } = {},
+): Promise<MemberAbortOutcome> {
   const members = db
     .query<{ id: string; status: TaskStatus }, [string]>(
       `SELECT id, status FROM tasks WHERE story_id=?`,
     )
     .all(storyId);
+
+  // The LIVE (abortable) members — neither terminal nor mid-rollback. Computed from the SAME
+  // synchronous capture the loop iterates, so the latch covers exactly what gets torn down.
+  const liveIds = members
+    .filter((m) => !isTerminal(m.status) && m.status !== "rolling_back")
+    .map((m) => m.id);
+  // F3 WINDOW-CLOSE: latch the live members non-mergeable NOW, before the first `await`. A
+  // fire-and-forget caller's subsequent synchronous lines (story_id=NULL / DELETE) therefore
+  // run only AFTER every live member is already refused by finalizeMerge — no orphan can merge.
+  if (opts.hold && liveIds.length > 0) {
+    db.query(
+      `UPDATE tasks SET aborting=1 WHERE id IN (${liveIds.map(() => "?").join(", ")})`,
+    ).run(...liveIds);
+  }
 
   const aborted: string[] = [];
   const failed: string[] = [];
