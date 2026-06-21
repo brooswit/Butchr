@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.164] - 2026-06-21
+
 - **Hardened: bounded subprocess-output capture closes a latent OOM (`src/exec.ts`, `src/herdr.ts`, `src/config.ts`, `src/harness.ts`).** Both child-process capture paths — `exec.run` (gate/test commands, git) and `herdr.runHeadless` (the conformance reviewer + brief expander) — previously read the child's stdout/stderr into memory via `new Response(stream).text()` with NO byte cap, so a gate/test command or a runaway `claude` that printed gigabytes before its wall-clock timeout fired (the timeout bounds wall-clock, not bytes) could buffer unboundedly and OOM the butchr process. A new shared, streaming `exec.readBoundedTail(stream, maxBytes)` helper now backs both call sites: it retains only the LAST `maxBytes` bytes — the END is what `ciTail` and the conformance-verdict parser both want — dropping from the FRONT as new data arrives (peak memory ~`maxBytes` regardless of total output) and prepending a short `[...truncated N bytes...]` marker when it trims. The cap is the new `BUTCHR_MAX_SUBPROC_OUTPUT_BYTES` knob (default 8 MiB, floor-clamped at 64 KiB). A SUB-CAP run is captured in FULL, byte-for-byte unchanged, so `exec.run`'s exit-code / `ok` / `timedOut` / TIMEOUT_MARKER handling and `runHeadless`'s never-throw contract are preserved; when a proc is killed mid-stream the partial tail is returned. New regression tests in `test/exec-bounded-output.test.ts` (sub-cap unchanged; over-cap truncated to ~cap with the tail retained + marker; exit code captured under truncation; `readBoundedTail` unit cases). No `package.json` change.
 
 ## [0.9.163] - 2026-06-21
