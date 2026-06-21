@@ -23,6 +23,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
 } from "node:fs";
@@ -106,7 +107,15 @@ export async function snapshotDb(): Promise<string> {
   const target = uniqueTarget(config.backupDir, fsStamp());
   // db.ts is loaded lazily here, not at module top — see the module header for why.
   const { db } = await import("./db.ts");
-  db.exec(`VACUUM INTO ${sqlQuote(target)}`);
+  try {
+    db.exec(`VACUUM INTO ${sqlQuote(target)}`);
+  } catch (e) {
+    // A failed VACUUM INTO (e.g. disk full) can leave a partial target file that
+    // would later masquerade as a valid backup. Best-effort remove it, then
+    // re-throw so callers (snapshotAndPrune) catch+log exactly as before.
+    rmSync(target, { force: true });
+    throw e;
+  }
   lastSnapshotAt = new Date().toISOString();
   return target;
 }
@@ -202,13 +211,76 @@ export async function snapshotOnShutdown(): Promise<void> {
  */
 export function resolveBackup(target: string): string {
   if (target === "latest") {
-    const all = listBackups();
-    if (all.length === 0) throw new Error(`no snapshots found in ${config.backupDir}`);
-    return all[0]!.path;
+    // listBackups() honestly returns EVERY prefix/suffix-matching file (so pruning
+    // can still reap zero-byte leftovers). For auto-selection, skip an obvious
+    // partial: pick the newest snapshot with positive size. (F1's validator is the
+    // real safety net for explicit path/filename restores.)
+    const newest = listBackups().find((b) => b.size > 0);
+    if (!newest) throw new Error(`no snapshots found in ${config.backupDir}`);
+    return newest.path;
   }
   const path = isAbsolute(target) ? target : join(config.backupDir, basename(target));
   if (!existsSync(path)) throw new Error(`snapshot file not found: ${path}`);
   return path;
+}
+
+// The 16-byte SQLite file header: the 15-char ASCII string plus a trailing NUL.
+// Compared as BYTES (not a JS string) so the NUL terminator is significant.
+const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "latin1");
+
+/**
+ * Validate that `from` is a non-empty, well-formed, integrity-clean SQLite file
+ * BEFORE it is allowed to overwrite the live db. Throws (restore ABORTED, live db
+ * left untouched) on any failure. Checks run cheapest→strongest, and size+magic
+ * run BEFORE any db open so a zero-byte/garbage file never reaches SQLite:
+ *   1. non-zero size,
+ *   2. 16-byte SQLite header magic (byte-compared),
+ *   3. a throwaway READ-ONLY open + `PRAGMA quick_check` returning a single 'ok' row.
+ * Database is imported HERE (not from ./db.ts) to keep this module's "never open the
+ * live db at import" property; the readonly open of a VACUUM-INTO file leaves no
+ * -wal/-shm sidecars and is closed in a `finally` regardless.
+ */
+function validateBackupSource(from: string): void {
+  const fail = (reason: string): never => {
+    throw new Error(
+      `invalid/corrupt backup, restore ABORTED (live DB untouched): ${from} — ${reason}`,
+    );
+  };
+
+  // 1. Non-zero size.
+  let size: number;
+  try {
+    size = statSync(from).size;
+  } catch (e) {
+    return fail(`cannot stat source: ${(e as Error).message}`);
+  }
+  if (!(size > 0)) return fail("zero-byte file");
+
+  // 2. SQLite header magic (byte-compare; the trailing NUL matters).
+  let head: Buffer;
+  try {
+    head = readFileSync(from).subarray(0, 16);
+  } catch (e) {
+    return fail(`cannot read source header: ${(e as Error).message}`);
+  }
+  if (!head.equals(SQLITE_MAGIC)) return fail("not a SQLite database (bad header magic)");
+
+  // 3. Throwaway read-only integrity check. quick_check is cheaper than
+  // integrity_check and returns a single row keyed `quick_check` whose value is
+  // 'ok' on a clean db. Any non-'ok' row (or a throw on open) means corrupt.
+  const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+  let probe: import("bun:sqlite").Database | null = null;
+  try {
+    probe = new Database(from, { readonly: true });
+    const row = probe.query<{ quick_check: string }, []>(`PRAGMA quick_check`).get();
+    if (!row || row.quick_check !== "ok") {
+      return fail(`integrity check failed: ${row?.quick_check ?? "no result"}`);
+    }
+  } catch (e) {
+    return fail(`cannot open/verify as SQLite: ${(e as Error).message}`);
+  } finally {
+    probe?.close();
+  }
 }
 
 export type RestoreResult = { restored: string; from: string; backedUp: string | null };
@@ -225,6 +297,10 @@ export type RestoreResult = { restored: string; from: string; backedUp: string |
  */
 export function restoreFromBackup(target: string): RestoreResult {
   const from = resolveBackup(target);
+  // Validate the SOURCE before touching anything: this runs before the pre-restore
+  // copy and before the clobbering copyFileSync, so on any failure the live db is
+  // left BYTE-FOR-BYTE untouched and no success is reported.
+  validateBackupSource(from);
   const dbPath = config.dbPath;
   mkdirSync(dirname(dbPath), { recursive: true });
 

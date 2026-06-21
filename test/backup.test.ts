@@ -10,7 +10,15 @@
 // test/ci-gate.test.ts mutates config.ciRetries.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -232,5 +240,118 @@ describe("restoreFromBackup", () => {
     const result = backupMod.restoreFromBackup("latest");
     expect(result.backedUp).toBeNull();
     expect(existsSync(target)).toBe(true);
+  });
+});
+
+describe("restoreFromBackup — source validation (F1)", () => {
+  // Seed a real live db at the target, capture its bytes, then attempt a restore
+  // from an INVALID source — the restore must throw and leave the live db
+  // byte-for-byte untouched (validation runs before any pre-restore copy/clobber).
+  function seedLiveDb(): { target: string; before: Buffer } {
+    const target = join(DATA_DIR, "validate-target.db");
+    rmSync(target, { force: true });
+    rmSync(target + "-wal", { force: true });
+    rmSync(target + "-shm", { force: true });
+    const live = new Database(target, { create: true });
+    live.exec("PRAGMA journal_mode=DELETE"); // standalone file, no sidecars
+    live.exec("CREATE TABLE marker (x)");
+    live.exec("INSERT INTO marker VALUES (7)");
+    live.close();
+    configMod.config.dbPath = target;
+    return { target, before: readFileSync(target) };
+  }
+
+  test("F1a: a zero-byte source aborts and leaves the live db untouched", () => {
+    const { target, before } = seedLiveDb();
+    const bad = join(DATA_DIR, "zero-source.db");
+    writeFileSync(bad, "");
+
+    expect(() => backupMod.restoreFromBackup(bad)).toThrow(/restore ABORTED/);
+    // Live db is byte-for-byte identical to before.
+    expect(readFileSync(target).equals(before)).toBe(true);
+    // No pre-restore copy was made for THIS target (validation aborted first).
+    expect(readdirSync(DATA_DIR).some((n) => n.startsWith("validate-target.db.pre-restore-"))).toBe(
+      false,
+    );
+  });
+
+  test("F1b: a non-zero non-SQLite (garbage) source aborts, live db untouched", () => {
+    const { target, before } = seedLiveDb();
+    const bad = join(DATA_DIR, "garbage-source.db");
+    writeFileSync(bad, Buffer.from("this is definitely not a sqlite database header"));
+
+    expect(() => backupMod.restoreFromBackup(bad)).toThrow(/restore ABORTED/);
+    expect(readFileSync(target).equals(before)).toBe(true);
+    expect(readdirSync(DATA_DIR).some((n) => n.startsWith("validate-target.db.pre-restore-"))).toBe(
+      false,
+    );
+  });
+
+  test("F1c: a valid snapshot restores successfully and returns a RestoreResult", async () => {
+    const snap = await backupMod.snapshotDb();
+    const target = join(DATA_DIR, "valid-restore-target.db");
+    rmSync(target, { force: true });
+    configMod.config.dbPath = target;
+
+    const result = backupMod.restoreFromBackup(snap);
+    expect(result.restored).toBe(target);
+    expect(result.from).toBe(snap);
+
+    const restored = new Database(target, { readonly: true });
+    try {
+      const n = restored
+        .query<{ c: number }, [string]>(`SELECT COUNT(*) AS c FROM tasks WHERE workspace_id=?`)
+        .get(DIR_ID)!.c;
+      expect(n).toBe(3);
+    } finally {
+      restored.close();
+    }
+  });
+});
+
+describe("resolveBackup('latest') — skips zero-byte partials (F2)", () => {
+  test("returns the newest POSITIVE-SIZE snapshot, not a newer zero-byte file", async () => {
+    const valid = await backupMod.snapshotDb();
+    await new Promise((r) => setTimeout(r, 5));
+    // A NEWER (later-sorting name + later mtime) zero-byte butchr-*.db partial.
+    const partial = join(BACKUP_DIR, "butchr-9999-zero.db");
+    writeFileSync(partial, "");
+
+    // Sanity: the partial IS the newest entry listBackups() reports (so pruning can
+    // still reap it), but 'latest' must skip it.
+    expect(backupMod.listBackups()[0]!.path).toBe(partial);
+    expect(backupMod.resolveBackup("latest")).toBe(valid);
+  });
+
+  test("'latest' with only a zero-byte file throws", () => {
+    mkdirSync(BACKUP_DIR, { recursive: true });
+    writeFileSync(join(BACKUP_DIR, "butchr-only-zero.db"), "");
+    expect(() => backupMod.resolveBackup("latest")).toThrow(/no snapshots/);
+  });
+});
+
+describe("snapshotDb — failed VACUUM leaves no partial target (F3)", () => {
+  test("a throwing VACUUM INTO removes the partial target and re-throws", async () => {
+    const origExec = dbMod.db.exec.bind(dbMod.db);
+    let partialPath: string | null = null;
+    // Stub exec so a VACUUM INTO writes a partial file (as SQLite might on disk-full)
+    // then throws — exactly the failure snapshotDb must clean up after.
+    (dbMod.db as { exec: (sql: string) => unknown }).exec = (sql: string) => {
+      const m = /VACUUM INTO '(.+)'/.exec(sql);
+      if (m) {
+        partialPath = m[1]!.replace(/''/g, "'");
+        writeFileSync(partialPath, "");
+        throw new Error("simulated disk full");
+      }
+      return origExec(sql);
+    };
+
+    try {
+      await expect(backupMod.snapshotDb()).rejects.toThrow(/disk full/);
+      expect(partialPath).not.toBeNull();
+      expect(existsSync(partialPath!)).toBe(false);
+    } finally {
+      (dbMod.db as { exec: (sql: string) => unknown }).exec = origExec;
+    }
   });
 });
