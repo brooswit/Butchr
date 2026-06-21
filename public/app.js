@@ -830,6 +830,72 @@ function backToWorkspace(workspaceId) {
   location.hash = workspaceId ? "#/workspace/" + workspaceId : "#/";
 }
 
+// ---------- stranded-work pull-signal ----------
+// <test-extract:stranded-indicator> — pure, DOM-free helpers for the STRANDED-WORK pull-signal
+// (story st-a4cc6082). Unit-tested in test/stranded-indicator-ui.test.ts by extracting this block
+// and eval'ing it against a tiny `esc` shim. Keep it self-contained (its ONLY dependency is `esc`).
+// The dashboard API (S2) serves, per workspace, `stranded` (count) + `strandedItems`
+// [{workId, kind, reason}] plus `totals.stranded`. Each item's `reason` ALREADY embeds BOTH the
+// condition AND the responder verdict (e.g. "idea task pending; CTO gave up (dead)" / "...; CTO
+// disabled" / "story merge_blocked; leader gave up (dead)" / "...; leader disabled"), so it is
+// rendered verbatim. kind ∈ idea | dead_blocked | stuck_story | merge_blocked.
+const STRANDED_KIND_LABEL = {
+  idea: "idea awaiting spec",
+  dead_blocked: "dead-blocked task",
+  stuck_story: "stuck story",
+  merge_blocked: "merge-blocked story",
+};
+function strandedKindLabel(kind) {
+  return STRANDED_KIND_LABEL[kind] || String(kind || "");
+}
+// The link target for a stranded item. TASK-kind findings (idea / dead_blocked) carry a TASK id →
+// the work-detail route #/task/<id>. STORY-kind findings (stuck_story / merge_blocked) carry a
+// STORY id, and stories have NO detail route in this app (parseHash knows only dashboard | metrics
+// | workspace/<id> | task/<id>, and the story card is inert) — so a story id must route to its
+// OWNING WORKSPACE, never #/task/<storyId> (that would mis-render a node id in the task view).
+function strandedHref(kind, workId, workspaceId) {
+  if (kind === "stuck_story" || kind === "merge_blocked") {
+    return "#/workspace/" + esc(workspaceId);
+  }
+  return "#/task/" + esc(workId);
+}
+// The DISTINCT, prominent stranded-work panel as an HTML string — or "" when nothing is stranded
+// (totals.stranded === 0), so the dashboard's calm empty state is preserved. Grouped by workspace
+// (so each item names which workspace/story it belongs to), every item linked via strandedHref.
+// A STRONGER signal than the ordinary review/needsAttention badge: a responder is DEAD or disabled
+// and a human must step in.
+function strandedMarkup(data) {
+  const total = (data && data.totals && data.totals.stranded) || 0;
+  if (!total) return "";
+  const workspaces = (data && data.workspaces) || [];
+  const groups = workspaces
+    .filter((w) => w && Array.isArray(w.strandedItems) && w.strandedItems.length)
+    .map((w) => {
+      const name = esc(w.label || w.path || w.id);
+      const items = w.strandedItems
+        .map((it) => {
+          const href = strandedHref(it.kind, it.workId, w.id);
+          return `<li class="stranded-item"><a class="stranded-link" href="${href}">`
+            + `<span class="stranded-kind">${esc(strandedKindLabel(it.kind))}</span>`
+            + `<span class="stranded-reason">${esc(it.reason)}</span></a></li>`;
+        })
+        .join("");
+      return `<div class="stranded-group"><div class="stranded-ws">${name}</div>`
+        + `<ul class="stranded-list">${items}</ul></div>`;
+    })
+    .join("");
+  return `<div class="panel stranded-panel" role="alert">
+      <div class="stranded-head">
+        <span class="stranded-icon" aria-hidden="true">⚠</span>
+        <h2>Stranded work <span class="stranded-count">${esc(String(total))}</span></h2>
+      </div>
+      <p class="stranded-lead">A responder is <strong>dead or disabled</strong> — this work is
+        pending with no agent to act on it, so a human must intervene.</p>
+      ${groups}
+    </div>`;
+}
+// </test-extract:stranded-indicator>
+
 // ---------- dashboard ----------
 async function renderDashboard() {
   // The cross-project dashboard rollup: per-workspace active/review/needs-attention/
@@ -855,8 +921,18 @@ async function renderDashboard() {
     sum.appendChild(stat("in review", totals.review, "review"));
     sum.appendChild(stat("need attention", totals.needsAttention, "attn"));
     sum.appendChild(stat("failed", totals.failed, "failed"));
+    // STRANDED pull-signal (story st-a4cc6082): pending work whose owning responder (CTO / story
+    // leader) is dead-while-desired or disabled. Distinct, stronger class (lights up red when
+    // non-zero) — a human, not an agent, must act.
+    sum.appendChild(stat("stranded", totals.stranded, "stranded"));
     wrap.appendChild(sum);
   }
+
+  // The prominent, visually-distinct stranded-work callout — listing each stranded item, its
+  // condition + responder reason, and which workspace/story it belongs to (linked to the work).
+  // Empty string ⇒ nothing stranded ⇒ no node added, so a healthy board stays calm.
+  const strandedHtml = strandedMarkup(data);
+  if (strandedHtml) wrap.appendChild(el("div", { html: strandedHtml }));
 
   // add-workspace form
   const form = el("div", { class: "panel" });
@@ -950,6 +1026,7 @@ function dirCard(d) {
         <span class="ws-bucket${d.review ? " review" : ""}">review <b>${d.review}</b></span>
         <span class="ws-bucket${d.needsAttention ? " attn" : ""}">attention <b>${d.needsAttention}</b></span>
         <span class="ws-bucket${d.failed ? " failed" : ""}">failed <b>${d.failed}</b></span>
+        <span class="ws-bucket${d.stranded ? " stranded" : ""}">stranded <b>${d.stranded || 0}</b></span>
       </div>`
     : "";
   const card = el("div", { class: "card" });

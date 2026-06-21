@@ -426,6 +426,45 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .needs-input-panel .ni-noctx { margin: 0 0 12px; font-size: 13px; }
 .needs-input-panel .ni-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
+/* STRANDED-WORK panel (story st-a4cc6082) — the dashboard pull-signal callout. A bold red-accented
+   panel (thick left bar, like .needs-input-panel) listing the stranded items grouped by workspace,
+   each linked to the affected work. Deliberately LOUDER than the review/needsAttention badges:
+   this means a responder is DEAD or disabled and a human must step in. */
+.stranded-panel {
+  border: 1px solid var(--failed);
+  border-left: 4px solid var(--failed);
+  background: var(--panel-2);
+  margin: 4px 0 20px;
+}
+.stranded-panel .stranded-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.stranded-panel .stranded-head h2 { margin: 0; font-size: 16px; color: var(--failed); }
+.stranded-panel .stranded-icon { font-size: 18px; line-height: 1; }
+.stranded-panel .stranded-count {
+  display: inline-block; min-width: 20px; padding: 0 7px; margin-left: 4px;
+  font-size: 13px; font-weight: 700; text-align: center;
+  color: #fff; background: var(--failed); border-radius: 999px;
+}
+.stranded-panel .stranded-lead { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text); }
+.stranded-panel .stranded-group { margin-top: 10px; }
+.stranded-panel .stranded-ws {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); margin-bottom: 4px;
+}
+.stranded-panel .stranded-list { list-style: none; margin: 0; padding: 0; }
+.stranded-panel .stranded-item { margin: 0 0 4px; }
+.stranded-panel .stranded-link {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  padding: 6px 8px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); background: var(--panel);
+  text-decoration: none; color: var(--text);
+}
+.stranded-panel .stranded-link:hover { border-color: var(--failed); }
+.stranded-panel .stranded-kind {
+  font-size: 11px; font-weight: 700; color: var(--failed);
+  text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
+}
+.stranded-panel .stranded-reason { font-size: 13px; color: var(--muted); }
+
 /* STORY-LEVEL ASK panel — an open story ask (pending_ask) surfaced under its story row:
    the leader's question, who currently owns it (ask_responder), and a freeform answer box
    that POSTs /api/stories/:id/answer. Styled like the responder-banner / rollup panels:
@@ -550,6 +589,14 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .ws-bucket.review { border-color: var(--review); color: var(--review); }
 .ws-bucket.attn { border-color: var(--review); color: var(--review); }
 .ws-bucket.failed { border-color: var(--failed); color: var(--failed); }
+/* STRANDED pull-signal (story st-a4cc6082) — a STRONGER signal than ordinary review/attention:
+   a responder is dead or disabled and a human must intervene. The stat is FILLED (not just
+   outlined) so it reads louder than the other buckets, and the per-card bucket is bold red. */
+.dash-stat.stranded.nonzero { border-color: var(--failed); background: var(--failed); }
+.dash-stat.stranded.nonzero .ds-num { color: #fff; }
+.dash-stat.stranded.nonzero .ds-label { color: #fff; }
+.ws-bucket.stranded { border-color: var(--failed); color: #fff; background: var(--failed); }
+.ws-bucket.stranded b { color: #fff; }
 
 /* per-workspace build/test gate command panel + editor (workspace view). */
 .gate-cmd {
