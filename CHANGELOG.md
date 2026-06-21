@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.156] - 2026-06-21
+
 - **Fixed: a transient `/api/state-meta` hiccup no longer makes the board falsely read empty (story st-c656c44e, F2) (`public/app.js`).** `loadStateMeta()` runs once at boot; on a fetch failure it left `ACTIVE_STATUSES`/`TERMINAL_STATUSES`/`FILTER_STATUSES` as `[]`, which made `boardLaneKey` map every leaf to `null` → `renderBoard` saw `total===0` and showed "No active work in the pipeline." (with no filter chips), while the List view degraded oppositely (everything stayed "active"). It was never retried, so this persisted until the next boot. Now the catch path falls back to a non-empty, server-canonical `DEFAULT_STATE_META` (a hand-kept mirror of `src/db.ts`'s `STATE_META`/`ALL_STATUSES`/`isTerminal`, in the exact `/api/state-meta` shape) so board/list/filters keep working, and the load self-heals: `connectSSE` re-tries `loadStateMeta` on the next SSE event while still on the fallback, swapping in the authoritative server values and re-rendering once it succeeds — no page reload needed. The status-table build (`statusSetsFrom`) and board-lane classification (`boardLaneKeyFor`) were extracted into pure, DOM-free helpers; new `test/state-meta-fallback.test.ts` asserts the fallback sets are non-empty, an `in_progress` leaf still lands in a real lane (not `null`), and the client `DEFAULT_STATE_META` mirrors the server's canonical sets exactly. No server/API/`package.json` change.
 
 ## [0.9.155] - 2026-06-21
