@@ -19,6 +19,11 @@ import {
   stopWorkspaceAgent,
 } from "./workspace-agent.ts";
 import { stopWorkspaceStoryAgents } from "./story-agent.ts";
+// RUNTIME-ONLY circular import: tasks.ts statically imports workspaces.ts, and strandedItems is
+// a hoisted function CALLED only at request time (dashboard()), never at module-eval — so the
+// cycle resolves with no load-time TDZ (mirrors tasks.ts's work.ts/cto-agent.ts cycles).
+import { strandedItems } from "./tasks.ts";
+import type { StrandedItem } from "./tasks.ts";
 import { ALL_STATUSES, db, nowIso, REVIEW_STATES, saveWorkspaceAgentRow, sumStatuses } from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
@@ -509,7 +514,13 @@ export function workspaceDetail(id: string): WorkspaceView {
  *                       needs_info (kept under the `review` field name for the API).
  *  - `failed`         — the terminal `failed` state (a dispatch/spec-gen give-up or a
  *                       post-merge verify revert) — execution failures a human should see.
- *  - `needsAttention` — what to look at right now (= review + failed).
+ *  - `needsAttention` — what to look at right now (= review + failed + stranded).
+ *  - `stranded`       — agent-INDEPENDENT pull-signal (story st-a4cc6082, S2): pending work
+ *                       (idea / dead-blocked task; stuck / merge_blocked story) whose OWNING
+ *                       responder (CTO or story leader) is dead-while-desired (gave_up) or
+ *                       disabled, so it would otherwise strand with NO push-channel signal.
+ *                       FOLDED into needsAttention so the existing badge lights up; a LIVE
+ *                       responder ⇒ stranded=0 ⇒ needsAttention byte-for-byte unchanged.
  */
 export type DashboardWorkspace = {
   id: string;
@@ -523,6 +534,10 @@ export type DashboardWorkspace = {
   review: number;
   failed: number;
   needsAttention: number;
+  /** Count of stranded pending items (= strandedItems.length), folded into needsAttention. */
+  stranded: number;
+  /** The stranded pending items (work id + kind + human reason) — see tasks.strandedItems. */
+  strandedItems: StrandedItem[];
   /** OPEN stories in this workspace (Phase 6 story rollup) — the count of stories still
    *  driving work, so the dashboard surfaces story-level progress alongside task buckets.
    *  Per-story member-task counts + leader status live on GET /api/stories(/:id). */
@@ -537,6 +552,7 @@ export type Dashboard = {
     review: number;
     failed: number;
     needsAttention: number;
+    stranded: number;
     openStories: number;
   };
 };
@@ -560,6 +576,7 @@ export function dashboard(): Dashboard {
     review: 0,
     failed: 0,
     needsAttention: 0,
+    stranded: 0,
     openStories: 0,
   };
   const workspaces = rows.map((d) => {
@@ -570,13 +587,20 @@ export function dashboard(): Dashboard {
     // FEEDBACK states awaiting a human (kept under the `review` field name).
     const review = (c.spec_review ?? 0) + (c.in_review ?? 0) + (c.needs_info ?? 0);
     const failed = c.failed ?? 0; // the terminal `failed` state — see comment above
-    // = review + failed, expressed via the exported membership set (numerically identical).
-    const needsAttention = sumStatuses(c, REVIEW_STATES);
+    // STRANDED pull-signal (story st-a4cc6082, S2): pending items whose owning responder is
+    // dead-while-desired (gave_up) or disabled — SYNC DB projection, no liveness probe.
+    const strandedItemsList = strandedItems(d.id);
+    const stranded = strandedItemsList.length;
+    // = review + failed (REVIEW_STATES) + stranded. A LIVE responder ⇒ stranded=0 ⇒ this equals
+    // the prior sumStatuses(c, REVIEW_STATES) byte-for-byte (idea/blocked/story-ids are all
+    // OUTSIDE REVIEW_STATES, so a stranded item is never double-counted).
+    const needsAttention = sumStatuses(c, REVIEW_STATES) + stranded;
     const openStories = openStoryCount(d.id);
     totals.active += active;
     totals.review += review;
     totals.failed += failed;
     totals.needsAttention += needsAttention;
+    totals.stranded += stranded;
     totals.openStories += openStories;
     return {
       id: d.id,
@@ -589,6 +613,8 @@ export function dashboard(): Dashboard {
       review,
       failed,
       needsAttention,
+      stranded,
+      strandedItems: strandedItemsList,
       openStories,
     };
   });

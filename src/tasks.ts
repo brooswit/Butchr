@@ -9,11 +9,13 @@ import {
   db,
   ensureStoryWorkNode,
   estimateRows,
+  getWorkspaceAgentRow,
   isTerminal,
   matchesQuery,
   nowIso,
   recordTaskEvent,
 } from "./db.ts";
+import { isCtoEnabled } from "./cto-agent.ts";
 import type { TaskRow, TaskStatus, WorkspaceRow } from "./db.ts";
 // RECURSIVE PARENT-CHAIN RESPONDER (story st-540ba705, step 6a). pendingResponder now
 // delegates the LIVE feedback routing to work.ts's recursive resolver over `parent_id`
@@ -3171,6 +3173,136 @@ export function notifyStoryBlockedIfStuck(storyId: string): boolean {
 export function notifyStoryReadiness(storyId: string): boolean {
   if (notifyStoryCompletionIfReady(storyId)) return true;
   return notifyStoryBlockedIfStuck(storyId);
+}
+
+// --- STRANDED-WORK PULL-SIGNAL (story st-a4cc6082, S2) -----------------------
+// An agent-INDEPENDENT, human-facing PULL signal for pending work whose OWNING responder (the
+// CTO of a directory, or a story LEADER) is dead-while-desired (S1's durable workspace.gave_up)
+// or DISABLED, so the work strands with NO push-channel signal. Read straight from the DB —
+// gave_up, isCtoEnabled, leader desired, story.status — so dashboard() stays a SYNC projection
+// with NO per-request liveness probe. THE CRITICAL PROPERTY: a LIVE responder (gave_up=0 AND
+// enabled/desired) is NOT stranded and contributes NOTHING, so the existing REVIEW_STATES
+// needsAttention is byte-for-byte unchanged. idea/blocked/story-ids are all OUTSIDE
+// REVIEW_STATES, so a stranded item is NEVER double-counted against the review/failed buckets.
+
+export type StrandedKind = "idea" | "dead_blocked" | "stuck_story" | "merge_blocked";
+/** One pending item whose owning responder is stranded (see strandedItems). */
+export type StrandedItem = { workId: string; kind: StrandedKind; reason: string };
+
+/** Is the CTO responder for a directory STRANDED — effectively DISABLED (cto_enabled off / the
+ *  global default off), or gave_up at the supervisor's restart cap (S1's durable verdict)? Pure
+ *  DB read; NO liveness probe (gave_up IS the durable liveness verdict). */
+function ctoResponderStranded(directoryId: string): boolean {
+  if (!isCtoEnabled(directoryId)) return true;
+  return getWorkspaceAgentRow(`ws-cto-${directoryId}`)?.gave_up === 1;
+}
+
+/** Is the LEADER responder for a NON-TERMINAL story STRANDED — gave_up at the restart cap
+ *  (durable), or DISABLED (its `ws-leader-<story>` row exists with desired=0 while the story is
+ *  still open/merge_blocked, so the supervisor will not (re)launch it)? A MISSING leader row is
+ *  treated as NOT stranded (conservative — avoids flagging a story that never had a unified
+ *  leader row). Pure DB read; no probe. */
+function leaderResponderStranded(storyId: string, storyStatus: string): boolean {
+  const row = getWorkspaceAgentRow(`ws-leader-${storyId}`);
+  if (!row) return false;
+  if (row.gave_up === 1) return true;
+  return row.desired === 0 && (storyStatus === "open" || storyStatus === "merge_blocked");
+}
+
+/**
+ * The STRANDED pending items in a directory — F1 idea / F2 dead-blocked / F3 stuck story / F4
+ * merge_blocked — each gated on its OWNING responder being stranded. A SYNC DB projection, used
+ * per-workspace by dashboard() and aggregated across directories by strandedTotals() for /health.
+ */
+export function strandedItems(directoryId: string): StrandedItem[] {
+  const items: StrandedItem[] = [];
+
+  // CTO-owned findings (F1, F2) — only when the directory's CTO responder is stranded. A task
+  // WITH a story_id is owned by its story LEADER (handled per-story below), so the CTO findings
+  // consider STANDALONE tasks (story_id IS NULL) only. The `id NOT IN (SELECT id FROM stories)`
+  // guard drops materialized story Work NODES (mirrors counts()/listTasks).
+  if (ctoResponderStranded(directoryId)) {
+    const ctoWhy = isCtoEnabled(directoryId) ? "CTO gave up (dead)" : "CTO disabled";
+    // F1 — `idea` tasks (a brief awaiting a spec) whose CTO responder is stranded.
+    const ideas = db
+      .query<{ id: string }, [string]>(
+        `SELECT id FROM tasks WHERE workspace_id=? AND story_id IS NULL AND status='idea'
+           AND id NOT IN (SELECT id FROM stories)`,
+      )
+      .all(directoryId);
+    for (const t of ideas) {
+      items.push({ workId: t.id, kind: "idea", reason: `idea task pending; ${ctoWhy}` });
+    }
+    // F2 — `blocked` tasks stuck on a never-merging (dead) dependency whose CTO responder is
+    // stranded. Reuse deadBlockerIds over the parsed blocked_by set (NON-empty ⇒ permanently
+    // stuck). reevaluateBlockedTask / the push-channel EMIT this transiently; this is the DURABLE
+    // pull-signal for when the responder that would act on it is gone.
+    const blocked = db
+      .query<{ id: string; blocked_by: string | null }, [string]>(
+        `SELECT id, blocked_by FROM tasks WHERE workspace_id=? AND story_id IS NULL AND status='blocked'
+           AND id NOT IN (SELECT id FROM stories)`,
+      )
+      .all(directoryId);
+    for (const t of blocked) {
+      const dead = deadBlockerIds(parseBlockedBy(t.blocked_by));
+      if (dead.length === 0) continue;
+      items.push({
+        workId: t.id,
+        kind: "dead_blocked",
+        reason: `blocked on dead dependency ${dead.join(", ")}; ${ctoWhy}`,
+      });
+    }
+  }
+
+  // LEADER-owned findings (F3, F4) — per story, only when the story's LEADER responder is
+  // stranded. F4 is a merge_blocked story keyed PURELY off (state ∧ leader-stranded): conflict's
+  // one-time target:'cto' PUSH (stories.landStory) is a separate transient channel and is NOT
+  // re-surfaced here — and a LIVE leader ⇒ stranded=0 so the live-responder property still holds.
+  const stories = db
+    .query<{ id: string; status: string }, [string]>(
+      `SELECT id, status FROM stories WHERE workspace_id=? AND status IN ('open','merge_blocked')`,
+    )
+    .all(directoryId);
+  for (const s of stories) {
+    if (!leaderResponderStranded(s.id, s.status)) continue;
+    const leaderWhy =
+      getWorkspaceAgentRow(`ws-leader-${s.id}`)?.gave_up === 1
+        ? "leader gave up (dead)"
+        : "leader disabled";
+    if (s.status === "merge_blocked") {
+      // F4 — a merge_blocked story the (stranded) leader can no longer re-attempt landing for.
+      items.push({
+        workId: s.id,
+        kind: "merge_blocked",
+        reason: `story merge_blocked; ${leaderWhy}`,
+      });
+      continue;
+    }
+    // F3 — an OPEN story SETTLED with a dead member: ≥1 member, EVERY member terminal (nothing in
+    // flight), yet NOT all merged/rolled_back (so it can never complete) — mirrors
+    // notifyStoryBlockedIfStuck's predicate; reuse isStoryComplete for the all-merged check.
+    const members = db
+      .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
+      .all(s.id);
+    if (members.length === 0) continue;
+    if (members.every((m) => isTerminal(m.status)) && !isStoryComplete(s.id)) {
+      items.push({
+        workId: s.id,
+        kind: "stuck_story",
+        reason: `story can never complete (dead member); ${leaderWhy}`,
+      });
+    }
+  }
+
+  return items;
+}
+
+/** Aggregate the stranded pull-signal across ALL directories — the /health rollup. */
+export function strandedTotals(): { total: number; items: StrandedItem[] } {
+  const dirs = db.query<{ id: string }, []>(`SELECT id FROM directory`).all();
+  const items: StrandedItem[] = [];
+  for (const d of dirs) items.push(...strandedItems(d.id));
+  return { total: items.length, items };
 }
 
 // --- STORY → MAIN MERGE MECHANICS (CONTRIBUTING §11.4/§11.5/§11.6 — Phase E) -------

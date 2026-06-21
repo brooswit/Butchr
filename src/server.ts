@@ -54,7 +54,7 @@ import pkg from "../package.json" with { type: "json" };
 // other task/story op now flows through the unified /api/work surface (work-api.ts), which
 // imports tasks.ts/stories.ts itself — the legacy /api/tasks + /api/stories routes that used
 // the rest were deleted in the step-6e cutover.
-import { attentionList, getTask, statsRollup } from "./tasks.ts";
+import { attentionList, getTask, statsRollup, strandedTotals } from "./tasks.ts";
 import {
   abortWork,
   answerWork,
@@ -369,14 +369,24 @@ async function healthResponse(): Promise<Response> {
   // question awaiting an answer (`needs_info`), or an execution `failed` task to inspect.
   // The webapp turns this into a tab-title badge + header indicator. Derived from the
   // status counts; no extra query.
+  // STRANDED pull-signal (story st-a4cc6082, S2): agent-INDEPENDENT pending work (idea /
+  // dead-blocked task; stuck / merge_blocked story) whose OWNING responder (CTO or story leader)
+  // is dead-while-desired (gave_up) or disabled — a SYNC DB projection across all directories,
+  // no liveness probe. FOLDED into needsAttention.total so the existing badge lights up; a LIVE
+  // responder ⇒ stranded=0 ⇒ total is byte-for-byte the prior REVIEW_STATES sum (idea/blocked/
+  // story-ids are all OUTSIDE REVIEW_STATES, so a stranded item is never double-counted).
+  const stranded = dbOk
+    ? strandedTotals()
+    : { total: 0, items: [] as ReturnType<typeof strandedTotals>["items"] };
   const needsAttention = {
     spec_review: tasks.spec_review ?? 0,
     in_review: tasks.in_review ?? 0,
     needs_info: tasks.needs_info ?? 0,
     failed: tasks.failed ?? 0,
-    // Summed over the shared REVIEW_STATES membership (db.ts) — the single source for
-    // the operator pull-signal, identical to the open-coded sum it replaces.
-    total: sumStatuses(tasks, REVIEW_STATES),
+    // The stranded count, folded into `total` below.
+    stranded: stranded.total,
+    // Summed over the shared REVIEW_STATES membership (db.ts) PLUS the stranded pull-signal.
+    total: sumStatuses(tasks, REVIEW_STATES) + stranded.total,
   };
 
   // Tick-loop liveness: stale if we've ticked at least once but not within
@@ -454,6 +464,10 @@ async function healthResponse(): Promise<Response> {
     failedTasks: tasks.failed ?? 0,
     concurrency,
     needsAttention,
+    // STRANDED-WORK pull-signal (story st-a4cc6082, S2): the agent-INDEPENDENT pending items
+    // whose owning responder is dead-while-desired (gave_up) or disabled, with a human reason
+    // per item — already folded into needsAttention.total/.stranded above.
+    stranded,
     // Self-heal visibility: last startup reap of orphaned worktrees + herdr husks.
     reaper: { lastRunAt: reap.at, worktrees: reap.worktrees, husks: reap.husks },
     // DB snapshot/backup resilience: last snapshot time this run (null until the
