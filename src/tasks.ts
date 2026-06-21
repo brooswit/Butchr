@@ -1040,6 +1040,27 @@ function isolatedStoryBranch(row: TaskRow): string | null {
 }
 
 /**
+ * The parent story's AUTHORITATIVE status (read straight from the `stories` row, NOT the
+ * member's raw `tasks.status`), or null if the task has no story or the story is gone. Read via
+ * a DIRECT db query — NOT stories.ts — to avoid the tasks↔stories import cycle (same idiom as
+ * isolatedStoryBranch). The subtask MERGE path (finalizeMerge) GUARDS on this so a member can't
+ * be merged into a story branch its container has already stopped accepting work into
+ * (merging/done/aborted) — see the guard in finalizeMerge (story st-a632b2cc F1).
+ */
+function parentStoryStatus(row: TaskRow): string | null {
+  if (!row.story_id) return null;
+  return (
+    db
+      .query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`)
+      .get(row.story_id)?.status ?? null
+  );
+}
+
+/** Story statuses that still ACCEPT member merges — mirrors createSubtask's creation guard
+ * (src/stories.ts): `open`/`merge_blocked` accept members; `merging`/`done`/`aborted` do not. */
+const STORY_ACCEPTS_MEMBERS: ReadonlySet<string> = new Set(["open", "merge_blocked"]);
+
+/**
  * Resolve a task's REBASE/MERGE BASE — the ref its branch is measured/rebased against.
  * For an ISOLATED story member (isolatedStoryBranch != null) this is the STORY BRANCH; for
  * every other task it is the workspace default branch (today's value). The guard keeps the
@@ -2053,6 +2074,13 @@ export type ApproveOutcome = {
   // carries the streak (0/1/2); the merge only runs once two consecutive `confirm-major`
   // calls land it. Approve alone parks (it just says "the diff is good"). See confirmMajor.
   awaitingMajorConfirm?: boolean;
+  // story st-a632b2cc F1: the subtask's PARENT STORY has stopped accepting members
+  // (merging/done/aborted), so finalizeMerge REFUSED the merge rather than recreate a
+  // torn-down story branch and land onto an orphan branch (silent lost work). The task is
+  // LEFT in_review (not lost); `message` carries a human-readable reason for the route to
+  // surface. Did NOT merge.
+  storyClosed?: boolean;
+  message?: string;
 };
 
 /**
@@ -2544,6 +2572,28 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   }
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
+
+  // PARENT-STORY GUARD (story st-a632b2cc F1). finalizeMerge is the SINGLE merge entry (human
+  // approve, maybeAutoMerge, confirmMajor, boot recovery all route here) and it otherwise guards
+  // only the TASK's own status — resolveMergeContext / isolatedStoryBranch resolve the ff-target
+  // purely from row.story_id + flags and NEVER read the STORY's status. So an in_review subtask
+  // could be approved+merged AFTER its parent story moved to merging/done/aborted; once landStory
+  // deleted the story branch (git.removeStoryBranch), the resolveMergeContext below would call
+  // git.ensureStoryBranch and RECREATE the deleted branch, landing the subtask onto an ORPHAN
+  // branch that never reaches main → silent LOST WORK. REFUSE here, BEFORE the global merge lock
+  // and BEFORE resolveMergeContext/ensureStoryBranch can recreate the branch, whenever the
+  // AUTHORITATIVE story status no longer accepts members (mirrors createSubtask's creation guard:
+  // open/merge_blocked accept; merging/done/aborted do not). The task is LEFT in_review (not lost)
+  // so a human can re-home it; both the human-approve and auto-merge paths surface `storyClosed`
+  // instead of retrying (maybeAutoMerge bails on the same condition before ever reaching here).
+  const storyStatus = parentStoryStatus(row);
+  if (storyStatus && !STORY_ACCEPTS_MEMBERS.has(storyStatus)) {
+    const message =
+      `parent story ${row.story_id} is ${storyStatus} — subtask merge refused ` +
+      `(story no longer accepts members; task held in_review)`;
+    console.warn(`[butchr] finalizeMerge(${id}): ${message}`);
+    return { task: taskView(id)!, storyClosed: true, message };
+  }
 
   // MAJOR DOUBLE-CONFIRM INTERLOCK (release_mode + version_bump='major'). A major-bump
   // task does NOT merge until the HUMAN has issued two CONSECUTIVE `confirm-major` calls
@@ -4060,6 +4110,13 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
 
     const dir = getWorkspace(row.workspace_id);
     if (!dir) return false;
+
+    // PARENT-STORY GUARD (story st-a632b2cc F1): never auto-merge a subtask whose container story
+    // has stopped accepting members (merging/done/aborted) — finalizeMerge would REFUSE it anyway.
+    // Bail here (silently) so the CI-settle hook + dispatcher-tick backstop don't re-attempt and
+    // re-log every pass. open/merge_blocked still accept members (mirrors createSubtask's guard).
+    const ms = parentStoryStatus(row);
+    if (ms && !STORY_ACCEPTS_MEMBERS.has(ms)) return false;
 
     // STALE-GREEN GUARD: trust ci_status='pass' ONLY when it was gated on the CURRENT branch
     // tip. If the tip moved since CI settled (ci_tip ≠ live HEAD), the green is bound to a

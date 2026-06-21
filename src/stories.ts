@@ -28,6 +28,46 @@ import { HttpError, getWorkspace, listWorkspaces, workspaceBranchIsolation } fro
 // validate an incoming status before it touches the row.
 const STORY_STATUSES: ReadonlySet<string> = new Set<StoryStatus>(["open", "done", "aborted"]);
 
+/**
+ * The ONE guarded STORY-status transition (story st-a632b2cc) — the story-level sibling of
+ * task setStatus (src/tasks.ts). Builds a `WHERE id=? [AND status IN (…from)]` UPDATE that
+ * writes `status` (plus any `opts.set` columns) and returns whether a row ACTUALLY changed
+ * (false = lost a race / illegal source — the caller bails, firing none of the side-effects
+ * that ride alongside the write).
+ *
+ * Every story-status write routes through here with a legal `from` set per transition, so a
+ * TERMINAL story (done/aborted) can never be re-opened or re-transitioned, and a done/aborted
+ * write can never race an in-flight `merging` (landStory's done/merge_blocked writes CAS from
+ * `merging` only). The CAS is the SOURCE guard; callers keep the existing TARGET validation
+ * (STORY_STATUSES.has) and own the side-effects, gating them on the returned boolean.
+ *
+ *  - `from` — the status(es) the row must be in for the UPDATE to apply (the race guard);
+ *    omit for an unconditional `WHERE id=?`.
+ *  - `set`  — extra columns written alongside status as `col=?` (e.g. brief, merge shas, the
+ *    pending_ask/ask_responder terminal clear).
+ */
+function setStoryStatus(
+  id: string,
+  to: StoryStatus,
+  opts: { from?: StoryStatus | StoryStatus[]; set?: Record<string, string | null> } = {},
+): boolean {
+  const assigns = ["status=?"];
+  const params: (string | null)[] = [to];
+  for (const [col, val] of Object.entries(opts.set ?? {})) {
+    assigns.push(`${col}=?`);
+    params.push(val);
+  }
+  let where = "id=?";
+  params.push(id);
+  if (opts.from !== undefined) {
+    const froms = Array.isArray(opts.from) ? opts.from : [opts.from];
+    where += ` AND status IN (${froms.map(() => "?").join(", ")})`;
+    params.push(...froms);
+  }
+  const res = db.query(`UPDATE stories SET ${assigns.join(", ")} WHERE ${where}`).run(...params);
+  return res.changes > 0;
+}
+
 /** Look up a story by its id, or null if none matches. */
 export function getStory(id: string): StoryRow | null {
   return db.query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`).get(id) ?? null;
@@ -119,67 +159,96 @@ export function updateStory(
   }
 
   // REQUEST-TO-LAND interception: an isolated story's `done` (from `open`/`merge_blocked`)
-  // routes through the story→main landing path instead of a direct `done` write. Apply any
-  // brief update first, then set `merging` (leader kept up) and drive landStory in the
-  // background (restart-recoverable: boot recovery re-drives a `merging` story). Returns the
-  // `merging` row immediately — the merge runs async + surfaces its outcome via attention events.
+  // routes through the story→main landing path instead of a direct `done` write. Set `merging`
+  // via the GUARDED CAS (from open/merge_blocked, folding any brief update into the SAME write
+  // so brief is atomic with the guarded status), keep the leader up, and drive landStory in the
+  // background (restart-recoverable: boot recovery re-drives a `merging` story). Returns the row
+  // immediately — the merge runs async + surfaces its outcome via attention events. A racing
+  // terminal write that already moved the story off open/merge_blocked makes the CAS a no-op, in
+  // which case we do NOT spin up the merge.
   const isLandRequest =
     patch.status === "done" &&
     story.isolated === 1 &&
     (story.status === "open" || story.status === "merge_blocked");
   if (isLandRequest) {
-    if (briefUpdate !== null) {
-      db.query(`UPDATE stories SET brief=? WHERE id=?`).run(briefUpdate, id);
-    }
-    db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(id);
-    onStoryStatusChanged(id, "merging"); // keep the leader up through the merge
-    void landStory(id).catch((e) => {
-      console.error(`[butchr] story ${id} landStory failed: ${(e as Error).message}`);
+    const moved = setStoryStatus(id, "merging", {
+      from: ["open", "merge_blocked"],
+      set: briefUpdate !== null ? { brief: briefUpdate } : undefined,
     });
+    if (moved) {
+      onStoryStatusChanged(id, "merging"); // keep the leader up through the merge
+      void landStory(id).catch((e) => {
+        console.error(`[butchr] story ${id} landStory failed: ${(e as Error).message}`);
+      });
+    }
     return getStory(id)!;
   }
 
-  // A NODE going ABORTED must FIRST tear down its LIVE members, or each in-flight member is
-  // STRANDED as an orphaned standalone top-level task (its feedback re-routes to the CTO; it
-  // merges to main with no story context) AND keeps a story_id/parent_id pointing at an aborted
-  // node whose completion seam can never fire. Fire the shared cascade BEFORE the node write —
-  // the member SELECT runs synchronously here (before its first await), so it captures the full
-  // live-member set now; the per-member teardown then completes asynchronously (mirrors this
-  // file's `void landStory` / `void teardownLeaderWorkspaceForWork` fire-and-forget idiom and
-  // keeps updateStory's synchronous signature). Already-MERGED members are PRESERVED untouched.
-  if (patch.status === "aborted") {
-    void abortInflightMembers(id).catch(() => {});
+  // BRIEF-ONLY PATCH (no status): a plain brief edit is allowed in ANY state and never touches
+  // status, so it skips the guarded transition entirely.
+  if (patch.status === undefined) {
+    if (briefUpdate !== null) {
+      db.query(`UPDATE stories SET brief=? WHERE id=?`).run(briefUpdate, id);
+    }
+    return getStory(id)!;
   }
 
-  const assigns: string[] = [];
-  const params: (string | null)[] = [];
-  if (briefUpdate !== null) {
-    assigns.push("brief=?");
-    params.push(briefUpdate);
-  }
-  if (patch.status !== undefined) {
-    assigns.push("status=?");
-    params.push(patch.status as string);
-  }
+  // GUARDED STATUS TRANSITION (st-a632b2cc F2) — mirrors the task-level setStatus CAS: a PATCH
+  // status write fires ONLY from a legal SOURCE state, so an illegal/racing transition is a
+  // silent no-op (the row is left untouched and none of the side-effects below run). Legal
+  // `from` per target:
+  //   - `open`    : only a no-op from `open` — a terminal/merging/merge_blocked story can NEVER
+  //                 be RE-OPENED (the re-open-from-done bug: writing `open` over a terminal `done`
+  //                 would relaunch a leader for a story whose branch was already merged-and-deleted).
+  //   - `done`    : from `open` only (the NON-isolated immediate-done; an isolated open/
+  //                 merge_blocked `done` was intercepted as a land request above). Blocks a `done`
+  //                 racing an in-flight `merging` and a re-`done` on a terminal row.
+  //   - `aborted` : from `open`/`merge_blocked` — NOT `merging`, so an abort can never race an
+  //                 in-flight landStory (a `merging` story's abort PATCH is a rejected no-op).
+  // The pending_ask/ask_responder terminal clear + any brief update ride in the SAME guarded
+  // write, so they apply iff the transition is legal.
+  const legalFrom: Record<string, StoryStatus[]> = {
+    open: ["open"],
+    done: ["open"],
+    aborted: ["open", "merge_blocked"],
+  };
+  const target = patch.status as StoryStatus;
+  const set: Record<string, string | null> = {};
+  if (briefUpdate !== null) set.brief = briefUpdate;
   // HYGIENE: a TERMINAL transition (`done`/`aborted`) clears any open story-level ask — leaving
   // stale `pending_ask`/`ask_responder` on a finished story is dead data and a pointless still-
   // answerable ask. (answerStoryAsk is otherwise the only writer that clears the pair.)
-  if (patch.status === "done" || patch.status === "aborted") {
-    assigns.push("pending_ask=NULL", "ask_responder=NULL");
+  if (target === "done" || target === "aborted") {
+    set.pending_ask = null;
+    set.ask_responder = null;
   }
-  if (assigns.length) {
-    params.push(id);
-    db.query(`UPDATE stories SET ${assigns.join(", ")} WHERE id=?`).run(...params);
+  const changed = setStoryStatus(id, target, { from: legalFrom[target], set });
+  if (!changed) {
+    // Illegal/racing transition — row untouched, NO side-effects (matches task setStatus, where
+    // a lost CAS just returns false and the caller bails).
+    return getStory(id)!;
   }
-  // STORY COMPLETION REPORTED UP (Phase 6): when the leader marks the story `done` (the goal
-  // is verified met), report completion UP to the CTO via a story-level attention event
-  // targeted at the WORKSPACE/CTO feed ('story <id> complete'). Fire only on the ENTRY into
-  // `done` (story.status was not already `done`) so a no-op re-PATCH doesn't re-notify. This
-  // is published BEFORE the leader teardown below — the leader (the diff-review responder that
-  // merged the last subtask) is provably still up, but the report is for the CTO, not it.
-  // (An isolated story never reaches here for `done` — its land path publishes `complete`
-  // from landStory only once the branch has actually landed on main.)
-  if (patch.status === "done" && story.status !== "done") {
+
+  // A NODE going ABORTED tears down its LIVE members, or each in-flight member is STRANDED as an
+  // orphaned standalone top-level task (its feedback re-routes to the CTO; it merges to main with
+  // no story context) AND keeps a story_id/parent_id pointing at an aborted node whose completion
+  // seam can never fire. Fire the shared cascade now that the abort has PROVABLY taken effect
+  // (gated on the CAS) — an abort rejected against a terminal/merging story must NOT tear members
+  // down. The member SELECT runs synchronously inside abortInflightMembers (before its first
+  // await), so it captures the full live-member set now; per-member teardown completes async
+  // (mirrors this file's `void landStory` fire-and-forget idiom). Already-MERGED members are
+  // PRESERVED untouched.
+  if (target === "aborted") {
+    void abortInflightMembers(id).catch(() => {});
+  }
+  // STORY COMPLETION REPORTED UP (Phase 6): on the ENTRY into `done` (the CAS proved the row
+  // actually moved open→done, so a no-op re-PATCH never re-notifies), report completion UP to
+  // the CTO via a story-level attention event targeted at the WORKSPACE/CTO feed. Published
+  // BEFORE the leader teardown below — the leader (the diff-review responder that merged the
+  // last subtask) is provably still up, but the report is for the CTO, not it. (An isolated
+  // story never reaches here for `done` — its land path publishes `complete` from landStory
+  // only once the branch has actually landed on main.)
+  if (target === "done") {
     publish({
       type: "story.attention",
       story_id: id,
@@ -189,17 +258,15 @@ export function updateStory(
       detail: story.brief ?? null,
     });
   }
-  // Drive the STORY-LEADER agent off a status change (Phase 3): `done`/`aborted` stop the
+  // Drive the STORY-LEADER agent off the REAL status change (Phase 3): `done`/`aborted` stop the
   // leader (desired-down + teardown); `open` (re)launches it. Thin hook into story-agent.ts.
-  if (patch.status !== undefined && typeof patch.status === "string") {
-    onStoryStatusChanged(id, patch.status);
-  }
+  onStoryStatusChanged(id, target);
   // UNIFIED-PATH completion teardown: a genuine story terminal (`done`/`aborted`) tears the
   // node's leader WORKSPACE row down too (the legacy onStoryStatusChanged only zeroes the
   // story_agent table), so the unified supervisor stops relaunching a finished story's leader.
-  // `open` (reopen) must NOT tear down; the isolated-`done` land request returned early above
-  // (landStory tears down on the actual land). Best-effort; no-op when the unified gate is OFF.
-  if (patch.status === "done" || patch.status === "aborted") {
+  // `open` (reopen-as-no-op) must NOT tear down; the isolated-`done` land request returned early
+  // above (landStory tears down on the actual land). Best-effort; no-op when the unified gate is OFF.
+  if (target === "done" || target === "aborted") {
     void teardownLeaderWorkspaceForWork(id).catch(() => {});
   }
   return getStory(id)!;
@@ -353,40 +420,59 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
 
   // Ensure the transient `merging` state (idempotent — updateStory already set it on the PATCH
   // path; boot recovery re-enters with it already set; a merge_blocked re-attempt flips it now).
+  // GUARDED CAS from open/merge_blocked: if the story raced to a terminal state between the read
+  // above and here, the CAS no-ops and we bail rather than clobber done/aborted back to merging.
   if (story.status !== "merging") {
-    db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(storyId);
+    if (!setStoryStatus(storyId, "merging", { from: ["open", "merge_blocked"] })) {
+      return getStory(storyId);
+    }
     onStoryStatusChanged(storyId, "merging");
   }
 
   const outcome = await mergeStoryBranch(storyId);
 
   if (outcome.kind === "landed") {
-    // Clear any open ask on this terminal `done` transition too (hygiene, mirrors updateStory's
-    // terminal branch) — a landed story is finished, so a stale answerable ask is dead data.
-    db.query(
-      `UPDATE stories SET status='done', merge_base_sha=?, merged_sha=?, pending_ask=NULL, ask_responder=NULL WHERE id=?`,
-    ).run(outcome.baseSha, outcome.mergedSha, storyId);
-    // Report `complete` UP to the CTO (the leader is provably still up here), THEN tear the
-    // leader down. Only a landed-and-green story ever reaches this.
-    publish({
-      type: "story.attention",
-      story_id: storyId,
-      workspace_id: story.workspace_id,
-      target: "cto",
-      reason: "complete",
-      detail: story.brief ?? null,
+    // GUARDED `done` write — CAS from `merging` ONLY. Clears any open ask on this terminal
+    // transition too (hygiene, mirrors updateStory's terminal branch) — a landed story is
+    // finished, so a stale answerable ask is dead data. If a concurrent abort already moved the
+    // row merging→aborted, this CAS no-ops and the side-effects below DON'T fire (the abort owns
+    // the terminal state); otherwise landStory's own `done` write wins.
+    const landed = setStoryStatus(storyId, "done", {
+      from: ["merging"],
+      set: {
+        merge_base_sha: outcome.baseSha,
+        merged_sha: outcome.mergedSha,
+        pending_ask: null,
+        ask_responder: null,
+      },
     });
-    onStoryStatusChanged(storyId, "done");
-    // Unified-path teardown of the node's leader workspace row (mirrors the updateStory
-    // terminal branch) — only a landed-and-green isolated story reaches `done` here.
-    void teardownLeaderWorkspaceForWork(storyId).catch(() => {});
+    if (landed) {
+      // Report `complete` UP to the CTO (the leader is provably still up here), THEN tear the
+      // leader down. Only a landed-and-green story ever reaches this.
+      publish({
+        type: "story.attention",
+        story_id: storyId,
+        workspace_id: story.workspace_id,
+        target: "cto",
+        reason: "complete",
+        detail: story.brief ?? null,
+      });
+      onStoryStatusChanged(storyId, "done");
+      // Unified-path teardown of the node's leader workspace row (mirrors the updateStory
+      // terminal branch) — only a landed-and-green isolated story reaches `done` here.
+      void teardownLeaderWorkspaceForWork(storyId).catch(() => {});
+    }
     return getStory(storyId);
   }
 
   // Every non-landed outcome leaves main + the story branch untouched → merge_blocked (the
   // leader is KEPT up to re-attempt). onStoryStatusChanged("merge_blocked") is a no-op stop
-  // (the leader stays up), called for symmetry with the other transitions.
-  db.query(`UPDATE stories SET status='merge_blocked' WHERE id=?`).run(storyId);
+  // (the leader stays up), called for symmetry with the other transitions. GUARDED CAS from
+  // `merging` ONLY: if a concurrent abort already terminalized the row, the CAS no-ops and we
+  // bail rather than resurrect a terminal story to merge_blocked + re-fire its attention events.
+  if (!setStoryStatus(storyId, "merge_blocked", { from: ["merging"] })) {
+    return getStory(storyId);
+  }
   onStoryStatusChanged(storyId, "merge_blocked");
 
   if (outcome.kind === "gateRed" || outcome.kind === "postVerifyRed") {

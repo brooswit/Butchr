@@ -198,3 +198,51 @@ describe("createStory captures the per-story isolated bit (§11.8)", () => {
     dbMod.db.query(`UPDATE workspaces SET branch_isolation=0 WHERE id=?`).run(WS);
   });
 });
+
+describe("story-status CAS / from-guard (st-a632b2cc F2)", () => {
+  /** Insert a story directly in WS with a given status (no createStory → no leader launch). */
+  function mkStoryAt(id: string, status: string): void {
+    dbMod.db
+      .query(
+        `INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, WS, `story ${id}`, status, 0, dbMod.nowIso());
+  }
+
+  test("(a) RE-OPEN from `done` is REJECTED — a PATCH {status:'open'} no-ops, status stays done", () => {
+    const SID = "st-f2reopen";
+    mkStoryAt(SID, "done");
+
+    // `open`'s only legal source is `open` itself — a terminal story can never be re-opened
+    // (the bug: writing `open` over a merged-and-deleted `done` would relaunch its leader).
+    const row = storiesMod.updateStory(SID, { status: "open" });
+    expect(row.status).toBe("done");
+    expect(storiesMod.getStory(SID)!.status).toBe("done");
+  });
+
+  test("(a') a terminal `done` cannot be re-transitioned to `aborted` either", () => {
+    const SID = "st-f2done-abort";
+    mkStoryAt(SID, "done");
+
+    // `aborted`'s legal sources are open/merge_blocked — never a terminal row.
+    const row = storiesMod.updateStory(SID, { status: "aborted" });
+    expect(row.status).toBe("done");
+    expect(storiesMod.getStory(SID)!.status).toBe("done");
+  });
+
+  test("a legal transition still fires: `open` → `aborted` succeeds", () => {
+    const SID = "st-f2legal";
+    mkStoryAt(SID, "open");
+    const row = storiesMod.updateStory(SID, { status: "aborted" });
+    expect(row.status).toBe("aborted");
+    expect(storiesMod.getStory(SID)!.status).toBe("aborted");
+  });
+
+  test("a brief-only PATCH still edits the brief in ANY state (no status guard)", () => {
+    const SID = "st-f2brief";
+    mkStoryAt(SID, "done");
+    const row = storiesMod.updateStory(SID, { brief: "edited brief on a done story" });
+    expect(row.brief).toBe("edited brief on a done story");
+    expect(row.status).toBe("done"); // untouched
+  });
+});

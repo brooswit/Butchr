@@ -812,6 +812,7 @@ route("POST", "/api/work/:id/approve", async (_req, p) => {
   if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
   if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
   if (r.awaitingMajorConfirm) return json({ task: r.task, awaitingMajorConfirm: true });
+  if (r.storyClosed) return json({ task: r.task, storyClosed: true, message: r.message });
   return json(r.task);
 });
 
@@ -937,6 +938,7 @@ route("POST", "/api/work/:id/confirm-major", async (_req, p) => {
   if (r.conflictSentBack) return json({ task: r.task, conflictSentBack: true });
   if (r.revertedOnRed) return json({ task: r.task, revertedOnRed: true });
   if (r.awaitingMajorConfirm) return json({ task: r.task, awaitingMajorConfirm: true });
+  if (r.storyClosed) return json({ task: r.task, storyClosed: true, message: r.message });
   return json(r.task);
 });
 

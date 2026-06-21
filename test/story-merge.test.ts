@@ -363,3 +363,84 @@ describe("non-isolated story is unchanged (§11.8)", () => {
     expect(complete.target).toBe("cto");
   });
 });
+
+describe("subtask merge GUARDS on the parent story's authoritative status (st-a632b2cc F1)", () => {
+  /** Build a REAL in_review subtask of `storyId` (worktree cut off the story branch) that has
+   * committed `file` but is NOT yet merged onto the story branch. Returns its id. */
+  async function buildInReviewMember(storyId: string, file: string): Promise<string> {
+    const view = await tasksMod.createTask(
+      WS_ISO, `late ${file}`, [], [], "task", null, [], 0, false, false, "patch", [], storyId,
+    );
+    const id = view.id;
+    const wt = join(REPO_ISO, id);
+    writeFileSync(join(wt, file), "late\n");
+    execFileSync("git", ["-C", wt, "add", "-A"]);
+    execFileSync("git", ["-C", wt, "commit", "-q", "-m", `late ${file}`]);
+    dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(id);
+    taskmdMod.updateTaskMdStatus(REPO_ISO, id, "in_review");
+    return id;
+  }
+
+  for (const st of ["merging", "done", "aborted"] as const) {
+    test(`approving an in_review member of a ${st} story is REFUSED + task stays in_review + branch never recreated`, async () => {
+      const SID = `st-f1${st}`;
+      mkStory(SID, WS_ISO, 1);
+      const storyBranch = gitMod.storyBranchName(SID);
+
+      // A first member lands on the story branch (creates it), then a SECOND member is built +
+      // left in_review on the story branch but never merged.
+      await seedMerged(REPO_ISO, WS_ISO, SID, `f1${st}a.txt`, "a\n");
+      const late = await buildInReviewMember(SID, `f1${st}b.txt`);
+
+      // Move the parent story OUT of the member-accepting states. For `done` we LAND it for real
+      // (mergeStoryBranch → removeStoryBranch actually DELETES the story branch — the orphan-
+      // recreate case); for merging/aborted we set the status directly (branch intact).
+      if (st === "done") {
+        verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
+        await storiesMod.landStory(SID);
+        expect(storyRow(SID).status).toBe("done");
+        expect(await gitMod.branchExists(REPO_ISO, storyBranch)).toBe(false); // deleted
+      } else {
+        dbMod.db.query(`UPDATE stories SET status=? WHERE id=?`).run(st, SID);
+      }
+
+      const mainBefore = g(["rev-parse", DEFAULT_ISO]);
+      // Approve the leftover member — REFUSED before resolveMergeContext/ensureStoryBranch runs.
+      verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
+      const out = await tasksMod.finalizeMerge(late);
+
+      expect(out.storyClosed).toBe(true);
+      expect(out.message).toContain(SID);
+      expect(out.message).toContain(st);
+      // The task is held in_review (NOT lost), and nothing reached main.
+      expect(out.task.status).toBe("in_review");
+      expect(g(["rev-parse", DEFAULT_ISO])).toBe(mainBefore);
+      expect(existsSync(join(REPO_ISO, `f1${st}b.txt`))).toBe(false);
+      // A terminal/merging story's deleted branch must NOT be recreated by the refused merge.
+      if (st === "done") {
+        expect(await gitMod.branchExists(REPO_ISO, storyBranch)).toBe(false);
+      }
+    });
+  }
+
+  test("F2: a PATCH abort/done while the story is `merging` is REJECTED (CAS no-op), and landStory's own done write still wins", async () => {
+    const SID = "st-f2race";
+    mkStory(SID, WS_ISO, 1);
+    await seedMerged(REPO_ISO, WS_ISO, SID, "race.txt", "r\n");
+    // Put the story into the in-flight `merging` state (as updateStory's land request would).
+    dbMod.db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(SID);
+
+    // A racing PATCH abort/done is REJECTED — abort's legal `from` is open/merge_blocked (NOT
+    // merging) and done's is open (NOT merging) — so the guarded CAS no-ops and the row stays
+    // `merging`. (done is NOT intercepted as a land request here: isLandRequest needs status
+    // open/merge_blocked, not merging.)
+    expect(storiesMod.updateStory(SID, { status: "aborted" }).status).toBe("merging");
+    expect(storiesMod.updateStory(SID, { status: "done" }).status).toBe("merging");
+    expect(storyRow(SID).status).toBe("merging");
+
+    // landStory's own `done` write (CAS from `merging`) still wins → the in-flight merge lands.
+    verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
+    await storiesMod.landStory(SID);
+    expect(storyRow(SID).status).toBe("done");
+  });
+});

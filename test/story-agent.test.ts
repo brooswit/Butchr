@@ -16,9 +16,10 @@
 //     disabled (story not open); herdr-down skip.
 //   - SUPERVISED RELAUNCH on death RESUMES the same session.
 //   - CRUD LIFECYCLE WIRING: createStory marks the leader desired + creates a story_agent
-//     row; updateStory→done/aborted clears desired + tears down; updateStory→open relaunches;
-//     deleteStory removes the story_agent row (and teardown is attempted); unregistering the
-//     WORKSPACE cascade-removes its story_agent rows.
+//     row; updateStory→done/aborted clears desired + tears down; updateStory→open on a TERMINAL
+//     story is a guarded no-op (st-a632b2cc F2 — no leader relaunch); deleteStory removes the
+//     story_agent row (and teardown is attempted); unregistering the WORKSPACE cascade-removes
+//     its story_agent rows.
 //
 // config fields are set DIRECTLY on the imported config object (deterministic regardless of
 // bun's shared-config import order).
@@ -453,7 +454,7 @@ describe("CRUD lifecycle wiring (stories.ts / workspaces.ts → story-agent.ts)"
     expect(calls.teardownTask).toBeGreaterThanOrEqual(1);
   });
 
-  test("updateStory→open (re)launches the leader", async () => {
+  test("updateStory→open on a TERMINAL story is REJECTED — the leader is NOT relaunched (st-a632b2cc F2)", async () => {
     const { runner } = makeFake({ alive: false });
     harnessMod.setRunner(runner);
     const story = storiesMod.createStory(WS, "story reopen");
@@ -462,13 +463,18 @@ describe("CRUD lifecycle wiring (stories.ts / workspaces.ts → story-agent.ts)"
     await flush();
     expect(row(story.id)!.desired).toBe(0);
 
+    // Re-opening a terminal (aborted/done) story is now a GUARDED no-op: `open`'s only legal
+    // source is `open` itself, so the CAS rejects the transition and the leader is NOT relaunched
+    // — fixing the bug where writing `open` over a terminal row relaunched a leader for a story
+    // whose branch was already merged-and-deleted.
     const reopen = makeFake({ alive: false });
     harnessMod.setRunner(reopen.runner);
-    storiesMod.updateStory(story.id, { status: "open" });
+    const result = storiesMod.updateStory(story.id, { status: "open" });
     await flush();
 
-    expect(row(story.id)!.desired).toBe(1);
-    expect(reopen.calls.agentStart.length).toBeGreaterThanOrEqual(1);
+    expect(result.status).toBe("aborted"); // unchanged — the reopen was rejected
+    expect(row(story.id)!.desired).toBe(0);
+    expect(reopen.calls.agentStart.length).toBe(0);
   });
 
   test("deleteStory removes the story_agent row (and a teardown is attempted)", async () => {
