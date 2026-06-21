@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.163] - 2026-06-21
+
 - **Fixed: the spec-conformance verdict parser no longer silently drops verdicts whose `reason` contains braces/code (story st-c2093812, `src/conformance.ts`).** `parseConformanceVerdict` previously matched verdict objects with a brace-free regex (`/\{[^{}]*"conforms"[^{}]*\}/`), which failed on exactly the "no"/"partial" verdicts that matter most — the ones whose `reason` quotes code (`... returns {} instead ...`, TS types, JSX, object literals). A failed match returned `null`, which `triggerConformance` mapped to a NULL badge, and `gatesGreen` treats NULL as green — so a genuine off-spec concern was lost invisibly (advisory-only, so never an unsafe merge, but the gate's purpose was defeated intermittently). The parser now does a string-aware balanced-brace scan over stdout (tracking JSON string context with `\`-escape handling so braces inside a `reason` — even an unbalanced one inside the quoted string — don't break the match) and JSON-parses each candidate, preferring the LAST valid verdict. The format-example line in the prompt echo is not valid JSON so it is still skipped. The VALID-set check, last-match preference, `reason.trim()`/`conforms.toLowerCase()` normalization, `ConformanceResult|null` shape, and never-throw contract are unchanged. New regression tests in `test/conformance-gate.test.ts`. No `package.json` change.
 
 ## [0.9.162] - 2026-06-21
