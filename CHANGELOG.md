@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Boot recovery no longer discards uncommitted work via the `recoverMergedTasks`
+  empty-branch false-positive.** The boot sweep reconciled an `in_review` task to
+  `merged` (tearing down its worktree with `git worktree remove --force`) whenever
+  `branchAlreadyMerged` was true — but that check is `merge-base --is-ancestor`, which
+  is *trivially* true for a branch with zero own commits (its tip is still an old base
+  commit), so it could not tell a genuinely-landed branch from one that never diverged.
+  A failed best-effort `autoCommitOnReview` can leave real uncommitted work in such an
+  empty branch's worktree, which the sweep would then silently delete. `recoverMergedTasks`
+  now gates the reconcile with three fail-safe guards: (A) skip if the worktree holds
+  uncommitted changes (preserve the work); (B) skip unless the branch genuinely diverged
+  from its **fork** base — measured against the creation point recovered from the branch's
+  oldest reflog entry (`new src/git.ts: branchDivergedFromFork`), since own-commits vs the
+  *current* base are 0 after a fast-forward in the genuine case too; and (C), applied
+  *before* `resolveMergeContext` (whose isolated-member path lazily recreates the story
+  branch), skip a member whose parent story is aborting/closed/deleted, mirroring
+  `finalizeMerge`. Genuinely-landed tasks are still reconciled; nothing else changes.
+
 ## [0.9.173] - 2026-06-21
 
 - **Added: the dashboard now RENDERS the agent-independent "stranded work" pull-signal, so a human can SEE that an owning CTO/leader is dead-while-desired or disabled with pending work (story st-a4cc6082, S3) (`public/app.js`, `public/style.css`).** S2 (0.9.172) added the `stranded` count + `strandedItems` (`{ workId, kind, reason }`) to each `DashboardWorkspace` and `Dashboard.totals.stranded` on GET `/api/dashboard` + `/health`, but nothing surfaced it — so the signal was API-only and a human still couldn't see it. A new pure, DOM-free helper block in `public/app.js` (fenced `<test-extract:stranded-indicator>`, the same unit-testable pattern as the existing state-meta / capture-ui-state extracts) renders it: `strandedMarkup(data)` builds a DISTINCT, prominent panel — bold red-accented (thick left bar, like `.needs-input-panel`), `role="alert"`, headed "Stranded work" with the total count and the lead "a responder is dead or disabled — a human must intervene" — listing every stranded item GROUPED BY WORKSPACE (so each names which workspace/story it belongs to), each showing its friendly condition label (`strandedKindLabel`: idea awaiting spec / dead-blocked task / stuck story / merge-blocked story) and the `reason` verbatim (which already carries BOTH the condition AND the responder verdict — "CTO gave up (dead)" / "CTO disabled" / "leader gave up (dead)" / "leader disabled"). Items LINK to the affected work via `strandedHref(kind, workId, workspaceId)`, which BRANCHES on kind because STORIES HAVE NO DETAIL ROUTE in the app (`parseHash` knows only dashboard | metrics | workspace/<id> | task/<id>): TASK-kind findings (`idea`/`dead_blocked`) link to `#/task/<workId>`, while STORY-kind findings (`stuck_story`/`merge_blocked`) link to the OWNING `#/workspace/<workspaceId>` (never `#/task/<storyId>`, which would mis-render a node id in the task-detail view). The panel mounts on the dashboard immediately after the cross-project summary (above the register form), and is OMITTED entirely when `totals.stranded === 0` so a healthy board stays calm. A `stranded` stat is added to the `dash-summary` row and a `stranded` bucket badge to each workspace card — both visually STRONGER than the ordinary review/needsAttention badge (filled red when non-zero) since this needs a person, not an agent. All output is `esc`-escaped. No existing dashboard layout, the needsAttention/review badges, empty states, or story rollup are changed. New regression tests in `test/stranded-indicator-ui.test.ts` (extract-and-eval the helper block: total count + per-item kind label + verbatim reason + owning-workspace name render; the kind-branched link target — TASK kinds → `#/task/<workId>`, STORY kinds → `#/workspace/<workspaceId>` and NOT `#/task/<storyId>`; HTML escaping; and the empty-string/absent panel when nothing is stranded). No `package.json` change.

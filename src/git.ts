@@ -148,6 +148,61 @@ async function branchOwnCommitCount(dir: string, base: string, taskId: string): 
 }
 
 /**
+ * Whether the task branch GENUINELY DIVERGED from its CREATION (FORK) base — i.e. it authored
+ * >=1 commit of its own since `git worktree add -b <taskId> <path> <base>` cut it.
+ *
+ * This is the discriminator the boot-recovery sweep (recoverMergedTasks) needs and that
+ * branchAlreadyMerged / branchOwnCommitCount CANNOT provide:
+ *   • branchOwnCommitCount measured vs the CURRENT base is 0 in BOTH the genuine landed case
+ *     (after a fast-forward, base already CONTAINS the branch's commits → `base..taskId` == 0)
+ *     AND the never-diverged empty case — so it does not discriminate.
+ *   • tasks.merge_base_sha is NULL in the genuine crash-in-gap case too (the crash struck before
+ *     recordLanded, the only writer) — so non-null is not a discriminator either.
+ * The only stable signal is own-commits vs the FORK point, recovered here from the branch ref's
+ * OLDEST reflog entry: `git worktree add -b` writes a "branch: Created from <base>" reflog entry
+ * whose sha IS the fork commit, and the reflog is append-only so it survives the rebase that
+ * lands the branch onto base. `fork..taskId` >= 1 ⇒ the branch authored real work (genuine
+ * landed case); == 0 ⇒ never diverged (empty branch).
+ *
+ * FAIL CLOSED: if the fork point can't be recovered (reflog pruned/missing) or any git error,
+ * returns false (treat as NOT diverged → the caller SKIPS — the task stays in_review for normal
+ * handling, no data loss, an operator can re-approve).
+ */
+export async function branchDivergedFromFork(dir: string, taskId: string): Promise<boolean> {
+  // Fully-qualify the ref: the task worktree dir is `<dir>/<taskId>`, so a BARE `<taskId>` is
+  // ambiguous (ref vs path) and `reflog show` fatals on it — `refs/heads/<taskId>` is unambiguous.
+  const ref = `refs/heads/${taskId}`;
+  // Reflog entries are newest-first; the OLDEST (last) line is the creation/fork sha.
+  const reflog = await run([git, "-C", dir, "reflog", "show", "--format=%H", ref]);
+  if (!reflog.ok) return false;
+  const lines = reflog.stdout.trim().split("\n").filter((l) => l.trim().length > 0);
+  const fork = lines[lines.length - 1];
+  if (!fork) return false;
+  const count = await run([git, "-C", dir, "rev-list", "--count", `${fork}..${ref}`]);
+  if (!count.ok) return false;
+  return (parseInt(count.stdout.trim(), 10) || 0) >= 1;
+}
+
+/**
+ * Whether the task's worktree holds UNCOMMITTED work a recovery teardown would discard — the
+ * data-loss guard for recoverMergedTasks (an autoCommitOnReview that FAILED leaves real work
+ * uncommitted in the worktree while the branch stays empty). Three states, kept distinct:
+ *   • worktree ABSENT → false (nothing to lose — do NOT block a genuine heal whose worktree was
+ *     already removed; recordLanded→teardownAndDiscard is absent-safe).
+ *   • worktree EXISTS and `status --porcelain` is non-empty → true (DIRTY → preserve).
+ *   • worktree EXISTS but the status probe ERRORS → true (can't confirm clean → fail-safe toward
+ *     preservation).
+ * Only an EXISTING worktree warrants the preserve-skip; absent is not "unconfirmable".
+ */
+export async function worktreeHasUncommittedWork(dir: string, taskId: string): Promise<boolean> {
+  const wt = worktreePath(dir, taskId);
+  if (!existsSync(wt)) return false;
+  const st = await run([git, "-C", wt, "status", "--porcelain"]);
+  if (!st.ok) return true;
+  return st.stdout.trim().length > 0;
+}
+
+/**
  * Count of commits on the default branch that the task branch does NOT yet contain
  * (the `taskId..base` range) — i.e. how many commits BEHIND the current default tip
  * the branch is. 0 means the branch already contains the tip (it is "on tip"). The

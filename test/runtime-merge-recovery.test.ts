@@ -25,7 +25,7 @@
 // worktrees/branches/commits — so we assert what genuinely lands (or doesn't) on main.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +38,8 @@ let dbMod: typeof import("../src/db.ts");
 let taskmdMod: typeof import("../src/taskmd.ts");
 let verifyMod: typeof import("../src/verify.ts");
 let wsMod: typeof import("../src/workspaces.ts");
+let storiesMod: typeof import("../src/stories.ts");
+let gitMod: typeof import("../src/git.ts");
 
 function g(args: string[], cwd = REPO_ROOT): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -77,6 +79,8 @@ beforeAll(async () => {
   tasksMod = await import("../src/tasks.ts");
   verifyMod = await import("../src/verify.ts");
   wsMod = await import("../src/workspaces.ts");
+  storiesMod = await import("../src/stories.ts");
+  gitMod = await import("../src/git.ts");
 
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
@@ -144,6 +148,17 @@ function restrandAsCrashed(id: string): void {
   taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
 }
 
+/** Reflog-FAITHFUL crash-in-gap state for a GENUINELY-diverged task: fast-forward main onto the
+ *  branch's tip WITHOUT tearing the branch down, leaving the DB row in_review. The branch keeps
+ *  its real `git worktree add -b` "Created from main" reflog (so its OLDEST reflog entry is the
+ *  true fork point and `fork..tip` >= 1) AND its tip is now an ancestor of main AND its worktree
+ *  is clean — exactly what GUARD B's reflog probe must still reconcile (unlike `git branch <id>
+ *  main`, which discards the fork history → fork==tip → 0 divergence). main is checked out at
+ *  REPO_ROOT, so a `--ff-only` merge there advances main. */
+function landViaFastForward(id: string): void {
+  g(["merge", "--ff-only", id]);
+}
+
 describe("F2 — re-approve of an already-landed task is IDEMPOTENT (no second release)", () => {
   test("re-approve lands `merged` WITHOUT re-bumping, and releases dependents", async () => {
     // Land A for real → cuts 0.9.1, tears down the branch.
@@ -186,52 +201,132 @@ describe("F2 — re-approve of an already-landed task is IDEMPOTENT (no second r
   });
 });
 
-describe("F2 — recoverMergedTasks boot sweep reconciles the stranded task", () => {
-  test("an already-landed in_review task is finalized at boot WITHOUT re-bumping", async () => {
-    const b = await seedReviewTask("beta.ts", "export const b = 2;\n");
-    await tasksMod.approveTask(b);
-    expect(row(b).status).toBe("merged");
-    expect(version()).toBe("0.9.2"); // second real release of the suite
-    const headingsBefore = headingCount();
-
-    restrandAsCrashed(b);
-    expect(row(b).status).toBe("in_review");
+describe("recoverMergedTasks boot sweep — empty-branch false-positive guards (story st-794f8920)", () => {
+  test("(c) a GENUINELY-diverged branch that already LANDED is still reconciled to `merged`", async () => {
+    // Reflog-faithful crash-in-gap: real fork divergence + tip is an ancestor of main + clean
+    // worktree. GUARD B (fork-relative own-commits) must see >=1 and let the heal proceed.
+    const c = await seedReviewTask("beta.ts", "export const b = 2;\n");
+    landViaFastForward(c);
+    expect(row(c).status).toBe("in_review");
+    // The discriminator GUARD B relies on: own-commits vs the FORK base are >=1 even though
+    // vs the CURRENT base (main, post-ff) they are 0 — the trap GUARD B must avoid.
+    expect(g(["rev-list", "--count", `${g(["rev-parse", c])}..main`])).toBe("0"); // current-base trap
+    expect(await gitMod.branchDivergedFromFork(REPO_ROOT, c)).toBe(true); // fork-relative truth
 
     const dep = await tasksMod.createTask(
-      WS_ID, "depends on beta", [], [b], "task", null, [], 0, false, false, "patch",
+      WS_ID, "depends on beta", [], [c], "task", null, [], 0, false, false, "patch",
     );
     expect(row(dep.id).status).toBe("blocked");
 
     const versionBefore = version();
     const changelogBefore = changelog();
+    const headingsBefore = headingCount();
 
     // BOOT SWEEP — the in_review sibling of recoverRollingBackTasks.
     const recovered = await tasksMod.recoverMergedTasks();
     expect(recovered).toBeGreaterThanOrEqual(1);
 
-    // Finalized to a TERMINAL state (no re-dispatch loop), with no second release.
-    expect(row(b).status).toBe("merged");
+    // Finalized to a TERMINAL state (heal NOT regressed), with no second release.
+    expect(row(c).status).toBe("merged");
     expect(version()).toBe(versionBefore);
     expect(changelog()).toBe(changelogBefore);
     expect(headingCount()).toBe(headingsBefore);
-    expect(changelog()).not.toMatch(/## \[0\.9\.3\]/);
 
     // Dependent released.
     expect(row(dep.id).status).toBe("inactive");
   });
 
+  test("(a) an EMPTY never-diverged branch (clean worktree) is NOT marked merged, worktree kept", async () => {
+    // Real `git worktree add -b` path with ZERO commits: tip == main (trivially an ancestor →
+    // branchAlreadyMerged TRUE) but fork..tip == 0. GUARD B must skip; GUARD A is a no-op (clean).
+    const view = await tasksMod.createTask(
+      WS_ID, "empty branch", [], [], "task", null, [], 0, false, false, "patch",
+    );
+    const e = view.id;
+    dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(e);
+    taskmdMod.updateTaskMdStatus(REPO_ROOT, e, "in_review");
+    const wt = join(REPO_ROOT, e);
+    expect(g(["status", "--porcelain"], wt)).toBe(""); // clean worktree
+    expect(g(["rev-parse", e])).toBe(g(["rev-parse", "main"])); // 0 own commits (tip == base)
+    expect(await gitMod.branchDivergedFromFork(REPO_ROOT, e)).toBe(false);
+
+    await tasksMod.recoverMergedTasks();
+
+    expect(row(e).status).toBe("in_review"); // NOT falsely marked merged
+    expect(existsSync(wt)).toBe(true); // worktree NOT discarded
+  });
+
+  test("(b) REAL uncommitted work whose auto-commit FAILED (dirty + empty branch) is PRESERVED", async () => {
+    // The data-loss trigger: an empty branch (autoCommitOnReview returned false) with live
+    // uncommitted work in the worktree. GUARD A must skip BEFORE any teardown.
+    const view = await tasksMod.createTask(
+      WS_ID, "dirty branch", [], [], "task", null, [], 0, false, false, "patch",
+    );
+    const d = view.id;
+    dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(d);
+    taskmdMod.updateTaskMdStatus(REPO_ROOT, d, "in_review");
+    const wt = join(REPO_ROOT, d);
+    writeFileSync(join(wt, "lost-work.ts"), "export const precious = 42;\n"); // never committed
+    expect(g(["status", "--porcelain"], wt)).not.toBe(""); // dirty
+    expect(await gitMod.worktreeHasUncommittedWork(REPO_ROOT, d)).toBe(true);
+
+    await tasksMod.recoverMergedTasks();
+
+    expect(row(d).status).toBe("in_review"); // NOT marked merged
+    expect(existsSync(join(wt, "lost-work.ts"))).toBe(true); // uncommitted work PRESERVED
+    expect(readFileSync(join(wt, "lost-work.ts"), "utf8")).toBe(
+      "export const precious = 42;\n",
+    );
+  });
+
   test("a genuinely-unmerged in_review task is NOT swept (its tip carries unmerged commits)", async () => {
-    // Seed but do NOT merge: the branch has its own commit not in main, so its tip is NOT an
+    // Seed but do NOT land: the branch has its own commit not in main, so its tip is NOT an
     // ancestor of main → branchAlreadyMerged is false → the sweep must leave it alone.
-    const c = await seedReviewTask("gamma.ts", "export const c = 3;\n");
-    expect(row(c).status).toBe("in_review");
+    const u = await seedReviewTask("gamma.ts", "export const c = 3;\n");
+    expect(row(u).status).toBe("in_review");
     const versionBefore = version();
     const changelogBefore = changelog();
 
     await tasksMod.recoverMergedTasks();
 
-    expect(row(c).status).toBe("in_review"); // untouched
+    expect(row(u).status).toBe("in_review"); // untouched
     expect(version()).toBe(versionBefore); // no spurious bump
     expect(changelog()).toBe(changelogBefore);
+  });
+
+  test("(d) an ABORTING task / a member of an ABORTED story is NOT reconciled (no story-branch recreation)", async () => {
+    // (d1) the aborting latch — a genuinely-landed task with aborting=1 must be refused by GUARD C.
+    const ab = await seedReviewTask("epsilon.ts", "export const ee = 5;\n");
+    landViaFastForward(ab);
+    dbMod.db.query(`UPDATE tasks SET aborting=1 WHERE id=?`).run(ab);
+
+    await tasksMod.recoverMergedTasks();
+    expect(row(ab).status).toBe("in_review"); // GUARD C (aborting) skipped it, not reconciled
+
+    // (d2) an isolated member of an ABORTED/DELETED story — GUARD C must run BEFORE
+    // resolveMergeContext so its lazy ensure-story-branch side effect never RECREATES the
+    // deleted story branch to false-merge into.
+    wsMod.setWorkspaceBranchIsolation(WS_ID, true); // story captures isolated=1 at creation
+    const story = storiesMod.createStory(WS_ID, "isolated story");
+    const member = await storiesMod.createSubtask(story.id, { prompt: "member work" });
+    const m = member.id;
+    const storyBranch = gitMod.storyBranchName(story.id);
+    // createSubtask lazily ensured the story branch + worktree; tear them down to model the
+    // deleted-story state, then strand the member in_review.
+    execFileSync(
+      "git",
+      ["-C", REPO_ROOT, "worktree", "remove", "--force", join(REPO_ROOT, `butchr-story-${story.id}`)],
+      { stdio: "ignore" },
+    );
+    execFileSync("git", ["-C", REPO_ROOT, "branch", "-D", storyBranch], { stdio: "ignore" });
+    dbMod.db.query(`UPDATE stories SET status='aborted' WHERE id=?`).run(story.id);
+    dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(m);
+    expect(() => g(["rev-parse", "--verify", storyBranch])).toThrow(); // precondition: absent
+
+    await tasksMod.recoverMergedTasks();
+
+    expect(row(m).status).toBe("in_review"); // member NOT reconciled
+    expect(() => g(["rev-parse", "--verify", storyBranch])).toThrow(); // story branch NOT recreated
+    wsMod.setWorkspaceBranchIsolation(WS_ID, false); // restore the shared workspace flag
   });
 });

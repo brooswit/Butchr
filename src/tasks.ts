@@ -4762,9 +4762,24 @@ export async function recoverRollingBackTasks(): Promise<number> {
  * checked against the wrong base) and reconciles the DB to `merged` + releases dependents via
  * recordLanded, WITHOUT re-merging / re-bumping (recordLanded never touches git refs).
  *
- * branchAlreadyMerged is branch-exists/fail-closed, so a task whose branch is genuinely
- * unmerged (tip carries its own commits → not an ancestor of base) is left untouched. Best-
- * effort per task; never throws. Runs at boot BEFORE the dispatcher starts, so no concurrent
+ * branchAlreadyMerged alone is INSUFFICIENT, though: it is `merge-base --is-ancestor`, so a
+ * branch with ZERO own commits (tip == an old base commit — every task branch starts this way
+ * at `git worktree add -b`) is TRIVIALLY an ancestor of base and reports true. It CANNOT tell
+ * "real task commits LANDED on base" (the genuine case) from "branch NEVER diverged" (empty). So
+ * three guards gate the reconcile, all best-effort/fail-safe:
+ *   GUARD C (story) — applied BEFORE resolveMergeContext, because that call lazily ENSURES
+ *     (recreates) an isolated member's story branch as a load-bearing side effect; an isolated
+ *     member of a closed/aborted/deleted story must be skipped FIRST so that ensure never fires.
+ *     Mirrors finalizeMerge's two refusals (row.aborting + parentStoryStatus ∉ accepts-members).
+ *     No-op for standalone tasks (parentStoryStatus null, aborting 0).
+ *   GUARD A (data-loss) — if the worktree holds UNCOMMITTED work (the autoCommit-failed lost-work
+ *     residual), skip and leave it in_review; never discard real work. The genuine crash-in-gap
+ *     case has a CLEAN (or already-removed) worktree, so this does not regress the heal.
+ *   GUARD B (empty branch) — reconcile only a branch that GENUINELY DIVERGED from its FORK base
+ *     (>=1 own commit, via branchDivergedFromFork's reflog probe). Own-commits vs the CURRENT
+ *     base is 0 in BOTH cases (post-ff), and merge_base_sha is NULL in the genuine case too —
+ *     both are traps; only the fork-relative count discriminates. Fail-closed → skip.
+ * Best-effort per task; never throws. Runs at boot BEFORE the dispatcher starts, so no concurrent
  * merge moves base. Returns how many were reconciled.
  */
 export async function recoverMergedTasks(): Promise<number> {
@@ -4776,10 +4791,22 @@ export async function recoverMergedTasks(): Promise<number> {
     try {
       const dir = getWorkspace(row.workspace_id);
       if (!dir) continue;
+      // GUARD C — refuse a member of a story that no longer accepts merges, BEFORE
+      // resolveMergeContext so its lazy ensure-story-branch side effect never recreates a
+      // deleted/closed story branch to false-merge into. Mirrors finalizeMerge (st-a632b2cc).
+      if (row.aborting) continue;
+      const storyStatus = parentStoryStatus(row);
+      if (storyStatus && !STORY_ACCEPTS_MEMBERS.has(storyStatus)) continue;
       // Resolve base the SAME way finalizeMerge does (isolated member → its story branch,
       // standalone → default), so an isolated member is checked against the right ref.
       const mctx = await resolveMergeContext(row);
       if (!(await git.branchAlreadyMerged(dir.path, row.id, mctx.base))) continue;
+      // GUARD A — a dirty (or unconfirmable) worktree is real work the autoCommit failed to
+      // capture; preserve it, leave the task in_review. Absent worktree → nothing to lose, proceed.
+      if (await git.worktreeHasUncommittedWork(dir.path, row.id)) continue;
+      // GUARD B — only reconcile a branch that genuinely diverged from its fork base. An empty
+      // never-diverged branch is an ancestor of base trivially (false-positive); skip it.
+      if (!(await git.branchDivergedFromFork(dir.path, row.id))) continue;
       // Already landed: backfill merged_sha from the current target tip; never re-bump.
       // in_review tasks land `merged` (rollback tasks sit in `rolling_back`, covered by
       // recoverRollingBackTasks → finalizeMerge's idempotent short-circuit).
