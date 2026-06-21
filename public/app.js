@@ -997,6 +997,13 @@ async function renderWorkspace(id) {
   // consumes the FULL union (nodes + leaves) so stories render as peer rows alongside tasks,
   // with their subtasks grouped underneath client-side.
   const tasks = workLeaves(work);
+  // Bound the long-lived module caches against this render's live work-id set (nodes + leaves),
+  // dropping entries for work that has left the list so neither grows unbounded over a session.
+  pruneWorkCaches(
+    new Set((Array.isArray(work) ? work : []).map((w) => w && w.id).filter(Boolean)),
+    WORK_TREE_EXPANDED,
+    activityCache,
+  );
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
 
@@ -1204,6 +1211,18 @@ function openNewStoryModal(workspaceId) {
 // always visible (indented) regardless of this set — only the detail block toggles.
 const WORK_TREE_EXPANDED = new Set();
 
+// <test-extract:prune-caches>
+// Bound the two long-lived module caches so they don't grow unbounded across a long session:
+// WORK_TREE_EXPANDED (story ids whose detail is open) and activityCache (task id -> last pulse).
+// Both only ever ADD ids; work that leaves the list (merged/aborted, or you switch workspaces)
+// kept its entry forever. On each workspace render we drop every id no longer in the current
+// work-id set — functionally harmless (a stale id renders nothing) — purely a growth bound.
+function pruneWorkCaches(liveIds, expanded, activity) {
+  for (const id of expanded) if (!liveIds.has(id)) expanded.delete(id);
+  for (const id of activity.keys()) if (!liveIds.has(id)) activity.delete(id);
+}
+// </test-extract:prune-caches>
+
 // Group the flat /api/work list (nodes + leaves, newest-first) into a tree CLIENT-SIDE — no
 // server help needed. A leaf's parent is its parent_id when populated, else its story_id
 // (parent_id is inert today but PREFERRED for forward-compat). A leaf whose parent id matches
@@ -1230,14 +1249,33 @@ function groupWork(work) {
   return { topLevel, childrenByNode };
 }
 
+// <test-extract:complete-status>
+// A work item counts as COMPLETE once it reaches a SUCCESSFUL terminal status. A LEAF task ends
+// at `merged` (or `rolled_back`); a STORY NODE ends at `done`. This is the ONE source of truth
+// for "is this work finished", reused by workRollup's ✓ count AND the cross-type graph/rollup
+// progress bars — those bars mix nodes + leaves in one subtree, so they MUST count node `done`
+// too, else any subtree containing a completed story UNDER-reports (it sits in the total but
+// never in the merged numerator). Failure/abort are terminal but NOT complete (they're the ✗).
+const COMPLETE_STATUSES = new Set(["merged", "rolled_back", "done"]);
+function isCompleteStatus(status) { return COMPLETE_STATUSES.has(status); }
+// Shared numerator behind both cross-type progress bars (graph node sub-bar + dependentRollup):
+// how many of `ids` resolve (via the byId map) to a COMPLETE work item.
+function countComplete(ids, byId) {
+  let n = 0;
+  for (const id of ids) if (isCompleteStatus((byId.get(id) || {}).status)) n++;
+  return n;
+}
+// </test-extract:complete-status>
+
 // A node's compact subtask ROLLUP string from its server-computed per-status `counts` map.
 // total counts every status EXCEPT the `idle` pseudo-bucket (a flag peeled out of in_progress,
-// not a real status); ✓ = merged + rolled_back (done), ✗ = failed + aborted (dead). Degrades
-// cleanly: a node with no subtasks (or only idle) reads "0" with no ✓/✗ noise.
+// not a real status); ✓ = completed (merged | rolled_back | done — see isCompleteStatus),
+// ✗ = failed + aborted (dead). Degrades cleanly: a node with no subtasks (or only idle) reads
+// "0" with no ✓/✗ noise.
 function workRollup(counts) {
   const c = counts || {};
   const total = Object.keys(c).reduce((n, k) => (k === "idle" ? n : n + (c[k] || 0)), 0);
-  const done = (c.merged || 0) + (c.rolled_back || 0);
+  const done = Object.keys(c).reduce((n, k) => (isCompleteStatus(k) ? n + (c[k] || 0) : n), 0);
   const dead = (c.failed || 0) + (c.aborted || 0);
   const parts = [];
   if (done) parts.push(done + "✓");
@@ -2039,8 +2077,9 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     // Nodes that gate nothing get no bar and keep the plain two-line layout.
     const subIds = gatedSubtree(id, dependentsOf);
     const subTotal = subIds.size;
-    let subMerged = 0;
-    for (const sid of subIds) if ((byId.get(sid) || {}).status === "merged") subMerged++;
+    // COMPLETE, not just `merged`: a dependent STORY lands at status `done`, so a merged-only
+    // count under-reports any subtree gating a story (see isCompleteStatus / countComplete).
+    const subMerged = countComplete(subIds, byId);
     const prog = subTotal ? ` · ${subMerged}/${subTotal} merged` : "";
     // When a bar is present the two text lines shift up to make room for it.
     const idY = NH / 2 - (subTotal ? 5 : 3);
@@ -2611,7 +2650,9 @@ function dependentRollup(rootId, tasks) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const subtree = [...gatedSubtree(rootId, dependentsOf)].map((sid) => byId.get(sid)).filter(Boolean);
   const direct = directIds.map((did) => byId.get(did)).filter(Boolean);
-  const merged = subtree.filter((t) => t.status === "merged").length;
+  // COMPLETE, not just `merged` — a dependent STORY completes at status `done`, so the merged-only
+  // count under-reported any subtree containing one (mirrors the graph sub-bar; see isCompleteStatus).
+  const merged = subtree.filter((t) => isCompleteStatus(t.status)).length;
   return { direct, total: subtree.length, merged };
 }
 
