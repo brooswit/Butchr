@@ -741,6 +741,17 @@ ensureColumn("tasks", "answer", "TEXT");
 ensureColumn("tasks", "diff_lines", "INTEGER");
 ensureColumn("tasks", "path_type", "TEXT");
 
+// PHANTOM-RELEASE GUARD FOOTPRINT (story st-3988b68e). The task's CODE file set
+// (JSON-array TEXT, repo-relative, EXCLUDING the workspace's configured changelog +
+// version-file paths) captured at review/GREEN time by tasks.captureDiffFootprint —
+// the DURABLE record the merge-time guard (git.merge → detectPhantomDrop) compares the
+// rebased branch against to catch a rebase / CHANGELOG-conflict resolution that silently
+// DROPPED the code (the EMPTY 0.9.150 phantom release). NON-SHRINKING: a later code-less
+// re-capture (e.g. a `reset --soft` that dropped the code commits) KEEPS the prior
+// non-empty set so a corrupted re-submission can't erase the evidence. NULL / "[]" means
+// the task carried no code (pure changelog/docs) — the guard is a no-op for it.
+ensureColumn("tasks", "code_files", "TEXT");
+
 // `tags` is a JSON-array TEXT column holding a task's free-form LABELS — short
 // strings the operator attaches at creation to organize a growing task list
 // (e.g. "webapp", "core", "docs", "spike"). Purely organizational: nothing in the
@@ -1636,6 +1647,9 @@ export type TaskRow = {
   // task for its rough duration estimate. NULL until/unless a footprint was captured.
   diff_lines: number | null;
   path_type: string | null;
+  // PHANTOM-RELEASE GUARD FOOTPRINT (see the ensureColumn block above + git.merge): the task's
+  // CODE-file set captured at review time as JSON-array TEXT, NON-SHRINKING. NULL/"[]" = no code.
+  code_files: string | null;
   // PER-TASK DISPATCH PRIORITY (see the ensureColumn block above): higher dispatches
   // sooner; the queued selection orders by `priority DESC, created_at ASC`. Default
   // 0. Surfaced on TaskView via the `...row` spread (no extra plumbing in taskView).

@@ -622,6 +622,13 @@ export type MergeResult = {
   // the caller can surface the verdict to the approver. ok=false on this result.
   gateRed?: boolean;
   gateOutput?: string;
+  // Set true when the PHANTOM-RELEASE GUARD refused the merge: the rebased branch no longer
+  // carries the task's code (a rebase / CHANGELOG-conflict resolution dropped it), so the ff
+  // was REFUSED — the ff-target branch is UNTOUCHED, NO release was cut, and the task branch +
+  // worktree are left intact. `conflictFiles` carries the dropped code files. Distinct from a
+  // `conflict` (the rebase itself failed); the caller bounces it through the SAME requestChanges
+  // path so the agent re-resolves preserving the code (story st-3988b68e). ok=false on this result.
+  phantomDropped?: boolean;
 };
 
 /**
@@ -799,6 +806,92 @@ async function taskDiffIsDocsOnly(
 }
 
 /**
+ * The set of CODE files a commit range changed, repo-relative, EXCLUDING the workspace's
+ * changelog + version-file paths (those are bump/stamp surfaces, not the task's own code).
+ * Plain `git diff --name-only <fromRef>..<toRef>` (TWO-dot: exactly the files `toRef` changed
+ * relative to `fromRef`). Fail-closed: any git error returns [] so a caller treats "couldn't
+ * tell" as "no code claim" — never a false guard trip on a transient git hiccup.
+ *
+ * Used by the PHANTOM-RELEASE GUARD in merge(): comparing the task's ORIGINAL code-file set
+ * (its review-time footprint and/or its merge-entry tip) against the rebased tip's net code
+ * diff catches a rebase / CHANGELOG-conflict resolution that silently DROPPED the code (the
+ * 0.9.150 work-loss incident, story st-3988b68e). The exclusions match taskDiffIsDocsOnly's
+ * intent — the workspace's CONFIGURED changelog/version paths are the single source of truth.
+ */
+export async function changedCodeFiles(
+  dir: string,
+  fromRef: string,
+  toRef: string,
+  excludePaths: string[] = [],
+): Promise<string[]> {
+  const res = await run([
+    git, "-C", dir, "diff", "--name-only", `${fromRef}..${toRef}`,
+  ]);
+  if (!res.ok) return [];
+  const exclude = new Set(excludePaths.filter(Boolean));
+  return res.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !exclude.has(l));
+}
+
+/**
+ * The PHANTOM-RELEASE GUARD's verdict on a rebased tip: the dropped files + a bounce message
+ * when the rebase silently lost the task's code, else null. Pure (no git I/O) so it's directly
+ * unit-testable. Three layers of defense-in-depth (story st-3988b68e):
+ *
+ *   (A) STRUCTURAL — the task carried code ENTERING this merge (`preRebaseCode`) that the
+ *       rebased net diff no longer carries: git's own rebase/changelog-union dropped it.
+ *   (B) DURABLE — the caller recorded the task's code footprint at review/GREEN time
+ *       (`originalCodeFiles`, captured BEFORE the agent could `reset --soft` it away) and the
+ *       rebased net diff is missing those files: the live branch was ALREADY corrupted before
+ *       it reached the merge. This is the actual 0.9.150 incident — by merge time the branch
+ *       only carried the CHANGELOG, so (A) sees nothing; only the durable footprint catches it.
+ *   (BELT) a RELEASE that nets ZERO code for a NON-rollback task that is KNOWN to be a CODE task
+ *       (`isCodeTask`, from the durable `path_type` footprint) is a dropped-work phantom even if
+ *       (A)/(B) missed it — e.g. the per-file `code_files` footprint was lost/empty but the
+ *       coarser path-type signal still says the task changed code. `isCodeTask` is an INDEPENDENT
+ *       column from the per-file sets, so this layer can fire when both of those are empty.
+ *
+ * Gated STRICTLY on "originally-touched code files now gone" / "a known code task nets no code",
+ * never on "the diff is small": a task that originally touched NO code (pure changelog/docs — empty
+ * sets, non-code path_type) returns null and merges normally. The rare false positive (base
+ * independently landed identical content, so a real change nets empty post-rebase) is acceptable:
+ * it bounces the agent to re-resolve rather than silently shipping an empty release, and is recoverable.
+ */
+export function detectPhantomDrop(p: {
+  preRebaseCode: string[];
+  originalCodeFiles: string[];
+  netCode: string[];
+  releaseMode: boolean;
+  isRollback: boolean;
+  isCodeTask: boolean;
+}): { missing: string[]; message: string } | null {
+  const net = new Set(p.netCode);
+  const message =
+    "rebase dropped the task's changes (phantom-release guard) — re-resolve the " +
+    "conflict preserving the code, not just the CHANGELOG";
+
+  // (A) structural — code present at merge entry, gone after the rebase.
+  const droppedStructural = p.preRebaseCode.filter((f) => !net.has(f));
+  if (p.preRebaseCode.length > 0 && droppedStructural.length > 0) {
+    return { missing: droppedStructural, message };
+  }
+  // (B) durable — the review-time footprint's code is gone after the rebase.
+  const droppedDurable = p.originalCodeFiles.filter((f) => !net.has(f));
+  if (p.originalCodeFiles.length > 0 && droppedDurable.length > 0) {
+    return { missing: droppedDurable, message };
+  }
+  // (BELT) a release that carries ZERO code for a non-rollback task KNOWN to be a code task —
+  // an independent net even when both per-file sets above are empty/unavailable.
+  if (p.releaseMode && !p.isRollback && p.isCodeTask && p.netCode.length === 0) {
+    const missing = p.originalCodeFiles.length > 0 ? p.originalCodeFiles : p.preRebaseCode;
+    return { missing, message };
+  }
+  return null;
+}
+
+/**
  * MERGE-TIME VERSION BUMP (+ release-mode changelog stamp): on a successful merge,
  * butchr bumps the workspace's configured version file (`versionFile`, relative to the
  * repo root — e.g. `package.json`) so concurrent tasks stop colliding on it (agents no
@@ -958,6 +1051,20 @@ export type MergeOptions = {
   // non-overlapping base content the task's own (stale) tests never exercise, so a tip
   // that was green pre-rebase can be red post-rebase. Omitted = today's merge, unchanged.
   onRebased?: (rebaseDir: string) => Promise<{ ok: boolean; output: string }>;
+  // PHANTOM-RELEASE GUARD inputs (story st-3988b68e). `originalCodeFiles` is the task's CODE
+  // footprint captured at review/GREEN time (tasks.captureDiffFootprint → the `code_files`
+  // column), passed by finalizeMerge so the guard can detect a branch that was ALREADY
+  // stripped of its code before the merge (the 0.9.150 incident — git.merge's own pre/post
+  // rebase compare can't see it because the branch reached the merge already code-less).
+  // `isRollback` exempts a deliberate rollback task from the empty-release belt check (a
+  // rollback can legitimately net no NEW code). Omitted = no durable footprint / not a
+  // rollback; the structural pre/post-rebase layer still runs for every caller.
+  originalCodeFiles?: string[];
+  isRollback?: boolean;
+  // PHANTOM-RELEASE GUARD belt input: the task is KNOWN to be a CODE task per its durable
+  // `path_type` footprint (an INDEPENDENT signal from originalCodeFiles), so a release that
+  // nets ZERO code for it is refused even when the per-file footprint was lost. Omitted = unknown.
+  isCodeTask?: boolean;
 };
 
 export async function merge(
@@ -1022,6 +1129,21 @@ export async function merge(
   // Rebase the task branch onto the current base tip. Run it in the worktree
   // where the task branch is checked out (the base stays checked out at `dir`).
   const rebaseDir = existsSync(wt) ? wt : dir;
+
+  // PHANTOM-RELEASE GUARD (capture). The task's CODE-file set at the tip ENTERING this merge,
+  // measured vs its merge-base with `base` and EXCLUDING the changelog/version paths. Captured
+  // HERE — before the rebase mutates the branch — so the post-rebase assert below can detect a
+  // rebase (or changelog-union) that silently drops the task's own code (story st-3988b68e).
+  const phantomExclude = [opts.changelogPath ?? "", opts.versionFile ?? ""];
+  let preRebaseCode: string[] = [];
+  {
+    const preTip = (await run([git, "-C", rebaseDir, "rev-parse", "HEAD"])).stdout.trim();
+    const mb = await run([git, "-C", rebaseDir, "merge-base", base, preTip]);
+    if (mb.ok && preTip) {
+      preRebaseCode = await changedCodeFiles(rebaseDir, mb.stdout.trim(), preTip, phantomExclude);
+    }
+  }
+
   const rb = await run([git, "-C", rebaseDir, "rebase", base]);
   if (!rb.ok) {
     // SAFETY NET: a purely-additive changelog conflict (both sides only ADDED bullets) is
@@ -1039,6 +1161,34 @@ export async function merge(
       const { conflict, conflictFiles, message } =
         await collectConflictAndAbort(rebaseDir, rb, base);
       return { ok: false, conflict, message, conflictFiles };
+    }
+  }
+
+  // PHANTOM-RELEASE GUARD (assert). The branch is now linear atop base — BEFORE the version
+  // bump + ff, assert it still CARRIES the task's code. Compare the task's ORIGINAL code-file
+  // set (the merge-entry tip above AND the caller's durable review-time footprint) against the
+  // rebased tip's NET code diff vs base. If code that was there is GONE, REFUSE the ff: return
+  // ok:false/phantomDropped so the caller bounces the task back to its agent (ff-target
+  // UNTOUCHED, NO release cut, branch preserved) instead of cutting an EMPTY phantom release.
+  {
+    const rebasedTip = (await run([git, "-C", rebaseDir, "rev-parse", "HEAD"])).stdout.trim();
+    const netCode = await changedCodeFiles(rebaseDir, base, rebasedTip, phantomExclude);
+    const phantom = detectPhantomDrop({
+      preRebaseCode,
+      originalCodeFiles: opts.originalCodeFiles ?? [],
+      netCode,
+      releaseMode: opts.releaseMode ?? false,
+      isRollback: opts.isRollback ?? false,
+      isCodeTask: opts.isCodeTask ?? false,
+    });
+    if (phantom) {
+      return {
+        ok: false,
+        conflict: false,
+        phantomDropped: true,
+        conflictFiles: phantom.missing,
+        message: phantom.message,
+      };
     }
   }
 

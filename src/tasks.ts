@@ -1297,7 +1297,9 @@ export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome>
     const parentPriorTip = await git.headSha(mctx.ffWorktree).catch(() => null);
     const mr = await git.mergeWorkToParent(dir.path, workId, mctx.targetBranch, mctx.ffWorktree);
     if (!mr.ok) {
-      if (mr.conflict) {
+      // A phantom-drop (the rebase lost the node's code — story st-3988b68e) bounces exactly
+      // like a content conflict: parent UNTOUCHED, branch preserved, re-resolve preserving code.
+      if (mr.conflict || mr.phantomDropped) {
         return { kind: "conflict", files: mr.conflictFiles, message: mr.message };
       }
       return { kind: "mergeError", message: mr.message };
@@ -2584,6 +2586,17 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       base: mctx.base,
       ffWorktree: mctx.ffWorktree,
       ffTargetBranch: mctx.targetBranch,
+      // PHANTOM-RELEASE GUARD (story st-3988b68e). Pass the task's DURABLE review-time code
+      // footprint so git.merge can refuse the ff when the rebased branch no longer carries it —
+      // the 0.9.150 work-loss, where a CHANGELOG-only conflict resolution stripped the code
+      // BEFORE the merge (so the merge's own pre/post-rebase compare sees an already-empty
+      // branch). isRollback exempts a deliberate rollback from the empty-release belt check.
+      originalCodeFiles: parseBlockedBy(row.code_files),
+      isRollback,
+      // Belt: the coarse durable path-type footprint says this task changed code (core/webapp/
+      // mixed — anything but pure docs). An INDEPENDENT signal from code_files, so an empty-code
+      // release is refused even if the per-file footprint was lost.
+      isCodeTask: !!row.path_type && row.path_type !== "docs",
       // F1 — RE-GATE the REBASED tip BEFORE the ff. git.merge calls this after its internal
       // rebase + version bump, on the rebase worktree, BEFORE it fast-forwards the ff-target.
       // (1) invalidateStaleGates clears any CI/conformance green now bound to the OLD tip —
@@ -2647,6 +2660,16 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
           `left untouched (task was ${behind} commit(s) behind).\n${tail}`,
       );
       return { task: taskView(id)!, gateRed: true };
+    }
+    if (result.phantomDropped) {
+      // PHANTOM-RELEASE GUARD tripped (story st-3988b68e): the rebased branch lost the task's
+      // code (the 0.9.150 work-loss). git.merge REFUSED the ff — the ff-target is UNTOUCHED, NO
+      // release was cut, the branch + worktree survive. Route it through the SAME conflict bounce:
+      // hand the dropped files + the guard message to the agent so it re-resolves preserving the
+      // code, not just the CHANGELOG, rather than cutting an EMPTY phantom release.
+      const notes = await recordMergeConflictNote(dir, id, result.conflictFiles, result.message);
+      await requestChanges(id, notes, "phantom-release guard — rebase dropped code, sent back to agent");
+      return { task: taskView(id)!, conflictSentBack: true };
     }
     if (result.conflict) {
       // Content conflict — git.merge already aborted, so the tree is CLEAN.
@@ -3076,7 +3099,9 @@ export async function mergeStoryBranch(storyId: string): Promise<StoryMergeOutco
     const mainPriorTip = await git.headSha(dir.path).catch(() => null);
     const mr = await git.mergeStoryToMain(dir.path, storyId);
     if (!mr.ok) {
-      if (mr.conflict) {
+      // A phantom-drop (the rebase lost the story's code — story st-3988b68e) bounces exactly
+      // like a content conflict: main UNTOUCHED, story branch preserved, re-resolve preserving code.
+      if (mr.conflict || mr.phantomDropped) {
         return { kind: "conflict", files: mr.conflictFiles, message: mr.message };
       }
       return { kind: "mergeError", message: mr.message };
@@ -3224,9 +3249,23 @@ export async function captureDiffFootprint(id: string): Promise<void> {
     return; // best-effort — leave the columns as they were
   }
   const pathType = classifyPathType(stat.files);
+  // PHANTOM-RELEASE GUARD FOOTPRINT (story st-3988b68e). Record the task's CODE files —
+  // its changed set MINUS the workspace's configured changelog + version paths (the single
+  // source of truth, matching git.changedCodeFiles' exclusions) — as the DURABLE reference
+  // the merge-time guard compares the rebased branch against. NON-SHRINKING is the invariant:
+  // a code-LESS re-capture (the exact `reset --soft` + CHANGELOG-only re-commit that caused
+  // 0.9.150) must NOT erase a previously-recorded non-empty footprint, or the guard goes
+  // blind — so an empty new measure KEEPS the prior set; a non-empty one overwrites (a
+  // legit rework's final code set wins).
+  const exclude = new Set(
+    [workspaceChangelogPath(dir.id), workspaceVersionFile(dir.id)].filter(Boolean),
+  );
+  const newCode = stat.files.filter((f) => !exclude.has(f));
+  const priorCode = parseBlockedBy(row.code_files);
+  const codeFiles = newCode.length > 0 ? newCode : priorCode;
   db.query(
-    `UPDATE tasks SET diff_lines=?, path_type=? WHERE id=? AND status='in_review'`,
-  ).run(stat.changedLines, pathType, id);
+    `UPDATE tasks SET diff_lines=?, path_type=?, code_files=? WHERE id=? AND status='in_review'`,
+  ).run(stat.changedLines, pathType, JSON.stringify(codeFiles), id);
   emitUpdated(id);
 }
 
