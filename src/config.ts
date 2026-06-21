@@ -222,6 +222,24 @@ export const config = {
   herdrStartTimeoutMs: envInt("BUTCHR_HERDR_START_TIMEOUT_MS", 60000, { min: 1000 }),
 
   /**
+   * MAX CAPTURED SUBPROCESS OUTPUT (bytes), per stream (stdout / stderr). The two
+   * headless/subprocess capture paths — exec.run (gate/test commands, git) and
+   * herdr.runHeadless (the conformance reviewer + brief expander) — read the child's
+   * stdout/stderr into MEMORY. A gate command or a runaway `claude` that prints
+   * gigabytes before its wall-clock timeout fires would otherwise be buffered
+   * UNBOUNDEDLY and could OOM the butchr process (the timeout bounds wall-clock, not
+   * bytes). So each stream is read with a bounded tail reader (exec.readBoundedTail)
+   * that retains only the LAST `maxSubprocOutputBytes` bytes — the END is what
+   * ciTail and the conformance-verdict parser both want — dropping from the FRONT and
+   * prepending a short `[...truncated N bytes...]` marker when it trims. A normal
+   * sub-cap run is captured in full, byte-for-byte unchanged. Default ~8 MiB.
+   * Floor-clamped (min 64 KiB) so a tiny override can't truncate real gate output.
+   */
+  maxSubprocOutputBytes: envInt("BUTCHR_MAX_SUBPROC_OUTPUT_BYTES", 8 * 1024 * 1024, {
+    min: 64 * 1024,
+  }),
+
+  /**
    * POST-MERGE VERIFY GATE (and the in-worktree CI gate share this command). After a
    * task's branch fast-forwards into the default branch (see tasks.approveTask →
    * git.merge), butchr runs this command in the repo ROOT (the default-branch

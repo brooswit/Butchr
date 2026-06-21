@@ -1,6 +1,7 @@
 // Thin wrapper around Bun.spawn for shelling out to git / herdr, plus the small
 // pure helpers shared by the agent-launch path (the dispatcher + the managed CTO
 // agent both build a `script`-wrapped claude command the same way).
+import { config } from "./config.ts";
 
 /** Shell-escape a string for safe interpolation inside a single-quoted context. */
 export function shellQuote(s: string): string {
@@ -57,6 +58,75 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Read a child process's `stdout`/`stderr` stream into a string while BOUNDING the
+ * captured bytes, retaining the TAIL. Both subprocess capture paths (exec.run and
+ * herdr.runHeadless) use this instead of `new Response(stream).text()` so a runaway
+ * command that prints gigabytes before its wall-clock timeout fires can't buffer
+ * unboundedly and OOM the butchr process.
+ *
+ * It streams the chunks and keeps only the LAST `maxBytes` bytes — the END is what
+ * ciTail and the conformance-verdict parser both want — discarding from the FRONT as
+ * new data arrives, so peak memory stays ~`maxBytes` (plus one chunk) regardless of
+ * total output. When anything was dropped, a short `[...truncated N bytes...]\n`
+ * marker is prepended so the truncation is visible.
+ *
+ * INVARIANT: a SUB-CAP stream (total <= maxBytes) is decoded EXACTLY as
+ * `new Response(stream).text()` would (UTF-8, no marker) — so normal runs are
+ * byte-for-byte unchanged. `maxBytes <= 0` means UNBOUNDED (the historical read),
+ * and a null/absent stream yields "". Exported for unit tests.
+ */
+export async function readBoundedTail(
+  stream: ReadableStream<Uint8Array> | null | undefined,
+  maxBytes: number,
+): Promise<string> {
+  if (!stream) return "";
+  // Non-positive cap → unbounded: behaviorally identical to the historical read.
+  if (!(maxBytes > 0)) return new Response(stream).text();
+
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0; // bytes currently retained across `chunks`
+  let dropped = 0; // bytes discarded from the FRONT
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+      chunks.push(value);
+      total += value.length;
+      // Trim from the FRONT so we retain only the last `maxBytes` bytes.
+      while (total > maxBytes && chunks.length > 0) {
+        const first = chunks[0];
+        const over = total - maxBytes;
+        if (first.length <= over) {
+          chunks.shift();
+          total -= first.length;
+          dropped += first.length;
+        } else {
+          // Partial trim of the front chunk lands us exactly at `maxBytes`.
+          chunks[0] = first.subarray(over);
+          total -= over;
+          dropped += over;
+          break;
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  // Decode as one UTF-8 stream across chunk boundaries (stream:true), matching how
+  // Response.text() would decode the concatenation. A front-trim can clip the first
+  // chunk mid-codepoint; the decoder emits a replacement char there, which is
+  // acceptable for a truncated capture.
+  const decoder = new TextDecoder();
+  let text = "";
+  for (const c of chunks) text += decoder.decode(c, { stream: true });
+  text += decoder.decode();
+  return dropped > 0 ? `[...truncated ${dropped} bytes...]\n${text}` : text;
+}
+
 export type ExecResult = {
   code: number;
   stdout: string;
@@ -78,6 +148,12 @@ export type ExecOpts = {
    * historical behavior), so existing callers are unaffected.
    */
   timeoutMs?: number;
+  /**
+   * Optional per-stream byte cap on the captured stdout/stderr (the TAIL is kept;
+   * see readBoundedTail). Defaults to `config.maxSubprocOutputBytes`. <=0 →
+   * unbounded. Mainly an override seam for tests; normal callers omit it.
+   */
+  maxOutputBytes?: number;
 };
 
 /**
@@ -114,9 +190,15 @@ export async function run(
     }, opts.timeoutMs);
   }
 
+  // Bound the captured output (TAIL retained) so a runaway child can't OOM butchr.
+  // For sub-cap output this is byte-for-byte the historical `Response(...).text()`.
+  const cap =
+    opts.maxOutputBytes !== undefined
+      ? opts.maxOutputBytes
+      : config.maxSubprocOutputBytes;
   const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readBoundedTail(proc.stdout, cap),
+    readBoundedTail(proc.stderr, cap),
     proc.exited,
   ]);
   if (timer) clearTimeout(timer);

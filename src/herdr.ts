@@ -3,7 +3,7 @@
 // which speaks to the running herdr server over its unix socket and replies with
 // a JSON envelope: {"id": "...", "result": { ... }}.
 import { config } from "./config.ts";
-import { run, sleep, stripAnsi } from "./exec.ts";
+import { readBoundedTail, run, sleep, stripAnsi } from "./exec.ts";
 // The runtime-handle types + the backend interface live in harness.ts (which owns
 // the abstraction's contract). We import them TYPE-ONLY (erased at runtime, so no
 // import cycle: harness.ts imports `herdrRunner` from here as a value) and re-export
@@ -611,9 +611,17 @@ export async function runHeadless(spec: HeadlessSpec): Promise<HeadlessResult> {
         proc.kill("SIGKILL");
       }, spec.timeoutMs);
     }
+    // Bound the captured output (TAIL retained) so a runaway headless `claude` that
+    // prints gigabytes before its timeout fires can't buffer unboundedly and OOM
+    // butchr. Sub-cap output is byte-for-byte the historical read; the
+    // verdict-parsers want the END of the stream, which is exactly what's kept.
+    const cap =
+      spec.maxOutputBytes !== undefined
+        ? spec.maxOutputBytes
+        : config.maxSubprocOutputBytes;
     const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      readBoundedTail(proc.stdout, cap),
+      readBoundedTail(proc.stderr, cap),
       proc.exited,
     ]);
     return { ok: !timedOut && code === 0, code, stdout, stderr, timedOut };

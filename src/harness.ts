@@ -67,6 +67,12 @@ export type HeadlessSpec = {
   cwd: string;
   /** Wall-clock bound (ms); the child is SIGKILLed on expiry. <=0 → unbounded. */
   timeoutMs: number;
+  /**
+   * Optional per-stream byte cap on the captured stdout/stderr (the TAIL is kept;
+   * see exec.readBoundedTail). Defaults to `config.maxSubprocOutputBytes`. <=0 →
+   * unbounded. Mainly an override seam for tests; normal callers omit it.
+   */
+  maxOutputBytes?: number;
 };
 
 /** The outcome of one headless run. `ok` ⇔ exited 0 within the timeout. */
