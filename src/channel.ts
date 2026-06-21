@@ -271,6 +271,16 @@ export class AttentionBridge {
   // tier is surfaced. We emit only on an ACTUAL change (prev !== current), so a same-status
   // re-render with an unchanged responder never re-fires.
   private lastResponder = new Map<string, string | null>();
+  // DELIVERED STORY-CONTAINER notifications (story.attention), keyed `storyId|target|reason|marker`
+  // — the de-dup set that makes a story.attention deliver EXACTLY ONCE across a reconnect/restart
+  // gap (the st-ad96e5c3 follow-up to st-fffc76a8's leaf resync). Unlike the leaf surfaces, a
+  // story.attention has no per-id "last status" to diff, so a re-fed event is suppressed by membership
+  // here instead. Only events carrying a `marker` participate (completion-review / gate-red /
+  // member-blocked / the CTO `ask`); a markerless reason (ask-answered / complete / merge-conflict) is
+  // never resynced, so it is emitted as before and never recorded. The marker MONOTONICALLY changes on
+  // a legitimate re-fire (e.g. completion-review's rising merged-count), so a genuine re-fire gets a new
+  // key and still emits, while a reconnect-resync re-derives the SAME key and is suppressed.
+  private deliveredStory = new Set<string>();
   // workspace_id -> human label, populated from workspace.* events on the same
   // stream (and optionally seeded once at startup). Used only for the content line;
   // meta.workspace is always the stable workspace_id.
@@ -511,6 +521,21 @@ export class AttentionBridge {
       if (this.scopeDir && dirId !== this.scopeDir) return null;
     }
 
+    // DE-DUP (the st-ad96e5c3 reconnect-resync seam). A `marker` is a durable, REST-derivable
+    // state token the publisher stamps on the event (see events.ts); when present, we record the
+    // composite key on first delivery and SUPPRESS any later re-feed of the SAME key — so a
+    // story.attention re-synthesized from REST on reconnect (resyncAttention) is delivered exactly
+    // once, while a genuine RE-FIRE (a marker that moved — e.g. completion-review's rising
+    // merged-count) is a NEW key and still emits. A MARKERLESS reason (ask-answered / complete /
+    // merge-conflict) is never resynced, so it bypasses the set and emits as before (recording it
+    // would only risk wrongly suppressing a legit live re-fire the bridge can't disambiguate).
+    const marker = typeof e.marker === "string" ? e.marker : null;
+    if (marker !== null) {
+      const key = `${storyId}|${target}|${reason}|${marker}`;
+      if (this.deliveredStory.has(key)) return null;
+      this.deliveredStory.add(key);
+    }
+
     const { phrase, state } = STORY_ATTENTION[reason];
     const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
     const detail = tidy(e.detail);
@@ -715,6 +740,75 @@ function isOnAttentionSurface(item: Record<string, unknown>): boolean {
   );
 }
 
+/** A story's member-count totals, derived from the REST work view's `counts` rollup (the
+ * per-status member counts). `idle` (and `needs_user_input`) are PEELED OUT of `in_progress`,
+ * NOT separate members, so they are EXCLUDED from the total to avoid double-counting (mirrors the
+ * member-count logic in tasks.ts). `merged` = merged+rolled_back; `dead` = failed+aborted; these
+ * mirror the publishers' markers so a re-derived event de-dups against an already-delivered one. */
+function storyMemberTotals(counts: Record<string, unknown>): {
+  total: number;
+  merged: number;
+  dead: number;
+  inFlight: number;
+} {
+  const num = (v: unknown) => (typeof v === "number" && v >= 0 ? v : 0);
+  const PEELED = new Set(["idle", "needs_user_input"]);
+  let total = 0;
+  for (const [s, v] of Object.entries(counts)) if (!PEELED.has(s)) total += num(v);
+  const merged = num(counts.merged) + num(counts.rolled_back);
+  const dead = num(counts.failed) + num(counts.aborted);
+  return { total, merged, dead, inFlight: total - merged - dead };
+}
+
+/**
+ * Re-derive a LEADER bridge's outstanding target:'story' story.attention events from a node's REST
+ * work view (StoryView). Pure + DB-free; each marker mirrors the matching publisher (tasks.ts /
+ * stories.ts) so a synthesized event de-dups against an already-delivered live one. `ask-answered`
+ * is OUT OF SCOPE (its answer text is unrecoverable from REST). Returns 0..2+ synthesized events.
+ */
+function leaderStorySurfaces(node: Record<string, unknown>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const storyId = typeof node.id === "string" ? node.id : "";
+  if (!storyId) return out;
+  const dir = typeof node.workspace_id === "string" ? node.workspace_id : "";
+  const status = typeof node.status === "string" ? node.status : "";
+  const brief = typeof node.brief === "string" ? node.brief : null;
+  const counts =
+    node.counts && typeof node.counts === "object"
+      ? (node.counts as Record<string, unknown>)
+      : {};
+  const { total, merged, dead, inFlight } = storyMemberTotals(counts);
+  const liveLeader = status === "open" || status === "merge_blocked";
+  const mk = (reason: string, detail: string | null, marker: string) => ({
+    type: "story.attention",
+    story_id: storyId,
+    workspace_id: dir,
+    target: "story",
+    reason,
+    detail,
+    marker,
+  });
+  // completion-review: every member merged/rolled_back (mirrors isStoryComplete +
+  // notifyStoryCompletionIfReady). marker = merged count (rises as each fix-subtask lands).
+  if (liveLeader && total > 0 && merged === total) {
+    out.push(mk("completion-review", brief, String(merged)));
+  }
+  // member-blocked: all members terminal AND ≥1 dead (mirrors notifyStoryBlockedIfStuck).
+  if (liveLeader && total > 0 && inFlight === 0 && dead >= 1) {
+    out.push(mk("member-blocked", brief, String(dead)));
+  }
+  // gate-red: the story is merge_blocked (mirrors landStory's gate-red). detail is degraded — the
+  // gate output is unrecoverable from REST. BENIGN OVERLAP: a merge_blocked story is essentially
+  // always all-merged (members merge into the story branch BEFORE the story→main attempt), so this
+  // co-derives with completion-review; the two carry distinct `reason`s (distinct de-dup keys) so
+  // both may push once on a recovering reconnect, and the set quiets repeats thereafter. Over-
+  // delivering on a recovery path is the correct bias (steering note).
+  if (status === "merge_blocked") {
+    out.push(mk("gate-red", null, String(merged)));
+  }
+  return out;
+}
+
 /**
  * ONE-SHOT REST re-sync run on every (re)connect (see SseLoopOpts.onConnect): re-detect any
  * TASK attention transition that fired while the bridge was mid-reconnect — or that was
@@ -731,15 +825,26 @@ function isOnAttentionSurface(item: Record<string, unknown>): boolean {
  *
  * SCOPE: this recovers ALL LEAF (task) attention surfaces — attention status, idle, AND
  * dead_blocked — including a story-leader bridge's OWN subtasks' feedback/failures, via the
- * scopeStory routing inside consume (the candidate pre-filter mirrors all three). STORY-CONTAINER
- * notifications (story.attention: completion-review / story asks / gate-red / etc.) are NOT
- * re-synced: consume handles them STATELESSLY (no de-dup map), so re-feeding them would
- * double-emit on every reconnect; safely re-syncing them would need a de-dup key consume does
- * not have — out of proportionate scope for this fix (flagged as a possible follow-up).
+ * scopeStory routing inside consume (the candidate pre-filter mirrors all three).
+ *
+ * STORY-CONTAINER notifications (story.attention) ARE now re-synced too (the st-ad96e5c3 follow-up
+ * to st-fffc76a8): we re-DERIVE the outstanding story-level surfaces from the durable REST work view
+ * and feed synthesized story.attention objects through the SAME bridge.consume(), so ownership
+ * routing (consumeStoryAttention) + the marker de-dup set are inherited unchanged — a missed
+ * story.attention is delivered exactly once, an already-delivered one is suppressed by its marker key.
+ * Re-derivable from REST (via leaderStorySurfaces + the CTO ask scan below):
+ *   - LEADER bridge (scopeStory): `completion-review` (status open|merge_blocked AND all members
+ *     merged/rolled_back), `member-blocked` (open|merge_blocked AND all members terminal AND ≥1
+ *     failed/aborted), `gate-red` (status merge_blocked; detail degraded — gate output is gone).
+ *     `ask-answered` is OUT OF SCOPE — its answer text is unrecoverable from REST.
+ *   - WORKSPACE/CTO bridge (scopeDir): the outstanding `ask` (a node with pending_ask != null AND
+ *     ask_responder == 'cto'). `complete` / `merge-conflict` are transient → OUT OF SCOPE.
  *
  * DB-free: it reads the SAME REST surface the dashboard does (GET /api/work + GET /api/work/:id),
- * scoped to this bridge's workspace/story. Fully best-effort — per-item and whole-fn failures are
- * caught and logged, never thrown, so a still-restarting butchr just means the next connect retries.
+ * scoped to this bridge's workspace/story (the story-container derivation reuses the already-fetched
+ * GET /api/work list — its node rows carry status / counts / pending_ask / ask_responder). Fully
+ * best-effort — per-item, the story-container block, and the whole fn each catch+log, never throw,
+ * so a still-restarting butchr just means the next connect retries.
  */
 export async function resyncAttention(args: {
   baseUrl: string;
@@ -793,6 +898,52 @@ export async function resyncAttention(args: {
       } catch (e) {
         log(`re-sync item ${id} failed: ${(e as Error).message}`);
       }
+    }
+
+    // STORY-CONTAINER (story.attention) re-derivation — recover story-level notifications missed
+    // during the gap, mirroring the leaf re-feed. We synthesize story.attention objects from the
+    // already-fetched node rows (work_kind:'node' = the StoryView, carrying status / counts /
+    // pending_ask / ask_responder) and feed them through the SAME bridge.consume(), so ownership
+    // routing + the marker de-dup are inherited unchanged. Its OWN try/catch (and a per-event one)
+    // so a malformed node never aborts the already-completed leaf resync above.
+    try {
+      const nodes = (items as Array<Record<string, unknown>>).filter(
+        (it) => it.work_kind === "node",
+      );
+      const feed = (ev: Record<string, unknown>) => {
+        try {
+          const note = bridge.consume(ev);
+          if (note) emit(note);
+        } catch (e) {
+          log(`re-sync story ${String(ev.story_id)} failed: ${(e as Error).message}`);
+        }
+      };
+      if (scopeStory) {
+        // LEADER bridge: re-derive THIS story's outstanding target:'story' surfaces from its node.
+        const node = nodes.find((n) => n.id === scopeStory);
+        if (node) for (const ev of leaderStorySurfaces(node)) feed(ev);
+      } else {
+        // WORKSPACE/CTO bridge: re-derive each outstanding CTO-owned `ask` (a node still holding a
+        // pending_ask owned by the CTO). detail/marker = the durable pending_ask text.
+        for (const node of nodes) {
+          const sid = typeof node.id === "string" ? node.id : "";
+          const pendingAsk = typeof node.pending_ask === "string" ? node.pending_ask : null;
+          const askResponder =
+            typeof node.ask_responder === "string" ? node.ask_responder : null;
+          if (!sid || !pendingAsk || askResponder !== "cto") continue;
+          feed({
+            type: "story.attention",
+            story_id: sid,
+            workspace_id: typeof node.workspace_id === "string" ? node.workspace_id : "",
+            target: "cto",
+            reason: "ask",
+            detail: pendingAsk,
+            marker: pendingAsk,
+          });
+        }
+      }
+    } catch (e) {
+      log(`re-sync story-container failed: ${(e as Error).message}`);
     }
   } catch (e) {
     log(`re-sync failed: ${(e as Error).message}`);

@@ -244,6 +244,14 @@ export function openStoryAsk(id: string, question: unknown): StoryRow {
     target: "cto",
     reason: "ask",
     detail: q,
+    // DE-DUP MARKER (channel.ts reconnect-resync): the pending_ask text itself — durable +
+    // REST-derivable (the work view exposes `pending_ask`), unlike the volatile `detail`. A new
+    // ask cycle with a DIFFERENT question gets a new marker and re-fires. KNOWN/ACCEPTED LIMIT
+    // (LOW): two DISTINCT ask cycles with byte-IDENTICAL question text collide on the same marker,
+    // so the CTO bridge would suppress the second one's live push (the bridge never sees the
+    // leader-targeted `ask-answered` that would clear its set). Bounded by the CTO's /api/work
+    // pending_ask poll — acceptable here; we do NOT add an asked_at column to disambiguate.
+    marker: q,
   });
   return getStory(id)!;
 }
@@ -320,6 +328,18 @@ export function answerStoryAsk(id: string, answer: unknown): StoryRow {
  * (done/aborted); safe to call from updateStory (the PATCH path) and recoverMergingStories
  * (boot). The story branch + main are untouched on every non-landed outcome.
  */
+/** Count of a story's TERMINAL-MERGED members (merged + rolled_back) — the gate-red de-dup
+ * marker (channel.ts reconnect-resync). Mirrors the REST work view's `counts.merged +
+ * counts.rolled_back` (and tasks.ts's identically-named completion-review marker), so the live
+ * event and the reconnect-resync compute a byte-identical marker. */
+function mergedMemberCount(storyId: string): number {
+  return db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND (status='merged' OR status='rolled_back')`,
+    )
+    .get(storyId)!.n;
+}
+
 export async function landStory(storyId: string): Promise<StoryRow | null> {
   const story = getStory(storyId);
   if (!story) return null;
@@ -379,6 +399,11 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
       target: "story",
       reason: "gate-red",
       detail: `${where} RED — add subtask(s) to fix, then re-request completion. ${outcome.output}`.trim(),
+      // DE-DUP MARKER (channel.ts reconnect-resync): the merged-member count, SHARED with
+      // completion-review — a merge_blocked story is essentially always all-merged (members merge
+      // into the story branch BEFORE the story→main attempt), and between two RED land attempts the
+      // leader adds + merges fix subtasks, so this count advances and a genuine re-RED re-fires.
+      marker: String(mergedMemberCount(storyId)),
     });
   } else if (outcome.kind === "conflict") {
     // The story↔main rebase conflicted: the LEADER cannot resolve it (no worktree). Notify

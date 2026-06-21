@@ -499,6 +499,8 @@ describe("story-level ASK: open / escalate / answer (responder-redesign §4b)", 
         target: "cto",
         reason: "ask",
         detail: "Which approach: A or B?",
+        // DE-DUP MARKER (channel.ts reconnect-resync): the durable pending_ask text.
+        marker: "Which approach: A or B?",
       },
     ]);
   });

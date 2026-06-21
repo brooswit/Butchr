@@ -44,6 +44,17 @@ export type ButchrEvent =
   //     silent); the dashboard's SSE consumer is what surfaces a user-owned ask.
   // `detail` is a short human hook (the story brief, the gate output / conflict runbook, or the
   // ask question/answer text). See src/channel.ts (AttentionBridge).
+  //
+  // `marker` is an OPTIONAL, backward-safe DE-DUP marker (channel.ts reconnect-resync — the
+  // st-ad96e5c3 follow-up to st-fffc76a8): a state-derived token that lets the bridge deliver a
+  // story.attention EXACTLY ONCE across a reconnect/restart gap. It MUST be computable identically
+  // from this live event AND from the REST work view (so resyncAttention can re-derive it), so it
+  // is built from durable, REST-exposed state (a member merged/dead count, or the pending_ask text),
+  // NOT from the volatile `detail` (which is gone after the fact). It MONOTONICALLY changes on a
+  // legitimate RE-FIRE (e.g. completion-review's merged-count rises as each fix-subtask lands) so a
+  // genuine re-fire still emits. `null`/absent for reasons that are never resynced (ask-answered /
+  // complete / merge-conflict) → the bridge does NOT de-dup them (emits as before). Existing
+  // consumers (the dashboard's SSE reader) ignore the field, so this is purely additive.
   | {
       type: "story.attention";
       story_id: string;
@@ -55,8 +66,10 @@ export type ButchrEvent =
         | "gate-red"
         | "merge-conflict"
         | "ask"
-        | "ask-answered";
+        | "ask-answered"
+        | "member-blocked";
       detail: string | null;
+      marker?: string | null;
     }
   | { type: "hello"; now: string };
 

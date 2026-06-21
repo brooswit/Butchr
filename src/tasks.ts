@@ -2962,6 +2962,11 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
     .get(storyId);
   if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
   if (!isStoryComplete(storyId)) return false;
+  // DE-DUP MARKER (channel.ts reconnect-resync): the count of terminal-MERGED members
+  // (merged + rolled_back). It STRICTLY RISES on each legitimate re-fire — while a story sits
+  // merge_blocked, every fix-subtask that lands raises this count — so a genuine re-fire gets a
+  // NEW marker and still pushes, while a reconnect-resync re-derives the SAME count and de-dups.
+  // resyncAttention recomputes this identically from the REST work view's `counts` rollup.
   publish({
     type: "story.attention",
     story_id: storyId,
@@ -2969,8 +2974,30 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
     target: "story",
     reason: "completion-review",
     detail: story.brief ?? null,
+    marker: String(mergedMemberCount(storyId)),
   });
   return true;
+}
+
+/** Count of a story's TERMINAL-MERGED members (merged + rolled_back) — the completion-review /
+ * gate-red de-dup marker (channel.ts). Mirrors the REST work view's `counts.merged +
+ * counts.rolled_back`, so the live event and the reconnect-resync compute an identical marker. */
+function mergedMemberCount(storyId: string): number {
+  return db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND (status='merged' OR status='rolled_back')`,
+    )
+    .get(storyId)!.n;
+}
+
+/** Count of a story's DEAD members (failed + aborted) — the member-blocked de-dup marker
+ * (channel.ts). Mirrors the REST work view's `counts.failed + counts.aborted`. */
+function deadMemberCount(storyId: string): number {
+  return db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND (status='failed' OR status='aborted')`,
+    )
+    .get(storyId)!.n;
 }
 
 /**
@@ -2999,6 +3026,9 @@ export function notifyStoryBlockedIfStuck(storyId: string): boolean {
   const allTerminal = members.every((m) => isTerminal(m.status));
   const anyDead = members.some((m) => m.status === "failed" || m.status === "aborted");
   if (!allTerminal || !anyDead) return false;
+  // DE-DUP MARKER (channel.ts reconnect-resync): the count of DEAD members (failed + aborted).
+  // It rises if another member dies later, so a genuine re-settle re-fires; a reconnect-resync
+  // re-derives the same count (from the REST `counts` rollup) and de-dups.
   publish({
     type: "story.attention",
     story_id: storyId,
@@ -3006,6 +3036,7 @@ export function notifyStoryBlockedIfStuck(storyId: string): boolean {
     target: "story",
     reason: "member-blocked",
     detail: story.brief ?? null,
+    marker: String(deadMemberCount(storyId)),
   });
   return true;
 }

@@ -1148,3 +1148,153 @@ describe("channel: re-sync scoped attention on (re)connect", () => {
     expect(emitted).toEqual([]);
   });
 });
+
+// STORY-CONTAINER reconnect-resync (the st-ad96e5c3 follow-up to st-fffc76a8). resyncAttention now
+// re-derives outstanding story.attention surfaces from the REST work view's NODE rows and feeds them
+// through bridge.consume(), inheriting the Part-1 marker de-dup so each is delivered EXACTLY ONCE.
+describe("channel: story-container reconnect-resync (st-ad96e5c3)", () => {
+  // A CTO-owned story `ask` node: pending_ask set + ask_responder 'cto'.
+  const askNode = (over: Record<string, unknown> = {}) => ({
+    work_kind: "node",
+    id: "st-1",
+    workspace_id: "dir-1",
+    status: "open",
+    brief: "Ship the widget",
+    pending_ask: "Approve plan A?",
+    ask_responder: "cto",
+    counts: {},
+    ...over,
+  });
+  // A leader-owned completion-review node: an OPEN story whose members are all merged. counts.merged
+  // === total ⇒ the resync derives completion-review with marker = String(merged).
+  const completeNode = (over: Record<string, unknown> = {}) => ({
+    work_kind: "node",
+    id: "st-1",
+    workspace_id: "dir-1",
+    status: "open",
+    brief: "Ship the widget",
+    pending_ask: null,
+    ask_responder: null,
+    counts: { merged: 2 },
+    ...over,
+  });
+
+  test("a story ask AND a completion-review MISSED during the gap are each delivered exactly once", async () => {
+    // CTO bridge: the story `ask` fired during the gap (the bridge never saw it live) → resync recovers it.
+    const cto = new AttentionBridge("dir-1");
+    const { f: fAsk } = makeFakeFetch([askNode()], {});
+    const askEmitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: cto, scopeDir: "dir-1",
+      emit: (n) => askEmitted.push(n), fetchImpl: fAsk,
+    });
+    expect(askEmitted.map((n) => n.meta.state)).toEqual(["story_ask"]);
+    expect(askEmitted[0]!.meta.story_id).toBe("st-1");
+    expect(askEmitted[0]!.content).toContain("Approve plan A?");
+    // A SECOND reconnect (state unchanged) re-derives the SAME marker → suppressed (exactly once).
+    const { f: fAsk2 } = makeFakeFetch([askNode()], {});
+    const askEmitted2: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: cto, scopeDir: "dir-1",
+      emit: (n) => askEmitted2.push(n), fetchImpl: fAsk2,
+    });
+    expect(askEmitted2).toEqual([]);
+
+    // LEADER bridge: the completion-review fired during the gap → resync recovers it.
+    const leader = new AttentionBridge("dir-1", false, "st-1");
+    const { f: fDone } = makeFakeFetch([completeNode()], {});
+    const doneEmitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: leader, scopeDir: "dir-1", scopeStory: "st-1",
+      emit: (n) => doneEmitted.push(n), fetchImpl: fDone,
+    });
+    expect(doneEmitted.map((n) => n.meta.state)).toEqual(["story_completion_review"]);
+    expect(doneEmitted[0]!.meta.story_id).toBe("st-1");
+    // And exactly once: a second reconnect with the same merged-count marker is suppressed.
+    const { f: fDone2 } = makeFakeFetch([completeNode()], {});
+    const doneEmitted2: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: leader, scopeDir: "dir-1", scopeStory: "st-1",
+      emit: (n) => doneEmitted2.push(n), fetchImpl: fDone2,
+    });
+    expect(doneEmitted2).toEqual([]);
+  });
+
+  test("a story.attention already DELIVERED live is NOT re-emitted on a later reconnect", async () => {
+    const leader = new AttentionBridge("dir-1", false, "st-1");
+    // The live completion-review event (marker = merged count "2") was pushed before the gap.
+    const live = leader.consume({
+      type: "story.attention", story_id: "st-1", workspace_id: "dir-1",
+      target: "story", reason: "completion-review", detail: "Ship the widget", marker: "2",
+    });
+    expect(live).not.toBeNull();
+    // On reconnect the REST node re-derives the SAME marker ("2") → the resync emits nothing.
+    const { f } = makeFakeFetch([completeNode()], {});
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: leader, scopeDir: "dir-1", scopeStory: "st-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+    expect(emitted).toEqual([]);
+  });
+
+  test("a legitimately RE-FIRED completion-review (a fix-subtask lands) DOES emit again", () => {
+    const leader = new AttentionBridge("dir-1", false, "st-1");
+    const base = {
+      type: "story.attention", story_id: "st-1", workspace_id: "dir-1",
+      target: "story", reason: "completion-review", detail: "Ship the widget",
+    } as const;
+    // First completion-review with 2 members merged.
+    expect(leader.consume({ ...base, marker: "2" })).not.toBeNull();
+    // Re-feeding the SAME marker is suppressed (de-dup).
+    expect(leader.consume({ ...base, marker: "2" })).toBeNull();
+    // A fix-subtask lands while merge_blocked → merged count rises to 3 → a NEW marker → re-fires.
+    const refire = leader.consume({ ...base, marker: "3" });
+    expect(refire).not.toBeNull();
+    expect(refire!.meta.state).toBe("story_completion_review");
+  });
+
+  test("leaf AND story-container surfaces both resync in ONE pass (st-fffc76a8 leaf path unchanged)", async () => {
+    const leader = new AttentionBridge("dir-1", false, "st-1");
+    // One outstanding subtask leaf (a leaf surface) AND the story node ready for completion review.
+    const list = [
+      { work_kind: "leaf", id: "t-mine", workspace_id: "dir-1", story_id: "st-1", status: "needs_info" },
+      completeNode(),
+    ];
+    const views: Record<string, unknown> = {
+      "t-mine": {
+        id: "t-mine", workspace_id: "dir-1", story_id: "st-1", status: "needs_info",
+        question: "branch?", pending_responder: "story",
+      },
+    };
+    const { f } = makeFakeFetch(list, views);
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: leader, scopeDir: "dir-1", scopeStory: "st-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+    // The leaf (needs_info) is recovered exactly as before, AND the story-container completion-review.
+    expect(emitted.map((n) => n.meta.state).sort()).toEqual(
+      ["needs_info", "story_completion_review"].sort(),
+    );
+    expect(emitted.find((n) => n.meta.state === "needs_info")!.meta.task_id).toBe("t-mine");
+    expect(emitted.find((n) => n.meta.state === "story_completion_review")!.meta.story_id).toBe("st-1");
+  });
+
+  test("a merge_blocked story re-derives BOTH completion-review and gate-red (benign overlap)", async () => {
+    const leader = new AttentionBridge("dir-1", false, "st-1");
+    const { f } = makeFakeFetch(
+      [completeNode({ status: "merge_blocked" })],
+      {},
+    );
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge: leader, scopeDir: "dir-1", scopeStory: "st-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+    // Distinct reasons → distinct de-dup keys → both push once on this recovering reconnect.
+    expect(emitted.map((n) => n.meta.state).sort()).toEqual(
+      ["story_completion_review", "story_gate_red"].sort(),
+    );
+  });
+});
