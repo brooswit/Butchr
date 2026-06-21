@@ -301,9 +301,10 @@ describe("(d) the empty-release BELT rejects a zero-net-code release for a code 
 
     const { id, wt } = await seedReviewTask("Add belt.ts", "belt.ts", "export const z = 3;\n");
     await tasksMod.captureDiffFootprint(id);
-    // KNOWN code task: it touched belt.ts (code) + the CHANGELOG bullet → path_type 'mixed'
-    // (non-docs), so isCodeTask is true and the belt can fire.
-    expect(row(id).path_type).toBe("mixed");
+    // KNOWN code task: path_type is classified from the CODE-only set (belt.ts) — the CHANGELOG
+    // bullet is an excluded bump surface, not code — so it lands as 'core' (non-docs), making
+    // isCodeTask true so the belt can fire.
+    expect(row(id).path_type).toBe("core");
 
     // Isolate the BELT: clear the per-file footprint (simulating it being lost/empty) but KEEP
     // the coarse code path_type, so layers (A)/(B) cannot fire and only the belt is left to catch it.
@@ -319,5 +320,53 @@ describe("(d) the empty-release BELT rejects a zero-net-code release for a code 
     expect(version()).toBe(versionBefore);
     expect(mainHasFile("belt.ts")).toBe(false);
     expect(branchExists(id)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 3. REGRESSION (story st-395141ad): a VERSION-FILE-ONLY task must NOT be falsely blocked by the
+//    BELT. Root cause: path_type was classified from the RAW changed set, counting the version
+//    file (package.json → 'core') as code, so isCodeTask was true while the per-file code_files
+//    set (version/changelog excluded) was empty → the belt bounced a legit release. The capture
+//    layer now classifies path_type from the SAME code-only set as code_files.
+// ---------------------------------------------------------------------------------------------
+describe("(e) a VERSION-FILE-ONLY task is NOT falsely blocked by the BELT", () => {
+  test("path_type is 'docs' (no code), so it merges + cuts a real release that lands on main", async () => {
+    // Its only non-changelog change edits the configured version file (package.json) itself —
+    // here a benign field, not the version (the merge bump owns the version field).
+    const { id } = await seedReviewTask(
+      "Edit package.json",
+      "package.json",
+      `{\n  "name": "demo-versiononly",\n  "version": "0.9.0"\n}\n`,
+    );
+    await tasksMod.captureDiffFootprint(id);
+    // The version file is an excluded bump surface → zero CODE files → path_type 'docs' (NOT
+    // 'core'), so isCodeTask is false and the belt cannot fire.
+    expect(row(id).code_files).toBe(JSON.stringify([]));
+    expect(row(id).path_type).toBe("docs");
+
+    await tasksMod.approveTask(id);
+
+    const r = row(id);
+    expect(r.status).toBe("merged"); // not bounced by a phantom-release false positive
+    expect(r.released_version).toBeTruthy(); // a real version was assigned + stamped
+    // The change actually landed (a REAL release, not a phantom): main's package.json carries
+    // the edited field alongside the bumped version.
+    expect(JSON.parse(g(["show", "main:package.json"])).name).toBe("demo-versiononly");
+  });
+});
+
+describe("(f) the fix does not UNDER-flag — a version-file + real-code task stays a code task", () => {
+  test("path_type 'core' and code_files=['feat.ts'] (version file excluded) keep isCodeTask true", async () => {
+    const { id, wt } = await seedReviewTask("Add feat.ts", "feat.ts", "export const q = 1;\n");
+    // ALSO touch the version file in the same task → its changed set is feat.ts + package.json +
+    // CHANGELOG. The code-only footprint must drop the version/changelog but KEEP feat.ts.
+    writeFileSync(join(wt, "package.json"), `{\n  "name": "demo-mixed",\n  "version": "0.9.0"\n}\n`);
+    g(["add", "-A"], wt);
+    g(["commit", "-q", "-m", "also touch version file"], wt);
+
+    await tasksMod.captureDiffFootprint(id);
+    expect(row(id).code_files).toBe(JSON.stringify(["feat.ts"]));
+    expect(row(id).path_type).toBe("core"); // non-docs → isCodeTask stays true, guard armed
   });
 });

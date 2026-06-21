@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Phantom-release guard no longer false-positives on a **version-file-only** task: `captureDiffFootprint` now classifies `path_type` from the same code-only file set as `code_files` (excluding the workspace's version/changelog bump surfaces), so a task that only edits the version file lands as `docs` rather than `core` and is no longer bounced by the empty-release BELT. The 0.9.150 protection is unaffected — layer (B) keys off the non-shrinking `code_files` footprint, not `path_type` (story st-395141ad).
+
 ## [0.9.159] - 2026-06-21
 
 ### Fixed

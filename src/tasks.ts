@@ -3279,7 +3279,6 @@ export async function captureDiffFootprint(id: string): Promise<void> {
   } catch {
     return; // best-effort — leave the columns as they were
   }
-  const pathType = classifyPathType(stat.files);
   // PHANTOM-RELEASE GUARD FOOTPRINT (story st-3988b68e). Record the task's CODE files —
   // its changed set MINUS the workspace's configured changelog + version paths (the single
   // source of truth, matching git.changedCodeFiles' exclusions) — as the DURABLE reference
@@ -3294,6 +3293,15 @@ export async function captureDiffFootprint(id: string): Promise<void> {
   const newCode = stat.files.filter((f) => !exclude.has(f));
   const priorCode = parseBlockedBy(row.code_files);
   const codeFiles = newCode.length > 0 ? newCode : priorCode;
+  // path_type is classified from the SAME code-only set (newCode) as code_files — NOT the raw
+  // changed set — so the two footprint signals AGREE (story st-395141ad). Classifying the raw
+  // set counts the version/changelog BUMP SURFACES as code: a version-file-only change (e.g.
+  // package.json) would land as 'core' while code_files is empty, so the phantom-release BELT
+  // (isCodeTask = path_type !== 'docs' AND netCode === []) FALSELY bounces a legit release. An
+  // empty code set → 'docs' (no code touched); classifyPathType([]) would otherwise return
+  // 'core'. The 0.9.150 protection is unaffected — layer (B) keys off the non-shrinking
+  // code_files above, not path_type.
+  const pathType = newCode.length > 0 ? classifyPathType(newCode) : "docs";
   db.query(
     `UPDATE tasks SET diff_lines=?, path_type=?, code_files=? WHERE id=? AND status='in_review'`,
   ).run(stat.changedLines, pathType, JSON.stringify(codeFiles), id);
