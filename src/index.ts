@@ -21,7 +21,7 @@ import { initFileLogging } from "./log.ts";
 import { reapDeadRunningAgents, reapOrphans, reapStuckGates } from "./reaper.ts";
 import { startServer } from "./server.ts";
 import { recoverMergingStories } from "./stories.ts";
-import { recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
+import { recoverMergedTasks, recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
 import { listWorkspaces, pruneTempWorkspaces } from "./workspaces.ts";
 
@@ -82,6 +82,18 @@ async function main(): Promise<void> {
   const mergedStories = await recoverMergingStories();
   if (mergedStories > 0) {
     console.log(`[butchr] re-drove ${mergedStories} story(ies) left merging from a prior run`);
+  }
+
+  // Re-drive any ORDINARY task left `in_review` whose merge already LANDED before a crash
+  // struck finalizeMerge's verify+teardown gap (its code + version bump are on the target
+  // branch, but the DB `merged` write never happened). The in_review sibling of the
+  // rollback/story recovery above: reconcile the DB (merged + release dependents) WITHOUT
+  // re-merging or re-bumping (which would cut a duplicate release). Inert when none stranded.
+  const recoveredMerged = await recoverMergedTasks();
+  if (recoveredMerged > 0) {
+    console.log(
+      `[butchr] reconciled ${recoveredMerged} task(s) whose merge landed before a prior crash`,
+    );
   }
 
   // GATE RECOVERY (sibling of the agent auto-resume above): the CI build/test gate and

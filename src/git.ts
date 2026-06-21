@@ -114,6 +114,28 @@ async function branchContainsBase(dir: string, base: string, taskId: string): Pr
 }
 
 /**
+ * Whether the task branch's TIP is ALREADY contained in `base` — i.e. <taskId> is an ancestor
+ * of (or equal to) base, so the branch already LANDED. The MIRROR of branchContainsBase with
+ * the args swapped (there: is base in the branch? — am I behind?; here: is the branch in base?
+ * — did I already merge?). Used by the runtime-recovery idempotent finalize + boot sweep to
+ * detect a merge that fast-forwarded onto base before its DB `merged` write was made (a crash
+ * in finalizeMerge's verify+teardown gap). FAIL CLOSED: a missing branch ref or any git error
+ * → false, so a miss runs the NORMAL merge — never the reverse, which could double-bump.
+ *
+ * A not-yet-merged task carries its OWN commits (absent from base), so its tip is NOT an
+ * ancestor of base and this correctly returns false. The lone degenerate case is a branch with
+ * ZERO own commits (tip == an old base commit): it reports true, but the recovery path only
+ * stamps `merged` and cuts NO release, so the outcome is benign (no phantom release).
+ */
+export async function branchAlreadyMerged(dir: string, taskId: string, base: string): Promise<boolean> {
+  // The branch ref must resolve to a tip; a missing branch is "not merged" (fail closed).
+  const exists = await run([git, "-C", dir, "rev-parse", "--verify", "--quiet", taskId]);
+  if (!exists.ok) return false;
+  const anc = await run([git, "-C", dir, "merge-base", "--is-ancestor", taskId, base]);
+  return anc.ok;
+}
+
+/**
  * Count of commits unique to the task branch vs `base` (the `base..taskId` range) —
  * i.e. the branch's own work the rebase would replay. 0 on any git error (fail closed:
  * "no work to preserve").

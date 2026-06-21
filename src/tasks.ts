@@ -2452,6 +2452,74 @@ export async function approveTask(id: string): Promise<ApproveOutcome> {
 }
 
 /**
+ * Record a task's terminal LANDED state in the DB — the shared tail of every path where the
+ * task's branch is already in its target: the normal merge success (finalizeMerge), the
+ * IDEMPOTENT re-approve short-circuit, and the recoverMergedTasks boot sweep. It captures the
+ * agent's last log, tears down the worktree + branch (best-effort), stamps the landed state
+ * (`merged` / `rolled_back`), and releases dependents (reevaluateAllBlocked) + story readiness.
+ *
+ * It NEVER bumps the version or touches git refs — the code already landed; this only
+ * reconciles DB state. `merge` carries the real git.merge result on the success path; on a
+ * recovery path it is backfilled best-effort (merged_sha = the current target tip) with
+ * baseSha/version left null (unknowable post-hoc — but, crucially, NEVER re-bumped, so a
+ * re-approve / boot recovery can't cut a duplicate release).
+ *
+ * NULL-SAFE for the boot case (no live agent/worktree): teardownTask + git.cleanup both
+ * swallow a missing target, so calling it with nothing in flight is safe.
+ */
+async function recordLanded(
+  row: TaskRow,
+  dir: WorkspaceRow,
+  landed: TaskStatus,
+  inflight: TaskStatus,
+  merge: { baseSha?: string | null; mergedSha?: string | null; version?: string | null },
+): Promise<ApproveOutcome> {
+  const id = row.id;
+  const snapshot = readRunLogSnapshot(id);
+  // Close the agent's dedicated tab (best-effort — usually already gone since the agent exited
+  // after request_review) and discard the worktree + branch (already landed). Awaited so the
+  // landed write below only runs after teardown — a teardown failure propagates, as before.
+  await teardownAndDiscard(dir, row, {});
+  if (
+    !setStatus(id, landed, {
+      from: inflight,
+      note:
+        landed === "rolled_back"
+          ? "rolled back & merged into the default branch"
+          : "merged into the default branch",
+      set: {
+        review_note: null,
+        conflict: 0,
+        idle: 0,
+        needs_user_input: 0,
+        output_snapshot: snapshot || null,
+        merge_base_sha: merge.baseSha ?? null,
+        merged_sha: merge.mergedSha ?? null,
+        // In release_mode, the version butchr assigned + stamped at this merge (NULL otherwise,
+        // and NULL on a recovery path — never re-derived, so no duplicate release).
+        released_version: merge.version ?? null,
+        merged_at: keep(nowIso()),
+      },
+    })
+  ) {
+    // Raced (e.g. aborted) between the merge and here — the branch already landed, but the
+    // task moved on. Still release anything that was blocked on it.
+    emitUpdated(id);
+    reevaluateAllBlocked();
+    return { task: taskView(id)! };
+  }
+  // This task just landed — promote any task that was blocked on it (and whose other blockers
+  // are also merged) to queued right away, rather than waiting for the next dispatcher tick.
+  reevaluateAllBlocked();
+  // STORY READINESS (Phase 6 + F4): if this was a STORY member, the story may now be fully
+  // delivered (every member merged/rolled_back → completion-review) OR settled-but-stuck (a
+  // sibling already failed/aborted → member-blocked). story_id-guarded so STANDALONE tasks
+  // never trigger it (no regression).
+  if (row.story_id) notifyStoryReadiness(row.story_id);
+  return { task: taskView(id)! };
+}
+
+/**
  * MECHANICAL MERGE on approve: rebase the task's branch onto the default branch, run
  * the post-merge verify gate, and land it — `merged` for an ordinary task, `rolled_back`
  * for a ROLLBACK task (built from the `rollback` template, kind='rollback'). NO agent
@@ -2552,7 +2620,11 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // before the next queued merge runs, so a revert can never interleave with another
   // merge moving the same branch.
   type Gate = {
-    mr: git.MergeResult;
+    // Undefined ONLY on the alreadyLanded short-circuit below (which returns before the merge);
+    // every other branch sets it, and the alreadyLanded early-return guards the read.
+    mr?: git.MergeResult;
+    // The merge already landed before a prior crash (idempotent finalize) — skip the merge.
+    alreadyLanded?: boolean;
     verify?: { ok: boolean; output: string };
     reverted?: boolean;
     priorTip?: string | null;
@@ -2561,6 +2633,16 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     behind?: number;
   };
   const gate: Gate = await runExclusiveMerge<Gate>(async () => {
+    // IDEMPOTENT FINALIZE (runtime-recovery gap): if the task branch tip is ALREADY an ancestor
+    // of the ff-target base, this merge ALREADY landed — a crash struck AFTER the ff but BEFORE
+    // the DB `merged` write (finalizeMerge's verify+teardown gap). Check it UNDER the merge lock
+    // so base can't move mid-check; the only failure mode is a fail-closed false negative, which
+    // harmlessly runs the normal merge. Short-circuit WITHOUT re-rebasing / re-ff'ing / re-bumping
+    // — a re-bump here would cut a DUPLICATE release (the 0.9.150-class work-loss this fixes). The
+    // tail (recordLanded) reconciles `merged` + releases dependents.
+    if (await git.branchAlreadyMerged(dir.path, id, mctx.base)) {
+      return { alreadyLanded: true };
+    }
     // Capture the ff-target tip (story branch for an isolated member, else main) in the
     // ff-target worktree BEFORE the ff so we can restore it on RED.
     const priorTip = await git.headSha(mctx.ffWorktree).catch(() => null);
@@ -2637,7 +2719,16 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
     return { mr, verify, reverted: true, priorTip };
   });
 
-  const result = gate.mr;
+  if (gate.alreadyLanded) {
+    // The branch already fast-forwarded onto base before a prior crash — reconcile DB state
+    // ONLY (no re-merge, no re-bump). Backfill merged_sha from the current target tip;
+    // baseSha/version stay null (unknowable post-hoc, and never re-derived so no duplicate
+    // release). This releases dependents that were stranded when the DB write never happened.
+    const mergedSha = await git.headSha(mctx.ffWorktree).catch(() => null);
+    return recordLanded(row, dir, landed, inflight, { mergedSha });
+  }
+
+  const result = gate.mr!; // non-null: the alreadyLanded short-circuit returned above
   if (!result.ok) {
     if (result.gateRed) {
       // F1 — PRE-FF RE-GATE RED. The rebased tip failed the workspace build/test, so
@@ -2736,53 +2827,14 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
 
   // Merge succeeded. No agent runs at this point (the workspace agent exited at review),
   // so close the task to its terminal landed state directly. The branch is already in
-  // main; capture whatever the agent last logged, tear down the worktree + branch, and
-  // stamp the landed state (`merged`, or `rolled_back` for a rollback task).
-  const snapshot = readRunLogSnapshot(id);
-  // Close the agent's dedicated tab (best-effort — usually already gone since the
-  // agent exited after request_review, but removes any empty husk tab) and discard
-  // the worktree + branch (already landed in main). Awaited so the landed write below
-  // only runs after teardown — a teardown failure propagates, exactly as before.
-  await teardownAndDiscard(dir, row, {});
-  if (
-    !setStatus(id, landed, {
-      from: inflight,
-      note:
-        landed === "rolled_back"
-          ? "rolled back & merged into the default branch"
-          : "merged into the default branch",
-      set: {
-        review_note: null,
-        conflict: 0,
-        idle: 0,
-        needs_user_input: 0,
-        output_snapshot: snapshot || null,
-        merge_base_sha: result.baseSha ?? null,
-        merged_sha: result.mergedSha ?? null,
-        // In release_mode, the version butchr assigned + stamped at this merge (NULL
-        // otherwise). Surfaced on the merged task so the UI can show the released version.
-        released_version: result.version ?? null,
-        merged_at: keep(nowIso()),
-      },
-    })
-  ) {
-    // Raced (e.g. aborted) between the merge and here — the branch already landed
-    // in main, but the task moved on. Nothing more to do.
-    emitUpdated(id);
-    // The branch DID land in main, so any task blocked on it may now be eligible.
-    reevaluateAllBlocked();
-    return { task: taskView(id)! };
-  }
-  // This task just merged — promote any task that was blocked on it (and whose
-  // other blockers are also merged) to queued right away, rather than waiting for
-  // the next dispatcher tick to notice.
-  reevaluateAllBlocked();
-  // STORY READINESS (Phase 6 + F4): if this was a STORY member, the story may now be fully
-  // delivered (every member merged/rolled_back → completion-review) OR settled-but-stuck (a
-  // sibling already failed/aborted → member-blocked). story_id-guarded so STANDALONE tasks never
-  // trigger it (no regression).
-  if (row.story_id) notifyStoryReadiness(row.story_id);
-  return { task: taskView(id)! };
+  // main; capture whatever the agent last logged, tear down the worktree + branch, stamp
+  // the landed state (`merged`, or `rolled_back` for a rollback task), and release
+  // dependents — the shared landed tail (also used by the idempotent / boot-recovery paths).
+  return recordLanded(row, dir, landed, inflight, {
+    baseSha: result.baseSha,
+    mergedSha: result.mergedSha,
+    version: result.version,
+  });
 }
 
 /**
@@ -4476,10 +4528,11 @@ export async function requeueForResume(
 /**
  * On startup, any ROLLBACK task left mid-merge in `rolling_back` (butchr stopped while
  * its mechanical revert merge was in flight) is re-driven through finalizeMerge so it
- * lands (`rolled_back`) or bounces (conflict → `inactive`) rather than stranding. There
- * is no equivalent recovery for ordinary `in_review` tasks: an approve that crashed
- * mid-merge simply leaves the task in `in_review` for the operator to re-approve (the
- * branch/worktree are intact). Returns how many rollbacks were re-driven.
+ * lands (`rolled_back`) or bounces (conflict → `inactive`) rather than stranding. The
+ * equivalent recovery for ordinary `in_review` tasks whose merge already landed before the
+ * crash is recoverMergedTasks (below); a rollback re-driven here whose revert ALSO already
+ * landed is caught by finalizeMerge's own idempotent short-circuit. Returns how many
+ * rollbacks were re-driven.
  */
 export async function recoverRollingBackTasks(): Promise<number> {
   const rows = db
@@ -4487,6 +4540,48 @@ export async function recoverRollingBackTasks(): Promise<number> {
     .all();
   for (const r of rows) await finalizeMerge(r.id).catch(() => {});
   return rows.length;
+}
+
+/**
+ * BOOT RECOVERY — the `in_review` sibling of recoverRollingBackTasks / recoverMergingStories.
+ * A crash AFTER finalizeMerge's git fast-forward but BEFORE the DB `merged` write (the
+ * post-merge verify + teardown gap) leaves a task `in_review` FOREVER even though its code +
+ * version bump already landed on the target branch — dependents stay blocked and a re-approve
+ * would re-bump (cutting a duplicate release). This sweep finds each `in_review` task whose
+ * branch tip is ALREADY an ancestor of its merge base (resolveMergeContext.base: the story
+ * branch for an isolated member, else the default branch — so an isolated member is never
+ * checked against the wrong base) and reconciles the DB to `merged` + releases dependents via
+ * recordLanded, WITHOUT re-merging / re-bumping (recordLanded never touches git refs).
+ *
+ * branchAlreadyMerged is branch-exists/fail-closed, so a task whose branch is genuinely
+ * unmerged (tip carries its own commits → not an ancestor of base) is left untouched. Best-
+ * effort per task; never throws. Runs at boot BEFORE the dispatcher starts, so no concurrent
+ * merge moves base. Returns how many were reconciled.
+ */
+export async function recoverMergedTasks(): Promise<number> {
+  const rows = db
+    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='in_review'`)
+    .all();
+  let recovered = 0;
+  for (const row of rows) {
+    try {
+      const dir = getWorkspace(row.workspace_id);
+      if (!dir) continue;
+      // Resolve base the SAME way finalizeMerge does (isolated member → its story branch,
+      // standalone → default), so an isolated member is checked against the right ref.
+      const mctx = await resolveMergeContext(row);
+      if (!(await git.branchAlreadyMerged(dir.path, row.id, mctx.base))) continue;
+      // Already landed: backfill merged_sha from the current target tip; never re-bump.
+      // in_review tasks land `merged` (rollback tasks sit in `rolling_back`, covered by
+      // recoverRollingBackTasks → finalizeMerge's idempotent short-circuit).
+      const mergedSha = await git.headSha(mctx.ffWorktree).catch(() => null);
+      await recordLanded(row, dir, "merged", "in_review", { mergedSha });
+      recovered++;
+    } catch {
+      // Best-effort per task — a bad row never blocks the rest of the sweep / boot.
+    }
+  }
+  return recovered;
 }
 
 /** What recoverStuckGates did across all tasks: CI re-triggers, conformance re-triggers,
