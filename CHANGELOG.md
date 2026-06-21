@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.161] - 2026-06-21
+
 ### Changed
 
 - **In-flight UI-state preservation (`public/app.js`) now has regression coverage,
