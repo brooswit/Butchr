@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.175] - 2026-06-26
+
 ### Changed
 - **Scattered direct `stories`-table by-id reads are consolidated behind two
   cycle-free accessors in `src/db.ts` (REVAMP Phase A).** `storyStatusOf(id)`
