@@ -56,12 +56,21 @@ afterAll(() => {
 function seedWork(
   id: string,
   status: string,
-  opts: { parentId?: string | null; blockedBy?: string[]; idle?: number; hasAgent?: number } = {},
+  opts: {
+    parentId?: string | null;
+    blockedBy?: string[];
+    idle?: number;
+    hasAgent?: number;
+    // REVAMP Phase B.2: node-vs-leaf is the persisted `work_kind` discriminator (isWorkNode keys
+    // on it, no longer child-count). A parent in this synthetic tree is a NODE in production (a
+    // story), so seed work_kind='node' on the node rows; leaves default to 'leaf'.
+    workKind?: "leaf" | "node";
+  } = {},
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, parent_id, blocked_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, parent_id, blocked_by, work_kind, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -71,6 +80,7 @@ function seedWork(
       opts.hasAgent ?? 0,
       opts.parentId ?? null,
       opts.blockedBy ? JSON.stringify(opts.blockedBy) : null,
+      opts.workKind ?? "leaf",
       dbMod.nowIso(),
     );
 }
@@ -79,15 +89,15 @@ describe("step 2 — Work structure (leaf vs node over parent_id)", () => {
   // A 3-level tree: A (top-level node) ← B (mid node) ← C (leaf). Feedback states so the
   // recursive responder applies (idea/in_review/needs_info are feedback states).
   beforeAll(() => {
-    seedWork("wrf-A", "in_review"); // top-level (parent_id NULL)
-    seedWork("wrf-B", "in_review", { parentId: "wrf-A" });
+    seedWork("wrf-A", "in_review", { workKind: "node" }); // top-level node (parent_id NULL)
+    seedWork("wrf-B", "in_review", { parentId: "wrf-A", workKind: "node" }); // mid node
     seedWork("wrf-C", "needs_info", { parentId: "wrf-B" }); // leaf
   });
 
-  test("a Work with children is a NODE; a childless Work is a LEAF", () => {
-    expect(workMod.isWorkNode("wrf-A")).toBe(true); // has child B
-    expect(workMod.isWorkNode("wrf-B")).toBe(true); // has child C
-    expect(workMod.isWorkLeaf("wrf-C")).toBe(true); // no children
+  test("a NODE is work_kind='node'; a LEAF is work_kind='leaf' (B.2 discriminator)", () => {
+    expect(workMod.isWorkNode("wrf-A")).toBe(true); // node (also has child B)
+    expect(workMod.isWorkNode("wrf-B")).toBe(true); // node (also has child C)
+    expect(workMod.isWorkLeaf("wrf-C")).toBe(true); // leaf
     expect(workMod.isWorkLeaf("wrf-A")).toBe(false);
     expect(workMod.workChildCount("wrf-A")).toBe(1);
     expect(workMod.workChildren("wrf-A").map((r) => r.id)).toEqual(["wrf-B"]);
@@ -188,10 +198,10 @@ describe("step 2 — malformed parent cycle/self-parent guard terminates", () =>
 
 describe("step 2 — blocked_by reused UNCHANGED for node-on-node blocking", () => {
   test("a NODE can block on another NODE via the existing blocked_by seam", () => {
-    // Two nodes (each given a child so they are nodes): nodeY blocks on nodeX.
-    seedWork("wrf-nodeX", "in_review");
+    // Two nodes (each work_kind='node', each also given a child): nodeY blocks on nodeX.
+    seedWork("wrf-nodeX", "in_review", { workKind: "node" });
     seedWork("wrf-nodeX-child", "needs_info", { parentId: "wrf-nodeX" });
-    seedWork("wrf-nodeY", "blocked", { blockedBy: ["wrf-nodeX"] });
+    seedWork("wrf-nodeY", "blocked", { blockedBy: ["wrf-nodeX"], workKind: "node" });
     seedWork("wrf-nodeY-child", "needs_info", { parentId: "wrf-nodeY" });
 
     expect(workMod.isWorkNode("wrf-nodeX")).toBe(true);

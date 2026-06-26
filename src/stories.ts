@@ -436,7 +436,7 @@ export function answerStoryAsk(id: string, answer: unknown): StoryRow {
 function mergedMemberCount(storyId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND (status='merged' OR status='rolled_back')`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')`,
     )
     .get(storyId)!.n;
 }
@@ -718,9 +718,12 @@ export async function createSubtask(
  * way the workspace rollup does — keeping the two rollups byte-for-byte comparable.
  */
 export function storyCounts(storyId: string): Record<string, number> {
+  // `work_kind='leaf'` is explicit (B.2): a story's members are always leaves and the node's own
+  // story_id is NULL, so the node is never counted here — structural node-exclusion, behavior-
+  // identical today. Mirrors the same guard on the tasks.ts story-rollup reads.
   const rows = db
     .query<{ status: string; n: number }, [string]>(
-      `SELECT status, COUNT(*) AS n FROM tasks WHERE story_id=? GROUP BY status`,
+      `SELECT status, COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' GROUP BY status`,
     )
     .all(storyId);
   const out: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
@@ -728,7 +731,7 @@ export function storyCounts(storyId: string): Record<string, number> {
   for (const r of rows) out[r.status] = r.n;
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND status='in_progress' AND has_agent=1 AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND status='in_progress' AND has_agent=1 AND idle=1`,
     )
     .get(storyId)!.n;
   out.idle = idle;

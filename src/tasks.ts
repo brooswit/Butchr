@@ -551,6 +551,11 @@ export type PendingResponder = "story" | "cto" | "user";
  * `status + plan_preview` at the surfaces that need it (the attention feed, the webapp).
  */
 export function isAwaitingFeedback(row: TaskRow): boolean {
+  // NOTE (B.2): deliberately NOT node-guarded. This is the CORE recursive-responder predicate —
+  // a NODE (a story / parent Work) legitimately awaits feedback and bubbles up the parent chain
+  // (work.resolveWorkResponder), so excluding nodes here would break node feedback routing. The
+  // node-blind ATTENTION LOOP (attentionList) is filtered to leaves at the SQL layer instead;
+  // story-level attention is surfaced separately via the leader/story surfaces.
   if (row.status === "in_progress" && row.idle) return true;
   // A live build agent hung at a human-only OS/CLI dialog is awaiting feedback exactly like
   // an idle one — the same flag-on-in_progress pattern; its responder resolves to 'user'.
@@ -925,9 +930,10 @@ export function attentionList(): AttentionItem[] {
   const rows = db
     .query<TaskRow, []>(
       `SELECT * FROM tasks
-        WHERE status IN ('spec_review','in_review','needs_info','failed')
+        WHERE work_kind='leaf' AND (
+              status IN ('spec_review','in_review','needs_info','failed')
            OR (status='in_progress' AND has_agent=1 AND idle=1)
-           OR (status='in_progress' AND has_agent=1 AND needs_user_input=1)
+           OR (status='in_progress' AND has_agent=1 AND needs_user_input=1))
         ORDER BY created_at ASC`,
     )
     .all();
@@ -1937,7 +1943,7 @@ export function reevaluateBlockedTask(id: string): boolean {
 /** Re-evaluate EVERY blocked task (used after a merge for prompt auto-unblock). */
 export function reevaluateAllBlocked(): void {
   const rows = db
-    .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked'`)
+    .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked' AND work_kind='leaf'`)
     .all();
   for (const r of rows) reevaluateBlockedTask(r.id);
 }
@@ -3061,8 +3067,13 @@ export function escalateTask(id: string): TaskView {
  * aborted/failed), is NOT complete.
  */
 export function isStoryComplete(storyId: string): boolean {
+  // `work_kind='leaf'` is explicit (B.2): members are always leaves and the node's own story_id
+  // is NULL so it's never selected here — the guard makes node-exclusion STRUCTURAL across the
+  // story-rollup reads rather than incidental, behavior-identical today.
   const members = db
-    .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
+    .query<{ status: TaskStatus }, [string]>(
+      `SELECT status FROM tasks WHERE story_id=? AND work_kind='leaf'`,
+    )
     .all(storyId);
   if (members.length === 0) return false;
   return members.every((m) => m.status === "merged" || m.status === "rolled_back");
@@ -3110,7 +3121,7 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
 function mergedMemberCount(storyId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND (status='merged' OR status='rolled_back')`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')`,
     )
     .get(storyId)!.n;
 }
@@ -3120,7 +3131,7 @@ function mergedMemberCount(storyId: string): number {
 function deadMemberCount(storyId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND (status='failed' OR status='aborted')`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND (status='failed' OR status='aborted')`,
     )
     .get(storyId)!.n;
 }
@@ -3141,7 +3152,9 @@ export function notifyStoryBlockedIfStuck(storyId: string): boolean {
   const story = getStoryRow(storyId);
   if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
   const members = db
-    .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
+    .query<{ status: TaskStatus }, [string]>(
+      `SELECT status FROM tasks WHERE story_id=? AND work_kind='leaf'`,
+    )
     .all(storyId);
   if (members.length === 0) return false;
   const allTerminal = members.every((m) => isTerminal(m.status));
@@ -4250,6 +4263,7 @@ export async function maybeAutoMerge(id: string): Promise<boolean> {
   try {
     const row = getTask(id);
     if (!row) return false;
+    if (row.work_kind === "node") return false; // a story node never auto-merges (B.2 structural guard)
     if (row.status !== "in_review") return false;
     if (row.ci_status !== "pass") return false;
     if (row.conflict) return false; // already-known conflict → human handles it
@@ -4661,7 +4675,9 @@ export async function requeueForResume(
   reason: string,
 ): Promise<"resumed" | "fresh" | "rescued" | "noop"> {
   const row = getTask(id);
-  if (!row || row.status !== "in_progress") return "noop";
+  // A story Work NODE is never resumable (B.2: exclude nodes via work_kind, not the inert
+  // 'merged' anchor the status check happens to catch today).
+  if (!row || row.work_kind === "node" || row.status !== "in_progress") return "noop";
 
   // Tear down the dead husk tab/pane (a fallen-to-shell pane, or a gone agent) BY NAME so
   // the re-dispatch spins up a fresh tab and the agent name is free. Best-effort.
@@ -4744,7 +4760,7 @@ export async function requeueForResume(
  */
 export async function recoverRollingBackTasks(): Promise<number> {
   const rows = db
-    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='rolling_back'`)
+    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='rolling_back' AND work_kind='leaf'`)
     .all();
   for (const r of rows) await finalizeMerge(r.id).catch(() => {});
   return rows.length;
@@ -4783,7 +4799,7 @@ export async function recoverRollingBackTasks(): Promise<number> {
  */
 export async function recoverMergedTasks(): Promise<number> {
   const rows = db
-    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='in_review'`)
+    .query<TaskRow, []>(`SELECT * FROM tasks WHERE status='in_review' AND work_kind='leaf'`)
     .all();
   let recovered = 0;
   for (const row of rows) {
@@ -4861,7 +4877,7 @@ export async function recoverStuckGates(): Promise<GateRecoveryResult> {
   const rows = db
     .query<TaskRow, []>(
       `SELECT * FROM tasks
-         WHERE status='in_review'
+         WHERE status='in_review' AND work_kind='leaf'
            AND (ci_status='running' OR conformance_status='checking')`,
     )
     .all();

@@ -60,23 +60,38 @@ export function workChildren(id: string): TaskRow[] {
     .all(id);
 }
 
-/** The number of direct children of a Work — the single cheap count both isWorkNode and
- *  isWorkLeaf derive from (avoids materializing the rows just to test emptiness). */
+/** The number of direct children of a Work — the cheap CHILD-RELATIONSHIP count (avoids
+ *  materializing the rows just to test emptiness). NOTE (B.2): node-vs-leaf is NO LONGER derived
+ *  from this — isWorkNode/isWorkLeaf key on the persisted `work_kind` discriminator. This stays
+ *  as the structural child-count utility (e.g. workChildren's cheap sibling). */
 export function workChildCount(id: string): number {
   return db
     .query<{ n: number }, [string]>(`SELECT COUNT(*) AS n FROM tasks WHERE parent_id=?`)
     .get(id)!.n;
 }
 
-/** Is this Work a NODE — does it have at least one child (today's "story")? */
+/** Is this Work a NODE (today's "story")? As of REVAMP Phase B.2 this is the SINGLE authoritative
+ *  node-definition: it keys on the persisted `work_kind` discriminator (db.ts), unified with
+ *  resolveWork (work-api.ts) so one column decides node-vs-leaf everywhere — no longer the
+ *  structural child-count test (for a materialized story, work_kind='node' AND children AND a
+ *  stories row all agree).
+ *
+ *  LATENT TRAP (B.3 closes it): the tasks NODE row is materialized LAZILY — createStory inserts
+ *  ONLY the stories row, and ensureStoryWorkNode stamps work_kind='node' later (at the first
+ *  member / leader). So a freshly-created CHILDLESS story has a stories row but NO tasks node row
+ *  yet → getTask is undefined → this returns false (reports it a LEAF), even though resolveWork
+ *  (which retains a getStory fallback for exactly this case) correctly calls it a NODE. INERT
+ *  today — isWorkNode/isWorkLeaf have NO production callers (only tests); B.3 will eagerly
+ *  materialize the node at createStory so work_kind becomes universally authoritative here too. */
 export function isWorkNode(id: string): boolean {
-  return workChildCount(id) > 0;
+  return getTask(id)?.work_kind === "node";
 }
 
-/** Is this Work a LEAF — does it have no children (today's "task")? A missing row is treated
- *  as a leaf (it has no children) — callers that need existence check getWork separately. */
+/** Is this Work a LEAF (today's "task")? The `work_kind` complement of isWorkNode — a missing row
+ *  is treated as a leaf (callers needing existence check getWork separately). See the
+ *  lazy-materialization trap noted on isWorkNode. */
 export function isWorkLeaf(id: string): boolean {
-  return workChildCount(id) === 0;
+  return getTask(id)?.work_kind !== "node";
 }
 
 /** The id of a Work's PARENT (the node it bubbles feedback up to), or null for a top-level

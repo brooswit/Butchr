@@ -256,7 +256,7 @@ export async function reconcileRunningTasks(
     .query<QueuedRow, []>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
-         WHERE t.status='in_progress' AND t.has_agent=1`,
+         WHERE t.status='in_progress' AND t.has_agent=1 AND t.work_kind='leaf'`,
     )
     .all();
   if (rows.length === 0) return { adopted: 0, rescued: 0, resumed: 0, skipped: 0 };
@@ -361,7 +361,7 @@ export function selectQueuedForDispatch(nowStr: string): QueuedRow[] {
     .query<QueuedRow, [string]>(
       `SELECT t.*, d.path, d.label, d.herdr_workspace, d.herdr_pane, d.id AS dir_id
          FROM tasks t JOIN workspaces d ON d.id = t.workspace_id
-         WHERE t.status='inactive'
+         WHERE t.status='inactive' AND t.work_kind='leaf'
            AND (t.next_dispatch_at IS NULL OR t.next_dispatch_at <= ?)
          ORDER BY t.priority DESC, t.created_at ASC`,
     )
@@ -384,7 +384,7 @@ async function tick(): Promise<void> {
     // (approveTask also re-evaluates immediately for promptness). Cheap: one query
     // plus a per-task blocker check; blocked tasks are few.
     for (const b of db
-      .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked'`)
+      .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked' AND work_kind='leaf'`)
       .all()) {
       reevaluateBlockedTask(b.id);
     }
@@ -397,7 +397,7 @@ async function tick(): Promise<void> {
     if (config.autoMergeEnabled) {
       for (const r of db
         .query<{ id: string }, []>(
-          `SELECT id FROM tasks WHERE status='in_review' AND ci_status='pass' AND auto_merged=0`,
+          `SELECT id FROM tasks WHERE status='in_review' AND ci_status='pass' AND auto_merged=0 AND work_kind='leaf'`,
         )
         .all()) {
         // Fire-and-forget — the tick must not block on a merge.

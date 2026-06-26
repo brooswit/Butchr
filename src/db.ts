@@ -1819,6 +1819,15 @@ export type TaskRow = {
   // Default 0. Resolved by tasks.pendingResponder; surfaced on TaskView via the `...row`
   // spread (no extra plumbing).
   escalated_to_user: number;
+  // WORK-UNIFICATION FOLD DISCRIMINATOR (REVAMP Phase B.2 — story st-6372812d): the persisted
+  // node/leaf marker (see the work_kind ensureColumn above) — 'leaf' (every standalone task,
+  // the schema default) or 'node' (a materialized story Work node, a row whose id IS a story id
+  // and whose tasks.status is today the inert 'merged' FK anchor). As of B.2 this is the SINGLE
+  // authoritative node-definition: isWorkNode / resolveWork key on it, and every loop that reads
+  // a node's tasks.status excludes nodes via `work_kind='leaf'` (structurally, NOT via the magic
+  // 'merged' status). DELIBERATELY STRIPPED from the serialized views (FOLD_VIEW_OMIT, tasks.ts)
+  // so TaskView/TaskListView stay byte-identical; read it only off a raw getTask() row.
+  work_kind: "leaf" | "node";
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -2139,11 +2148,18 @@ export type MetricRow = {
 
 /** Fetch the raw per-task rows the metrics aggregation needs; computeMetrics() turns them into dashboard aggregates with no further DB access. */
 export function metricRows(): MetricRow[] {
+  // `work_kind != 'node'` excludes story Work NODES (B.2). metricRows is the ONE aggregate over
+  // tasks.status that lacked ANY node filter, so the inert node anchor (status='merged') was
+  // miscounted as a real merged task in byStatus.merged / totalMerged / total — a latent
+  // inconsistency vs every sibling rollup (workspace counts, health), which already exclude the
+  // node. Filtering here both fixes that and prevents B.3 (real node status) from corrupting the
+  // metrics. This is the single documented output change in B.2 (see CHANGELOG); every other
+  // converted site is behavior-identical.
   return db
     .query<MetricRow, []>(
       `SELECT status, started_at, completed_at, merged_at,
               conflict, auto_merged, revert_reason, ci_status
-         FROM tasks`,
+         FROM tasks WHERE work_kind != 'node'`,
     )
     .all();
 }
@@ -2158,11 +2174,16 @@ export type EstimateRowRaw = Omit<EstimateRow, "blocked_by"> & {
 };
 
 export function estimateRows(): EstimateRowRaw[] {
+  // `work_kind='leaf'` drops story Work NODES at the SOURCE (B.2): a node row would otherwise
+  // feed the estimator, where it is excluded only by its inert 'merged' status (estimate.ts's
+  // `status==='merged'` → 0/already-landed handling). That merged-handling is KEPT exactly as-is
+  // — it legitimately zeroes REAL merged LEAF tasks (landed blockers contribute 0 duration); we
+  // only stop the phantom node from reaching it, so node-exclusion is structural, not via status.
   return db
     .query<EstimateRowRaw, []>(
       `SELECT id, status, started_at, completed_at, merged_at,
               diff_lines, path_type, blocked_by
-         FROM tasks`,
+         FROM tasks WHERE work_kind='leaf'`,
     )
     .all();
 }

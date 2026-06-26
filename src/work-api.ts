@@ -77,17 +77,29 @@ export type ResolvedWork =
   | { kind: "node"; story: StoryRow };
 
 /**
- * Resolve a work id to its underlying resource — a TASK (leaf) or a STORY (node) — or
- * throw 404 if neither exists. STORIES are tried FIRST: as of the step-6a cutover each story
- * is ALSO materialized as a `tasks` row (the parent_id FK anchor — see db.ensureStoryWorkNode),
- * so a story id now matches BOTH tables; the stories table is authoritative for "is this a
- * NODE," so it wins. A leaf task id never collides (story ids are `st-`-prefixed, a disjoint
- * id space), so it falls through to the task lookup.
+ * Resolve a work id to its underlying resource — a TASK (leaf) or a STORY (node) — or throw 404
+ * if neither exists. As of REVAMP Phase B.2 the node-vs-leaf discriminator is the persisted
+ * `work_kind` column (unified with work.isWorkNode — ONE definition), NOT "a stories row exists":
+ * a story's materialized `tasks` row carries work_kind='node', a standalone task work_kind='leaf'.
+ *
+ * The `getStory` FALLBACK is RETAINED and load-bearing because the node row is materialized
+ * LAZILY: createStory inserts ONLY the stories row, and ensureStoryWorkNode stamps the
+ * work_kind='node' tasks row later (at the first member / leader). So a freshly-created CHILDLESS
+ * story has a stories row but NO tasks node row yet → the work_kind read is absent → the fallback
+ * resolves it as a NODE from the stories table. (B.3 eagerly materializes the node at createStory,
+ * making this fallback redundant.) Behavior is byte-identical to the old getStory-first path: a
+ * story id never collides with a leaf task id (story ids are `st-`-prefixed, a disjoint space).
  */
 export function resolveWork(id: string): ResolvedWork {
+  const task = getTask(id);
+  // PRIMARY: the persisted node discriminator (B.2).
+  if (task?.work_kind === "node") {
+    const story = getStory(id);
+    if (story) return { kind: "node", story };
+  }
+  // FALLBACK (lazy not-yet-materialized node): a stories row with no/leaf tasks row is still a NODE.
   const story = getStory(id);
   if (story) return { kind: "node", story };
-  const task = getTask(id);
   if (task) return { kind: "leaf", task };
   throw new HttpError(404, `work not found: ${id}`);
 }

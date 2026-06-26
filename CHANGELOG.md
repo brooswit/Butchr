@@ -17,6 +17,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Node-blind loops now exclude story NODES via the explicit `work_kind`
+  discriminator, not the magic `'merged'` anchor (REVAMP Phase B.2, story
+  st-6372812d).** Behavior-IDENTICAL today (a materialized story Work node still
+  carries the inert terminal `status='merged'`), but every loop that reads a node's
+  `tasks.status` now excludes nodes STRUCTURALLY (`work_kind='leaf'` / `!= 'node'`)
+  so it stays correct once a node's status becomes real in a later phase — removing
+  the hidden dependency on the frozen `'merged'` value that `src/db.ts` enumerated.
+  Converted: the dispatcher ready/auto-unblock/auto-merge selects + `reconcileRunningTasks`
+  (`src/dispatcher.ts`); the reaper husk sweep (the one query that literally selected
+  the node row — saved only by no-agent), the worktree sweep, and
+  `reapDeadRunningAgents` (`src/reaper.ts`); `attentionList`, `recoverMergedTasks`,
+  `recoverStuckGates`, `recoverRollingBackTasks`, the blocked boot scan, and the
+  per-id `maybeAutoMerge` / `requeueForResume` guards (`src/tasks.ts`); the chain
+  estimator's source rows `estimateRows` (filtered at the SOURCE — `estimate.ts`'s
+  real-merged-leaf handling is kept exactly as-is) (`src/db.ts`); the story member
+  rollups `isStoryComplete` / `storyCounts` / merged+dead member counts
+  (`src/tasks.ts`, `src/stories.ts`); and the workspace unregister worktree cleanup
+  (`src/workspaces.ts`).
+- **The node/leaf DEFINITION is unified onto `work_kind` — ONE source of truth.**
+  `isWorkNode` / `isWorkLeaf` (`src/work.ts`) now key on the persisted `work_kind`
+  column instead of the structural child count, and the `resolveWork` facade
+  discriminator (`src/work-api.ts`) leads with `work_kind` — both agree on one
+  definition. `resolveWork` RETAINS its `getStory` fallback because the node row is
+  materialized lazily (a freshly-created childless story has a `stories` row but no
+  `tasks` node row yet), so it still resolves a not-yet-materialized story as a NODE;
+  a code comment flags the matching `isWorkNode` divergence for that lazy case (to be
+  closed when the node is materialized eagerly). `tasks.work_kind` is now typed on the
+  `TaskRow` shape (it stays stripped from every serialized view).
+
+### Fixed
+- **Metrics no longer count a story node's FK-anchor row as a merged task (REVAMP
+  Phase B.2).** `metricRows` (`src/db.ts`) was the one aggregate over `tasks.status`
+  with no node filter, so each materialized node (`status='merged'`) was miscounted
+  in `byStatus.merged` / `throughput.totalMerged` / `total` — inconsistent with every
+  sibling rollup (workspace counts, health), which already exclude nodes. It now
+  filters `work_kind != 'node'`, both correcting the count and preventing a
+  later-phase regression once node status becomes real. This is the single output
+  change in Phase B.2; every other converted site is byte-identical.
+
 ## [0.9.176] - 2026-06-26
 
 ### Added

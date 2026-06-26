@@ -143,6 +143,10 @@ export async function reapOrphans(
       const task = db
         .query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=?`)
         .get(taskId);
+      // A story Work NODE is never a bare-id worktree (story checkouts use STORY_WORKTREE_PREFIX,
+      // handled above), but exclude it STRUCTURALLY so a node is never force-reaped here even if
+      // its status becomes non-terminal in B.3 (B.2: node-exclusion via work_kind, not 'merged').
+      if (task && task.work_kind === "node") continue;
       if (task && !isTerminal(task.status)) continue; // live task — leave alone
 
       const reason = task ? `task ${task.status}` : "no task row";
@@ -158,11 +162,15 @@ export async function reapOrphans(
   // See src/cto-agent.ts.
   if (herdrUp) {
     // Same terminal membership as the worktree sweep above — derived from db, bound as
-    // placeholders so the SQL IN-list can never drift from isTerminal/ALL_STATUSES.
+    // placeholders so the SQL IN-list can never drift from isTerminal/ALL_STATUSES. The
+    // `work_kind='leaf'` guard excludes story Work NODES: a node carries a TERMINAL status
+    // ('merged') so it MATCHES this set today and is saved only because no agent is registered
+    // under its bare id — exclude it STRUCTURALLY (B.2) so it stays out once B.3 makes node
+    // status real, never via the accidental terminal-'merged' anchor.
     const placeholders = TERMINAL_STATUSES.map(() => "?").join(",");
     const terminal = db
       .query<TaskRow, string[]>(
-        `SELECT * FROM tasks WHERE status IN (${placeholders})`,
+        `SELECT * FROM tasks WHERE status IN (${placeholders}) AND work_kind='leaf'`,
       )
       .all(...TERMINAL_STATUSES);
     for (const t of terminal) {
@@ -203,7 +211,7 @@ export async function reapDeadRunningAgents(herdrUp: boolean): Promise<number> {
   const runsDir = join(config.dataDir, "runs");
   const rows = db
     .query<TaskRow, []>(
-      `SELECT * FROM tasks WHERE status='in_progress' AND has_agent=1`,
+      `SELECT * FROM tasks WHERE status='in_progress' AND has_agent=1 AND work_kind='leaf'`,
     )
     .all();
   let resumed = 0;

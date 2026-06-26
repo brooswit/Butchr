@@ -765,7 +765,10 @@ export async function unregisterWorkspace(id: string): Promise<void> {
     // workspace close below is a backstop, but per-tab teardown keeps things tidy
     // even if the workspace outlives this workspace.
     await herdr.teardownTask(t.id);
-    if (t.status !== "merged") {
+    // Skip story Work NODES STRUCTURALLY (B.2): a node has no bare-id worktree/branch to clean,
+    // and today it is skipped only because its inert anchor status is 'merged'. The work_kind
+    // guard keeps it skipped once B.3 makes node status real, not via that magic value.
+    if (t.work_kind !== "node" && t.status !== "merged") {
       await git.cleanup(dir.path, t.id).catch(() => {});
     }
   }
