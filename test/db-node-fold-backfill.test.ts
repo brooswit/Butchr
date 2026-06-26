@@ -23,6 +23,12 @@ import { join } from "node:path";
 let DATA_DIR: string;
 let REPO_ROOT: string;
 let dbMod: typeof import("../src/db.ts");
+let tasksMod: typeof import("../src/tasks.ts");
+let workApiMod: typeof import("../src/work-api.ts");
+
+// The five fold columns persisted on `tasks` this step — they must NOT leak onto any
+// serialized task view (TaskView / TaskListView / the unified work list).
+const FOLD_COLS = ["work_kind", "brief", "isolated", "pending_ask", "ask_responder"] as const;
 
 // Distinct ids — the db/config singletons are shared across test files.
 const WS = "nodefold-ws";
@@ -53,6 +59,8 @@ beforeAll(async () => {
   process.env.BUTCHR_HERDR_BIN = "true";
 
   dbMod = await import("../src/db.ts");
+  tasksMod = await import("../src/tasks.ts");
+  workApiMod = await import("../src/work-api.ts");
   const now = dbMod.nowIso();
 
   dbMod.db
@@ -170,5 +178,45 @@ describe("Phase B.1 fold schema — idempotence", () => {
     const before = snap();
     dbMod.runMigrations();
     expect(snap()).toEqual(before);
+  });
+});
+
+// The fold columns are PERSISTED on `tasks` but must stay OFF every serialized task view so
+// the read surface is BYTE-IDENTICAL to Phase A (the read-flip is B.4). A `...row` spread would
+// otherwise leak them — and `work_kind` would collide with the work-api facade's own
+// discriminator. Pin all three view builders (taskView / taskListView / allTasksView) AND the
+// unified GET /api/work list (listWork → allTasksView) so a regression at any one is caught.
+describe("Phase B.1 fold schema — INERT: columns do not leak onto task views", () => {
+  test("taskView (leaf + node anchor) carries none of the 5 fold columns", () => {
+    const leaf = tasksMod.taskView(LEAF)!;
+    const node = tasksMod.taskView(SN)!;
+    for (const k of FOLD_COLS) {
+      expect(k in leaf).toBe(false);
+      expect(k in node).toBe(false);
+    }
+  });
+
+  test("the per-workspace taskListView carries none of the 5 fold columns", () => {
+    const leaf = tasksMod.taskListView(WS).find((t) => t.id === LEAF)!;
+    expect(leaf).toBeDefined();
+    for (const k of FOLD_COLS) expect(k in leaf).toBe(false);
+  });
+
+  test("the cross-workspace allTasksView (GET /api/work source) carries none of the 5 fold columns", () => {
+    const leaf = tasksMod.allTasksView({ workspace: WS }).find((t) => t.id === LEAF)!;
+    expect(leaf).toBeDefined();
+    for (const k of FOLD_COLS) expect(k in leaf).toBe(false);
+  });
+
+  test("the unified GET /api/work list adds work_kind='leaf' from the FACADE — never the 4 node-only fields", async () => {
+    const list = await workApiMod.listWork({ workspace: WS });
+    const leaf = list.find((w) => w.id === LEAF)!;
+    expect(leaf).toBeDefined();
+    // The facade's discriminator is present + correct...
+    expect(leaf.work_kind).toBe("leaf");
+    // ...but the 4 node-only mirror columns must NOT have leaked through allTasksView.
+    for (const k of ["brief", "isolated", "pending_ask", "ask_responder"] as const) {
+      expect(k in leaf).toBe(false);
+    }
   });
 });

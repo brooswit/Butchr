@@ -33,12 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`migrateUnifyStoryParent`, `ensureStoryWorkNode`) now stamp them at insert so a
   node carries the marker the instant it exists. The migration is backward-safe and
   re-runnable (the merge gate may run it on the live DB). The new columns are kept
-  OFF the serialized `TaskView` / `TaskListView` (a `rowForView` strip in
-  `src/tasks.ts`) so the API surface stays byte-identical to Phase A and `work_kind`
-  does not collide with the work-api facade's own discriminator. Covered by an
-  isolated-DB test (`test/db-node-fold-backfill.test.ts`) asserting column presence,
-  backfill correctness for a node / leaf / childless story, the backfill re-syncing a
-  reset node, and idempotence across a second migration pass.
+  OFF every serialized task view — a `rowForView` strip applied in all three builders
+  (`taskView`, the per-workspace `taskListView`, and the cross-workspace
+  `allTasksView` that feeds the unified `GET /api/work` list) in `src/tasks.ts` — so
+  the API surface stays byte-identical to Phase A and `work_kind` does not collide
+  with the work-api facade's own discriminator. Covered by an isolated-DB test
+  (`test/db-node-fold-backfill.test.ts`) asserting column presence, backfill
+  correctness for a node / leaf / childless story, the backfill re-syncing a reset
+  node, idempotence across a second migration pass, and that no fold column leaks onto
+  `taskView` / `taskListView` / `allTasksView` / the `GET /api/work` leaf items.
 
 ## [0.9.175] - 2026-06-26
 
