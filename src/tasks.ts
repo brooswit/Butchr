@@ -425,6 +425,21 @@ export function validateContext(context: unknown): string[] {
 function blockerState(blockerId: string): "merged" | "dead" | "pending" {
   const b = getTask(blockerId);
   if (!b) return "dead"; // gone — can never merge
+  // A story Work NODE can appear in a leaf's blocked_by — setBlockedBy/the block command validate
+  // only that the blocker EXISTS, not that it is a leaf. A node's tasks.status is NOT a leaf
+  // lifecycle status, so resolve node-terminality from the AUTHORITATIVE story status (storyStatusOf,
+  // never the raw node anchor): `done` ⇒ satisfied ("merged"), `aborted` ⇒ "dead" (never merges),
+  // anything else (open/merging/merge_blocked) ⇒ still in flight ("pending"). This both fixes a
+  // PRE-EXISTING latent bug (a frozen-'merged' node blocker was ALWAYS treated satisfied, so a leaf
+  // blocked on a still-OPEN story unblocked immediately) and avoids the B.3 deadlock a naive
+  // status check would introduce (a `done` node has no leaf 'merged' status → would dead-end at
+  // "pending" forever). [REVAMP B.3 — story st-6372812d]
+  if (b.work_kind === "node") {
+    const s = storyStatusOf(blockerId);
+    if (s === "done") return "merged";
+    if (s === "aborted") return "dead";
+    return "pending";
+  }
   if (b.status === "merged") return "merged";
   if (DEAD_BLOCKER_STATES.has(b.status)) return "dead";
   return "pending";
@@ -2994,6 +3009,15 @@ export async function rejectTask(id: string, note: string): Promise<TaskView> {
 export async function abortTask(id: string): Promise<TaskView> {
   const row = getTask(id);
   if (!row) throw new HttpError(404, `task not found: ${id}`);
+  // DEFENSIVE NODE GUARD (REVAMP B.3 — story st-6372812d). The facade routes node aborts through a
+  // STORY abort (abortWork → requireLeaf 409s a node), so a node id should never reach here. But
+  // B.3 flips a node's tasks.status off the frozen 'merged' anchor to a live value (e.g. 'open'),
+  // which would slip past the `merged`/`aborted` guards below and tear a STORY down AS A TASK
+  // (discard its worktree, setStatus 'aborted'). Refuse structurally — mirrors the maybeAutoMerge
+  // node guard — so the safety is by work_kind, not incidental to the old status anchor.
+  if (row.work_kind === "node") {
+    throw new HttpError(409, `cannot abort a node work item ${id} as a task (abort the story instead)`);
+  }
   if (row.status === "merged") {
     throw new HttpError(409, "task is already merged");
   }

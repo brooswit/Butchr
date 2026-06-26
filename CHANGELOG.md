@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A story NODE's own `tasks` row now DUAL-WRITES the story's REAL state in lock-step
+  with the still-authoritative `stories` table (REVAMP Phase B.3, story st-6372812d).**
+  Behavior-PRESERVING: reads still come from `stories` via the Phase A accessors
+  (`storyStatusOf` / `getStoryRow` are UNCHANGED), so this only makes the node row a
+  faithful shadow ready for the B.4 read-flip. The frozen `'merged'` FK anchor is
+  replaced by the real value on NODE rows only (`open`/`merging`/`merge_blocked`/`done`/
+  `aborted` — the same superset as `stories.status`, no mapping); leaves are untouched.
+  Safe only because B.2 already made every loop exclude nodes STRUCTURALLY via
+  `work_kind`. Implemented as: every `stories` write mirrors onto the id-matched node
+  via a new `mirrorStoryNode` seam in `setStoryStatus` + the brief/ask/escalate/answer
+  writers (`src/stories.ts`); the node is EAGERLY materialized at `createStory` and the
+  three materializers (`ensureStoryWorkNode`, `migrateUnifyStoryParent`,
+  `migrateBackfillNodeFold`) now carry the real status (`src/db.ts`, additive +
+  idempotent + backward-safe).
+- **Fixed a latent dependency bug exposed by B.3: a story NODE used as a leaf's blocker
+  now resolves via the AUTHORITATIVE story status** — `done` ⇒ satisfied, `aborted` ⇒
+  dead (never merges), else pending (`blockerState`, `src/tasks.ts`). Previously a node
+  blocker was frozen `'merged'` and so ALWAYS read as satisfied (a leaf blocked on a
+  still-open story unblocked immediately); without this fix B.3's real `done` status
+  would instead dead-end at "pending" forever. `abortTask` also gains a defensive
+  `work_kind='node'` guard so a node id can never be torn down as a task.
+
 ## [0.9.177] - 2026-06-26
 
 ### Changed

@@ -122,12 +122,20 @@ describe("step 6a — parent_id backfill from story_id", () => {
   });
 });
 
-describe("step 6a — each story is materialized as an inert `merged` Work node", () => {
-  test("every story has a tasks node (id == story id) with status 'merged'", () => {
+describe("step 6a — each story is materialized as a Work node carrying its REAL story status", () => {
+  test("every story has a tasks node (id == story id) carrying the story's real status (B.3)", () => {
     const ids = out.nodes1.map((n: any) => n.id);
     expect(ids).toEqual(["st-abrt", "st-done", "st-open"]);
+    // B.3 (story st-6372812d): the node row is the DUAL-WRITE shadow of the story — it carries the
+    // story's REAL status, NOT the old frozen `merged` FK anchor. Safe because B.2 excludes nodes
+    // from every loop STRUCTURALLY via work_kind, not via the incidental terminal status.
+    const expectedStatus: Record<string, string> = {
+      "st-abrt": "aborted",
+      "st-done": "done",
+      "st-open": "open",
+    };
     for (const n of out.nodes1) {
-      expect(n.status).toBe("merged"); // the inert FK anchor, irrelevant to routing
+      expect(n.status).toBe(expectedStatus[n.id]); // the dual-write shadow of stories.status
       expect(n.parent_id).toBeNull(); // a top-level node
       expect(n.story_id).toBeNull(); // NOT a member of itself (excluded from storyCounts etc.)
     }

@@ -1089,15 +1089,14 @@ export function migrateReadyRunningSplit(): void {
 // table + `story_id` stay fully intact + authoritative (story state is still read via the
 // stories table / storyView, and the /api/stories path is untouched until step 6d).
 //
-// The materialized node carries the TERMINAL inert status `merged` precisely so NO old-server
-// loop acts on it: the dispatcher selects only inactive/blocked/in_review; auto-merge selects
-// in_review; attentionList / the channel never query `merged`; reapOrphans' worktree sweep
-// enumerates on-disk worktrees (the node has none) and its husk sweep keys on the bare task
-// id (a leader's herdr name is `<prefix>-story-<id>`, never the bare id) so neither matches;
-// the chain estimator EXCLUDES `merged` rows; unregister SKIPS git.cleanup for `merged`; and
-// isStoryComplete / storyCounts key on story_id (the node's is NULL). The node's status is a
-// pure FK anchor — it carries NO story semantics (story state stays in the stories table) and
-// is irrelevant to routing (resolveWorkResponder reads parent_id, never the parent row).
+// The materialized node carries the story's REAL status (the B.3 dual-write shadow — story
+// st-6372812d), NOT the old frozen `merged` anchor. NO loop acts on it because B.2 made every
+// loop exclude nodes STRUCTURALLY via work_kind='leaf' (dispatcher/auto-merge/reaper/recovery)
+// — node-exclusion no longer depends on the incidental terminal `merged`, so it is safe for the
+// node to carry a live-looking status (open/merging/merge_blocked/done/aborted). Reads stay
+// AUTHORITATIVE on the stories table this phase; the node row is the lock-step shadow the B.4
+// read-flip will consult. isStoryComplete / storyCounts still key on story_id (the node's is
+// NULL, so it is never counted as a member), and routing reads parent_id, never the parent row.
 //
 // IDEMPOTENT: INSERT OR IGNORE skips already-materialized nodes; the backfill is guarded by
 // `parent_id IS NULL` (so it never clobbers a parent_id set by new code) and an FK-safe
@@ -1105,17 +1104,18 @@ export function migrateReadyRunningSplit(): void {
 // the defaulted NOT NULL columns must exist) and the status folds.
 export function migrateUnifyStoryParent(): void {
   // (1) Materialize each story as a Work node — id = story id, the FK anchor for members'
-  // parent_id. id/workspace_id/status/created_at plus the Phase B.1 node fields
-  // (work_kind='node' + the node-only stories columns brief/isolated/pending_ask/ask_responder)
-  // are supplied so a node carries its fold marker + node data the instant it materializes;
-  // every other NOT NULL column carries a schema DEFAULT (kind='task', version_bump='patch',
-  // has_agent=0, escalated_to_user=0, conflict=0, idle=0, …) so the projection is valid. The
-  // node fields are INERT (nothing reads them yet); migrateBackfillNodeFold re-syncs any node
+  // parent_id. id/workspace_id/created_at plus the story's REAL status (the B.3 dual-write
+  // shadow — NOT the old frozen `merged` anchor) and the Phase B.1 node fields (work_kind='node'
+  // + the node-only stories columns brief/isolated/pending_ask/ask_responder) are supplied so a
+  // node carries its fold marker + node data the instant it materializes; every other NOT NULL
+  // column carries a schema DEFAULT (kind='task', version_bump='patch', has_agent=0,
+  // escalated_to_user=0, conflict=0, idle=0, …) so the projection is valid. Reads stay on the
+  // stories table this phase; migrateBackfillNodeFold re-syncs (status + node fields) any node
   // already materialized by a PRIOR run (INSERT OR IGNORE skips those here).
   db.exec(
     `INSERT OR IGNORE INTO tasks
        (id, workspace_id, status, created_at, work_kind, brief, isolated, pending_ask, ask_responder)
-       SELECT id, workspace_id, 'merged', created_at, 'node', brief, isolated, pending_ask, ask_responder
+       SELECT id, workspace_id, status, created_at, 'node', brief, isolated, pending_ask, ask_responder
          FROM stories`,
   );
   // (2) Backfill members' parent_id from story_id (the node now exists → FK-safe). Guarded so
@@ -1127,29 +1127,32 @@ export function migrateUnifyStoryParent(): void {
   );
 }
 
-// WORK-UNIFICATION FOLD BACKFILL (REVAMP Phase B.1 — story st-6372812d, ADDITIVE + INERT +
-// IDEMPOTENT). Stamp the persisted node discriminator + mirror the node-only `stories` fields
-// onto every materialized story Work node's OWN `tasks` row, so the row carries the data the
-// fold (B.4) will later read instead of the separate `stories` table. NOTHING reads work_kind
-// or the mirrored columns for any decision yet — `stories.status` + getStoryRow stay the source
-// of truth this step.
+// WORK-UNIFICATION FOLD BACKFILL (REVAMP Phase B.1 → B.3 — story st-6372812d, ADDITIVE +
+// IDEMPOTENT). Stamp the persisted node discriminator + mirror the node `stories` fields onto
+// every materialized story Work node's OWN `tasks` row, so the row carries the data the fold
+// (B.4) will later read instead of the separate `stories` table. B.3 adds the node's `status`
+// to the copied set so the row is a FAITHFUL lock-step shadow of the story (no longer the frozen
+// `merged` anchor). `stories.status` + getStoryRow stay AUTHORITATIVE for reads this step — the
+// shadow is written but not yet read; B.4 flips the reads.
 //
 // Runs AFTER migrateUnifyStoryParent (which materializes the node rows this keys on) and the
 // forward-column step (which adds work_kind + the four mirror columns). migrateUnifyStoryParent /
-// ensureStoryWorkNode ALREADY stamp these at materialization time; this backfill is the belt for
-// a node materialized by a PRIOR run (whose INSERT OR IGNORE predates this fold and so left
-// work_kind at the 'leaf' DEFAULT + the mirror columns unset).
+// ensureStoryWorkNode ALREADY stamp status + these fields at materialization time; this backfill
+// is the belt for a node materialized by a PRIOR run (whose INSERT OR IGNORE predates this fold
+// and so left work_kind at the 'leaf' DEFAULT + status at the old 'merged' anchor + the mirror
+// columns unset).
 //
-// BACKWARD-SAFE (the dev-runs-migrate-live-db hazard): purely an additive UPDATE of previously-
-// inert columns — it never DROPs/RENAMEs anything and the `stories` table stays authoritative,
-// so it is harmless if a gate/build runs it against the LIVE db while the old server runs.
-// IDEMPOTENT: `stories` is the source of truth, so re-running re-copies identical values
-// (work_kind='node' for every id that IS a story). Correlated subqueries mirror the existing
-// migration SQL style (migrateUnifyStoryParent above).
+// BACKWARD-SAFE (the dev-runs-migrate-live-db hazard): an additive UPDATE that copies from the
+// authoritative `stories` table — it never DROPs/RENAMEs anything. Writing the real node status
+// is safe even against a live server because B.2 (already shipped) made every loop exclude nodes
+// via work_kind, so no loop acts on a node whatever its status. IDEMPOTENT: `stories` is the
+// source of truth, so re-running re-copies identical values (work_kind='node' + the live status
+// for every id that IS a story). Correlated subqueries mirror migrateUnifyStoryParent's style.
 export function migrateBackfillNodeFold(): void {
   db.exec(
     `UPDATE tasks SET
        work_kind='node',
+       status       =(SELECT s.status        FROM stories s WHERE s.id=tasks.id),
        brief        =(SELECT s.brief         FROM stories s WHERE s.id=tasks.id),
        isolated     =(SELECT s.isolated      FROM stories s WHERE s.id=tasks.id),
        pending_ask  =(SELECT s.pending_ask   FROM stories s WHERE s.id=tasks.id),
@@ -1163,14 +1166,17 @@ export function migrateBackfillNodeFold(): void {
  * points at) — the single-story form of migrateUnifyStoryParent's bulk INSERT, used by the
  * runtime story-membership writers (createTask / assignTaskToStory) so a member created
  * AFTER the boot migration still gets an FK-valid parent_id. INSERT OR IGNORE → a no-op when
- * the node already exists or the story is gone. Status `merged` (the inert FK anchor — see
- * migrateUnifyStoryParent); story state stays authoritative in the stories table.
+ * the node already exists or the story is gone. The node materializes carrying the story's REAL
+ * status (the B.3 dual-write shadow — story st-6372812d), NOT the old frozen `merged` anchor: the
+ * stories table stays AUTHORITATIVE for reads, but the node's tasks row is kept lock-step so the
+ * later B.4 read-flip is a no-op. Safe to carry a live-looking status only because B.2 made every
+ * loop exclude nodes STRUCTURALLY via work_kind (not via the incidental terminal `merged`).
  */
 export function ensureStoryWorkNode(storyId: string): void {
   db.query(
     `INSERT OR IGNORE INTO tasks
        (id, workspace_id, status, created_at, work_kind, brief, isolated, pending_ask, ask_responder)
-       SELECT id, workspace_id, 'merged', created_at, 'node', brief, isolated, pending_ask, ask_responder
+       SELECT id, workspace_id, status, created_at, 'node', brief, isolated, pending_ask, ask_responder
          FROM stories WHERE id=?`,
   ).run(storyId);
 }

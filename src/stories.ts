@@ -65,7 +65,33 @@ function setStoryStatus(
     params.push(...froms);
   }
   const res = db.query(`UPDATE stories SET ${assigns.join(", ")} WHERE ${where}`).run(...params);
+  if (res.changes > 0) {
+    // B.3 DUAL-WRITE (story st-6372812d): a story-status write actually landed — mirror the SAME
+    // status + every `set` column onto the node's own `tasks` row in lock-step. Skipped when the
+    // CAS no-op'd (changes=0) so a lost/illegal transition never touches the shadow.
+    mirrorStoryNode(id, { status: to, ...(opts.set ?? {}) });
+  }
   return res.changes > 0;
+}
+
+/**
+ * DUAL-WRITE the node's own `tasks` row (REVAMP Phase B.3 — story st-6372812d). Every write to a
+ * story's `stories` row mirrors the SAME values onto the id-matched Work NODE's `tasks` row, kept
+ * lock-step so the node row is a faithful shadow ready for the B.4 read-flip. Reads STILL come from
+ * the stories table this phase — this only WRITES the shadow, so behavior is unchanged. The helper:
+ *   1. ensureStoryWorkNode(id) — guarantees the node exists (materializing it carrying the story's
+ *      REAL status — covers a pre-existing childless story whose node was never lazily created);
+ *   2. UPDATE … WHERE id=? AND work_kind='node' — the `node` guard means this can ONLY ever touch a
+ *      NODE row, never clobber a leaf.
+ * `fields` are columns that exist on BOTH tables (status + the node-only brief/pending_ask/
+ * ask_responder, and the merge shas) — the exact values just written to the stories row.
+ */
+function mirrorStoryNode(id: string, fields: Record<string, string | null>): void {
+  ensureStoryWorkNode(id);
+  const assigns = Object.keys(fields).map((c) => `${c}=?`);
+  if (assigns.length === 0) return;
+  const params = [...Object.values(fields), id];
+  db.query(`UPDATE tasks SET ${assigns.join(", ")} WHERE id=? AND work_kind='node'`).run(...params);
 }
 
 /** Look up a story by its id, or null if none matches. Thin wrapper over the canonical
@@ -115,6 +141,11 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
   db.query(
     `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(id, workspaceId, brief.trim(), "open", created, isolated);
+  // B.3 (story st-6372812d): EAGERLY materialize the node's own `tasks` row at creation so the
+  // dual-write shadow exists from birth (carrying the real 'open' status + brief/isolated) — a
+  // node is no longer materialized lazily at first member/leader. INERT vs reads (still the stories
+  // table this phase); makes work_kind authoritative even for a childless story.
+  ensureStoryWorkNode(id);
   // A new `open` story gets a managed STORY-LEADER agent (Phase 3): mark it desired +
   // launch it. Thin hook into story-agent.ts so the CRUD here stays clean; the hook marks
   // desired synchronously and fires the launch best-effort (never fails story creation).
@@ -219,6 +250,7 @@ export function updateStory(
   if (patch.status === undefined) {
     if (briefUpdate !== null) {
       db.query(`UPDATE stories SET brief=? WHERE id=?`).run(briefUpdate, id);
+      mirrorStoryNode(id, { brief: briefUpdate }); // B.3 dual-write (st-6372812d)
     }
     return getStory(id)!;
   }
@@ -338,6 +370,7 @@ export function openStoryAsk(id: string, question: unknown): StoryRow {
   }
   const q = question.trim();
   db.query(`UPDATE stories SET pending_ask=?, ask_responder='cto' WHERE id=?`).run(q, id);
+  mirrorStoryNode(id, { pending_ask: q, ask_responder: "cto" }); // B.3 dual-write (st-6372812d)
   publish({
     type: "story.attention",
     story_id: id,
@@ -373,6 +406,7 @@ export function escalateStoryAsk(id: string): StoryRow {
     throw new HttpError(409, "no open CTO-owned ask to escalate");
   }
   db.query(`UPDATE stories SET ask_responder='user' WHERE id=?`).run(id);
+  mirrorStoryNode(id, { ask_responder: "user" }); // B.3 dual-write (st-6372812d)
   publish({
     type: "story.attention",
     story_id: id,
@@ -402,6 +436,7 @@ export function answerStoryAsk(id: string, answer: unknown): StoryRow {
   }
   const a = answer.trim();
   db.query(`UPDATE stories SET pending_ask=NULL, ask_responder=NULL WHERE id=?`).run(id);
+  mirrorStoryNode(id, { pending_ask: null, ask_responder: null }); // B.3 dual-write (st-6372812d)
   publish({
     type: "story.attention",
     story_id: id,
