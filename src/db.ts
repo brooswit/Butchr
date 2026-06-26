@@ -927,6 +927,35 @@ dropColumnIfExists("directory", "step_responders");
 // exit rule (=0 on any transition off in_progress), and requeueForResume (=0).
 ensureColumn("tasks", "has_agent", "INTEGER NOT NULL DEFAULT 0");
 
+// WORK-UNIFICATION FOLD SCHEMA (REVAMP Phase B.1 — story st-6372812d, ADDITIVE + INERT).
+// Lay the columns the fold needs on `tasks` so a story NODE's OWN `tasks` row can later
+// become authoritative (replacing the separate `stories` table). NOTHING reads any of these
+// for any decision YET — `stories.status` + getStoryRow stay the source of truth; the read
+// flip is a LATER phase (B.4). Purely stored this step.
+//
+//   - `work_kind` is the persisted node/leaf DISCRIMINATOR the fold keys on: 'leaf' (the
+//     default every existing row + every standalone task backfills to — today's task) or
+//     'node' (a materialized story Work node — a row whose id IS a story id). Backfilled to
+//     'node' for every materialized node by migrateBackfillNodeFold (below, after the nodes
+//     are materialized) AND stamped at materialization time in migrateUnifyStoryParent /
+//     ensureStoryWorkNode so a node carries it the instant it exists. This becomes the SINGLE
+//     authoritative node-definition the fold consults — but isWorkNode (work.ts) stays the
+//     STRUCTURAL child-count test this step; routing it through work_kind is B.2.
+ensureColumn("tasks", "work_kind", "TEXT NOT NULL DEFAULT 'leaf'");
+
+//   - The NODE-ONLY fields that today live ONLY on the `stories` table and have no home on
+//     `tasks`: `brief` (the story's goal/description), `isolated` (the per-story isolation
+//     bit — own branch; default 0), and the responder-redesign ask seam `pending_ask` /
+//     `ask_responder` (a leader's open story-level ask + who owns it). Mirrored here so a
+//     node row can carry them after the fold; backfilled from the id-matched `stories` row by
+//     migrateBackfillNodeFold + copied at materialization time. INERT — nothing reads them yet.
+//     (NOTE: `merge_base_sha` / `merged_sha` — the other two stories-only fields — ALREADY
+//     exist on tasks (above), so they are deliberately NOT re-added here.)
+ensureColumn("tasks", "brief", "TEXT");
+ensureColumn("tasks", "isolated", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("tasks", "pending_ask", "TEXT");
+ensureColumn("tasks", "ask_responder", "TEXT");
+
 // NAME-ONLY CUTOVER (story st-a77b050f, step 3 — final). Drop the per-agent EPHEMERAL
 // herdr handles `herdr_pane_id`/`herdr_tab_id` from tasks/cto_agent/story_agent: agents
 // are now addressed, torn down, and liveness-checked BY NAME (steps 1+2), so these
@@ -1076,12 +1105,18 @@ export function migrateReadyRunningSplit(): void {
 // the defaulted NOT NULL columns must exist) and the status folds.
 export function migrateUnifyStoryParent(): void {
   // (1) Materialize each story as a Work node — id = story id, the FK anchor for members'
-  // parent_id. Only id/workspace_id/status/created_at are supplied; every other NOT NULL
-  // column carries a schema DEFAULT (kind='task', version_bump='patch', has_agent=0,
-  // escalated_to_user=0, conflict=0, idle=0, …) so the minimal projection is valid.
+  // parent_id. id/workspace_id/status/created_at plus the Phase B.1 node fields
+  // (work_kind='node' + the node-only stories columns brief/isolated/pending_ask/ask_responder)
+  // are supplied so a node carries its fold marker + node data the instant it materializes;
+  // every other NOT NULL column carries a schema DEFAULT (kind='task', version_bump='patch',
+  // has_agent=0, escalated_to_user=0, conflict=0, idle=0, …) so the projection is valid. The
+  // node fields are INERT (nothing reads them yet); migrateBackfillNodeFold re-syncs any node
+  // already materialized by a PRIOR run (INSERT OR IGNORE skips those here).
   db.exec(
-    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at)
-       SELECT id, workspace_id, 'merged', created_at FROM stories`,
+    `INSERT OR IGNORE INTO tasks
+       (id, workspace_id, status, created_at, work_kind, brief, isolated, pending_ask, ask_responder)
+       SELECT id, workspace_id, 'merged', created_at, 'node', brief, isolated, pending_ask, ask_responder
+         FROM stories`,
   );
   // (2) Backfill members' parent_id from story_id (the node now exists → FK-safe). Guarded so
   // a re-run, or a row whose new code already set parent_id, is left untouched.
@@ -1089,6 +1124,37 @@ export function migrateUnifyStoryParent(): void {
     `UPDATE tasks SET parent_id = story_id
        WHERE story_id IS NOT NULL AND parent_id IS NULL
          AND story_id IN (SELECT id FROM tasks)`,
+  );
+}
+
+// WORK-UNIFICATION FOLD BACKFILL (REVAMP Phase B.1 — story st-6372812d, ADDITIVE + INERT +
+// IDEMPOTENT). Stamp the persisted node discriminator + mirror the node-only `stories` fields
+// onto every materialized story Work node's OWN `tasks` row, so the row carries the data the
+// fold (B.4) will later read instead of the separate `stories` table. NOTHING reads work_kind
+// or the mirrored columns for any decision yet — `stories.status` + getStoryRow stay the source
+// of truth this step.
+//
+// Runs AFTER migrateUnifyStoryParent (which materializes the node rows this keys on) and the
+// forward-column step (which adds work_kind + the four mirror columns). migrateUnifyStoryParent /
+// ensureStoryWorkNode ALREADY stamp these at materialization time; this backfill is the belt for
+// a node materialized by a PRIOR run (whose INSERT OR IGNORE predates this fold and so left
+// work_kind at the 'leaf' DEFAULT + the mirror columns unset).
+//
+// BACKWARD-SAFE (the dev-runs-migrate-live-db hazard): purely an additive UPDATE of previously-
+// inert columns — it never DROPs/RENAMEs anything and the `stories` table stays authoritative,
+// so it is harmless if a gate/build runs it against the LIVE db while the old server runs.
+// IDEMPOTENT: `stories` is the source of truth, so re-running re-copies identical values
+// (work_kind='node' for every id that IS a story). Correlated subqueries mirror the existing
+// migration SQL style (migrateUnifyStoryParent above).
+export function migrateBackfillNodeFold(): void {
+  db.exec(
+    `UPDATE tasks SET
+       work_kind='node',
+       brief        =(SELECT s.brief         FROM stories s WHERE s.id=tasks.id),
+       isolated     =(SELECT s.isolated      FROM stories s WHERE s.id=tasks.id),
+       pending_ask  =(SELECT s.pending_ask   FROM stories s WHERE s.id=tasks.id),
+       ask_responder=(SELECT s.ask_responder FROM stories s WHERE s.id=tasks.id)
+     WHERE id IN (SELECT id FROM stories)`,
   );
 }
 
@@ -1102,8 +1168,10 @@ export function migrateUnifyStoryParent(): void {
  */
 export function ensureStoryWorkNode(storyId: string): void {
   db.query(
-    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at)
-       SELECT id, workspace_id, 'merged', created_at FROM stories WHERE id=?`,
+    `INSERT OR IGNORE INTO tasks
+       (id, workspace_id, status, created_at, work_kind, brief, isolated, pending_ask, ask_responder)
+       SELECT id, workspace_id, 'merged', created_at, 'node', brief, isolated, pending_ask, ask_responder
+         FROM stories WHERE id=?`,
   ).run(storyId);
 }
 
@@ -1235,6 +1303,7 @@ const MIGRATIONS: Array<() => void> = [
   migrateStatusModel,
   migrateReadyRunningSplit,
   migrateUnifyStoryParent,
+  migrateBackfillNodeFold,
   migrateWorkspaceAgentRows,
   () => migrateWorkspacesView(db),
 ];

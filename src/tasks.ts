@@ -610,6 +610,21 @@ export function pendingResponder(row: TaskRow): PendingResponder | null {
 }
 
 /** Merge the DB row with the on-disk task.md for the detail view. */
+// REVAMP Phase B.1 (work-unification fold, story st-6372812d). The fold columns persisted on
+// `tasks` this step — `work_kind` (the node/leaf discriminator) + the node-only mirror set
+// `brief`/`isolated`/`pending_ask`/`ask_responder` — are ADDITIVE + INERT: they exist ONLY at
+// the DB layer and are deliberately kept OFF the serialized task views so TaskView /
+// TaskListView stay BYTE-IDENTICAL to Phase A (the read-surface flip onto a node's own row is a
+// LATER phase, B.4). A bare `...row` spread would leak them onto every task JSON, and `work_kind`
+// would COLLIDE with the work-api facade's own computed `work_kind` discriminator. This strips
+// them so the projection is unchanged; nothing reads them off a view yet.
+const FOLD_VIEW_OMIT = ["work_kind", "brief", "isolated", "pending_ask", "ask_responder"] as const;
+function rowForView(row: TaskRow): TaskRow {
+  const r = { ...row } as Record<string, unknown>;
+  for (const k of FOLD_VIEW_OMIT) delete r[k];
+  return r as TaskRow;
+}
+
 export function taskView(id: string): TaskView | null {
   const row = getTask(id);
   if (!row) return null;
@@ -627,7 +642,7 @@ export function taskView(id: string): TaskView | null {
   }
   const blocked_by = parseBlockedBy(row.blocked_by);
   return {
-    ...row,
+    ...rowForView(row),
     prompt,
     context,
     review_notes,
@@ -702,7 +717,7 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
     if (needle && !matchesQuery(taskSearchText(row, dirPath), needle)) continue;
     const blocked_by = parseBlockedBy(row.blocked_by);
     out.push({
-      ...row,
+      ...rowForView(row),
       blocked_by,
       tags: parseTags(row.tags),
       allowlist: parseAllowlist(row.allowlist),
@@ -751,7 +766,7 @@ export function allTasksView(
       if (needle && !matchesQuery(taskSearchText(row, ws.path), needle)) continue;
       const blocked_by = parseBlockedBy(row.blocked_by);
       out.push({
-        ...row,
+        ...rowForView(row),
         blocked_by,
         tags: parseTags(row.tags),
         blockerStates: blockerStatesOf(blocked_by),

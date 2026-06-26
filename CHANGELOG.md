@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Additive, inert schema for the work-unification fold (REVAMP Phase B.1, story
+  st-6372812d).** Lays the columns the fold needs on `tasks` so a story NODE's own
+  `tasks` row can *later* become authoritative in place of the separate `stories`
+  table — nothing reads them for any decision yet (`stories.status` + `getStoryRow`
+  stay the source of truth; the read-flip is a later phase). `src/db.ts` adds a
+  persisted node/leaf discriminator `tasks.work_kind` (`TEXT NOT NULL DEFAULT
+  'leaf'`) plus the node-only fields that today live only on `stories` — `brief`,
+  `isolated` (`INTEGER NOT NULL DEFAULT 0`), `pending_ask`, `ask_responder`
+  (`merge_base_sha`/`merged_sha` already existed on `tasks`). A new idempotent boot
+  migration `migrateBackfillNodeFold` (ordered right after `migrateUnifyStoryParent`)
+  stamps `work_kind='node'` + mirrors those fields onto every materialized story Work
+  node from its `stories` row, and both runtime materializers
+  (`migrateUnifyStoryParent`, `ensureStoryWorkNode`) now stamp them at insert so a
+  node carries the marker the instant it exists. The migration is backward-safe and
+  re-runnable (the merge gate may run it on the live DB). The new columns are kept
+  OFF the serialized `TaskView` / `TaskListView` (a `rowForView` strip in
+  `src/tasks.ts`) so the API surface stays byte-identical to Phase A and `work_kind`
+  does not collide with the work-api facade's own discriminator. Covered by an
+  isolated-DB test (`test/db-node-fold-backfill.test.ts`) asserting column presence,
+  backfill correctness for a node / leaf / childless story, the backfill re-syncing a
+  reset node, and idempotence across a second migration pass.
+
 ## [0.9.175] - 2026-06-26
 
 ### Changed
