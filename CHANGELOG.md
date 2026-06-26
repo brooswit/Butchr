@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.177] - 2026-06-26
+
 ### Changed
 - **Node-blind loops now exclude story NODES via the explicit `work_kind`
   discriminator, not the magic `'merged'` anchor (REVAMP Phase B.2, story
