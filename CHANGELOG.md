@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.176] - 2026-06-26
+
 ### Added
 - **Additive, inert schema for the work-unification fold (REVAMP Phase B.1, story
   st-6372812d).** Lays the columns the fold needs on `tasks` so a story NODE's own
