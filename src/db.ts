@@ -1384,6 +1384,38 @@ export type StoryRow = {
 };
 
 // ===========================================================================
+// CANONICAL `stories`-table READ ACCESSORS (REVAMP Phase A — story st-26a5c2e1)
+// ===========================================================================
+// The SINGLE seam through which the rest of the codebase reads a story row BY ID.
+// They live HERE (not stories.ts) on purpose: db.ts is the cycle-free low-level
+// module that tasks.ts / workspace-agent.ts / story-agent.ts / reaper.ts already
+// import, so routing their previously-inline `SELECT ... FROM stories WHERE id=?`
+// reads through these adds NO new import edge (importing stories.ts back into those
+// modules would close the tasks↔stories cycle the inline SQL was written to dodge).
+//
+// These are PURE, behavior-preserving centralizations over the CURRENT model — they
+// do NOT decide anything about story_id vs parent_id (linkage stays the workParentId
+// seam in work.ts) and add NO fallback. They are the seam the Phase B fold (RFC
+// st-6372812d) will later flip in ONE edit per accessor body; that is their value.
+
+/** A story's raw `status` by id, or null if no such story row exists. The single
+ *  scalar status read — node-terminality (workspace-agent.nodeWorkIsTerminal) and a
+ *  member's parent-story status (tasks.parentStoryStatus) both route through here. */
+export function storyStatusOf(id: string): string | null {
+  return (
+    db.query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`).get(id)
+      ?.status ?? null
+  );
+}
+
+/** A full story row by id, or null if none. The single by-id full-row read; callers
+ *  that need only one column read it off the returned row (SELECT * is a superset of
+ *  any single-column SELECT — the consumed field is byte-identical). */
+export function getStoryRow(id: string): StoryRow | null {
+  return db.query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`).get(id) ?? null;
+}
+
+// ===========================================================================
 // THE CANONICAL TASK STATE MACHINE (the CEO's exact model).
 // ===========================================================================
 // Every task is in exactly one of TWELVE states. Each state has a KIND — one of three

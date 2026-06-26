@@ -39,6 +39,7 @@ import {
   db,
   demoteSiblingWorkspaceAgents,
   getWorkspaceAgentRow,
+  storyStatusOf,
   listWorkspaceAgentRows,
   listWorkspaceAgentRowsForWork,
   liveWorkspaceForWork,
@@ -551,9 +552,7 @@ export function liveWorkspaceFor(workId: string): WorkspaceAgentRow | null {
  */
 function nodeWorkIsTerminal(workId: string | null): boolean {
   if (!workId) return false;
-  const status = db
-    .query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`)
-    .get(workId)?.status;
+  const status = storyStatusOf(workId);
   return status === "done" || status === "aborted";
 }
 

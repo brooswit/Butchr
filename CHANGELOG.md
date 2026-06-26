@@ -17,7 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.174] - 2026-06-21
+### Changed
+- **Scattered direct `stories`-table by-id reads are consolidated behind two
+  cycle-free accessors in `src/db.ts` (REVAMP Phase A).** `storyStatusOf(id)`
+  (`SELECT status … WHERE id=?`) and `getStoryRow(id)` (`SELECT * … WHERE id=?`)
+  are now the single seam through which `tasks.ts`, `workspace-agent.ts`,
+  `story-agent.ts`, `reaper.ts`, and `stories.ts` (`getStory` delegates) read a
+  story row by id — replacing eleven copies of the same inline SQL. They live in
+  `db.ts` (not `stories.ts`) precisely so the `tasks↔stories` import cycle the
+  inline reads were written to dodge stays closed. This is a pure, behavior-
+  preserving refactor: no schema/migration/write change, every substitution
+  returns the identical value, and node-terminality still reads `stories.status`
+  (not the inert `tasks.status='merged'` anchor). The accessors are the exact
+  seam the upcoming Phase B fold will flip in one edit per body. Linkage
+  (`workParentId`) is deliberately left in place, and the set-scans, `NOT IN`
+  existence subqueries, the workspaces JOIN read, and the legacy `story_id`
+  responder tier are untouched. Guarded by `test/db-story-accessors.test.ts`.
 
 ### Fixed
 - **Boot recovery no longer discards uncommitted work via the `recoverMergedTasks`

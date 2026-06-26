@@ -7,7 +7,7 @@
 // story or a task's story_id yet. Later phases add a story-leader agent (a mini-CTO that
 // decomposes / feedbacks / merges) + a responder-escalation chain that consume it. This
 // module mirrors the shape of src/workspaces.ts (a thin CRUD service over the DB).
-import { ALL_STATUSES, db, ensureStoryWorkNode, isTerminal, nowIso } from "./db.ts";
+import { ALL_STATUSES, db, ensureStoryWorkNode, getStoryRow, isTerminal, nowIso } from "./db.ts";
 import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
@@ -68,9 +68,10 @@ function setStoryStatus(
   return res.changes > 0;
 }
 
-/** Look up a story by its id, or null if none matches. */
+/** Look up a story by its id, or null if none matches. Thin wrapper over the canonical
+ *  by-id read (db.getStoryRow) so there's a single definition of the stories row read. */
 export function getStory(id: string): StoryRow | null {
-  return db.query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`).get(id) ?? null;
+  return getStoryRow(id);
 }
 
 /** A workspace's stories, newest-first (mirrors listTasks' ordering). */

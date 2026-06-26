@@ -9,11 +9,13 @@ import {
   db,
   ensureStoryWorkNode,
   estimateRows,
+  getStoryRow,
   getWorkspaceAgentRow,
   isTerminal,
   matchesQuery,
   nowIso,
   recordTaskEvent,
+  storyStatusOf,
 } from "./db.ts";
 import { isCtoEnabled } from "./cto-agent.ts";
 import type { TaskRow, TaskStatus, WorkspaceRow } from "./db.ts";
@@ -1034,9 +1036,7 @@ function emitUpdated(id: string): void {
 function isolatedStoryBranch(row: TaskRow): string | null {
   if (!row.story_id) return null;
   if (!workspaceBranchIsolation(row.workspace_id)) return null;
-  const story = db
-    .query<{ isolated: number }, [string]>(`SELECT isolated FROM stories WHERE id=?`)
-    .get(row.story_id);
+  const story = getStoryRow(row.story_id);
   if (!story || story.isolated !== 1) return null;
   return git.storyBranchName(row.story_id);
 }
@@ -1051,11 +1051,7 @@ function isolatedStoryBranch(row: TaskRow): string | null {
  */
 function parentStoryStatus(row: TaskRow): string | null {
   if (!row.story_id) return null;
-  return (
-    db
-      .query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`)
-      .get(row.story_id)?.status ?? null
-  );
+  return storyStatusOf(row.story_id);
 }
 
 /** Story statuses that still ACCEPT member merges — mirrors createSubtask's creation guard
@@ -1668,9 +1664,7 @@ export async function createTask(
   // directly): the story must exist (404) and live in THIS task's workspace (400). Checked
   // here, BEFORE the worktree is created, so a bad story never strands an orphaned worktree.
   if (storyId != null) {
-    const storyWs = db
-      .query<{ workspace_id: string }, [string]>(`SELECT workspace_id FROM stories WHERE id=?`)
-      .get(storyId)?.workspace_id;
+    const storyWs = getStoryRow(storyId)?.workspace_id;
     if (storyWs == null) throw new HttpError(404, `story not found: ${storyId}`);
     if (storyWs !== workspaceId) {
       throw new HttpError(400, "story belongs to a different workspace than the task");
@@ -3075,11 +3069,7 @@ export function isStoryComplete(storyId: string): boolean {
  * dead-subscriber throw, so this never breaks the merge that triggered it.
  */
 export function notifyStoryCompletionIfReady(storyId: string): boolean {
-  const story = db
-    .query<{ workspace_id: string; brief: string | null; status: string }, [string]>(
-      `SELECT workspace_id, brief, status FROM stories WHERE id=?`,
-    )
-    .get(storyId);
+  const story = getStoryRow(storyId);
   if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
   if (!isStoryComplete(storyId)) return false;
   // DE-DUP MARKER (channel.ts reconnect-resync): the count of terminal-MERGED members
@@ -3133,11 +3123,7 @@ function deadMemberCount(storyId: string): number {
  * Visibility ONLY — it changes NO story state and does NOT auto-complete.
  */
 export function notifyStoryBlockedIfStuck(storyId: string): boolean {
-  const story = db
-    .query<{ workspace_id: string; brief: string | null; status: string }, [string]>(
-      `SELECT workspace_id, brief, status FROM stories WHERE id=?`,
-    )
-    .get(storyId);
+  const story = getStoryRow(storyId);
   if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
   const members = db
     .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
@@ -3352,9 +3338,7 @@ export type StoryMergeOutcome =
  * approved steer). Throws HttpError(404) if the story / its workspace is gone.
  */
 export async function mergeStoryBranch(storyId: string): Promise<StoryMergeOutcome> {
-  const story = db
-    .query<{ workspace_id: string }, [string]>(`SELECT workspace_id FROM stories WHERE id=?`)
-    .get(storyId);
+  const story = getStoryRow(storyId);
   if (!story) throw new HttpError(404, `story not found: ${storyId}`);
   const dir = getWorkspace(story.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");

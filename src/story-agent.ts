@@ -43,6 +43,7 @@ import {
   db,
   ensureStoryWorkNode,
   getStoryAgentRow,
+  getStoryRow,
   listStoryAgentRows,
   nowIso,
   saveStoryAgentRow,
@@ -77,12 +78,6 @@ function logFile(storyId: string): string {
  *  infix guarantees no collision with a workspace's CTO name (`<prefix>-<workspaceId>`). */
 export function storyAgentName(storyId: string): string {
   return `${config.ctoAgentName}-story-${storyId}`;
-}
-
-/** A story row, or null if it is gone. Read directly via db (not stories.ts) to avoid an
- *  import cycle — the same way cto-agent reads the workspace row directly. */
-function getStoryRow(storyId: string): StoryRow | null {
-  return db.query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`).get(storyId) ?? null;
 }
 
 /**

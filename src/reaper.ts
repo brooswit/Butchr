@@ -8,8 +8,8 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { config } from "./config.ts";
-import { ALL_STATUSES, db, isTerminal } from "./db.ts";
-import type { StoryRow, StoryStatus, WorkspaceRow, TaskRow } from "./db.ts";
+import { ALL_STATUSES, db, getStoryRow, isTerminal } from "./db.ts";
+import type { StoryStatus, WorkspaceRow, TaskRow } from "./db.ts";
 import { run } from "./exec.ts";
 import { storyBranchName } from "./git.ts";
 import { harness } from "./harness.ts";
@@ -131,9 +131,7 @@ export async function reapOrphans(
       // story owns it. Its branch is `butchr/story/<id>` (storyBranchName), NOT the dir name.
       if (name.startsWith(STORY_WORKTREE_PREFIX)) {
         const storyId = name.slice(STORY_WORKTREE_PREFIX.length);
-        const story = db
-          .query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`)
-          .get(storyId);
+        const story = getStoryRow(storyId);
         if (story && !isStoryTerminal(story.status)) continue; // live story — leave alone
         const reason = story ? `story ${story.status}` : "no story row";
         await reapWorktree(dir.path, wtPath, storyBranchName(storyId), reason);
