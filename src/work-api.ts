@@ -78,28 +78,25 @@ export type ResolvedWork =
 
 /**
  * Resolve a work id to its underlying resource — a TASK (leaf) or a STORY (node) — or throw 404
- * if neither exists. As of REVAMP Phase B.2 the node-vs-leaf discriminator is the persisted
- * `work_kind` column (unified with work.isWorkNode — ONE definition), NOT "a stories row exists":
- * a story's materialized `tasks` row carries work_kind='node', a standalone task work_kind='leaf'.
+ * if neither exists. STORIES are tried FIRST: each story is also materialized as a `tasks` row
+ * (the parent_id FK anchor — see db.ensureStoryWorkNode), so a story id matches BOTH tables; the
+ * stories table is authoritative for "is this a NODE," so it wins. A leaf task id never collides
+ * (story ids are `st-`-prefixed, a disjoint id space), so it falls through to the task lookup.
  *
- * The `getStory` FALLBACK is RETAINED and load-bearing because the node row is materialized
- * LAZILY: createStory inserts ONLY the stories row, and ensureStoryWorkNode stamps the
- * work_kind='node' tasks row later (at the first member / leader). So a freshly-created CHILDLESS
- * story has a stories row but NO tasks node row yet → the work_kind read is absent → the fallback
- * resolves it as a NODE from the stories table. (B.3 eagerly materializes the node at createStory,
- * making this fallback redundant.) Behavior is byte-identical to the old getStory-first path: a
- * story id never collides with a leaf task id (story ids are `st-`-prefixed, a disjoint space).
+ * NODE-IDENTITY for this FACADE stays STORIES-BACKED through Phase B.2 — deliberately NOT switched
+ * onto `work_kind`. Two reasons: (1) resolveWork returns the story PAYLOAD (StoryRow), which still
+ * lives in the `stories` table until the B.4 read-flip moves it onto the node's tasks row; and (2)
+ * the node tasks row is materialized LAZILY (createStory inserts ONLY the stories row;
+ * ensureStoryWorkNode stamps the work_kind='node' row later, at the first member / leader), so a
+ * freshly-created childless story has a stories row but NO tasks node row yet — getStory-first
+ * resolves it as a NODE regardless. The PURE node/leaf PREDICATE (work.isWorkNode/isWorkLeaf, no
+ * payload) unifies onto `work_kind` NOW; this facade RESOLVER follows in B.4 alongside the payload
+ * move. Byte-identical to before — this step does not touch resolveWork's logic.
  */
 export function resolveWork(id: string): ResolvedWork {
-  const task = getTask(id);
-  // PRIMARY: the persisted node discriminator (B.2).
-  if (task?.work_kind === "node") {
-    const story = getStory(id);
-    if (story) return { kind: "node", story };
-  }
-  // FALLBACK (lazy not-yet-materialized node): a stories row with no/leaf tasks row is still a NODE.
   const story = getStory(id);
   if (story) return { kind: "node", story };
+  const task = getTask(id);
   if (task) return { kind: "leaf", task };
   throw new HttpError(404, `work not found: ${id}`);
 }

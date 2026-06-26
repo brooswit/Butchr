@@ -36,16 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollups `isStoryComplete` / `storyCounts` / merged+dead member counts
   (`src/tasks.ts`, `src/stories.ts`); and the workspace unregister worktree cleanup
   (`src/workspaces.ts`).
-- **The node/leaf DEFINITION is unified onto `work_kind` — ONE source of truth.**
+- **The pure node/leaf PREDICATE is unified onto `work_kind` — ONE source of truth.**
   `isWorkNode` / `isWorkLeaf` (`src/work.ts`) now key on the persisted `work_kind`
-  column instead of the structural child count, and the `resolveWork` facade
-  discriminator (`src/work-api.ts`) leads with `work_kind` — both agree on one
-  definition. `resolveWork` RETAINS its `getStory` fallback because the node row is
-  materialized lazily (a freshly-created childless story has a `stories` row but no
-  `tasks` node row yet), so it still resolves a not-yet-materialized story as a NODE;
-  a code comment flags the matching `isWorkNode` divergence for that lazy case (to be
-  closed when the node is materialized eagerly). `tasks.work_kind` is now typed on the
-  `TaskRow` shape (it stays stripped from every serialized view).
+  column instead of the structural child count. The `resolveWork` facade discriminator
+  (`src/work-api.ts`) is deliberately LEFT stories-backed (getStory-first, unchanged)
+  for this phase: it returns the story PAYLOAD (`StoryRow`), which still lives in the
+  `stories` table until the B.4 read-flip, and it must tolerate the LAZY-materialized
+  node (a freshly-created childless story has a `stories` row but no `tasks` node row
+  yet, so getStory-first still resolves it as a NODE). The facade resolver's `work_kind`
+  unification follows in B.4 alongside that payload move; a code comment on `isWorkNode`
+  flags the matching divergence for the lazy case (to be closed when the node is
+  materialized eagerly). `tasks.work_kind` is now typed on the `TaskRow` shape (it stays
+  stripped from every serialized view).
 
 ### Fixed
 - **Metrics no longer count a story node's FK-anchor row as a merged task (REVAMP

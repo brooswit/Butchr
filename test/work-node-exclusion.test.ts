@@ -280,14 +280,15 @@ describe("unified node/leaf definition keys on work_kind (incl. lazy fallback)",
   });
 
   test("LAZY node (stories row, no tasks node row): resolveWork falls back to NODE", () => {
-    // Directive #4: the not-yet-materialized story must still resolve as a NODE via the retained
-    // getStory fallback (createStory inserts only the stories row).
+    // Directive #4: the not-yet-materialized story must still resolve as a NODE. resolveWork stays
+    // getStory-FIRST in B.2 (its work_kind unification + the payload move are B.4), and getStory
+    // resolves a lazy story (stories row, no tasks node row) as a NODE regardless.
     expect(tasksMod.getTask(LAZY)).toBeNull(); // no tasks node row yet
     expect(workApi.resolveWork(LAZY).kind).toBe("node");
 
-    // Directive #5 (the B.3-closes-it trap): isWorkNode reads work_kind off the ABSENT tasks row →
-    // reports the lazy story a LEAF, while resolveWork (with the fallback) correctly calls it a
-    // NODE. INERT today — isWorkNode/isWorkLeaf have NO production callers (only tests).
+    // Directive #5 (the B.3-closes-it trap): the PURE predicate isWorkNode reads work_kind off the
+    // ABSENT tasks row → reports the lazy story a LEAF, while resolveWork (getStory-first) correctly
+    // calls it a NODE. INERT today — isWorkNode/isWorkLeaf have NO production callers (only tests).
     expect(workMod.isWorkNode(LAZY)).toBe(false);
     expect(workMod.isWorkLeaf(LAZY)).toBe(true);
   });
