@@ -13,8 +13,9 @@
 //      loop's WHERE predicate WITH the work_kind guard excludes our node, while the SAME predicate
 //      WITHOUT it includes it (so the guard is provably load-bearing, not incidental to 'merged').
 //
-// Also proves the unified node/leaf DEFINITION (isWorkNode / resolveWork key on work_kind — ONE
-// definition) incl. the lazy-materialization getStory fallback + the documented divergence.
+// Also proves the unified node/leaf DEFINITION (isWorkNode / isWorkLeaf key on work_kind — ONE
+// definition) and, POST-B.4, that a node-less "lazy" story no longer resolves (getStory is
+// tasks-backed; B.3's eager materialization makes that state non-production).
 //
 // Pure / in-process: herdr stubbed (BUTCHR_HERDR_BIN → `true`). NO merge path runs (the node is
 // excluded from every sweep; the only sweeps EXECUTED are per-id guards on our own node id), so no
@@ -279,16 +280,19 @@ describe("unified node/leaf definition keys on work_kind (incl. lazy fallback)",
     expect(workMod.isWorkNode(LEAF)).toBe(false);
   });
 
-  test("LAZY node (stories row, no tasks node row): resolveWork falls back to NODE", () => {
-    // Directive #4: the not-yet-materialized story must still resolve as a NODE. resolveWork stays
-    // getStory-FIRST in B.2 (its work_kind unification + the payload move are B.4), and getStory
-    // resolves a lazy story (stories row, no tasks node row) as a NODE regardless.
-    expect(tasksMod.getTask(LAZY)).toBeNull(); // no tasks node row yet
-    expect(workApi.resolveWork(LAZY).kind).toBe("node");
+  test("LAZY story (stories row, no tasks node row): POST-B.4 resolveWork does NOT resolve it", () => {
+    // The pre-B.4 "getStory fallback resolves a node-less story as a NODE" is GONE: as of the B.4
+    // read-flip getStory → getStoryRow reads the node's OWN tasks row (work_kind='node'), so a
+    // stories row with NO tasks node row no longer resolves — resolveWork falls through to the leaf
+    // lookup (also absent) and 404s. This state is NON-PRODUCTION: B.3 makes createStory EAGERLY
+    // materialize the node, so every real story has one; the flip's hard dependency on the node row
+    // is safe precisely because of that eager materialization.
+    expect(tasksMod.getTask(LAZY)).toBeNull(); // no tasks node row
+    expect(dbMod.getStoryRow(LAZY)).toBeNull(); // getStory is tasks-backed now → no node → null
+    expect(() => workApi.resolveWork(LAZY)).toThrow(); // 404 not found (no node row, no leaf row)
 
-    // Directive #5 (the B.3-closes-it trap): the PURE predicate isWorkNode reads work_kind off the
-    // ABSENT tasks row → reports the lazy story a LEAF, while resolveWork (getStory-first) correctly
-    // calls it a NODE. INERT today — isWorkNode/isWorkLeaf have NO production callers (only tests).
+    // The PURE predicate isWorkNode reads work_kind off the ABSENT tasks row → LEAF, unchanged by
+    // the flip. INERT today — isWorkNode/isWorkLeaf have NO production callers (only tests).
     expect(workMod.isWorkNode(LAZY)).toBe(false);
     expect(workMod.isWorkLeaf(LAZY)).toBe(true);
   });

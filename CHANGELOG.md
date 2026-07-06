@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The node-state read accessors now read a story NODE's OWN `tasks` row instead of the
+  `stories` table — `tasks.*` is the source of truth, `stories.*` is the (still-present)
+  mirror (REVAMP Phase B.4 read-flip, story st-6372812d).** Behavior-IDENTICAL: B.3's
+  dual-write keeps the two in lock-step, so every read returns the same value it did
+  pre-flip — proven by a divergence test that writes only the node row and asserts the
+  reads follow it. FULLY REVERSIBLE: the change is a read-source swap in the accessor
+  bodies (flip them back to `stories` to revert). `storyStatusOf` and `getStoryRow`
+  (`src/db.ts`) now read `FROM tasks … WHERE id=? AND work_kind='node'` (an EXPLICIT
+  10-column list for `getStoryRow` so its `StoryRow` shape stays byte-identical, and the
+  `work_kind='node'` guard preserves "null for a non-node id"); `nodeWorkIsTerminal`
+  (`src/workspace-agent.ts`) and `parentStoryStatus` (`src/tasks.ts`) read the real node
+  status transparently through `storyStatusOf`. The remaining direct node-STATE reads are
+  routed to the tasks node too: `listStories` + `recoverMergingStories` (`src/stories.ts`),
+  the stranded-story scan (`src/tasks.ts`), and `openStoryCount` (`src/workspaces.ts`).
+  Writes are UNCHANGED — `setStoryStatus` keeps dual-writing `stories` (the mirror stays
+  until the Phase B.5 drop); membership/identity reads (`id NOT IN (SELECT id FROM
+  stories)`, story-id enumeration, the id→path JOIN) stay `stories`-backed, deferred to
+  B.5. No schema change, no migration: purely a read-source swap over B.3's existing
+  dual-write + backfill.
+
 ## [0.9.178] - 2026-07-06
 
 ### Changed

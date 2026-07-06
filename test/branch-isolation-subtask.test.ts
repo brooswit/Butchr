@@ -87,6 +87,7 @@ beforeAll(async () => {
   dbMod.db
     .query(`INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
     .run(STORY_ISO, WS_ISO, "isolated story", "open", 1, dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(STORY_ISO); // materialize the node (as createStory does) for B.4 reads
 
   // NON-isolated workspace (flag OFF = default) + a story captured isolated=0.
   dbMod.db
@@ -95,6 +96,7 @@ beforeAll(async () => {
   dbMod.db
     .query(`INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
     .run(STORY_NONISO, WS_STD, "non-isolated story", "open", 0, dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(STORY_NONISO); // materialize the node for B.4 reads
 });
 
 afterEach(() => {

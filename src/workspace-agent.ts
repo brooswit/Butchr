@@ -541,14 +541,15 @@ export function liveWorkspaceFor(workId: string): WorkspaceAgentRow | null {
 }
 
 /**
- * Is a node-Work GENUINELY terminal? Read ONLY from the AUTHORITATIVE `stories.status` (==
- * getStory().status — the same value /api/work/:id + storyView report). Terminal == `done`
- * or `aborted`; `open`/`merging`/`merge_blocked` are NOT terminal (the leader is KEPT up).
+ * Is a node-Work GENUINELY terminal? Reads the AUTHORITATIVE node status via storyStatusOf
+ * (== getStory().status — the same value /api/work/:id + storyView report). Terminal ==
+ * `done` or `aborted`; `open`/`merging`/`merge_blocked` are NOT terminal (the leader is KEPT up).
  *
- * NEVER decide this from the node's `tasks` row: a materialized story node ALWAYS reads
- * tasks.status='merged' regardless of its real story status, so a raw-status check would
- * tear down leaders for ACTIVE stories. (Read the stories table directly to avoid a
- * stories.ts import cycle — workspace-agent.ts owns no story import.)
+ * As of REVAMP Phase B.4 (story st-6372812d) storyStatusOf reads the node's OWN `tasks` row
+ * (guarded work_kind='node'), which now carries the node's REAL lifecycle status — no longer
+ * the old frozen `merged` anchor a raw-status check used to trip over. The read still routes
+ * through storyStatusOf (db.ts) rather than an inline query so workspace-agent.ts keeps no
+ * story import and the source stays swappable in one place.
  */
 function nodeWorkIsTerminal(workId: string | null): boolean {
   if (!workId) return false;

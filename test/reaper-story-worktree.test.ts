@@ -77,6 +77,7 @@ test("reaper does NOT remove a butchr-story-<id> worktree of an OPEN story", asy
   dbMod.db
     .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, 'open', ?)`)
     .run(storyId, WS, "ship it", dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(storyId); // materialize the node (as createStory does) for B.4 reads
   // Create the real story worktree on its story branch.
   g(["worktree", "add", "-q", "-b", storyBranch, storyWt]);
   expect(existsSync(storyWt)).toBe(true);
@@ -129,6 +130,7 @@ test("F5: ABORTING an isolated story removes its worktree + branch", async () =>
       `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 1)`,
     )
     .run(storyId, WS, "ship it", dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(storyId); // materialize the node for B.4 reads
   await gitMod.ensureStoryBranch(REPO_ROOT, storyBranch);
   expect(existsSync(storyWt)).toBe(true);
   expect(branchListed(storyBranch)).toBe(true);
@@ -150,6 +152,7 @@ test("F5: DELETING an isolated story removes its worktree + branch", async () =>
       `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 1)`,
     )
     .run(storyId, WS, "ship it", dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(storyId); // materialize the node for B.4 reads
   await gitMod.ensureStoryBranch(REPO_ROOT, storyBranch);
   expect(existsSync(storyWt)).toBe(true);
   expect(branchListed(storyBranch)).toBe(true);
@@ -172,6 +175,7 @@ test("F5: a NON-isolated story abort + delete do NOT error (and touch no story b
       `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 0)`,
     )
     .run(abortId, WS, "no iso", dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(abortId); // materialize the node for B.4 reads
   expect(() => storiesMod.updateStory(abortId, { status: "aborted" })).not.toThrow();
   expect(storiesMod.getStory(abortId)!.status).toBe("aborted");
 
@@ -181,6 +185,7 @@ test("F5: a NON-isolated story abort + delete do NOT error (and touch no story b
       `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 0)`,
     )
     .run(deleteId, WS, "no iso", dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(deleteId); // materialize the node for B.4 reads
   expect(() => storiesMod.deleteStory(deleteId)).not.toThrow();
   expect(storiesMod.getStory(deleteId)).toBeNull();
 

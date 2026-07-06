@@ -1,17 +1,21 @@
 // REVAMP Phase B.3 — DUAL-WRITE lock-step invariant (story st-6372812d).
 //
 // B.3 starts writing a story NODE's REAL state onto its OWN `tasks` row (replacing the frozen
-// `merged` anchor on node rows), kept lock-step with the still-authoritative `stories` table. The
-// `stories` table stays the SOURCE OF TRUTH for reads this phase (storyStatusOf / getStoryRow are
-// UNCHANGED) — so behavior is preserved; this only makes the node row a faithful shadow ready for
-// the B.4 read-flip. These tests assert, after EVERY story transition driven through the real
-// service functions, that the node `tasks` row == the `stories` row on the dual-written columns:
+// `merged` anchor on node rows), kept lock-step with the `stories` table. This test's core subject
+// is that DUAL-WRITE invariant: after EVERY story transition driven through the real service
+// functions, the node `tasks` row == the `stories` row on the dual-written columns:
 //
 //   create / updateStory(done) / updateStory(aborted) / brief-only PATCH /
 //   openStoryAsk / escalateStoryAsk / answerStoryAsk / landStory(→done) / landStory(→merge_blocked)
 //
-// Plus: (i) READS are still from `stories` (corrupt the node row → storyStatusOf/getStoryRow are
-// unmoved); (ii) the (A) blockerState fix — a story NODE used as a leaf's blocker resolves via the
+// (Historical note: through B.3 the `stories` table was still the read SOURCE OF TRUTH. REVAMP
+// Phase B.4 flipped storyStatusOf / getStoryRow to read the node's OWN tasks row — so the
+// read-source assertion here now proves the POST-FLIP reality: reads follow the tasks node, and
+// the dual-write keeps that value identical to the stories mirror. See
+// work-node-fold-readflip.test.ts for the dedicated divergence coverage.)
+//
+// Plus: (i) READS follow the tasks node (diverge the node row → storyStatusOf/getStoryRow track
+// it); (ii) the (A) blockerState fix — a story NODE used as a leaf's blocker resolves via the
 // AUTHORITATIVE story status (open ⇒ pending, done ⇒ satisfied, aborted ⇒ dead), no longer the old
 // always-satisfied `merged` anchor; (iii) the (B) abortTask node guard refuses a node id.
 //
@@ -82,13 +86,15 @@ function assertLockStep(id: string): void {
   for (const c of MIRRORED) expect(n[c]).toEqual(s[c]);
 }
 
-/** Reads are STILL from `stories`: corrupt the node row's status, prove the read accessors are
- *  unmoved, then restore lock-step. Proves B.3 is behavior-preserving (no read flipped to tasks). */
-function assertReadsFromStories(id: string): void {
+/** POST-B.4: reads follow the node's OWN `tasks` row. Diverge the node status to a sentinel
+ *  (write ONLY tasks, bypassing the dual-write), prove the read accessors track the tasks value
+ *  (not the unchanged stories mirror), then restore lock-step. */
+function assertReadsFromTasksNode(id: string): void {
   const real = storyRow(id).status;
-  dbMod.db.query(`UPDATE tasks SET status='__corrupt__' WHERE id=? AND work_kind='node'`).run(id);
-  expect(dbMod.storyStatusOf(id)).toBe(real); // storyStatusOf reads stories, not the node row
-  expect(dbMod.getStoryRow(id)!.status).toBe(real); // getStoryRow too
+  dbMod.db.query(`UPDATE tasks SET status='__diverged__' WHERE id=? AND work_kind='node'`).run(id);
+  expect(storyRow(id).status).toBe(real); // stories mirror unchanged (dual-write bypassed)
+  expect(dbMod.storyStatusOf(id)).toBe("__diverged__"); // storyStatusOf follows the tasks node
+  expect(dbMod.getStoryRow(id)!.status).toBe("__diverged__"); // getStoryRow too
   dbMod.db.query(`UPDATE tasks SET status=? WHERE id=? AND work_kind='node'`).run(real, id); // restore
   assertLockStep(id);
 }
@@ -139,7 +145,7 @@ describe("B.3 dual-write lock-step — CRUD + ask transitions (no git)", () => {
     expect(n.work_kind).toBe("node");
     expect(n.brief).toBe("ship the widget");
     assertLockStep(st.id);
-    assertReadsFromStories(st.id);
+    assertReadsFromTasksNode(st.id);
   });
 
   test("updateStory open→done dual-writes status onto the node", () => {
@@ -148,7 +154,7 @@ describe("B.3 dual-write lock-step — CRUD + ask transitions (no git)", () => {
     expect(storyRow(st.id).status).toBe("done");
     expect(nodeRow(st.id).status).toBe("done");
     assertLockStep(st.id);
-    assertReadsFromStories(st.id);
+    assertReadsFromTasksNode(st.id);
   });
 
   test("updateStory open→aborted dual-writes status onto the node", () => {

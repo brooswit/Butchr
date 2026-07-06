@@ -557,11 +557,13 @@ export type Dashboard = {
   };
 };
 
-/** The count of OPEN stories in a workspace (the dashboard story rollup; cheap COUNT). */
+/** The count of OPEN stories in a workspace (the dashboard story rollup; cheap COUNT).
+ *  REVAMP Phase B.4 (story st-6372812d): counts the authoritative `tasks` node rows
+ *  (work_kind='node'), not the `stories` mirror. Byte-identical (B.3 dual-write). */
 function openStoryCount(workspaceId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM stories WHERE workspace_id=? AND status='open'`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND work_kind='node' AND status='open'`,
     )
     .get(workspaceId)!.n;
 }

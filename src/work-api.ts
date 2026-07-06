@@ -83,15 +83,14 @@ export type ResolvedWork =
  * stories table is authoritative for "is this a NODE," so it wins. A leaf task id never collides
  * (story ids are `st-`-prefixed, a disjoint id space), so it falls through to the task lookup.
  *
- * NODE-IDENTITY for this FACADE stays STORIES-BACKED through Phase B.2 — deliberately NOT switched
- * onto `work_kind`. Two reasons: (1) resolveWork returns the story PAYLOAD (StoryRow), which still
- * lives in the `stories` table until the B.4 read-flip moves it onto the node's tasks row; and (2)
- * the node tasks row is materialized LAZILY (createStory inserts ONLY the stories row;
- * ensureStoryWorkNode stamps the work_kind='node' row later, at the first member / leader), so a
- * freshly-created childless story has a stories row but NO tasks node row yet — getStory-first
- * resolves it as a NODE regardless. The PURE node/leaf PREDICATE (work.isWorkNode/isWorkLeaf, no
- * payload) unifies onto `work_kind` NOW; this facade RESOLVER follows in B.4 alongside the payload
- * move. Byte-identical to before — this step does not touch resolveWork's logic.
+ * NODE-IDENTITY for this FACADE stays getStory-DISPATCHED — deliberately NOT switched onto a direct
+ * `work_kind` test. It resolves node-vs-leaf by "does getStory(id) return a row"; as of Phase B.4
+ * that getStory → getStoryRow read is itself TASKS-BACKED (it reads the node's own tasks row guarded
+ * on work_kind='node' — B.3 eagerly materializes that row at createStory, so even a childless story
+ * has it), so the returned StoryRow PAYLOAD now comes from the node's tasks row, not the `stories`
+ * mirror. What has NOT moved is the facade's DISPATCH shape (getStory-first, story ids a disjoint
+ * `st-` space) and the ResolvedWork identity contract — those unify onto work_kind in B.5 with the
+ * stories-table drop. Byte-identical to before — this step does not touch resolveWork's own logic.
  */
 export function resolveWork(id: string): ResolvedWork {
   const story = getStory(id);

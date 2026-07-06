@@ -426,14 +426,15 @@ function blockerState(blockerId: string): "merged" | "dead" | "pending" {
   const b = getTask(blockerId);
   if (!b) return "dead"; // gone — can never merge
   // A story Work NODE can appear in a leaf's blocked_by — setBlockedBy/the block command validate
-  // only that the blocker EXISTS, not that it is a leaf. A node's tasks.status is NOT a leaf
-  // lifecycle status, so resolve node-terminality from the AUTHORITATIVE story status (storyStatusOf,
-  // never the raw node anchor): `done` ⇒ satisfied ("merged"), `aborted` ⇒ "dead" (never merges),
-  // anything else (open/merging/merge_blocked) ⇒ still in flight ("pending"). This both fixes a
-  // PRE-EXISTING latent bug (a frozen-'merged' node blocker was ALWAYS treated satisfied, so a leaf
-  // blocked on a still-OPEN story unblocked immediately) and avoids the B.3 deadlock a naive
-  // status check would introduce (a `done` node has no leaf 'merged' status → would dead-end at
-  // "pending" forever). [REVAMP B.3 — story st-6372812d]
+  // only that the blocker EXISTS, not that it is a leaf. A node's raw `tasks.status` is a STORY
+  // lifecycle status (not a leaf one), so resolve node-terminality via storyStatusOf: `done` ⇒
+  // satisfied ("merged"), `aborted` ⇒ "dead" (never merges), anything else (open/merging/
+  // merge_blocked) ⇒ still in flight ("pending"). Do NOT fall through to the leaf `b.status`
+  // checks below — a `done` node has no leaf 'merged' status and would dead-end at "pending"
+  // forever. As of REVAMP Phase B.4 (story st-6372812d) storyStatusOf reads the node's OWN tasks
+  // row (work_kind='node'), which now carries the node's REAL status; before B.3/B.4 the node
+  // carried a frozen 'merged' anchor, so a status check there would have wrongly treated a
+  // still-OPEN story blocker as satisfied. [REVAMP B.3/B.4 — story st-6372812d]
   if (b.work_kind === "node") {
     const s = storyStatusOf(blockerId);
     if (s === "done") return "merged";
@@ -1078,10 +1079,13 @@ function isolatedStoryBranch(row: TaskRow): string | null {
 }
 
 /**
- * The parent story's AUTHORITATIVE status (read straight from the `stories` row, NOT the
- * member's raw `tasks.status`), or null if the task has no story or the story is gone. Read via
- * a DIRECT db query — NOT stories.ts — to avoid the tasks↔stories import cycle (same idiom as
- * isolatedStoryBranch). The subtask MERGE path (finalizeMerge) GUARDS on this so a member can't
+ * The parent story's AUTHORITATIVE status (the story NODE's own status, NOT the member's own
+ * raw `tasks.status`), or null if the task has no story or the story is gone. Routes through
+ * storyStatusOf (db.ts) — NOT stories.ts — to avoid the tasks↔stories import cycle (same idiom
+ * as isolatedStoryBranch's getStoryRow). As of REVAMP Phase B.4 (story st-6372812d) that
+ * accessor reads the node's OWN `tasks` row (work_kind='node'), so this is the parent node's
+ * real status sourced from tasks, not the `stories` mirror. The subtask MERGE path
+ * (finalizeMerge) GUARDS on this so a member can't
  * be merged into a story branch its container has already stopped accepting work into
  * (merging/done/aborted) — see the guard in finalizeMerge (story st-a632b2cc F1).
  */
@@ -3296,9 +3300,12 @@ export function strandedItems(directoryId: string): StrandedItem[] {
   // stranded. F4 is a merge_blocked story keyed PURELY off (state ∧ leader-stranded): conflict's
   // one-time target:'cto' PUSH (stories.landStory) is a separate transient channel and is NOT
   // re-surfaced here — and a LIVE leader ⇒ stranded=0 so the live-responder property still holds.
+  // REVAMP Phase B.4 (story st-6372812d): read node id+status from the authoritative `tasks`
+  // node rows (work_kind='node'), not the `stories` mirror. Byte-identical set (B.3 dual-write).
   const stories = db
     .query<{ id: string; status: string }, [string]>(
-      `SELECT id, status FROM stories WHERE workspace_id=? AND status IN ('open','merge_blocked')`,
+      `SELECT id, status FROM tasks
+        WHERE workspace_id=? AND work_kind='node' AND status IN ('open','merge_blocked')`,
     )
     .all(directoryId);
   for (const s of stories) {

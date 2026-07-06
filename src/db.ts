@@ -938,9 +938,13 @@ ensureColumn("tasks", "has_agent", "INTEGER NOT NULL DEFAULT 0");
 //     'node' (a materialized story Work node — a row whose id IS a story id). Backfilled to
 //     'node' for every materialized node by migrateBackfillNodeFold (below, after the nodes
 //     are materialized) AND stamped at materialization time in migrateUnifyStoryParent /
-//     ensureStoryWorkNode so a node carries it the instant it exists. This becomes the SINGLE
-//     authoritative node-definition the fold consults — but isWorkNode (work.ts) stays the
-//     STRUCTURAL child-count test this step; routing it through work_kind is B.2.
+//     ensureStoryWorkNode so a node carries it the instant it exists. This IS the SINGLE
+//     authoritative node-definition the fold consults: the node/leaf PREDICATES isWorkNode/
+//     isWorkLeaf (work.ts) key on it (B.2, shipped — no longer the structural child-count
+//     test), and as of B.4 the node-state read accessors (storyStatusOf/getStoryRow, below)
+//     read the node's OWN tasks row guarded on work_kind='node'. The resolveWork FACADE
+//     (work-api.ts) still dispatches node-vs-leaf via getStory-first, not work_kind directly
+//     — that identity unification lands in B.5 with the stories-table drop.
 ensureColumn("tasks", "work_kind", "TEXT NOT NULL DEFAULT 'leaf'");
 
 //   - The NODE-ONLY fields that today live ONLY on the `stories` table and have no home on
@@ -1459,35 +1463,64 @@ export type StoryRow = {
 };
 
 // ===========================================================================
-// CANONICAL `stories`-table READ ACCESSORS (REVAMP Phase A — story st-26a5c2e1)
+// CANONICAL story-NODE READ ACCESSORS (REVAMP Phase A seam — story st-26a5c2e1;
+// FLIPPED to the tasks node row in Phase B.4 — story st-6372812d)
 // ===========================================================================
 // The SINGLE seam through which the rest of the codebase reads a story row BY ID.
 // They live HERE (not stories.ts) on purpose: db.ts is the cycle-free low-level
 // module that tasks.ts / workspace-agent.ts / story-agent.ts / reaper.ts already
-// import, so routing their previously-inline `SELECT ... FROM stories WHERE id=?`
-// reads through these adds NO new import edge (importing stories.ts back into those
-// modules would close the tasks↔stories cycle the inline SQL was written to dodge).
+// import, so routing their previously-inline `SELECT ... WHERE id=?` reads through
+// these adds NO new import edge (importing stories.ts back into those modules would
+// close the tasks↔stories cycle the inline SQL was written to dodge).
 //
-// These are PURE, behavior-preserving centralizations over the CURRENT model — they
-// do NOT decide anything about story_id vs parent_id (linkage stays the workParentId
-// seam in work.ts) and add NO fallback. They are the seam the Phase B fold (RFC
-// st-6372812d) will later flip in ONE edit per accessor body; that is their value.
+// PHASE B.4 READ-FLIP: as of B.4 these read the node's OWN `tasks` row (guarded on
+// work_kind='node') — the node is now AUTHORITATIVE from its own row. The `stories`
+// table remains only as the B.3 dual-write MIRROR (setStoryStatus still writes it)
+// until it is dropped in B.5. Because the mirror is kept in lock-step, the flip is
+// behavior-identical, and it is REVERSIBLE by swapping the source back to `stories`
+// in these bodies. They still decide NOTHING about story_id vs parent_id (linkage
+// stays the workParentId seam in work.ts) and add NO fallback.
 
-/** A story's raw `status` by id, or null if no such story row exists. The single
+/** A story's raw `status` by id, or null if no such story NODE exists. The single
  *  scalar status read — node-terminality (workspace-agent.nodeWorkIsTerminal) and a
- *  member's parent-story status (tasks.parentStoryStatus) both route through here. */
+ *  member's parent-story status (tasks.parentStoryStatus) both route through here.
+ *
+ *  REVAMP Phase B.4 (story st-6372812d): reads the node's OWN `tasks` row (the
+ *  authoritative source post-flip), NOT the `stories` mirror. The `work_kind='node'`
+ *  guard preserves the pre-flip contract — a non-node id (a leaf task, or an id that
+ *  is no story) resolves to null, exactly as `SELECT ... FROM stories WHERE id=?` did.
+ *  B.3's dual-write keeps tasks==stories, so this is behavior-identical; reversible by
+ *  swapping the source back. The `stories` table stays (mirror) until B.5. */
 export function storyStatusOf(id: string): string | null {
   return (
-    db.query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`).get(id)
-      ?.status ?? null
+    db
+      .query<{ status: string }, [string]>(
+        `SELECT status FROM tasks WHERE id=? AND work_kind='node'`,
+      )
+      .get(id)?.status ?? null
   );
 }
 
-/** A full story row by id, or null if none. The single by-id full-row read; callers
- *  that need only one column read it off the returned row (SELECT * is a superset of
- *  any single-column SELECT — the consumed field is byte-identical). */
+/** A full story row by id, or null if no such story NODE exists. The single by-id
+ *  full-row read; callers that need only one column read it off the returned row.
+ *
+ *  REVAMP Phase B.4 (story st-6372812d): constructs the StoryRow from the node's OWN
+ *  `tasks` row (authoritative post-flip), NOT the `stories` mirror. An EXPLICIT column
+ *  list (NOT `SELECT *`, which on `tasks` carries dozens of extra columns) yields the
+ *  byte-identical StoryRow shape every consumer expects; the `work_kind='node'` guard
+ *  preserves "null for a non-node id". All ten StoryRow columns live on `tasks` (B.1
+ *  added brief/isolated/pending_ask/ask_responder; the rest predate it). B.3's
+ *  dual-write keeps the values identical to the `stories` row; reversible. */
 export function getStoryRow(id: string): StoryRow | null {
-  return db.query<StoryRow, [string]>(`SELECT * FROM stories WHERE id=?`).get(id) ?? null;
+  return (
+    db
+      .query<StoryRow, [string]>(
+        `SELECT id, workspace_id, brief, status, isolated, pending_ask, ask_responder,
+                merge_base_sha, merged_sha, created_at
+           FROM tasks WHERE id=? AND work_kind='node'`,
+      )
+      .get(id) ?? null
+  );
 }
 
 // ===========================================================================

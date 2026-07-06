@@ -320,6 +320,9 @@ describe("recoverMergedTasks boot sweep — empty-branch false-positive guards (
     );
     execFileSync("git", ["-C", REPO_ROOT, "branch", "-D", storyBranch], { stdio: "ignore" });
     dbMod.db.query(`UPDATE stories SET status='aborted' WHERE id=?`).run(story.id);
+    // Mirror the aborted status onto the story NODE — the B.4-flipped guard C reads the node
+    // (via storyStatusOf), and production keeps stories↔node lock-step.
+    dbMod.db.query(`UPDATE tasks SET status='aborted' WHERE id=? AND work_kind='node'`).run(story.id);
     dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(m);
     expect(() => g(["rev-parse", "--verify", storyBranch])).toThrow(); // precondition: absent
 

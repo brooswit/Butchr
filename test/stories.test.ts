@@ -266,7 +266,9 @@ describe("Phase 6: all-subtasks-merged completion detection", () => {
     const story = storiesMod.createStory(WS_A, "Already-done story");
     seedMember("st6-d-1", WS_A, story.id, "merged");
     // Flip the story status directly (avoid the leader-teardown side effects of updateStory).
+    // Mirror onto the node too — B.4-flipped reads consult the node, kept lock-step in production.
     dbMod.db.query(`UPDATE stories SET status='done' WHERE id=?`).run(story.id);
+    dbMod.db.query(`UPDATE tasks SET status='done' WHERE id=? AND work_kind='node'`).run(story.id);
     expect(tasksMod.notifyStoryCompletionIfReady(story.id)).toBe(false);
   });
 });
@@ -338,6 +340,7 @@ describe("F4: story stuck on a failed/aborted member", () => {
     seedMember("f4-done-1", WS_A, story.id, "merged");
     seedMember("f4-done-2", WS_A, story.id, "aborted");
     dbMod.db.query(`UPDATE stories SET status='done' WHERE id=?`).run(story.id);
+    dbMod.db.query(`UPDATE tasks SET status='done' WHERE id=? AND work_kind='node'`).run(story.id);
     expect(tasksMod.notifyStoryBlockedIfStuck(story.id)).toBe(false);
     expect(tasksMod.notifyStoryReadiness(story.id)).toBe(false);
   });
@@ -669,6 +672,7 @@ describe("st-a632b2cc F4: assignTaskToStory story-status guard", () => {
     // merge_blocked → assignable (merge_blocked is butchr-owned; set it directly)
     const mb = storiesMod.createStory(WS_A, "F4 merge_blocked");
     dbMod.db.query(`UPDATE stories SET status='merge_blocked' WHERE id=?`).run(mb.id);
+    dbMod.db.query(`UPDATE tasks SET status='merge_blocked' WHERE id=? AND work_kind='node'`).run(mb.id);
     seedTask("f4-mb", WS_A);
     expect(storiesMod.assignTaskToStory("f4-mb", mb.id).story_id).toBe(mb.id);
 
@@ -692,6 +696,7 @@ describe("st-a632b2cc F4: assignTaskToStory story-status guard", () => {
     // merging → rejected (transient; set it directly)
     const merging = storiesMod.createStory(WS_A, "F4 merging");
     dbMod.db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(merging.id);
+    dbMod.db.query(`UPDATE tasks SET status='merging' WHERE id=? AND work_kind='node'`).run(merging.id);
     seedTask("f4-merging", WS_A);
     expect(() => storiesMod.assignTaskToStory("f4-merging", merging.id)).toThrow(
       /cannot assign a task to a merging story/,

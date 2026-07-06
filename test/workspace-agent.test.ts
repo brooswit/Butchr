@@ -367,7 +367,9 @@ describe("unified workspace supervisor", () => {
 // workspace down, (2) boot reconcile won't revive a terminal node's leader, and (3) the
 // REQUIRED trap: an OPEN node whose RAW tasks.status='merged' is NOT treated as terminal.
 describe("leader teardown on node-Work completion (unified)", () => {
-  /** Seed a `stories` row (AUTHORITATIVE status). isolated=0 so a `done` PATCH lands immediately. */
+  /** Seed a `stories` row (AUTHORITATIVE status) + its materialized Work node (as production's
+   *  createStory does) so the B.4-flipped reads — which now read the node's OWN tasks row — resolve
+   *  it at this status. isolated=0 so a `done` PATCH lands immediately. */
   function insertStory(id: string, status: string): void {
     dbMod.db
       .query(
@@ -375,11 +377,12 @@ describe("leader teardown on node-Work completion (unified)", () => {
          VALUES (?, ?, ?, ?, ?, 0)`,
       )
       .run(id, DIR, `brief ${id}`, status, dbMod.nowIso());
+    dbMod.ensureStoryWorkNode(id); // node carries the story's status (work_kind='node')
   }
 
   /** Seed a LIVE leader `workspace` row for a story node (+ the FK-target materialized `tasks` row). */
   function seedLiveLeader(wsId: string, storyId: string, live: Set<string>): string {
-    insertTask(storyId); // the materialized story node — FK target of the leader's work_id
+    dbMod.ensureStoryWorkNode(storyId); // the materialized story NODE — FK target of the leader's work_id
     dbMod.saveWorkspaceAgentRow(wsId, {
       kind: "leader",
       directory_id: DIR,
@@ -1328,7 +1331,10 @@ describe("create-time unified rows (st-93384200 Bug 3)", () => {
       dbMod.db
         .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?,?,?,?,?,0)`)
         .run(storyId, DIR, `brief ${storyId}`, status, dbMod.nowIso());
-      insertTask(storyId); // the materialized story node (FK target of the leader's work_id)
+      // The materialized story node (FK target of the leader's work_id) carrying the story's REAL
+      // status — via ensureStoryWorkNode (as production does), so the B.4-flipped nodeWorkIsTerminal
+      // (which reads the node's OWN tasks row through storyStatusOf) sees this transient status.
+      dbMod.ensureStoryWorkNode(storyId);
       const wsId = `ws-leader-${storyId}`;
       dbMod.saveWorkspaceAgentRow(wsId, {
         kind: "leader", directory_id: DIR, work_id: storyId, desired: 1, has_agent: 1, session_id: `sess-${wsId}`,

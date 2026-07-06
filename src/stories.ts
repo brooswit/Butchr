@@ -100,11 +100,17 @@ export function getStory(id: string): StoryRow | null {
   return getStoryRow(id);
 }
 
-/** A workspace's stories, newest-first (mirrors listTasks' ordering). */
+/** A workspace's stories, newest-first (mirrors listTasks' ordering). REVAMP Phase B.4
+ *  (story st-6372812d): reads the node rows from `tasks` (work_kind='node') — the
+ *  authoritative source post-flip — with the EXPLICIT StoryRow column list so the shape
+ *  is byte-identical to the old `SELECT * FROM stories`. B.3's dual-write keeps the values
+ *  identical; the `stories` mirror stays until B.5. */
 export function listStories(workspaceId: string): StoryRow[] {
   return db
     .query<StoryRow, [string]>(
-      `SELECT * FROM stories WHERE workspace_id=? ORDER BY created_at DESC`,
+      `SELECT id, workspace_id, brief, status, isolated, pending_ask, ask_responder,
+              merge_base_sha, merged_sha, created_at
+         FROM tasks WHERE workspace_id=? AND work_kind='node' ORDER BY created_at DESC`,
     )
     .all(workspaceId);
 }
@@ -594,7 +600,16 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
  * tasks.recoverRollingBackTasks for the story level. Returns how many were re-driven.
  */
 export async function recoverMergingStories(): Promise<number> {
-  const rows = db.query<{ id: string }, []>(`SELECT id FROM stories WHERE status='merging'`).all();
+  // REVAMP Phase B.4 (story st-6372812d): read the `merging` node ids from the authoritative
+  // `tasks` node rows (work_kind='node'), not the `stories` mirror. SAFE against the two
+  // non-transactional dual-writes in setStoryStatus: (1) that write is synchronous (no await
+  // between the stories UPDATE and mirrorStoryNode), so a running process never exposes a
+  // mid-state; (2) a hard crash between them self-heals at boot — migrateBackfillNodeFold
+  // re-syncs every node's tasks.status FROM stories in runMigrations, which runs BEFORE this
+  // recovery scan (index.ts). So the tasks node row is authoritative by the time we read it.
+  const rows = db
+    .query<{ id: string }, []>(`SELECT id FROM tasks WHERE work_kind='node' AND status='merging'`)
+    .all();
   for (const r of rows) await landStory(r.id).catch(() => {});
   return rows.length;
 }

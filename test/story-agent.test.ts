@@ -51,11 +51,14 @@ function insertWorkspace(id: string): void {
     .run(id, join(DATA_DIR, id), id, dbMod.nowIso());
 }
 
-/** Insert a story row DIRECTLY (bypasses the createStory launch hook) with a given status. */
+/** Insert a story row DIRECTLY (bypasses the createStory launch hook) with a given status.
+ *  Materializes the node's `tasks` row too (as production's createStory does) so the B.4-flipped
+ *  read accessors — reading the node's own tasks row — resolve it. */
 function insertStory(id: string, workspaceId: string, status = "open"): void {
   dbMod.db
     .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(id, workspaceId, `brief for ${id}`, status, dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(id);
 }
 
 beforeAll(async () => {

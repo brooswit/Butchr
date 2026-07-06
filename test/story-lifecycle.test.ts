@@ -200,13 +200,16 @@ describe("createStory captures the per-story isolated bit (§11.8)", () => {
 });
 
 describe("story-status CAS / from-guard (st-a632b2cc F2)", () => {
-  /** Insert a story directly in WS with a given status (no createStory → no leader launch). */
+  /** Insert a story directly in WS with a given status (no createStory → no leader launch).
+   *  Also materializes the node's `tasks` row (as production does) so the B.4-flipped read
+   *  accessors — reading the node's own tasks row — resolve it at the given status. */
   function mkStoryAt(id: string, status: string): void {
     dbMod.db
       .query(
         `INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(id, WS, `story ${id}`, status, 0, dbMod.nowIso());
+    dbMod.ensureStoryWorkNode(id);
   }
 
   test("(a) RE-OPEN from `done` is REJECTED — a PATCH {status:'open'} no-ops, status stays done", () => {
