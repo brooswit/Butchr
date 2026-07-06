@@ -97,7 +97,7 @@ function saveRow(storyId: string, patch: Parameters<typeof saveStoryAgentRow>[1]
 function storyWorkspacePath(storyId: string): string | null {
   const row = db
     .query<{ path: string }, [string]>(
-      `SELECT w.path AS path FROM stories s JOIN workspaces w ON w.id = s.workspace_id WHERE s.id=?`,
+      `SELECT w.path AS path FROM tasks t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id=? AND t.work_kind='node'`,
     )
     .get(storyId);
   return row?.path ?? null;
@@ -578,7 +578,7 @@ export async function reconcileStoryAgents(
   let adopted = 0;
   let launched = 0;
   let skipped = 0;
-  const stories = db.query<{ id: string }, []>(`SELECT id FROM stories`).all();
+  const stories = db.query<{ id: string }, []>(`SELECT id FROM tasks WHERE work_kind='node'`).all();
   for (const s of stories) {
     try {
       const res = await reconcileStoryAgent(s.id, herdrUp);
@@ -743,7 +743,7 @@ export function onStoryStatusChanged(storyId: string, status: string): void {
  */
 export async function stopWorkspaceStoryAgents(workspaceId: string): Promise<void> {
   const stories = db
-    .query<{ id: string }, [string]>(`SELECT id FROM stories WHERE workspace_id=?`)
+    .query<{ id: string }, [string]>(`SELECT id FROM tasks WHERE workspace_id=? AND work_kind='node'`)
     .all(workspaceId);
   for (const s of stories) {
     await stopStoryAgent(s.id).catch(() => {});

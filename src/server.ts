@@ -337,9 +337,10 @@ async function healthResponse(): Promise<Response> {
         .query<{ status: string; n: number }, []>(
           // EXCLUDE materialized story Work NODES (st-540ba705 step 6a — see tasks.listTasks):
           // a story's anchor `tasks` row is not a real task, so it must not inflate the global
-          // health status rollup with a phantom `merged` per story.
+          // health status rollup with a phantom `merged` per story. The work_kind='node'
+          // discriminator is the node membership test (REVAMP-2 B.5a).
           `SELECT status, COUNT(*) AS n FROM tasks
-            WHERE id NOT IN (SELECT id FROM stories) GROUP BY status`,
+            WHERE work_kind != 'node' GROUP BY status`,
         )
         .all();
       for (const r of rows) tasks[r.status] = r.n;

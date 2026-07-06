@@ -162,9 +162,23 @@ const row = (id: string) => dbMod.getStoryAgentRow(id);
 const flush = () => new Promise((r) => setTimeout(r, 25));
 
 beforeEach(() => {
-  // Reset the per-story records, stories, + in-memory supervision state between scenarios.
+  // Reset the per-story records, stories, materialized story Work NODES, + in-memory supervision
+  // state between scenarios. The db is process-wide across test files (see the top-of-file note),
+  // so the scope of each delete matters:
+  //   - story_agent GLOBAL: it is a leaf/child table (nothing FK-references it), so a global wipe
+  //     is safe and clears any story_agent detritus reconcileStoryAgents left when it enumerated —
+  //     via the B.5a work_kind='node' read — OTHER files' open nodes and launched their leaders.
+  //   - stories + their materialized `tasks` nodes SCOPED to THIS file (`dir-storytest*`): a global
+  //     `DELETE FROM stories` would delete OTHER files' stories while their `tasks` nodes survive,
+  //     breaking the node⟺stories lock-step that reconcileStoryAgents' saveStoryAgentRow FK relies
+  //     on (and a global node delete would FK-crash on their inbound referrers). The two scoped
+  //     deletes clear this file's stories + nodes IN LOCK-STEP (as production's deleteStory removes
+  //     both together), so no stale node leaks into the next scenario and other files stay consistent.
   dbMod.db.query(`DELETE FROM story_agent`).run();
-  dbMod.db.query(`DELETE FROM stories`).run();
+  dbMod.db
+    .query(`DELETE FROM tasks WHERE work_kind='node' AND workspace_id LIKE 'dir-storytest%'`)
+    .run();
+  dbMod.db.query(`DELETE FROM stories WHERE workspace_id LIKE 'dir-storytest%'`).run();
   sa._resetSupervisionStateForTest();
 });
 

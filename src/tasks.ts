@@ -521,12 +521,12 @@ export function listTasks(workspaceId: string): TaskRow[] {
   // task/leaf, so it must never surface in the task LIST views (taskListView / allTasksView).
   // Keeping it out preserves the byte-identical `/api/tasks` list and a clean `/api/work` leaf
   // set; getTask() (by id) still resolves it for the parent_id routing/FK walks. The
-  // `id NOT IN (SELECT id FROM stories)` filter is exact — story ids are a disjoint id space,
-  // so no real task is ever excluded. (Step 6d folds stories into work and revisits this.)
+  // `work_kind != 'node'` filter is exact — a story Work NODE is exactly a work_kind='node'
+  // row, so no real task is ever excluded (REVAMP-2 B.5a). (Step 6d folds stories into work.)
   return db
     .query<TaskRow, [string]>(
       `SELECT * FROM tasks
-        WHERE workspace_id=? AND id NOT IN (SELECT id FROM stories)
+        WHERE workspace_id=? AND work_kind != 'node'
         ORDER BY created_at DESC`,
     )
     .all(workspaceId);
@@ -3333,15 +3333,16 @@ export function strandedItems(directoryId: string): StrandedItem[] {
 
   // CTO-owned findings (F1, F2) — only when the directory's CTO responder is stranded. A task
   // WITH a story_id is owned by its story LEADER (handled per-story below), so the CTO findings
-  // consider STANDALONE tasks (story_id IS NULL) only. The `id NOT IN (SELECT id FROM stories)`
-  // guard drops materialized story Work NODES (mirrors counts()/listTasks).
+  // consider STANDALONE tasks (story_id IS NULL) only. The `work_kind != 'node'` guard drops
+  // materialized story Work NODES (mirrors counts()/listTasks); story_id IS NULL is the distinct
+  // standalone-membership test (REVAMP-2 B.5a converts only the node guard).
   if (ctoResponderStranded(directoryId)) {
     const ctoWhy = isCtoEnabled(directoryId) ? "CTO gave up (dead)" : "CTO disabled";
     // F1 — `idea` tasks (a brief awaiting a spec) whose CTO responder is stranded.
     const ideas = db
       .query<{ id: string }, [string]>(
         `SELECT id FROM tasks WHERE workspace_id=? AND story_id IS NULL AND status='idea'
-           AND id NOT IN (SELECT id FROM stories)`,
+           AND work_kind != 'node'`,
       )
       .all(directoryId);
     for (const t of ideas) {
@@ -3354,7 +3355,7 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     const blocked = db
       .query<{ id: string; blocked_by: string | null }, [string]>(
         `SELECT id, blocked_by FROM tasks WHERE workspace_id=? AND story_id IS NULL AND status='blocked'
-           AND id NOT IN (SELECT id FROM stories)`,
+           AND work_kind != 'node'`,
       )
       .all(directoryId);
     for (const t of blocked) {

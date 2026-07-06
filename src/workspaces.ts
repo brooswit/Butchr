@@ -89,9 +89,10 @@ function counts(workspaceId: string): Record<string, number> {
     .query<{ status: string; n: number }, [string]>(
       // EXCLUDE materialized story Work NODES (st-540ba705 step 6a — see tasks.listTasks): a
       // story's anchor `tasks` row is not a real task and must not inflate the workspace's
-      // per-status counts (it would otherwise add a phantom `merged` per story).
+      // per-status counts (it would otherwise add a phantom `merged` per story). The
+      // work_kind='node' discriminator is the node membership test (REVAMP-2 B.5a).
       `SELECT status, COUNT(*) AS n FROM tasks
-        WHERE workspace_id=? AND id NOT IN (SELECT id FROM stories)
+        WHERE workspace_id=? AND work_kind != 'node'
         GROUP BY status`,
     )
     .all(workspaceId);

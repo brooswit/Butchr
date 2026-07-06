@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- REVAMP-2 Phase B.5a (story st-78a8b4e7) — byte-identical read-conversion of the
+  last stories-table membership reads to `work_kind`. The final 8 membership/identity
+  reads that keyed on the physical `stories` table (health rollup, `listTasks`,
+  workspace per-status counts, CTO stranded-item findings, and the story-agent
+  enumeration/teardown/path lookups) now test `work_kind='node'` instead. Behavior is
+  identical today — the B.3 dual-write keeps `work_kind='node'` ⟺ `id IN stories` in
+  lock-step — and fully reversible: the `stories` table stays intact. After B.5a nothing
+  reads the `stories` table except the dual-write mirror and the boot re-syncs.
+
 ## [0.9.182] - 2026-07-06
 
 - **Dashboard now shows every work-item's TYPE and every agent's KIND via one generic badge.** A single `KIND_VISUAL` lookup + `kindBadge()` emitter in `public/app.js` maps a kind string → { label, glyph, cssClass }: work-items badge `node`→STORY / `leaf`→TASK (keyed off the authoritative `work_kind` field) and agent surfaces badge their structurally-known kind `cto`/`leader`/`build`. Wired into all three views — List (task rows via `taskChips`, story rows, build-agent rows), Board (task/story cards, blocker chips, build-agent term links), and Graph (glyph-only in-node marker) — plus the CTO card/mini-badge and story-leader lines. An unmapped kind falls back to a neutral generic badge (never crashes), so a future container kind (`repo`/`project`) or agent perspective is one new table row, not a new code branch. Theme-safe `--kind-*` vars + `.kind-badge`/`.tg-kind` styles in `public/style.css` (replaces the ad-hoc `.story-badge` pill). Covered by `test/kind-badge.test.ts`.
