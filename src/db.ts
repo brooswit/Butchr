@@ -347,7 +347,16 @@ export function migrateWorkspacesView(database: Database): void {
   database.exec(`DROP TRIGGER IF EXISTS workspaces_view_insert`);
   database.exec(`DROP TRIGGER IF EXISTS workspaces_view_update`);
   database.exec(`DROP TRIGGER IF EXISTS workspaces_view_delete`);
-  database.exec(`DROP VIEW IF EXISTS workspaces`);
+  // DEFENSIVE SELF-HEAL (REVAMP-2 B.5b incident): drop `workspaces` by its ACTUAL object type.
+  // It is normally a VIEW, but a botched table-rebuild once left it as a TABLE, and a plain
+  // `DROP VIEW` throws "use DROP TABLE to delete table workspaces" on a table → boot crash-loop.
+  // Querying the type and dropping accordingly turns that unbootable state into a self-healing
+  // convergence (the stray table is dropped and rebuilt as the view on the very next boot).
+  const wsType = database
+    .query<{ type: string }, []>(`SELECT type FROM sqlite_master WHERE name='workspaces'`)
+    .get()?.type;
+  if (wsType === "table") database.exec(`DROP TABLE IF EXISTS workspaces`);
+  else database.exec(`DROP VIEW IF EXISTS workspaces`);
   database.exec(`CREATE VIEW workspaces AS SELECT * FROM directory`);
   database.exec(`
     CREATE TRIGGER workspaces_view_insert INSTEAD OF INSERT ON workspaces BEGIN
@@ -1301,6 +1310,13 @@ export function migrateDropStoriesMirror(): void {
   if (!tableExists(db, "stories")) return; // converged already — no-op
 
   db.exec("PRAGMA foreign_keys = OFF;");
+  // ROOT-CAUSE FIX (REVAMP-2 B.5b incident): with legacy_alter_table OFF (SQLite's default), an
+  // `ALTER TABLE … RENAME`/`DROP COLUMN` REWRITES every view/trigger that references the touched
+  // table — which, in the live flip, MATERIALIZED the `workspaces` back-compat VIEW into a TABLE,
+  // so the next boot's migrateWorkspacesView `DROP VIEW` threw and crash-looped. Turn legacy mode
+  // ON for the duration of the rebuilds so ALTER only touches the renamed table itself and never
+  // rewrites/materializes the `workspaces` view. Restored in `finally`.
+  db.exec("PRAGMA legacy_alter_table = ON;");
   // Remove the compat view + triggers so no ALTER below re-parses them (recreated in `finally`).
   db.exec(`DROP TRIGGER IF EXISTS workspaces_view_insert`);
   db.exec(`DROP TRIGGER IF EXISTS workspaces_view_update`);
@@ -1348,6 +1364,7 @@ export function migrateDropStoriesMirror(): void {
   } finally {
     // Recreate the `workspaces` compat view + triggers (idempotent DROP+CREATE) and restore FKs.
     migrateWorkspacesView(db);
+    db.exec("PRAGMA legacy_alter_table = OFF;");
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
