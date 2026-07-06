@@ -25,7 +25,13 @@ import {
   teardownLeaderWorkspaceForWork,
 } from "./workspace-agent.ts";
 import type { StoryAgentStatus } from "./workspace-agent.ts";
-import { HttpError, getWorkspace, listWorkspaces, workspaceBranchIsolation } from "./workspaces.ts";
+import {
+  HttpError,
+  assertRepoIsProjectMember,
+  getWorkspace,
+  listWorkspaces,
+  workspaceBranchIsolation,
+} from "./workspaces.ts";
 
 // The three valid story statuses (mirrors the StoryStatus union in db.ts). Used to
 // validate an incoming status before it touches the row.
@@ -142,6 +148,42 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
   // desired synchronously and fires the launch best-effort (never fails story creation).
   onStoryCreated(id);
   return getStory(id)!;
+}
+
+/**
+ * CREATE a PROJECT-LEVEL INITIATIVE (REVAMP-4 Phase 3 / P3d, story st-1a82a2e1) — the CEO's
+ * delegation surface: the CEO seeds a STORY into a member repo, and that repo's own CTO/leader
+ * turn it into work. This MIRRORS the human→CEO handoff one rung down (a brief a subordinate
+ * decomposes), reusing the EXACT createStory machinery a CTO uses — the CEO does NOT own the
+ * story's lifecycle, it DELEGATES: the created story lands `open` in the repo's workspace, gets its
+ * managed LEADER (onStoryCreated), and its story-level asks / completion route to the repo's CTO
+ * (existing story→cto routing), with the CEO above only via the P3a escalation ladder.
+ *
+ * `assertRepoIsProjectMember` enforces SINGLE-project scope: the repo must be registered under THIS
+ * project (cross-repo spanning is P3e). One repo per initiative.
+ *
+ * REPO-PARENTING: createStory materializes the story NODE with parent_id NULL (a top-level story —
+ * BYTE-IDENTICAL to a CTO-created story). To make the initiative bubble up to the CEO, we then
+ * repoint its parent_id → the OWNING REPO node (its own workspace_id, which IS the repo node id by
+ * S0a construction — the same shape migrateReparentTopLevelUnderRepo gives every top-level Work).
+ * With the repo registered under the project, the story's chain is now story→repo→project ⇒
+ * [{cto},{ceo},{user}] (immediate responder still {cto} — the CEO delegates, does not own). We do
+ * NOT touch createStory itself, so the CTO/leader story-creation path stays byte-identical.
+ */
+export function createProjectInitiative(
+  projectId: string,
+  repoId: unknown,
+  brief: unknown,
+): StoryRow {
+  const repo = assertRepoIsProjectMember(projectId, repoId);
+  // Reuse the CTO's story machinery verbatim — repo.id is the repo node id == its directory id
+  // (S0a), the workspace createStory anchors the node + its leader to.
+  const story = createStory(repo.id, brief);
+  // Repoint the fresh story NODE onto its owning repo node so its escalation chain reaches the CEO
+  // (story→repo→project). parent_id = the repo node id (== story.workspace_id) — the canonical S1
+  // top-level shape. Immediate responder is unchanged ({cto}); only the chain gains the {ceo} tier.
+  db.query(`UPDATE tasks SET parent_id=? WHERE id=? AND work_kind='node'`).run(repo.id, story.id);
+  return getStory(story.id)!;
 }
 
 /**
@@ -396,6 +438,13 @@ export function escalateStoryAsk(id: string): StoryRow {
   if (story.pending_ask === null || story.ask_responder !== "cto") {
     throw new HttpError(409, "no open CTO-owned ask to escalate");
   }
+  // TODO (REVAMP-4, deferred to P3f — story st-1a82a2e1): this is a SINGLE-HOP cursor (cto→user).
+  // Once a repo is registered under a PROJECT (P3d), a CTO escalating an ask in that repo SHOULD
+  // advance to the CEO (the project's supervisor) BEFORE the user — i.e. walk the container ladder
+  // (work.workResponderChain) rather than jump straight to `user`. Generalizing this cursor is a
+  // SEPARATE piece; P3d deliberately does NOT touch it, so escalateStoryAsk stays byte-identical
+  // (proven by a non-project-repo cto→user test) and the CEO rung is opt-in via the escalation
+  // CHAIN, not this runtime cursor.
   // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
   db.query(`UPDATE tasks SET ask_responder='user' WHERE id=? AND work_kind='node'`).run(id);
   publish({

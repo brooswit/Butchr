@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **REVAMP-4 Phase 3 / P3d — CEO directive surface (a running CEO can register repos + delegate
+  initiatives).** The project-tier CEO (P3c) gains its creation authority: it can place repos under
+  its project and hand their CTOs high-level initiatives. New routes: `POST /api/projects/:id/repos`
+  `{ repo }` reparents a `work_kind='repo'` node's `parent_id` → the project (idempotent, reversible
+  via `DELETE /api/projects/:id/repos/:repoId`, listable via `GET`); `POST /api/projects/:id/initiatives`
+  `{ repo, brief }` seeds a STORY into a MEMBER repo via the existing `createStory` machinery and
+  reparents it onto the repo node, so the repo's own LEADER manages it and its asks/completion route
+  to the repo's CTO — the CEO **delegates** (immediate responder stays `{cto}`), it does not own the
+  story's lifecycle; the CEO sits above only via the P3a escalation chain (`repo→cto→project→ceo→user`).
+  Creation is gated by a new **level-based authority** rule (`tasks.assertCreationAllowed`): each
+  supervisor may create only the tier one level below it (`project → repo → story → subtask`), so a
+  CEO cannot create a build leaf directly and a CTO cannot create a project. The CEO operator brief
+  is replaced with a real directive brief (register repos, seed initiatives), honest that cross-repo
+  initiatives spanning multiple repos + cross-repo `blocked_by` remain a later release (P3e).
+- **BYTE-IDENTICAL + SINGLE-PROJECT:** every existing creation path is unchanged
+  (`assertWorkspaceTaskCreationAllowed` still blocks a standalone leaf/allows rollback; CTO still
+  creates stories; leader still creates subtasks); registering a repo is opt-in and non-disruptive
+  (only the escalation chain gains the `{ceo}` tier; `project_id` stays null for repo-work); and the
+  runtime escalation cursor (`escalateStoryAsk`, cto→user) is untouched — its CEO-rung generalization
+  is deferred (a `TODO` marks it), proven byte-identical by a non-project-repo test.
+
 ## [0.9.201] - 2026-07-06
 
 ### Added

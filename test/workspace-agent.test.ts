@@ -2117,15 +2117,19 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     }
   });
 
-  test("the CEO brief gives a real STAND-BY role and does NOT tell it to GET a 404-ing project node", () => {
+  test("the CEO brief describes the real DIRECTIVE surface (register repos + seed initiatives)", () => {
     const proj = dirsMod.createProject(DIR);
     const brief = wa.buildWorkspaceBrief(
       mkRow({ id: `ws-ceo-${proj.id}`, kind: "ceo", work_id: proj.id, directory_id: DIR }),
     );
     expect(brief).toContain("CEO of project");
-    expect(brief).toContain("stand by");
-    // Honest that the directive surface is not yet available (P3d) — no invented capability.
-    expect(brief).toContain("NOT yet available");
+    // The P3d directive surface, scoped to THIS project id: register repos + seed initiatives.
+    expect(brief).toContain(`POST /api/projects/${proj.id}/repos`);
+    expect(brief).toContain(`POST /api/projects/${proj.id}/initiatives`);
+    // No longer inert — the P3c "stand by" placeholder is gone.
+    expect(brief).not.toContain("stand by");
+    // Honest about the SINGLE-project boundary: cross-repo spanning is a later release (P3e).
+    expect(brief).toContain("P3e");
     // Must NOT instruct a GET /api/work/<project> — a 'project' node 404s there (P3a).
     expect(brief).not.toContain("GET /api/work");
     expect(brief.length).toBeGreaterThan(200); // a real brief, not an 80-byte stub

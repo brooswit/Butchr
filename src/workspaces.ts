@@ -590,6 +590,106 @@ export async function setWorkspaceCeoEnabled(
   return getProject(projectNodeId)!;
 }
 
+// ---- REGISTER REPOS UNDER A PROJECT (REVAMP-4 Phase 3 / P3d, story st-1a82a2e1) -----------
+// The CEO's directive surface for placing a repo under its project: reparent a work_kind='repo'
+// node's parent_id → the project node. After this, work in that repo bubbles repo→{cto}→project→
+// {ceo}→{user} via the P3a container ladder (work.containerLadderChain) — the immediate responder
+// stays {cto} (byte-identical CTO-feed ownership; project_id stays null for repo-work), and only
+// the ESCALATION CHAIN gains the {ceo} tier, so registration is OPT-IN and non-disruptive. A repo
+// node's parent_id is NULL when unregistered (top of the tree — REVAMP-4 S1 keeps repo nodes NULL),
+// so registration/unregistration is a lossless repo.parent_id ↔ project ↔ NULL move.
+
+/** Look up a REPO node (a work_kind='repo' `tasks` row — id == its directory id, S0a) by id, or
+ *  null. The repo mirror of getProject. Exported for the directive endpoints + tests. */
+export function getRepoNode(id: string): TaskRow | null {
+  return (
+    db.query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=? AND work_kind='repo'`).get(id) ??
+    null
+  );
+}
+
+/**
+ * REGISTER a repo under a project (REVAMP-4 P3d) — reparent the repo node's parent_id → the
+ * project node. Guards: the project must exist (404); the target must be a real repo node (404 if
+ * it is not `work_kind='repo'` — a project/story/leaf id is refused); the repo must not already be
+ * registered under a DIFFERENT project (409 — unregister it there first). IDEMPOTENT: a repo already
+ * under THIS project returns unchanged (no-op). Returns the refreshed repo node row.
+ */
+export function registerRepoUnderProject(projectId: string, repoId: unknown): TaskRow {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  if (typeof repoId !== "string" || !repoId.trim()) {
+    throw new HttpError(400, "repo id is required");
+  }
+  const repo = getRepoNode(repoId.trim());
+  if (!repo) throw new HttpError(404, `repo not found: ${repoId}`);
+  if (repo.parent_id === projectId) return repo; // idempotent — already a member
+  if (repo.parent_id != null) {
+    throw new HttpError(
+      409,
+      `repo ${repo.id} is already registered under project ${repo.parent_id}; unregister it there first`,
+    );
+  }
+  db.query(`UPDATE tasks SET parent_id=? WHERE id=? AND work_kind='repo'`).run(projectId, repo.id);
+  return getRepoNode(repo.id)!;
+}
+
+/**
+ * UNREGISTER a repo from a project (REVAMP-4 P3d) — the reversible inverse of
+ * registerRepoUnderProject: set the repo node's parent_id back to NULL (top of the tree). Guards:
+ * the project must exist (404); the target must be a repo node (404). IDEMPOTENT: a repo already
+ * unregistered (parent_id NULL) returns unchanged. 409 if the repo is registered under a DIFFERENT
+ * project (never silently detach another project's repo). Returns the refreshed repo node row.
+ */
+export function unregisterRepoFromProject(projectId: string, repoId: string): TaskRow {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  const repo = getRepoNode(repoId);
+  if (!repo) throw new HttpError(404, `repo not found: ${repoId}`);
+  if (repo.parent_id == null) return repo; // idempotent — already unregistered
+  if (repo.parent_id !== projectId) {
+    throw new HttpError(
+      409,
+      `repo ${repo.id} is registered under a different project (${repo.parent_id}), not ${projectId}`,
+    );
+  }
+  db.query(`UPDATE tasks SET parent_id=NULL WHERE id=? AND work_kind='repo'`).run(repo.id);
+  return getRepoNode(repo.id)!;
+}
+
+/** The repo nodes registered under a project (its members) — the reads companion for the CEO +
+ *  verification. 404 if the project is gone. */
+export function listProjectRepos(projectId: string): TaskRow[] {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  return db
+    .query<TaskRow, [string]>(
+      `SELECT * FROM tasks WHERE parent_id=? AND work_kind='repo' ORDER BY created_at`,
+    )
+    .all(projectId);
+}
+
+/**
+ * Assert a repo is a MEMBER of a project (registered under it) and return the repo node row, else
+ * throw. The guard behind the CEO's initiative surface (createProjectInitiative): the project must
+ * exist (404); `repoId` must name a real repo node (404) that is registered under THIS project
+ * (409 otherwise — the CEO can only delegate into repos it owns; SINGLE-project scope, cross-repo
+ * spanning is P3e). Returns the member repo node row.
+ */
+export function assertRepoIsProjectMember(projectId: string, repoId: unknown): TaskRow {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  if (typeof repoId !== "string" || !repoId.trim()) {
+    throw new HttpError(400, "repo id is required");
+  }
+  const repo = getRepoNode(repoId.trim());
+  if (!repo) throw new HttpError(404, `repo not found: ${repoId}`);
+  if (repo.parent_id !== projectId) {
+    throw new HttpError(
+      409,
+      `repo ${repo.id} is not a member of project ${projectId} — register it first ` +
+        `(POST /api/projects/${projectId}/repos)`,
+    );
+  }
+  return repo;
+}
+
 /**
  * Set a workspace's VERSIONED-RELEASES MODE and return the refreshed view. `true`/`false`
  * turns release_mode on/off; `null`/`undefined` is treated as OFF (the default — unlike the

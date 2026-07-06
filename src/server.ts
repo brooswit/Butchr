@@ -26,12 +26,15 @@ import {
   getProject,
   getWorkspace,
   getWorkspaceByPath,
+  listProjectRepos,
   listWorkspaces,
+  registerRepoUnderProject,
   registerWorkspace,
   setWorkspaceBranchIsolation,
   setWorkspaceCeoEnabled,
   setWorkspaceCtoEnabled,
   setWorkspaceReleaseMode,
+  unregisterRepoFromProject,
   unregisterWorkspace,
   updateWorkspaceChangelogPath,
   updateWorkspaceGateCmd,
@@ -61,7 +64,10 @@ import pkg from "../package.json" with { type: "json" };
 // other task/story op now flows through the unified /api/work surface (work-api.ts), which
 // imports tasks.ts/stories.ts itself — the legacy /api/tasks + /api/stories routes that used
 // the rest were deleted in the step-6e cutover.
-import { attentionList, getTask, statsRollup, strandedTotals } from "./tasks.ts";
+import { assertCreationAllowed, attentionList, getTask, statsRollup, strandedTotals } from "./tasks.ts";
+// REVAMP-4 P3d: the CEO's project-level INITIATIVE surface — seed a story into a member repo,
+// delegating to that repo's CTO/leader (createStory machinery). See stories.createProjectInitiative.
+import { createProjectInitiative } from "./stories.ts";
 import {
   abortWork,
   answerWork,
@@ -764,6 +770,42 @@ route("GET", "/api/projects/:id", async (_req, p) => {
 route("PATCH", "/api/projects/:id", async (req, p) => {
   const body = await readJson(req);
   return json(await setWorkspaceCeoEnabled(p.id!, body.ceo_enabled));
+});
+
+// ---- CEO DIRECTIVE SURFACE (REVAMP-4 Phase 3 / P3d) ------------------------
+// A running CEO's creation authority: register repos under its project + seed project-level
+// initiatives that delegate to a member repo's CTO/leader. Both are gated by the LEVEL-BASED
+// authority rule (tasks.assertCreationAllowed): a CEO may create/seed the repo tier one level
+// below it, never a build leaf directly. SINGLE-project scope — cross-repo spanning is P3e.
+
+// Register a repo under this project — reparent the repo node's parent_id → the project. Body
+// `{ repo: <repo/directory id> }`. Idempotent; 404 project/repo gone; 404 if the id is not a repo
+// node; 409 if it is already registered under a different project. After this, work in the repo
+// bubbles repo→cto→project→ceo→user via the P3a ladder. Returns the refreshed repo node row.
+route("POST", "/api/projects/:id/repos", async (req, p) => {
+  const body = await readJson(req);
+  assertCreationAllowed("ceo", "repo");
+  return json(registerRepoUnderProject(p.id!, body.repo), 201);
+});
+// The repos registered under this project (its members). 404 if the project is gone.
+route("GET", "/api/projects/:id/repos", async (_req, p) => {
+  return json(listProjectRepos(p.id!));
+});
+// Unregister a repo from this project — repo.parent_id back to NULL (reversible). Idempotent; 404
+// project/repo gone; 409 if the repo belongs to a different project. Returns the refreshed row.
+route("DELETE", "/api/projects/:id/repos/:repoId", async (_req, p) => {
+  return json(unregisterRepoFromProject(p.id!, p.repoId!));
+});
+
+// Create a project-level INITIATIVE — the CEO seeds a STORY into a member repo, delegating to that
+// repo's CTO/leader (the CEO does NOT own the story's lifecycle). Body `{ repo, brief }`. Gated to
+// a repo REGISTERED under this project (409 otherwise); SINGLE repo per initiative (cross-repo is
+// P3e); a CEO cannot create a build leaf directly (authority rule). Maps to createProjectInitiative
+// (createStory into the member repo + reparent so it bubbles to the CEO). Returns the story node.
+route("POST", "/api/projects/:id/initiatives", async (req, p) => {
+  const body = await readJson(req);
+  assertCreationAllowed("ceo", "story");
+  return json(createProjectInitiative(p.id!, body.repo, body.brief), 201);
 });
 
 // ---- WORK (UNIFIED SURFACE) -----------------------------------------------

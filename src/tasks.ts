@@ -1854,6 +1854,50 @@ export function assertWorkspaceTaskCreationAllowed(kind: TaskKind): void {
   );
 }
 
+/**
+ * LEVEL-BASED CREATION AUTHORITY (REVAMP-4 Phase 3 / P3d, story st-1a82a2e1) — the GENERALIZATION
+ * of assertWorkspaceTaskCreationAllowed above. butchr's supervisor tiers form a CONTAINMENT LADDER
+ *
+ *     project (CEO)  →  repo (CTO)  →  story-node (leader)  →  subtask leaf (build)
+ *
+ * and each tier may create/seed EXACTLY the artifacts at the tier ONE LEVEL BELOW its own
+ * container; reaching deeper must be DELEGATED down the ladder. This encodes that rule as data so
+ * the NEW CEO directive surface is gated by the SAME principle that already blocks a CTO from
+ * creating a standalone leaf:
+ *   - 'ceo'    (owns a project) → 'repo'  (register/reparent a repo under the project) and
+ *                                 'story' (seed a repo-scoped INITIATIVE — a story into a member
+ *                                          repo, the same artifact a CTO would create there).
+ *   - 'cto'    (owns a repo)    → 'story' (createStory). The one direct LEAF a repo admits is a
+ *                                 'rollback', gated separately by assertWorkspaceTaskCreationAllowed.
+ *   - 'leader' (owns a story)   → 'subtask' (createSubtask — a leaf).
+ * Anything else is refused: a CEO may NOT create a build 'subtask' leaf directly, a CTO may NOT
+ * create a 'project' or register 'repo's, a leader may NOT create a 'story'/'project', etc.
+ *
+ * PURE + exported so the rule is unit-testable without the HTTP server (mirrors
+ * assertWorkspaceTaskCreationAllowed / csrfGuard). Throws HttpError(403) when the tier may not
+ * create the target; returns for an allowed pair. This is CONSULTED BY the NEW CEO endpoints only
+ * (POST /api/projects/:id/repos + /initiatives); the existing operator/CTO/leader creation paths
+ * are UNCHANGED (byte-identical) — this adds authority for the new surface without re-gating any
+ * landed path.
+ */
+export type SupervisorTier = "ceo" | "cto" | "leader";
+export type CreatableArtifact = "project" | "repo" | "story" | "subtask";
+
+const CREATION_AUTHORITY: Record<SupervisorTier, ReadonlySet<CreatableArtifact>> = {
+  ceo: new Set<CreatableArtifact>(["repo", "story"]),
+  cto: new Set<CreatableArtifact>(["story"]),
+  leader: new Set<CreatableArtifact>(["subtask"]),
+};
+
+export function assertCreationAllowed(tier: SupervisorTier, target: CreatableArtifact): void {
+  if (CREATION_AUTHORITY[tier].has(target)) return;
+  throw new HttpError(
+    403,
+    `a ${tier} may not create a '${target}' directly — each supervisor creates only the tier ` +
+      `directly below it (project → repo → story → subtask) and delegates deeper.`,
+  );
+}
+
 export async function createTask(
   workspaceId: string,
   prompt: string,
