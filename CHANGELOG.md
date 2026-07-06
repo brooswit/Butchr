@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Internal (REVAMP-1 Phase C S3): rerouted the `/api/workspaces/:id/cto/*` routes
+  (`src/server.ts`) and the `unregisterWorkspace` CTO teardown (`src/workspaces.ts`) off the
+  legacy launcher `cto-agent.ts` onto the unified workspace supervisor. Added a thin CTO-compat
+  surface to `src/workspace-agent.ts` — `ctoAgentStatus` / `startCtoAgent` / `stopCtoAgent` /
+  `restartCtoAgent` / `ctoAgentName` (plus the relocated `CtoStatus` type) — that maps a
+  directory id to its `ws-cto-<id>` unified row, delegates to `startWorkspaceAgent` /
+  `stopWorkspaceAgent` / `restartWorkspaceAgent` / `workspaceAgentStatus`, and adapts the result
+  back to the legacy `CtoStatus` shape. Route paths and response JSON are unchanged, and the
+  lifecycle ops (start/stop/restart) re-publish `cto.updated` exactly as the legacy path did (the
+  status read still does not publish), so the dashboard CTO card keeps live-updating. `server.ts`
+  and `workspaces.ts` now change import SOURCE only. Behavior-preserving under the production
+  default (`unifiedWorkspaceEnabled` on). `cto-agent.ts` / `story-agent.ts` are now imported by
+  only `src/index.ts` (the legacy boot-supervisor branch, dead under the flag-on default) —
+  cleared, with both files deleted, in S4/S5. Covered by the new CTO-compat + reworked
+  unregister-race cases in `test/workspace-agent.test.ts`.
+
 ## [0.9.190] - 2026-07-06
 
 ### Changed

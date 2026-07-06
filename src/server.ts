@@ -35,13 +35,17 @@ import {
   updateWorkspaceVersionFile,
   workspaceDetail,
 } from "./workspaces.ts";
+// CTO-agent routes now go through the UNIFIED workspace supervisor (REVAMP-1 Phase C, S3):
+// these names are thin CTO-compat wrappers over `ws-cto-<id>` in workspace-agent.ts that keep
+// the CtoStatus response shape + `cto.updated` emission identical. The legacy launcher
+// cto-agent.ts is no longer imported by server.ts.
 import {
   ctoAgentName,
   ctoAgentStatus,
   restartCtoAgent,
   startCtoAgent,
   stopCtoAgent,
-} from "./cto-agent.ts";
+} from "./workspace-agent.ts";
 import { publish, subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
 import { expandBrief } from "./expand.ts";

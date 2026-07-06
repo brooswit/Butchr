@@ -558,6 +558,105 @@ export function liveWorkspaceFor(workId: string): WorkspaceAgentRow | null {
   return liveWorkspaceForWork(workId);
 }
 
+// ---- CTO-COMPAT SURFACE (REVAMP-1 Phase C, S3) --------------------------------------------
+// The /api/workspaces/:id/cto/* routes (server.ts) + the unregisterWorkspace teardown
+// (workspaces.ts) historically called the legacy per-workspace launcher (cto-agent.ts). Those
+// callers address a DIRECTORY by its id; the unified `workspace` row backing that directory's
+// CTO agent is `ws-cto-<id>`. These thin wrappers map that id and adapt the unified
+// WorkspaceAgentStatus back to the legacy CtoStatus shape the dashboard consumes, so the route
+// response JSON is byte-identical and cto-agent.ts is no longer a live (non-test) src importer.
+//
+// The LIFECYCLE ops (start/stop/restart) re-publish `cto.updated` with the CtoStatus payload
+// EXACTLY as the legacy publishStatus did (cto-agent.ts:462-465) — the unified start/stop path
+// publishes `story.attention`, NOT `cto.updated`, so without this the dashboard CTO card (and
+// server.ts's live update) would stop refreshing on start/stop/restart. The plain STATUS read
+// does NOT publish (matching the legacy ctoAgentStatus, which never did).
+
+/** The dashboard/API view of a directory's managed CTO agent state (the legacy CtoStatus shape;
+ *  relocated here from cto-agent.ts so nothing dangling remains once that file is deleted). */
+export type CtoStatus = {
+  /** The workspace (directory) this CTO agent belongs to. */
+  workspaceId: string;
+  /** Per-directory enable (cto_enabled, or the global default). */
+  enabled: boolean;
+  /** The operator/boot WANTS it up (supervisor relaunches on death). */
+  desired: boolean;
+  /** A live herdr agent is registered under this directory's CTO name (async-probed). */
+  running: boolean;
+  /** The Claude session id butchr resumes on every relaunch. */
+  sessionId: string | null;
+  /** When the current run was (re)launched. */
+  since: string | null;
+  /** Supervised relaunches since the last fresh start. */
+  restarts: number;
+  /** Most recent launch/supervision failure, if any. */
+  lastError: string | null;
+};
+
+/** The unified `workspace` row id backing a directory's CTO agent. */
+function ctoWsId(directoryId: string): string {
+  return `ws-cto-${directoryId}`;
+}
+
+/** The herdr agent name for a directory's CTO agent (== the legacy cto-agent.ctoAgentName and
+ *  the unified workspaceAgentName of the `ws-cto-<id>` row). Used by the CTO terminal-attach route. */
+export function ctoAgentName(directoryId: string): string {
+  return `${config.ctoAgentName}-${directoryId}`;
+}
+
+/** Adapt the unified WorkspaceAgentStatus for `ws-cto-<id>` to the legacy CtoStatus shape. */
+async function toCtoStatus(directoryId: string): Promise<CtoStatus> {
+  const s = await workspaceAgentStatus(ctoWsId(directoryId));
+  return {
+    workspaceId: directoryId,
+    enabled: isCtoEnabled(directoryId),
+    desired: s.desired,
+    running: s.running,
+    sessionId: s.sessionId,
+    since: s.since,
+    restarts: s.restarts,
+    lastError: s.lastError,
+  };
+}
+
+/** Compute a directory's CtoStatus and publish a `cto.updated` event (mirrors legacy publishStatus). */
+async function publishCtoStatus(directoryId: string): Promise<CtoStatus> {
+  const s = await toCtoStatus(directoryId);
+  publish({ type: "cto.updated", cto: s });
+  return s;
+}
+
+/** A directory's current managed-CTO-agent status. A READ — does NOT publish (like legacy ctoAgentStatus). */
+export function ctoAgentStatus(directoryId: string): Promise<CtoStatus> {
+  return toCtoStatus(directoryId);
+}
+
+/** START (or adopt) a directory's CTO agent via the unified path, then publish `cto.updated`. */
+export async function startCtoAgent(
+  directoryId: string,
+  opts: { fresh?: boolean } = {},
+): Promise<CtoStatus> {
+  ensureWorkspaceAgentRow(ctoWsId(directoryId), { kind: "cto", directory_id: directoryId });
+  await startWorkspaceAgent(ctoWsId(directoryId), opts);
+  return publishCtoStatus(directoryId);
+}
+
+/** STOP a directory's CTO agent via the unified path, then publish `cto.updated`. */
+export async function stopCtoAgent(directoryId: string): Promise<CtoStatus> {
+  await stopWorkspaceAgent(ctoWsId(directoryId));
+  return publishCtoStatus(directoryId);
+}
+
+/** RESTART a directory's CTO agent (stop + start), mirroring legacy restartCtoAgent — each of the
+ *  stop/start publishes `cto.updated`, so the emission matches the legacy path exactly. */
+export async function restartCtoAgent(
+  directoryId: string,
+  opts: { fresh?: boolean } = {},
+): Promise<CtoStatus> {
+  await stopCtoAgent(directoryId);
+  return startCtoAgent(directoryId, { fresh: opts.fresh });
+}
+
 /**
  * Is a node-Work GENUINELY terminal? Reads the AUTHORITATIVE node status via storyStatusOf
  * (== getStory().status — the same value /api/work/:id + storyView report). Terminal ==

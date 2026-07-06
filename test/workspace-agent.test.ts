@@ -739,9 +739,12 @@ describe("leader teardown on node-Work completion (unified)", () => {
 
 // unregisterWorkspace must close the teardown-vs-relaunch RACE on the UNIFIED `workspace`
 // rows (story st-93384200 Bug 2): it marks the directory's cto/leader rows desired=0 as the
-// VERY FIRST teardown action — before the legacy stops close any pane BY NAME — so no
-// supervise tick can relaunch a just-closed pane during the legacy-close -> DELETE window.
-// The rows themselves still cascade away on the DELETE (FK ON DELETE CASCADE).
+// VERY FIRST teardown action — before any pane is closed BY NAME — so no supervise tick can
+// relaunch a just-closed pane during the teardown -> DELETE window. As of REVAMP-1 Phase C
+// (S3) the CTO teardown itself routes through the UNIFIED stopWorkspaceAgent (the compat
+// stopCtoAgent is now a thin `ws-cto-<id>` wrapper), so the pane close IS the unified
+// launcher.teardown; the legacy harness.teardownTask-by-name path is gone. The rows
+// themselves still cascade away on the DELETE (FK ON DELETE CASCADE).
 describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
   test("a supervise tick during teardown does NOT relaunch the cto/leader rows", async () => {
     const UDIR = "dir-unreg-race";
@@ -762,26 +765,25 @@ describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
     live.add(ctoName);
     live.add(leaderName);
 
-    // A tick firing DURING the unified stop (launcher.teardown is invoked by
-    // stopWorkspaceAgent) — desired=0 is already written synchronously, so no relaunch.
+    // The unified stop tears down each pane via launcher.teardown (stopWorkspaceAgent writes
+    // desired=0 SYNCHRONOUSLY before its first await). We fire a supervise tick from INSIDE
+    // teardown to prove the race is closed:
+    //   (a) after EACH teardown — a tick while a pane may still be live: desired=0 (or a still-
+    //       alive sibling) means no relaunch.
+    //   (b) once BOTH unified rows are down (by the leader's teardown — unregisterWorkspace
+    //       stops ws-cto first, then the leader): simulate BOTH panes already killed (names
+    //       dropped from `live`), THEN tick. The early desired=0 must STILL prevent any relaunch
+    //       even with the panes provably dead. (Were the unified stop deferred to just before
+    //       the DELETE, desired would still be 1 here and these ticks WOULD relaunch — the
+    //       regression this test guards.)
     const origTeardown = launcher.teardown;
+    let firedDeadPaneTick = false;
     launcher.teardown = async (name: string) => {
       await origTeardown(name);
       await wa._superviseTickForTest(ctoId);
       await wa._superviseTickForTest(leaderId);
-    };
-    // A tick firing in the LEGACY-close -> DELETE window: the legacy stopCtoAgent /
-    // stopWorkspaceStoryAgents close the panes via harness.teardownTask → runner.teardownTask.
-    // Simulate that close having killed both panes (names dropped from `live`), THEN tick —
-    // the early desired=0 must still prevent any relaunch. (Were the unified stop deferred to
-    // just before the DELETE, desired would still be 1 here and these ticks WOULD relaunch —
-    // the regression this test guards.)
-    const origTeardownTask = runner.teardownTask;
-    let firedLegacyTick = false;
-    runner.teardownTask = async (name: string) => {
-      await origTeardownTask(name);
-      if (!firedLegacyTick) {
-        firedLegacyTick = true;
+      if (name === leaderName && !firedDeadPaneTick) {
+        firedDeadPaneTick = true;
         live.delete(ctoName);
         live.delete(leaderName);
         await wa._superviseTickForTest(ctoId);
@@ -793,8 +795,8 @@ describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
 
     await dirsMod.unregisterWorkspace(UDIR);
 
-    expect(firedLegacyTick).toBe(true); // the legacy-window tick really ran
-    // NO relaunch happened for either row across BOTH ticks.
+    expect(firedDeadPaneTick).toBe(true); // the both-panes-dead teardown-window tick really ran
+    // NO relaunch happened for either row across ANY of the ticks.
     expect(calls.launch).toHaveLength(0);
   });
 
@@ -818,6 +820,91 @@ describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
     expect(
       dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(UDIR),
     ).toMatchObject({ n: 0 });
+  });
+});
+
+// ── CTO-COMPAT SURFACE (REVAMP-1 Phase C, S3) ───────────────────────────────
+// The /api/workspaces/:id/cto/* routes (server.ts) + unregisterWorkspace teardown now call
+// the thin CTO-compat wrappers in workspace-agent.ts instead of the legacy launcher
+// (cto-agent.ts). These prove the two invariants the dashboard depends on: (1) the route
+// response is the legacy CtoStatus SHAPE (keyed by the directory id, enabled from cto_enabled);
+// (2) the LIFECYCLE ops (start/stop/restart) re-publish `cto.updated` exactly as legacy
+// publishStatus did, while the STATUS read does NOT publish.
+describe("CTO-compat surface via the unified workspace table (Phase C S3)", () => {
+  const CDIR = "dir-cto-compat";
+  const CWS = `ws-cto-${CDIR}`;
+  let savedGlobalCtoEnabled: boolean;
+  let savedUnified: boolean;
+
+  /** Capture published `cto.updated` events. */
+  function captureCto() {
+    const events: Array<{ cto: Record<string, unknown> }> = [];
+    const unsub = eventsMod.subscribe((e) => {
+      if ((e as { type?: string }).type === "cto.updated") {
+        events.push(e as unknown as { cto: Record<string, unknown> });
+      }
+    });
+    return { events, unsub };
+  }
+
+  beforeEach(() => {
+    savedGlobalCtoEnabled = cfgMod.config.ctoAgentEnabled;
+    savedUnified = cfgMod.config.unifiedWorkspaceEnabled;
+    cfgMod.config.unifiedWorkspaceEnabled = true;
+    cfgMod.config.ctoAgentEnabled = true; // directory has no override → global default enables it
+    insertDir(CDIR);
+    dbMod.saveWorkspaceAgentRow(CWS, {
+      kind: "cto", directory_id: CDIR, desired: 1, has_agent: 1, session_id: "sess-cto-compat",
+    });
+  });
+  afterEach(() => {
+    cfgMod.config.ctoAgentEnabled = savedGlobalCtoEnabled;
+    cfgMod.config.unifiedWorkspaceEnabled = savedUnified;
+    wa.setLauncherForTest(null);
+    wa._resetSupervisionStateForTest(CWS);
+    dbMod.db.query(`DELETE FROM workspace WHERE directory_id=?`).run(CDIR);
+    dbMod.db.query(`DELETE FROM workspaces WHERE id=?`).run(CDIR);
+  });
+
+  test("ctoAgentStatus returns the legacy CtoStatus shape (keyed by directory id) and does NOT publish", async () => {
+    const { runner, launcher, live } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    live.add(wa.ctoAgentName(CDIR)); // pane registered/alive
+
+    const { events, unsub } = captureCto();
+    const s = await wa.ctoAgentStatus(CDIR);
+    unsub();
+
+    // Exact legacy CtoStatus shape — the dashboard contract (server.ts GET /cto).
+    expect(Object.keys(s).sort()).toEqual(
+      ["desired", "enabled", "lastError", "restarts", "running", "sessionId", "since", "workspaceId"],
+    );
+    expect(s.workspaceId).toBe(CDIR); // keyed by the DIRECTORY id, not the ws-cto row id
+    expect(s.enabled).toBe(true); // isCtoEnabled(dir)
+    expect(s.desired).toBe(true);
+    expect(s.running).toBe(true);
+    expect(s.sessionId).toBe("sess-cto-compat");
+    expect(events).toHaveLength(0); // a READ never publishes cto.updated
+  });
+
+  test("startCtoAgent / stopCtoAgent publish cto.updated with the CtoStatus payload", async () => {
+    const { runner, launcher } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+
+    const { events, unsub } = captureCto();
+    const started = await wa.startCtoAgent(CDIR);
+    expect(started.workspaceId).toBe(CDIR);
+    expect(events).toHaveLength(1); // start published exactly one cto.updated
+    expect(events[0]!.cto).toMatchObject({ workspaceId: CDIR, desired: true });
+
+    const stopped = await wa.stopCtoAgent(CDIR);
+    unsub();
+    expect(stopped.workspaceId).toBe(CDIR);
+    expect(stopped.desired).toBe(false);
+    expect(events).toHaveLength(2); // stop published a second cto.updated
+    expect(events[1]!.cto).toMatchObject({ workspaceId: CDIR, desired: false });
   });
 });
 

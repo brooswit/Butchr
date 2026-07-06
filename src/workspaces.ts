@@ -11,11 +11,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { config } from "./config.ts";
-import { stopCtoAgent } from "./cto-agent.ts";
 import {
   ensureWorkspaceAgentRow,
   isUnifiedWorkspaceEnabled,
   startWorkspaceAgent,
+  stopCtoAgent,
   stopWorkspaceAgent,
   stopWorkspaceStoryAgents,
 } from "./workspace-agent.ts";
