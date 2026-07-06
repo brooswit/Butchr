@@ -1805,3 +1805,75 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     expect(dbMod.getWorkspaceAgentRow("ws-cto-dir2")!.idle).toBe(1); // but the durable idle IS set
   });
 });
+
+// ---- operator briefs restored in the unified launch path (story st-06aedeae) -------------
+// The default launcher used to write an ~80-byte stub brief, so a unified-launched CTO/leader
+// booted with no role and idled. buildWorkspaceBrief restores the real, kind-guarded briefs
+// (ported from the legacy launchers Phase C deletes). The leader brief stays TIGHT — a
+// one-line title + a runtime GET, never the full embedded brief — and BOTH briefs carry the
+// concrete never-park (open-loop-ask) mechanism.
+describe("operator briefs (buildWorkspaceBrief, st-06aedeae)", () => {
+  /** Seed a story NODE (getStoryRow reads tasks WHERE work_kind='node') with a given brief. */
+  function seedStoryNode(id: string, brief: string): void {
+    dbMod.db
+      .query(
+        `INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, brief, isolated, created_at)
+         VALUES (?, ?, 'open', 'node', ?, 0, ?)`,
+      )
+      .run(id, DIR, brief, dbMod.nowIso());
+  }
+
+  test("the CTO brief carries the create-STORIES role + the concrete never-park open-loop-ask mechanism (NOT the stub)", () => {
+    const brief = wa.buildWorkspaceBrief(mkRow({ id: "w-cto-b", kind: "cto", directory_id: DIR }));
+    expect(brief).toContain("butchr CTO");
+    expect(brief).toContain("you create stories, NOT tasks");
+    // never-park invariant, named concretely:
+    expect(brief).toContain("pending_ask");
+    expect(brief).toContain("An idle agent is never a silent dead-end");
+    // definitely NOT the old stub:
+    expect(brief).not.toContain("workspace agent\n\nWorkspace");
+    expect(brief.length).toBeGreaterThan(1000);
+  });
+
+  test("the LEADER brief derives a ONE-LINE clamped title + instructs a runtime GET — it does NOT embed the full brief", () => {
+    const firstLine = "Restore operator briefs in the unified launch path";
+    const fullBrief = `${firstLine}\n\nThis is a long multi-line body that MUST NOT be embedded verbatim into the leader prompt — the leader fetches it live instead. Second body paragraph. Third body paragraph.`;
+    seedStoryNode("story-brief-1", fullBrief);
+    const brief = wa.buildWorkspaceBrief(
+      mkRow({ id: "w-l-b", kind: "leader", work_id: "story-brief-1", directory_id: DIR }),
+    );
+    // one-line title present…
+    expect(brief).toContain(`LEADER of story story-brief-1`);
+    expect(brief).toContain(firstLine);
+    // …runtime fetch instruction present…
+    expect(brief).toContain("GET /api/work/story-brief-1");
+    // …but the full multi-line body is NOT embedded (the whole point of keeping it tight):
+    expect(brief).not.toContain("MUST NOT be embedded verbatim");
+    expect(brief).not.toContain("Second body paragraph");
+    // never-park invariant, named concretely with the leader's ask endpoint:
+    expect(brief).toContain("POST /api/work/story-brief-1/ask");
+    expect(brief).toContain("pending_ask");
+    expect(brief).toContain("silent dead-end"); // (phrase may line-wrap; match the tail)
+  });
+
+  test("a LEADER whose story node is GONE yields a non-stub fallback keyed on work_id, still instructing the runtime GET (no throw)", () => {
+    const brief = wa.buildWorkspaceBrief(
+      mkRow({ id: "w-l-gone", kind: "leader", work_id: "story-missing", directory_id: DIR }),
+    );
+    expect(brief).toContain("LEADER of story story-missing");
+    expect(brief).toContain("GET /api/work/story-missing");
+    // no embedded title colon since the row is gone, but still a real (non-stub) brief:
+    expect(brief).not.toContain('LEADER of story story-missing: "');
+    expect(brief.length).toBeGreaterThan(1000);
+  });
+
+  test("a very long story first-line title is CLAMPED to ~80 chars (kept small)", () => {
+    const longLine = "X".repeat(200);
+    seedStoryNode("story-long", `${longLine}\n\nbody`);
+    const brief = wa.buildWorkspaceBrief(
+      mkRow({ id: "w-l-long", kind: "leader", work_id: "story-long", directory_id: DIR }),
+    );
+    expect(brief).not.toContain("X".repeat(120)); // the full 200-char line is NOT present
+    expect(brief).toContain("…"); // it was clamped with an ellipsis
+  });
+});
