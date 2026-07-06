@@ -167,9 +167,13 @@ describe("B.5b: state-machine transitions drive the node CAS", () => {
     seedMember("b5b-ab-merged", s.id, "merged");
     const aborted = storiesMod.updateStory(s.id, { status: "aborted" });
     expect(aborted.status).toBe("aborted");
-    // the live member is torn down; the already-merged member is preserved
-    await Bun.sleep(50);
+    // the live member is torn down by the FIRE-AND-FORGET member-abort cascade (async — it
+    // spawns herdr/git teardown), so poll until it lands rather than racing a fixed sleep.
+    for (let i = 0; i < 200 && tasksMod.getTask("b5b-ab-live")!.status !== "aborted"; i++) {
+      await Bun.sleep(10);
+    }
     expect(tasksMod.getTask("b5b-ab-live")!.status).toBe("aborted");
+    // the already-merged member is preserved (historical record, never aborted)
     expect(tasksMod.getTask("b5b-ab-merged")!.status).toBe("merged");
   });
 });
