@@ -58,7 +58,7 @@ import type { AttentionItem } from "./tasks.ts";
 // transitively — its only workspace-agent-importing dependency would be stories.ts, which the
 // dispatcher never imports), so this introduces NO import cycle and no shared module is needed.
 import { isGenuinelyIdle, shouldProbeTick } from "./dispatcher.ts";
-import { ensureHerdrWorkspace, isCtoEnabled } from "./workspaces.ts";
+import { ensureHerdrWorkspace, isCeoEnabled, isCtoEnabled } from "./workspaces.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import type { SendInput } from "./harness.ts";
@@ -384,6 +384,36 @@ merge count):
 }
 
 /**
+ * The per-project CEO leader brief (REVAMP-4 Phase 3 / P3c). A booted CEO has a real role so it
+ * does NOT boot role-less and idle-crash (the st-06aedeae failure), but this phase gives it NO
+ * directive/creation surface (P3d): it cannot yet register repos under the project or create
+ * initiatives, and a `project` node 404s on GET /api/work/:id (P3a). So the honest instruction is
+ * to STAND BY. It owns no actionable work, so it stays idle+zero-actionable = SILENT (the CEO's
+ * idle is never pushed — reconcileOperatorIdle escalates only for a leader). Kept intentionally
+ * minimal; the CEO's directive surface arrives in P3d.
+ */
+function buildCeoBrief(projectId: string): string {
+  return `# butchr CEO agent
+
+You are the **CEO of project ${projectId}** — a persistent, butchr-managed Claude Code session
+supervising the PROJECT tier (above the per-repo CTOs). butchr launched and supervises you and
+keeps your full context across relaunches (it \`--resume\`s your session).
+
+## Stand by — your directive surface is not yet enabled
+
+This is an EARLY project tier. Your directive/creation surface — registering repos under this
+project and creating initiatives — is **NOT yet available**, and there is no work routed to you
+yet. There is nothing for you to do right now: **stand by**. Do not attempt to create work,
+register repositories, or drive the repos' CTOs — those capabilities land in a later release.
+
+## Keep your context lean
+
+When this session grows large, run \`/compact\`. Otherwise simply remain available; butchr will
+surface work to you here once the project directive surface is enabled.
+`;
+}
+
+/**
  * The role/instructions written to a launched operator workspace's brief.md, KIND-GUARDED
  * (story st-06aedeae). Restores the real operator briefs in the unified launch path (the
  * inert default launcher previously wrote an ~80-byte stub, so a unified-launched operator
@@ -407,9 +437,12 @@ export function buildWorkspaceBrief(row: WorkspaceAgentRow): string {
 // NAME, launch COMMAND, channel SCOPE, brief, the operator-vs-build gate (launcher + startup/
 // mid-session probes), and the enable gate. The cto/leader/build rows reproduce today's behavior
 // BYTE-FOR-BYTE (proven by the existing name assertions + the capability-table test); the 'ceo'
-// row is ADDITIVE and INERT — `enabled` is const-false, so a ceo workspace row is never launched/
-// adopted/relaunched in Phase 0. The CEO creation surface + ceo_enabled wiring land in Phase 3.
-// NOTHING here touches resolveWorkResponder / routeOwns.
+// row is now LIVE-CAPABLE behind the per-project CEO enable (REVAMP-4 Phase 3 / P3c): its `enabled`
+// resolves isCeoEnabled(row.work_id) — the project node's ceo_enabled tri-state vs config.ceoAgentEnabled
+// (DEFAULT OFF), so with no project nodes + the default off no ceo ever boots (prod byte-identical),
+// and enabling a project's CEO (setWorkspaceCeoEnabled) makes the supervisor launch/relaunch it via
+// the SAME table-driven boot/reconcile/gave_up/teardown paths — no ceo-specific branch. NOTHING here
+// touches resolveWorkResponder / routeOwns.
 type SupervisorKind = {
   // The work_kind of the NODE this kind supervises in the recursive Work tree: 'node' (a story)
   // for a leader, 'repo' for a cto, 'project' for a ceo; null for a build (a leaf EXECUTOR — it
@@ -477,25 +510,31 @@ with \`GET /api/work/${row.work_id ?? row.id}\` and carry it out under review.
   ceo: {
     supervisedNodeKind: "project",
     isOperator: true,
-    // INERT in Phase 0: no ceo_enabled surface exists yet, so a ceo row is never enabled and thus
-    // never launched/adopted/relaunched. Phase 3 replaces this with a real project-enable resolver.
-    enabled: () => false,
+    // LIVE behind the per-project CEO enable (REVAMP-4 Phase 3 / P3c): a ceo row is enabled iff its
+    // project NODE (row.work_id) has ceo_enabled effectively true (its own tri-state, else the
+    // global config.ceoAgentEnabled — DEFAULT OFF). The CEO analog of cto's isCtoEnabled(directory).
+    // DEFAULT OFF ⇒ with no config.ceoAgentEnabled + no project nodes, no ceo ever boots and a
+    // stray desired=1 ceo row is torn down by the enabled-gate (prod byte-identical).
+    enabled: (row) => isCeoEnabled(row.work_id ?? ""),
     // herdr name `<prefix>-project-<projectNodeId>` (its work_id IS the project NODE, mirroring a
-    // leader's story work_id); the row-id convention is `ws-ceo-<projectNodeId>` (Phase 3 creates it).
+    // leader's story work_id); the row-id convention is `ws-ceo-<projectNodeId>` (setWorkspaceCeoEnabled).
     agentName: (row) => `${config.ctoAgentName}-project-${row.work_id ?? ""}`,
     agentCmd: () => config.ctoAgentCmd,
-    // DECLARATIVE / INERT: a ceo never launches in Phase 0, so writeWorkspaceMcpConfig is never
-    // called for it and BUTCHR_CHANNEL_PROJECT is written NOWHERE — it is NOT wired into channel.ts
-    // or routeOwns (that is Phase 3). Kept here so the table self-documents the project-tier scope.
+    // The kind-scoped channel MCP env: BUTCHR_CHANNEL_PROJECT (the project NODE) puts the channel
+    // bridge in PROJECT mode (channel.ts, REVAMP-4 P3b — already wired), plus BUTCHR_CHANNEL_WORKSPACE
+    // for the anchor directory. When a ceo launches (P3c) writeWorkspaceMcpConfig now writes these.
     channelEnv: (row) => ({
       ...(row.work_id ? { BUTCHR_CHANNEL_PROJECT: row.work_id } : {}),
       ...(row.directory_id ? { BUTCHR_CHANNEL_WORKSPACE: row.directory_id } : {}),
     }),
-    // Never rendered in Phase 0 (a ceo is never launched); a short defensive placeholder.
-    buildBrief: (row) => `# butchr CEO agent
-
-You are a butchr-managed CEO agent for project ${row.work_id ?? row.id} (Phase 0 placeholder).
-`,
+    // The CEO operator brief (REVAMP-4 P3c). A booted CEO has a real ROLE so it does not idle-crash,
+    // but is HONEST that its directive surface (registering repos under the project, creating
+    // initiatives) is NOT yet enabled (P3d) — so it STANDS BY. It owns no actionable work until
+    // P3d, so it stays fully SILENT: reconcileOperatorIdle PUSHES only for kind==='leader', and
+    // setWorkspaceIdle projects only cto/leader — so a ceo neither escalates nor records a durable
+    // idle projection. Deliberately does NOT tell it to GET /api/work/<project> — resolveWork 404s a
+    // 'project' node (P3a); the directive/read surface lands in P3d.
+    buildBrief: (row) => buildCeoBrief(row.work_id ?? row.id),
   },
 };
 

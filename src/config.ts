@@ -641,6 +641,17 @@ export const config = {
   ctoAgentEnabled: envBool("BUTCHR_CTO_AGENT", false),
 
   /**
+   * GLOBAL DEFAULT for the per-PROJECT CEO-agent enable (REVAMP-4 Phase 3 / P3c). DEFAULT OFF
+   * so nothing surprise-launches a Claude session — with this off AND no work_kind='project'
+   * nodes, prod is byte-identical (no CEO ever boots). A project node's own `tasks.ceo_enabled`
+   * tri-state WINS over this (NULL on the node → inherit this default); with both off butchr
+   * never boot-starts or supervises that project's CEO agent. The CEO analog of
+   * `ctoAgentEnabled`. Resolved by workspaces.isCeoEnabled; a project's CEO is enabled via
+   * PATCH /api/projects/:id { ceo_enabled }.
+   */
+  ceoAgentEnabled: envBool("BUTCHR_CEO_AGENT", false),
+
+  /**
    * NAME PREFIX for a workspace's CTO agent. The actual herdr agent name is
    * `<prefix>-<workspaceId>` (see cto-agent.ctoAgentName) — the stable handle
    * `herdr agent attach <name>` uses, one per workspace. Must NOT collide with any

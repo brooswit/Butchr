@@ -1874,8 +1874,11 @@ describe("operator briefs (buildWorkspaceBrief, st-06aedeae)", () => {
 // ---- SUPERVISOR_KINDS CAPABILITY TABLE (REVAMP-4 Phase 0 / S0c) --------------------------------
 // The CTO ruling: a future supervisor tier must be ONE TABLE ROW, not scattered `kind === "…"`
 // conditionals. These tests PROVE the table reproduces each existing kind's behavior BYTE-FOR-BYTE
-// (name / channel scope / launch cmd / operator+enable gates) — the ZERO-BEHAVIOR guardrail — and
-// that the new 'ceo' row is present but INERT (enabled=false, never launched in Phase 0).
+// (name / channel scope / launch cmd / operator+enable gates) — the ZERO-BEHAVIOR guardrail. The
+// 'ceo' row is now LIVE-CAPABLE behind the per-project enable (REVAMP-4 P3c): its `enabled`
+// resolves isCeoEnabled(work_id), which is false with no CEO-enabled project node (DEFAULT OFF), so
+// a stray desired=1 ceo row is still torn down — prod byte-identical. The CEO lifecycle proper is
+// exercised by the "CEO lifecycle (REVAMP-4 P3c)" describe below.
 describe("SUPERVISOR_KINDS capability table (S0c)", () => {
   const prefix = () => cfgMod.config.ctoAgentName;
 
@@ -1904,7 +1907,8 @@ describe("SUPERVISOR_KINDS capability table (S0c)", () => {
     expect(wa.SUPERVISOR_KINDS.build.channelEnv(mkRow({ id: "b", kind: "build" }))).toEqual({
       BUTCHR_CHANNEL_CONNECTIVITY_ONLY: "1",
     });
-    // ceo: DECLARATIVE project scope — never actually written (a ceo never launches in Phase 0).
+    // ceo: PROJECT scope — BUTCHR_CHANNEL_PROJECT (project mode, channel.ts P3b) + the anchor dir.
+    // Now actually written when a ceo launches (REVAMP-4 P3c).
     expect(
       wa.SUPERVISOR_KINDS.ceo.channelEnv(mkRow({ id: "e", kind: "ceo", work_id: "proj-1", directory_id: DIR })),
     ).toEqual({ BUTCHR_CHANNEL_PROJECT: "proj-1", BUTCHR_CHANNEL_WORKSPACE: DIR });
@@ -1928,25 +1932,29 @@ describe("SUPERVISOR_KINDS capability table (S0c)", () => {
     expect(wa.SUPERVISOR_KINDS.build.supervisedNodeKind).toBeNull();
   });
 
-  test("enabled gate: cto follows isCtoEnabled, leader/build always on, ceo const-false (inert)", () => {
+  test("enabled gate: cto follows isCtoEnabled, leader/build always on, ceo follows isCeoEnabled", () => {
     expect(wa.SUPERVISOR_KINDS.leader.enabled(mkRow({ id: "l", kind: "leader" }))).toBe(true);
     expect(wa.SUPERVISOR_KINDS.build.enabled(mkRow({ id: "b", kind: "build" }))).toBe(true);
-    expect(wa.SUPERVISOR_KINDS.ceo.enabled(mkRow({ id: "e", kind: "ceo" }))).toBe(false);
+    // ceo with no CEO-enabled project node (DEFAULT OFF) → false, exactly isCeoEnabled(work_id).
+    const ceoRow = mkRow({ id: "e", kind: "ceo", work_id: "proj-none" });
+    expect(wa.SUPERVISOR_KINDS.ceo.enabled(ceoRow)).toBe(dirsMod.isCeoEnabled("proj-none"));
+    expect(wa.SUPERVISOR_KINDS.ceo.enabled(ceoRow)).toBe(false);
     // cto's gate is exactly isCtoEnabled(directory).
     const ctoRow = mkRow({ id: "c", kind: "cto", directory_id: DIR });
     expect(wa.SUPERVISOR_KINDS.cto.enabled(ctoRow)).toBe(dirsMod.isCtoEnabled(DIR));
   });
 
-  test("a ceo workspace row is INERT: enabled=false → never launched by reconcile OR supervise", async () => {
+  test("DEFAULT OFF: a ceo row whose project is NOT ceo-enabled → torn down by reconcile AND supervise (never launched)", async () => {
     const { runner, launcher, calls } = makeFake();
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
+    // proj-1 is a plain LEAF (insertTask), not a ceo-enabled project node → isCeoEnabled false.
     insertTask("proj-1");
     dbMod.saveWorkspaceAgentRow("ws-ceo-proj-1", {
       kind: "ceo", directory_id: DIR, work_id: "proj-1", desired: 1,
     });
 
-    // reconcile a DESIRED-UP ceo → torn down, never launched.
+    // reconcile a DESIRED-UP but not-enabled ceo → torn down, never launched.
     const res = await wa.reconcileWorkspaceAgent("ws-ceo-proj-1", true);
     expect(res.action).toBe("stopped");
     expect(calls.launch).toHaveLength(0);
@@ -1956,5 +1964,170 @@ describe("SUPERVISOR_KINDS capability table (S0c)", () => {
     dbMod.saveWorkspaceAgentRow("ws-ceo-proj-1", { desired: 1 });
     await wa._superviseTickForTest("ws-ceo-proj-1");
     expect(calls.launch).toHaveLength(0);
+  });
+});
+
+// ---- CEO LIFECYCLE (REVAMP-4 Phase 3 / P3c, story st-1a82a2e1) ---------------------------------
+// Make a CEO agent LIVE-CAPABLE for a project node: createProject materializes the node, an
+// operator enables its CEO (setWorkspaceCeoEnabled), and the SAME table-driven supervisor
+// launches/reconciles/tears it down — no ceo-specific branch. DEFAULT OFF ⇒ prod byte-identical.
+// Uses the injected WorkspaceLauncher mock (no real agent spawned).
+describe("CEO lifecycle (REVAMP-4 P3c)", () => {
+  test("createProject materializes a maximally-inert project NODE (work_kind='project', status='merged', parent_id NULL, anchored to a directory)", () => {
+    const proj = dirsMod.createProject(DIR, "ship the moon");
+    expect(proj.id.startsWith("pj-")).toBe(true);
+    expect(proj.work_kind).toBe("project");
+    expect(proj.status).toBe("merged"); // the inert terminal anchor (like a repo/story node)
+    expect(proj.parent_id).toBeNull(); // top of the tree — no tier above a project
+    expect(proj.workspace_id).toBe(DIR); // anchored to an existing directory (FK + CEO cwd)
+    expect(proj.brief).toBe("ship the moon");
+    expect(proj.ceo_enabled).toBeNull(); // created DISABLED — enabling is a separate step
+    // getProject round-trips it; a non-project id (a plain leaf) is NOT a project.
+    expect(dirsMod.getProject(proj.id)!.id).toBe(proj.id);
+    insertTask("leaf-not-project");
+    expect(dirsMod.getProject("leaf-not-project")).toBeNull();
+    // 404 when the anchor directory is gone.
+    expect(() => dirsMod.createProject("dir-does-not-exist")).toThrow();
+  });
+
+  test("a status='merged' project node is EXCLUDED from a directory's leaf-only counts (S0a exclusion)", () => {
+    const ADIR = "dir-ceo-inert";
+    insertDir(ADIR);
+    const proj = dirsMod.createProject(ADIR);
+    // counts filter work_kind='leaf', so the project node inflates NO status bucket.
+    const detail = dirsMod.workspaceDetail(ADIR);
+    expect(detail.counts.merged).toBe(0);
+    // And it is invisible to the leaf-only membership query the loops use.
+    const leafHit = dbMod.db
+      .query<{ n: number }, [string]>(`SELECT COUNT(*) AS n FROM tasks WHERE id=? AND work_kind='leaf'`)
+      .get(proj.id)!.n;
+    expect(leafHit).toBe(0);
+  });
+
+  test("isCeoEnabled is a tri-state: missing→false, NULL→config default, 1→on, 0→off", async () => {
+    const proj = dirsMod.createProject(DIR);
+    const saved = cfgMod.config.ceoAgentEnabled;
+    try {
+      // missing / non-project id → never enabled.
+      expect(dirsMod.isCeoEnabled("pj-nope")).toBe(false);
+      // NULL (unset) inherits the global default.
+      cfgMod.config.ceoAgentEnabled = false;
+      expect(dirsMod.isCeoEnabled(proj.id)).toBe(false);
+      cfgMod.config.ceoAgentEnabled = true;
+      expect(dirsMod.isCeoEnabled(proj.id)).toBe(true);
+      // An explicit per-project value WINS over the global default either way.
+      cfgMod.config.ceoAgentEnabled = false;
+      await dirsMod.setWorkspaceCeoEnabled(proj.id, true);
+      expect(dirsMod.isCeoEnabled(proj.id)).toBe(true);
+      cfgMod.config.ceoAgentEnabled = true;
+      await dirsMod.setWorkspaceCeoEnabled(proj.id, false);
+      expect(dirsMod.isCeoEnabled(proj.id)).toBe(false);
+      // Clearing the override (null) reverts to inheriting the global default.
+      await dirsMod.setWorkspaceCeoEnabled(proj.id, null);
+      expect(dirsMod.isCeoEnabled(proj.id)).toBe(true);
+    } finally {
+      cfgMod.config.ceoAgentEnabled = saved;
+      // Tear any ws-ceo row the enable created so it can't leak a desired=1 row into a later tick.
+      await wa.stopWorkspaceAgent(`ws-ceo-${proj.id}`).catch(() => {});
+    }
+  });
+
+  test("setWorkspaceCeoEnabled(true) materializes a desired-up ws-ceo row that the supervisor WOULD launch; (false) tears it down", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    const proj = dirsMod.createProject(DIR);
+    const wsId = `ws-ceo-${proj.id}`;
+
+    // ENABLE → tasks.ceo_enabled=1 + a desired-up ceo workspace row bound to the project node,
+    // anchored to the project's directory (cwd + channel-workspace scope).
+    await dirsMod.setWorkspaceCeoEnabled(proj.id, true);
+    expect(dirsMod.getProject(proj.id)!.ceo_enabled).toBe(1);
+    const row = dbMod.getWorkspaceAgentRow(wsId)!;
+    expect(row.kind).toBe("ceo");
+    expect(row.work_id).toBe(proj.id);
+    expect(row.directory_id).toBe(DIR);
+    expect(row.desired).toBe(1);
+    expect(wa.SUPERVISOR_KINDS.ceo.enabled(row)).toBe(true);
+    // The mock agent name matches the ceo derivation.
+    expect(wa.workspaceAgentName(row)).toBe(`${cfgMod.config.ctoAgentName}-project-${proj.id}`);
+
+    // The supervisor WOULD launch it (dead + desired-up + enabled → a reconcile launches it).
+    const res = await wa.reconcileWorkspaceAgent(wsId, true);
+    expect(res.action).toBe("launched");
+    expect(calls.launch.map((c) => c.id)).toContain(wsId);
+
+    // DISABLE → torn down (desired=0 + the ceo pane torn down via the launcher).
+    await dirsMod.setWorkspaceCeoEnabled(proj.id, false);
+    expect(dirsMod.getProject(proj.id)!.ceo_enabled).toBe(0);
+    expect(dbMod.getWorkspaceAgentRow(wsId)!.desired).toBe(0);
+    expect(calls.teardown).toContain(`${cfgMod.config.ctoAgentName}-project-${proj.id}`);
+  });
+
+  test("HARDENING #1 — deleting the anchor directory GRACEFULLY stops an anchored CEO (not just cascade)", async () => {
+    const ADIR = "dir-ceo-anchor";
+    insertDir(ADIR);
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    const proj = dirsMod.createProject(ADIR);
+    await dirsMod.setWorkspaceCeoEnabled(proj.id, true);
+    const wsId = `ws-ceo-${proj.id}`;
+    const ceoName = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(wsId)!);
+    // Make it live so a graceful stop has a pane to tear down.
+    dbMod.saveWorkspaceAgentRow(wsId, { has_agent: 1 });
+
+    await dirsMod.unregisterWorkspace(ADIR);
+
+    // The anchored CEO agent was GRACEFULLY torn down BY NAME (the directory-teardown enumeration
+    // now includes kind='ceo'), not merely cascade-deleted at the DB row.
+    expect(calls.teardown).toContain(ceoName);
+    // And the row itself is gone (FK cascade), leaving no stranded ceo row for the directory.
+    expect(
+      dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(ADIR),
+    ).toMatchObject({ n: 0 });
+  });
+
+  test("HARDENING #2 — an enabled but WORK-LESS CEO stands by SILENTLY (no idle escalation)", () => {
+    const proj = dirsMod.createProject(DIR);
+    // A live, desired-up, genuinely-idle CEO workspace row (no actionable work — P3d not landed).
+    dbMod.saveWorkspaceAgentRow(`ws-ceo-${proj.id}`, {
+      kind: "ceo", directory_id: DIR, work_id: proj.id, desired: 1, has_agent: 1,
+      session_id: "sess-ceo",
+    });
+    const row = () => dbMod.getWorkspaceAgentRow(`ws-ceo-${proj.id}`)!;
+
+    const events: Array<Record<string, unknown>> = [];
+    const unsub = eventsMod.subscribe((e) => {
+      if ((e as { type?: string }).type === "story.attention") events.push(e as Record<string, unknown>);
+    });
+    try {
+      // Even forced idle across many cadences, a CEO NEVER pushes leader-idle (only a leader does)
+      // and NEVER stamps an escalation — idle+zero-actionable = fully SILENT.
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => 1_000 });
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => 1_000 + cfgMod.config.idleEscalateEveryMs * 5 });
+      expect(events.filter((e) => e.reason === "leader-idle")).toHaveLength(0);
+      expect(events).toHaveLength(0);
+      // A CEO gets NO durable idle projection either (setWorkspaceIdle projects only cto/leader —
+      // nothing reads a ceo's idle), so the row stays fully inert. No escalation stamp was written.
+      expect(row().idle).toBe(0);
+      expect(row().idle_escalated_at).toBeNull();
+    } finally {
+      unsub();
+    }
+  });
+
+  test("the CEO brief gives a real STAND-BY role and does NOT tell it to GET a 404-ing project node", () => {
+    const proj = dirsMod.createProject(DIR);
+    const brief = wa.buildWorkspaceBrief(
+      mkRow({ id: `ws-ceo-${proj.id}`, kind: "ceo", work_id: proj.id, directory_id: DIR }),
+    );
+    expect(brief).toContain("CEO of project");
+    expect(brief).toContain("stand by");
+    // Honest that the directive surface is not yet available (P3d) — no invented capability.
+    expect(brief).toContain("NOT yet available");
+    // Must NOT instruct a GET /api/work/<project> — a 'project' node 404s there (P3a).
+    expect(brief).not.toContain("GET /api/work");
+    expect(brief.length).toBeGreaterThan(200); // a real brief, not an 80-byte stub
   });
 });

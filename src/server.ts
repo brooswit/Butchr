@@ -21,12 +21,15 @@ import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { dispatcherHealth, isPaused, setPaused } from "./dispatcher.ts";
 import {
   HttpError,
+  createProject,
   dashboard,
+  getProject,
   getWorkspace,
   getWorkspaceByPath,
   listWorkspaces,
   registerWorkspace,
   setWorkspaceBranchIsolation,
+  setWorkspaceCeoEnabled,
   setWorkspaceCtoEnabled,
   setWorkspaceReleaseMode,
   unregisterWorkspace,
@@ -732,6 +735,35 @@ route("PATCH", "/api/workspaces/:id", async (req, p) => {
 route("DELETE", "/api/workspaces/:id", async (_req, p) => {
   await unregisterWorkspace(p.id!);
   return json({ ok: true });
+});
+
+// ---- PROJECTS + CEO (REVAMP-4 Phase 3 / P3c) ------------------------------
+// The minimal OPERATOR bootstrap for the PROJECT tier: create a work_kind='project' `tasks`
+// NODE (a CEO agent supervises it — the project analog of registering a repo + toggling its
+// CTO) and enable its CEO. A CEO cannot create itself, so this is the entry point. Guardrails
+// (P3c): no cross-repo (P3e) and no CEO directive/creation surface (P3d) — a booted CEO stands
+// by. See workspaces.createProject / setWorkspaceCeoEnabled.
+
+// Create a project node ANCHORED to an existing directory (`workspace`) — tasks.workspace_id is
+// NOT NULL FK→directory, so a project must reference a real directory (also the CEO's cwd +
+// channel-workspace scope). Optional `brief`. Returns the new project node. Does NOT enable the
+// CEO (a separate PATCH below). 404 if the anchor workspace is gone.
+route("POST", "/api/projects", async (req) => {
+  const body = await readJson(req);
+  return json(createProject(body.workspace, body.brief));
+});
+// A project node's row (for verification). 404 if it is not a project node.
+route("GET", "/api/projects/:id", async (_req, p) => {
+  const project = getProject(p.id!);
+  if (!project) throw new HttpError(404, `project not found: ${p.id}`);
+  return json(project);
+});
+// Enable/disable a project's managed CEO agent (boot auto-start + supervision). `ceo_enabled`:
+// true/false forces it on/off; null CLEARS the override → inherit config.ceoAgentEnabled. Mirrors
+// the workspaces cto_enabled PATCH. 404 if the project node is gone; 400 on a non-boolean value.
+route("PATCH", "/api/projects/:id", async (req, p) => {
+  const body = await readJson(req);
+  return json(await setWorkspaceCeoEnabled(p.id!, body.ceo_enabled));
 });
 
 // ---- WORK (UNIFIED SURFACE) -----------------------------------------------

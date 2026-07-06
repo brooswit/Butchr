@@ -29,7 +29,7 @@ import { publish } from "./events.ts";
 import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import * as herdr from "./herdr.ts";
-import { generateWorkspaceId } from "./ids.ts";
+import { generateProjectId, generateWorkspaceId } from "./ids.ts";
 import { ctoMdPath } from "./taskmd.ts";
 
 // Default CTO context seeded into a freshly registered workspace's
@@ -470,6 +470,126 @@ export async function setWorkspaceCtoEnabled(id: string, value: unknown): Promis
   return view;
 }
 
+// ---- PROJECT NODES + CEO ENABLE (REVAMP-4 Phase 3 / P3c, story st-1a82a2e1) ---------------
+// A PROJECT is a work_kind='project' `tasks` NODE — the top of the recursive Work tree that a
+// managed CEO agent supervises (the project-tier analog of a repo's CTO). This section is the
+// project mirror of the CTO surface above: createProject (register a project node — the analog
+// of registerWorkspace), isCeoEnabled (the analog of isCtoEnabled), and setWorkspaceCeoEnabled
+// (mirror-and-defer, the analog of setWorkspaceCtoEnabled). DEFAULT OFF: with no project nodes
+// and no config.ceoAgentEnabled, none of this ever boots a CEO ⇒ prod byte-identical. GUARDRAILS
+// (P3c): no cross-repo (P3e) and no CEO directive/creation surface (P3d) — a booted CEO can only
+// stand by; reparenting repos + creating initiatives under a project land later.
+
+/** Look up a PROJECT node (a work_kind='project' `tasks` row) by id, or null. REVAMP-4 P3c. */
+export function getProject(id: string): TaskRow | null {
+  return (
+    db.query<TaskRow, [string]>(`SELECT * FROM tasks WHERE id=? AND work_kind='project'`).get(id) ??
+    null
+  );
+}
+
+/** Mint a project id not already taken by any `tasks` row (mirrors uniqueStoryId's retry shape). */
+function uniqueProjectId(): string {
+  for (let i = 0; i < 100; i++) {
+    const id = generateProjectId();
+    if (!db.query(`SELECT 1 FROM tasks WHERE id=?`).get(id)) return id;
+  }
+  // Astronomically unlikely; fall back to extra entropy.
+  return `${generateProjectId()}-${generateProjectId().slice(3)}`;
+}
+
+/**
+ * CREATE a PROJECT NODE (REVAMP-4 Phase 3 / P3c) — a work_kind='project' `tasks` NODE a CEO agent
+ * supervises. The project analog of registerWorkspace (a repo) / createStory (a story node); it
+ * does NOT itself enable the CEO (a separate step — setWorkspaceCeoEnabled — mirroring
+ * register-then-enable for a repo's CTO).
+ *
+ * ANCHORED to an existing directory (`anchorWorkspaceId`): tasks.workspace_id is NOT NULL
+ * FK→directory, so a project node MUST reference a real directory. That anchor is also the CEO
+ * agent's launch cwd + BUTCHR_CHANNEL_WORKSPACE scope (cross-repo spanning is P3e). The node is
+ * maximally INERT so prod stays byte-identical:
+ *   - status='merged' — the SAME stable terminal anchor a repo/story node carries
+ *     (migrateMaterializeRepoNodes), so no lifecycle loop acts on it; combined with
+ *     work_kind='project' it is invisible to every leaf-only loop (`work_kind='leaf'`) and the
+ *     boot merged-sweep (recoverMergedTasks looks only at `status='in_review' AND leaf`).
+ *   - parent_id NULL — a project is the top of the tree (no tier above it).
+ * 404 if the anchor directory is gone. Returns the new project node row.
+ */
+export function createProject(anchorWorkspaceId: string, brief?: unknown): TaskRow {
+  if (!getWorkspace(anchorWorkspaceId)) {
+    throw new HttpError(404, `workspace not found: ${anchorWorkspaceId}`);
+  }
+  const briefText = typeof brief === "string" && brief.trim() ? brief.trim() : null;
+  const id = uniqueProjectId();
+  const created = nowIso();
+  db.query(
+    `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief)
+     VALUES (?, ?, 'merged', ?, 'project', ?)`,
+  ).run(id, anchorWorkspaceId, created, briefText);
+  return getProject(id)!;
+}
+
+/**
+ * Is a PROJECT's CEO agent ENABLED for boot auto-start + supervision (REVAMP-4 P3c)? The CEO
+ * analog of isCtoEnabled: the project NODE's own `tasks.ceo_enabled` tri-state WINS (1 → on,
+ * 0 → off); NULL inherits the GLOBAL default config.ceoAgentEnabled (itself DEFAULT OFF). An
+ * unknown / non-project id → not enabled. Guarded on work_kind='project' so only a real project
+ * node can ever be CEO-enabled. Exported for testing + SUPERVISOR_KINDS.ceo.enabled.
+ */
+export function isCeoEnabled(projectNodeId: string): boolean {
+  const row = db
+    .query<{ ceo_enabled: number | null }, [string]>(
+      `SELECT ceo_enabled FROM tasks WHERE id=? AND work_kind='project'`,
+    )
+    .get(projectNodeId);
+  if (!row) return false;
+  if (row.ceo_enabled !== null) return row.ceo_enabled === 1;
+  return config.ceoAgentEnabled;
+}
+
+/**
+ * Set (or clear) a PROJECT's per-project CEO-agent enable and return the refreshed project node
+ * (REVAMP-4 P3c). Mirrors setWorkspaceCtoEnabled: `true`/`false` forces the project's CEO agent
+ * on/off (boot auto-start + supervision); `null`/`undefined` CLEARS the override so it inherits
+ * config.ceoAgentEnabled. 404 if the project node is gone; 400 if the value is neither a boolean
+ * nor null.
+ *
+ * MIRROR-AND-DEFER: after writing tasks.ceo_enabled, materialize/tear the unified `workspace`
+ * runtime row (id `ws-ceo-<projectNodeId>`, kind='ceo', work_id = the project node, directory_id =
+ * the project's ANCHOR directory so defaultLauncher resolves a real cwd + the channel gets
+ * BUTCHR_CHANNEL_WORKSPACE alongside BUTCHR_CHANNEL_PROJECT) — ENABLED → ensure the row + desired=1
+ * (the supervisor launches it on its next tick, exactly like the CTO path); DISABLED →
+ * stopWorkspaceAgent (immediate teardown + desired=0). Async because the disable teardown is
+ * awaited. See workspace-agent.SUPERVISOR_KINDS.ceo.
+ */
+export async function setWorkspaceCeoEnabled(
+  projectNodeId: string,
+  value: unknown,
+): Promise<TaskRow> {
+  const project = getProject(projectNodeId);
+  if (!project) throw new HttpError(404, `project not found: ${projectNodeId}`);
+  let stored: number | null;
+  if (value === undefined || value === null) stored = null;
+  else if (typeof value === "boolean") stored = value ? 1 : 0;
+  else throw new HttpError(400, "ceo_enabled must be a boolean (or null to use the default)");
+  db.query(`UPDATE tasks SET ceo_enabled=? WHERE id=? AND work_kind='project'`).run(
+    stored,
+    projectNodeId,
+  );
+  const wsId = `ws-ceo-${projectNodeId}`;
+  if (isCeoEnabled(projectNodeId)) {
+    ensureWorkspaceAgentRow(wsId, {
+      kind: "ceo",
+      work_id: projectNodeId,
+      directory_id: project.workspace_id,
+    });
+    saveWorkspaceAgentRow(wsId, { desired: 1 });
+  } else {
+    await stopWorkspaceAgent(wsId);
+  }
+  return getProject(projectNodeId)!;
+}
+
 /**
  * Set a workspace's VERSIONED-RELEASES MODE and return the refreshed view. `true`/`false`
  * turns release_mode on/off; `null`/`undefined` is treated as OFF (the default — unlike the
@@ -745,18 +865,21 @@ export async function unregisterWorkspace(id: string): Promise<void> {
   if (!dir) throw new HttpError(404, `workspace not found: ${id}`);
 
   // RACE-PREVENTION (story st-93384200 Bug 2): mark this directory's UNIFIED `workspace`
-  // (singular) cto/leader rows desired=0 as the VERY FIRST teardown action — before the
+  // (singular) cto/leader/ceo rows desired=0 as the VERY FIRST teardown action — before the
   // legacy stops below close any pane BY NAME. stopWorkspaceAgent writes desired=0
   // SYNCHRONOUSLY (before its first await), so once these have run no unified supervise
   // tick can relaunch a just-closed pane at any point during unregister. Doing it last
   // (right before the DELETE) would instead MAXIMIZE the legacy-close -> DELETE window in
   // which a tick could revive the pane. This is RACE-prevention, NOT leak-prevention: the
   // rows themselves still cascade away on the DELETE below (FK ON DELETE CASCADE, db.ts).
+  // 'ceo' is INCLUDED (REVAMP-4 P3c): a CEO row ANCHORED to this directory (directory_id = the
+  // project's anchor dir) must be GRACEFULLY stopped — its herdr agent torn down — not merely
+  // cascade-deleted at the DB row, exactly like the cto/leader rows.
   // Best-effort; never block unregister. No-op when the unified supervisor is gated OFF.
   await stopWorkspaceAgent(`ws-cto-${id}`).catch(() => {});
   const unifiedRows = db
     .query<{ id: string }, [string]>(
-      `SELECT id FROM workspace WHERE directory_id=? AND kind IN ('cto','leader')`,
+      `SELECT id FROM workspace WHERE directory_id=? AND kind IN ('cto','leader','ceo')`,
     )
     .all(id);
   for (const r of unifiedRows) {

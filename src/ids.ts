@@ -94,3 +94,13 @@ export function generateWorkspaceId(): string {
 export function generateStoryId(): string {
   return `st-${hex4()}${hex4()}`;
 }
+
+/**
+ * Project IDs: a stable short slug carrying the `pj-` prefix (REVAMP-4 Phase 3 / P3c — the
+ * project-node analog of a story `st-` id). A project is a work_kind='project' `tasks` NODE;
+ * the distinct prefix keeps it unmistakable from a leaf/story/workspace id. Caller should verify
+ * uniqueness against existing rows. See workspaces.createProject.
+ */
+export function generateProjectId(): string {
+  return `pj-${hex4()}${hex4()}`;
+}

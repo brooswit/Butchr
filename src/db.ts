@@ -980,6 +980,17 @@ ensureColumn("tasks", "isolated", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("tasks", "pending_ask", "TEXT");
 ensureColumn("tasks", "ask_responder", "TEXT");
 
+// PER-PROJECT CEO-AGENT ENABLE (REVAMP-4 Phase 3 / P3c — story st-1a82a2e1). The CEO analog of
+// `directory.cto_enabled`, but keyed on the PROJECT NODE's OWN `tasks` row (a work_kind='project'
+// node — there is no `directory` sidecar for a project). Read ONLY for that project node (every
+// leaf/repo/story-node row leaves it NULL, exactly like the node-only brief/isolated/pending_ask
+// columns above). Tri-state master switch for the project's CEO agent (boot auto-start + crash
+// supervision): NULL = inherit the GLOBAL default config.ceoAgentEnabled (itself DEFAULT OFF), 1
+// forces it ON, 0 forces it OFF — a project's own setting WINS over the global default. Resolved
+// by workspaces.isCeoEnabled; settable via PATCH /api/projects/:id. DEFAULT OFF ⇒ with no
+// config.ceoAgentEnabled and no project nodes, prod is byte-identical (no CEO ever boots).
+ensureColumn("tasks", "ceo_enabled", "INTEGER");
+
 // NAME-ONLY CUTOVER (story st-a77b050f, step 3 — final). Drop the per-agent EPHEMERAL
 // herdr handles `herdr_pane_id`/`herdr_tab_id` from tasks/cto_agent/story_agent: agents
 // are now addressed, torn down, and liveness-checked BY NAME (steps 1+2), so these
@@ -2170,6 +2181,11 @@ export type TaskRow = {
   // `work_kind='node'` (so a repo is never mistaken for a story). 'project' has no materializer
   // yet — it is the reserved kind the project tier lands on next.
   work_kind: "leaf" | "node" | "repo" | "project";
+  // PER-PROJECT CEO-AGENT ENABLE (REVAMP-4 Phase 3 / P3c — see the ceo_enabled ensureColumn
+  // above): the tri-state master switch on a work_kind='project' node's OWN row — 1 on, 0 off,
+  // NULL inherit config.ceoAgentEnabled. NULL for every non-project row (the CEO analog of
+  // directory.cto_enabled). Read only via workspaces.isCeoEnabled; never surfaced on any view.
+  ceo_enabled: number | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -2382,7 +2398,8 @@ export type WorkspaceAgentRow = {
   name: string | null;
   // Which agent runs in this context (CHECK-pinned in the table). REVAMP-4 Phase 0 / S0c widened
   // this with 'ceo' — the project-tier supervisor kind (SUPERVISOR_KINDS, src/workspace-agent.ts).
-  // No ceo agent is booted in Phase 0 (its row is inert: SUPERVISOR_KINDS.ceo.enabled === false).
+  // As of Phase 3 / P3c a ceo row is LIVE-CAPABLE behind the per-project enable (isCeoEnabled) —
+  // DEFAULT OFF, so none boots without a CEO-enabled work_kind='project' node.
   kind: "cto" | "leader" | "build" | "ceo";
   // The DIRECTORY this runs in → today's `workspaces(id)` (renamed `directory` at cutover).
   directory_id: string | null;

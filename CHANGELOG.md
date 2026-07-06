@@ -17,6 +17,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **REVAMP-4 Phase 3 / P3c — CEO lifecycle (a CEO agent can boot + supervise a project).** The
+  project tier becomes LIVE-CAPABLE: an operator can create a `work_kind='project'` `tasks` NODE
+  and enable its managed CEO agent, which the existing unified supervisor then launches, reconciles,
+  and tears down through the SAME capability-table paths as the CTO/leader/build kinds — no
+  ceo-specific branch. **DEFAULT OFF:** with no `config.ceoAgentEnabled` (`BUTCHR_CEO_AGENT`,
+  default off) and no project nodes, no CEO ever boots and prod is byte-identical. Details:
+  - **Per-project enable flag** — a tri-state `tasks.ceo_enabled` column read ONLY for a project
+    node (the CEO analog of `directory.cto_enabled`): 1 on, 0 off, NULL inherits the global
+    `config.ceoAgentEnabled`. Resolved by `workspaces.isCeoEnabled`.
+  - **`SUPERVISOR_KINDS.ceo.enabled`** flips from a const-false stub to `isCeoEnabled(row.work_id)`,
+    and the ceo row now renders a real (minimal, honest) CEO brief instead of a Phase-0 placeholder —
+    it identifies as the project's CEO and STANDS BY, since the directive surface (registering repos,
+    creating initiatives) is not enabled until P3d.
+  - **Operator bootstrap** — `POST /api/projects { workspace, brief? }` materializes a project node
+    (anchored to an existing directory, `status='merged'` inert anchor, `parent_id` NULL);
+    `PATCH /api/projects/:id { ceo_enabled }` enables/disables its CEO (mirror-and-defer: materializes
+    `ws-ceo-<projectNodeId>` desired=1, or tears it down); `GET /api/projects/:id` returns the node.
+    `workspaces.createProject` / `getProject` / `setWorkspaceCeoEnabled` back these; `pj-…` ids
+    (`ids.generateProjectId`).
+  - **Graceful directory teardown of an anchored CEO** — `unregisterWorkspace`'s agent-stop
+    enumeration now includes `kind='ceo'`, so deleting a directory gracefully stops a CEO anchored to
+    it (its herdr agent torn down), not merely cascade-deletes the DB row.
+  - An enabled-but-work-less CEO stands by SILENTLY: it owns no actionable work until P3d, so it
+    produces no idle escalation (`reconcileOperatorIdle` pushes only for a leader).
+
 ## [0.9.200] - 2026-07-06
 
 ### Changed
