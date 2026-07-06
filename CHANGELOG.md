@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.198] - 2026-07-06
+
 ### Changed
 
 - **REVAMP-4 Phase 1 / S1 — reparent top-level Work under its repo node + a container-aware
