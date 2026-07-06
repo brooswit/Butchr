@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **REVAMP-4 Phase 0 / S0c — supervisor capability table + `'ceo'` workspace kind.** The seven
+  hardcoded per-`kind` branches across the unified workspace supervisor (agent name, brief, channel
+  scope, launch command, the operator-vs-build gate, and the enable gate) now consult a single
+  `SUPERVISOR_KINDS` capability table (`src/workspace-agent.ts`) — so a future supervisor tier is
+  ONE table row, not scattered `kind === "…"` conditionals. Zero behavior change for the existing
+  `cto`/`leader`/`build` kinds (the table encodes today's behavior byte-for-byte). Adds the new
+  `'ceo'` project-tier kind to the table and widens the `workspace.kind` CHECK to admit it via an
+  idempotent, FK-checked table-rebuild boot migration (`migrateWidenWorkspaceKindCheck`, following
+  `migrateDropStoriesMirror`'s procedure and preserving the `workspaces` back-compat view). NO CEO
+  agent is booted — a `ceo` workspace row is inert (`enabled` is const-false); the CEO creation
+  surface and `ceo_enabled` wiring land in a later phase.
+
 ## [0.9.196] - 2026-07-06
 
 ### Added

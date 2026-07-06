@@ -70,16 +70,16 @@ import type { AutoConfirmResult, ConfirmRule } from "./startup-confirm.ts";
 /**
  * The herdr agent name for a workspace row — NAME-ONLY identity, derived per kind to
  * MATCH today's names so the unified path is a drop-in at the cutover. A stored `name`
- * column WINS (so a caller can pin an explicit name); otherwise it is derived:
+ * column WINS (so a caller can pin an explicit name); otherwise the per-kind pattern from
+ * the SUPERVISOR_KINDS capability table derives it:
  *   - cto    → `<prefix>-<directory_id>`        (== cto-agent.ctoAgentName)
  *   - leader → `<prefix>-story-<work_id>`       (== story-agent.storyAgentName)
  *   - build  → `<work_id>`                       (== the dispatcher's task-id agent name)
+ *   - ceo    → `<prefix>-project-<work_id>`      (REVAMP-4 project tier — no agent booted yet)
  */
 export function workspaceAgentName(row: WorkspaceAgentRow): string {
   if (row.name && row.name.trim()) return row.name.trim();
-  if (row.kind === "cto") return `${config.ctoAgentName}-${row.directory_id ?? ""}`;
-  if (row.kind === "leader") return `${config.ctoAgentName}-story-${row.work_id ?? ""}`;
-  return row.work_id ?? row.id; // build: the task id is the agent name
+  return SUPERVISOR_KINDS[row.kind].agentName(row);
 }
 
 // ---- operator briefs (story st-06aedeae) -----------------------------------
@@ -397,19 +397,107 @@ merge count):
  *                minimal brief rather than the stub, for defensiveness.
  */
 export function buildWorkspaceBrief(row: WorkspaceAgentRow): string {
-  if (row.kind === "cto") return CTO_WORKSPACE_BRIEF;
-  if (row.kind === "leader") {
-    const storyId = row.work_id ?? row.id;
-    const story = getStoryRow(storyId);
-    return buildLeaderBrief(storyId, storyBriefTitle(story?.brief ?? null));
-  }
-  // build kind is not launched by the default launcher; keep a valid (non-stub) brief.
-  return `# butchr build agent
+  return SUPERVISOR_KINDS[row.kind].buildBrief(row);
+}
+
+// ---- SUPERVISOR CAPABILITY TABLE (REVAMP-4 Phase 0 / S0c) ------------------
+// A single per-kind CAPABILITY TABLE encoding what each workspace `kind` IS and DOES, so a future
+// supervisor tier is ONE TABLE ROW instead of scattered `kind === "…"` conditionals (CTO ruling).
+// It is the single source consulted by the seven per-kind decisions across this module — agent
+// NAME, launch COMMAND, channel SCOPE, brief, the operator-vs-build gate (launcher + startup/
+// mid-session probes), and the enable gate. The cto/leader/build rows reproduce today's behavior
+// BYTE-FOR-BYTE (proven by the existing name assertions + the capability-table test); the 'ceo'
+// row is ADDITIVE and INERT — `enabled` is const-false, so a ceo workspace row is never launched/
+// adopted/relaunched in Phase 0. The CEO creation surface + ceo_enabled wiring land in Phase 3.
+// NOTHING here touches resolveWorkResponder / routeOwns.
+type SupervisorKind = {
+  // The work_kind of the NODE this kind supervises in the recursive Work tree: 'node' (a story)
+  // for a leader, 'repo' for a cto, 'project' for a ceo; null for a build (a leaf EXECUTOR — it
+  // supervises nothing). Declarative tier metadata referencing the S0a work_kind values; no branch
+  // consumes it yet (it documents the recursive PROJECT/CEO tier the table is being shaped for).
+  supervisedNodeKind: "node" | "repo" | "project" | null;
+  // Is this a long-lived butchr-launched OPERATOR agent (vs a dispatcher-owned build executor)?
+  // Gates BOTH the shared herdr launcher (a build is never launched here — its worktree/branch
+  // provisioning stays DISPATCHER-owned) AND the startup/mid-session pane probes.
+  isOperator: boolean;
+  // Is this workspace ENABLED for boot auto-start + supervision? A DISABLED kind is torn down and
+  // never (re)launched. cto → the directory's cto_enabled tri-state; leader/build → always on (no
+  // enable gate today); ceo → const false (INERT until Phase 3 wires a real project-enable).
+  enabled: (row: WorkspaceAgentRow) => boolean;
+  // The herdr agent NAME (NAME-ONLY identity), derived per kind to MATCH today's names.
+  agentName: (row: WorkspaceAgentRow) => string;
+  // The configured launch COMMAND template for an operator launch (a build never launches here).
+  agentCmd: () => string;
+  // The kind-scoped channel MCP env fields, merged OVER the base connectivity env.
+  channelEnv: (row: WorkspaceAgentRow) => Record<string, string>;
+  // The role/instructions written to the launched workspace's brief.md.
+  buildBrief: (row: WorkspaceAgentRow) => string;
+};
+
+export const SUPERVISOR_KINDS: Record<WorkspaceAgentRow["kind"], SupervisorKind> = {
+  cto: {
+    supervisedNodeKind: "repo",
+    isOperator: true,
+    enabled: (row) => isCtoEnabled(row.directory_id ?? ""),
+    agentName: (row) => `${config.ctoAgentName}-${row.directory_id ?? ""}`,
+    agentCmd: () => config.ctoAgentCmd,
+    channelEnv: (row) => (row.directory_id ? { BUTCHR_CHANNEL_WORKSPACE: row.directory_id } : {}),
+    buildBrief: () => CTO_WORKSPACE_BRIEF,
+  },
+  leader: {
+    supervisedNodeKind: "node",
+    isOperator: true,
+    enabled: () => true,
+    agentName: (row) => `${config.ctoAgentName}-story-${row.work_id ?? ""}`,
+    agentCmd: () => config.storyAgentCmd,
+    channelEnv: (row) => ({
+      ...(row.work_id ? { BUTCHR_CHANNEL_STORY: row.work_id } : {}),
+      ...(row.directory_id ? { BUTCHR_CHANNEL_WORKSPACE: row.directory_id } : {}),
+    }),
+    buildBrief: (row) => {
+      const storyId = row.work_id ?? row.id;
+      const story = getStoryRow(storyId);
+      return buildLeaderBrief(storyId, storyBriefTitle(story?.brief ?? null));
+    },
+  },
+  build: {
+    supervisedNodeKind: null,
+    isOperator: false,
+    enabled: () => true,
+    agentName: (row) => row.work_id ?? row.id, // the task id is the agent name
+    agentCmd: () => config.ctoAgentCmd, // unused — a build is never launched by this module
+    channelEnv: () => ({ BUTCHR_CHANNEL_CONNECTIVITY_ONLY: "1" }),
+    // build kind is not launched by the default launcher; keep a valid (non-stub) brief.
+    buildBrief: (row) => `# butchr build agent
 
 You are a butchr-managed build agent for work ${row.work_id ?? row.id}. Fetch your task
 with \`GET /api/work/${row.work_id ?? row.id}\` and carry it out under review.
-`;
-}
+`,
+  },
+  ceo: {
+    supervisedNodeKind: "project",
+    isOperator: true,
+    // INERT in Phase 0: no ceo_enabled surface exists yet, so a ceo row is never enabled and thus
+    // never launched/adopted/relaunched. Phase 3 replaces this with a real project-enable resolver.
+    enabled: () => false,
+    // herdr name `<prefix>-project-<projectNodeId>` (its work_id IS the project NODE, mirroring a
+    // leader's story work_id); the row-id convention is `ws-ceo-<projectNodeId>` (Phase 3 creates it).
+    agentName: (row) => `${config.ctoAgentName}-project-${row.work_id ?? ""}`,
+    agentCmd: () => config.ctoAgentCmd,
+    // DECLARATIVE / INERT: a ceo never launches in Phase 0, so writeWorkspaceMcpConfig is never
+    // called for it and BUTCHR_CHANNEL_PROJECT is written NOWHERE — it is NOT wired into channel.ts
+    // or routeOwns (that is Phase 3). Kept here so the table self-documents the project-tier scope.
+    channelEnv: (row) => ({
+      ...(row.work_id ? { BUTCHR_CHANNEL_PROJECT: row.work_id } : {}),
+      ...(row.directory_id ? { BUTCHR_CHANNEL_WORKSPACE: row.directory_id } : {}),
+    }),
+    // Never rendered in Phase 0 (a ceo is never launched); a short defensive placeholder.
+    buildBrief: (row) => `# butchr CEO agent
+
+You are a butchr-managed CEO agent for project ${row.work_id ?? row.id} (Phase 0 placeholder).
+`,
+  },
+};
 
 /** The directory (repo root) a workspace runs in — its directory_id → workspaces.path. */
 function directoryPath(directoryId: string | null): string | null {
@@ -533,15 +621,10 @@ function writeWorkspaceMcpConfig(row: WorkspaceAgentRow): string {
   mkdirSync(workspaceDir(row.id), { recursive: true });
   const env: Record<string, string> = {
     BUTCHR_CHANNEL_SSE_URL: `http://${config.loopbackHost}:${config.port}/api/events`,
+    // Per-kind channel SCOPE from the capability table (cto → workspace; leader → story +
+    // workspace; build → connectivity-only) — byte-identical to the former per-kind branch.
+    ...SUPERVISOR_KINDS[row.kind].channelEnv(row),
   };
-  if (row.kind === "cto") {
-    if (row.directory_id) env.BUTCHR_CHANNEL_WORKSPACE = row.directory_id;
-  } else if (row.kind === "leader") {
-    if (row.work_id) env.BUTCHR_CHANNEL_STORY = row.work_id;
-    if (row.directory_id) env.BUTCHR_CHANNEL_WORKSPACE = row.directory_id;
-  } else {
-    env.BUTCHR_CHANNEL_CONNECTIVITY_ONLY = "1";
-  }
   const cfg = {
     mcpServers: {
       [CHANNEL_SERVER_NAME]: { command: "bash", args: ["-lc", config.ctoChannelCmd], env },
@@ -559,7 +642,7 @@ function buildWorkspaceArgv(
   mcpConfig: string,
   promptFile: string,
 ): string[] {
-  const cmd = row.kind === "leader" ? config.storyAgentCmd : config.ctoAgentCmd;
+  const cmd = SUPERVISOR_KINDS[row.kind].agentCmd();
   const agentCmd = cmd
     .replaceAll("{{MODEL_FLAG}}", modelFlag(config.ctoAgentModel))
     .replaceAll("{{SESSION_FLAG}}", sessionFlag)
@@ -602,9 +685,9 @@ export function autoConfirmWorkspaceStartup(name: string): Promise<AutoConfirmRe
 
 const defaultLauncher: WorkspaceLauncher = {
   async launch(row, fresh) {
-    if (row.kind === "build") {
+    if (!SUPERVISOR_KINDS[row.kind].isOperator) {
       throw new Error(
-        `unified workspace ${row.id}: build-kind launch (worktree + branch provisioning) ` +
+        `unified workspace ${row.id}: ${row.kind}-kind launch (worktree + branch provisioning) ` +
           `stays DISPATCHER-owned; not provisioned by this launcher`,
       );
     }
@@ -710,7 +793,7 @@ async function adoptOrLaunch(row: WorkspaceAgentRow, fresh: boolean): Promise<"a
       // forever. Operator kinds only (the adopt branch is operator-only today, but be
       // explicit). Best-effort: it can NEVER fail an adopt, and is a strict no-op (sends
       // nothing) once the agent is past startup, so a working leader is never disturbed.
-      if (row.kind === "cto" || row.kind === "leader") {
+      if (SUPERVISOR_KINDS[row.kind].isOperator) {
         // FIRE-AND-FORGET: never await the per-pane startup poll on the boot/reconcile
         // critical path. A pane that misclassifies as non-quiet would otherwise burn the
         // full maxPolls×pollMs budget here and gate the port bind (the 0.9.136 crash-loop).
@@ -1058,8 +1141,10 @@ export async function reconcileWorkspaceAgent(
   // cto_enabled tri-state vs the global default (default OFF), so the global default-off and
   // a per-directory disable are AUTHORITATIVE even against a stray desired=1 row: tear it down
   // — desired-down + free the name — so neither this reconcile NOR the supervisor revives it.
-  // ADDED ALONGSIDE the leader gate (does not touch any other kind's path).
-  if (row.kind === "cto" && !isCtoEnabled(row.directory_id ?? "")) {
+  // ADDED ALONGSIDE the leader gate (does not touch any other kind's path). Now table-driven:
+  // SUPERVISOR_KINDS[kind].enabled — cto → isCtoEnabled(dir), leader/build → always true (no gate,
+  // unchanged), ceo → const false (a stray desired=1 ceo row is torn down — inert in Phase 0).
+  if (!SUPERVISOR_KINDS[row.kind].enabled(row)) {
     await stopWorkspaceAgent(id);
     return { action: "stopped" };
   }
@@ -1389,8 +1474,9 @@ async function superviseWorkspace(id: string): Promise<void> {
   // A DISABLED CTO is never relaunched — short-circuit BEFORE the dead-while-desired relaunch/
   // backoff branch below (the legacy per-cto supervisor had the same top `if (!isCtoEnabled) return`).
   // A stray desired=1 ws-cto row whose directory has cto_enabled effectively false thus never
-  // triggers a launch attempt. ADDED ALONGSIDE existing gates; touches no other kind.
-  if (row.kind === "cto" && !isCtoEnabled(row.directory_id ?? "")) return;
+  // triggers a launch attempt. Table-driven (SUPERVISOR_KINDS[kind].enabled): cto → isCtoEnabled;
+  // leader/build → always true (no gate, unchanged); ceo → const false (never relaunched — inert).
+  if (!SUPERVISOR_KINDS[row.kind].enabled(row)) return;
   const st = supState(id);
   if (st.launchInFlight) return; // a start/stop/restart is mid-flight — don't race it
 
@@ -1408,7 +1494,7 @@ async function superviseWorkspace(id: string): Promise<void> {
     // prompt it hit after startup. Operator kinds only; genuine-idle gated inside the probe so an
     // actively-working agent is never read/keystroked. Awaited (best-effort, never throws) so a
     // single supervise tick drives one probe deterministically.
-    if (row.kind === "cto" || row.kind === "leader") {
+    if (SUPERVISOR_KINDS[row.kind].isOperator) {
       // Durable operator-idle projection + the idle→higher-up push (story st-a32c8138). Runs every
       // tick (a cheap peek+guard); shares the probe's genuine-idle gate. Best-effort — never throws.
       reconcileOperatorIdle(row);

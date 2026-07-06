@@ -1870,3 +1870,91 @@ describe("operator briefs (buildWorkspaceBrief, st-06aedeae)", () => {
     expect(brief).toContain("…"); // it was clamped with an ellipsis
   });
 });
+
+// ---- SUPERVISOR_KINDS CAPABILITY TABLE (REVAMP-4 Phase 0 / S0c) --------------------------------
+// The CTO ruling: a future supervisor tier must be ONE TABLE ROW, not scattered `kind === "…"`
+// conditionals. These tests PROVE the table reproduces each existing kind's behavior BYTE-FOR-BYTE
+// (name / channel scope / launch cmd / operator+enable gates) — the ZERO-BEHAVIOR guardrail — and
+// that the new 'ceo' row is present but INERT (enabled=false, never launched in Phase 0).
+describe("SUPERVISOR_KINDS capability table (S0c)", () => {
+  const prefix = () => cfgMod.config.ctoAgentName;
+
+  test("agentName reproduces each existing kind's name byte-for-byte + the ceo pattern", () => {
+    const cto = mkRow({ id: "w-cto", kind: "cto", directory_id: DIR });
+    const leader = mkRow({ id: "w-l", kind: "leader", work_id: "story-1", directory_id: DIR });
+    const build = mkRow({ id: "w-b", kind: "build", work_id: "task-9", directory_id: DIR });
+    const ceo = mkRow({ id: "w-ceo", kind: "ceo", work_id: "proj-1", directory_id: DIR });
+    // Byte-for-byte vs the former hardcoded formulas.
+    expect(wa.SUPERVISOR_KINDS.cto.agentName(cto)).toBe(`${prefix()}-${DIR}`);
+    expect(wa.SUPERVISOR_KINDS.leader.agentName(leader)).toBe(`${prefix()}-story-story-1`);
+    expect(wa.SUPERVISOR_KINDS.build.agentName(build)).toBe("task-9");
+    expect(wa.SUPERVISOR_KINDS.ceo.agentName(ceo)).toBe(`${prefix()}-project-proj-1`);
+    // workspaceAgentName delegates to the table (name-column still wins).
+    expect(wa.workspaceAgentName(ceo)).toBe(`${prefix()}-project-proj-1`);
+    expect(wa.workspaceAgentName(mkRow({ id: "w", kind: "ceo", name: "pinned", work_id: "proj-1" }))).toBe("pinned");
+  });
+
+  test("channelEnv reproduces each kind's former per-kind channel scope", () => {
+    expect(wa.SUPERVISOR_KINDS.cto.channelEnv(mkRow({ id: "c", kind: "cto", directory_id: DIR }))).toEqual({
+      BUTCHR_CHANNEL_WORKSPACE: DIR,
+    });
+    expect(
+      wa.SUPERVISOR_KINDS.leader.channelEnv(mkRow({ id: "l", kind: "leader", work_id: "story-1", directory_id: DIR })),
+    ).toEqual({ BUTCHR_CHANNEL_STORY: "story-1", BUTCHR_CHANNEL_WORKSPACE: DIR });
+    expect(wa.SUPERVISOR_KINDS.build.channelEnv(mkRow({ id: "b", kind: "build" }))).toEqual({
+      BUTCHR_CHANNEL_CONNECTIVITY_ONLY: "1",
+    });
+    // ceo: DECLARATIVE project scope — never actually written (a ceo never launches in Phase 0).
+    expect(
+      wa.SUPERVISOR_KINDS.ceo.channelEnv(mkRow({ id: "e", kind: "ceo", work_id: "proj-1", directory_id: DIR })),
+    ).toEqual({ BUTCHR_CHANNEL_PROJECT: "proj-1", BUTCHR_CHANNEL_WORKSPACE: DIR });
+    // empty-value keys are omitted (matching the former `if (row.x)` guards).
+    expect(wa.SUPERVISOR_KINDS.cto.channelEnv(mkRow({ id: "c", kind: "cto" }))).toEqual({});
+  });
+
+  test("agentCmd / isOperator / supervisedNodeKind match each kind's role", () => {
+    expect(wa.SUPERVISOR_KINDS.cto.agentCmd()).toBe(cfgMod.config.ctoAgentCmd);
+    expect(wa.SUPERVISOR_KINDS.leader.agentCmd()).toBe(cfgMod.config.storyAgentCmd);
+    expect(wa.SUPERVISOR_KINDS.ceo.agentCmd()).toBe(cfgMod.config.ctoAgentCmd);
+    // isOperator gates the launcher throw + the startup/mid-session probes.
+    expect(wa.SUPERVISOR_KINDS.cto.isOperator).toBe(true);
+    expect(wa.SUPERVISOR_KINDS.leader.isOperator).toBe(true);
+    expect(wa.SUPERVISOR_KINDS.ceo.isOperator).toBe(true);
+    expect(wa.SUPERVISOR_KINDS.build.isOperator).toBe(false);
+    // supervised node tier (declarative).
+    expect(wa.SUPERVISOR_KINDS.leader.supervisedNodeKind).toBe("node");
+    expect(wa.SUPERVISOR_KINDS.cto.supervisedNodeKind).toBe("repo");
+    expect(wa.SUPERVISOR_KINDS.ceo.supervisedNodeKind).toBe("project");
+    expect(wa.SUPERVISOR_KINDS.build.supervisedNodeKind).toBeNull();
+  });
+
+  test("enabled gate: cto follows isCtoEnabled, leader/build always on, ceo const-false (inert)", () => {
+    expect(wa.SUPERVISOR_KINDS.leader.enabled(mkRow({ id: "l", kind: "leader" }))).toBe(true);
+    expect(wa.SUPERVISOR_KINDS.build.enabled(mkRow({ id: "b", kind: "build" }))).toBe(true);
+    expect(wa.SUPERVISOR_KINDS.ceo.enabled(mkRow({ id: "e", kind: "ceo" }))).toBe(false);
+    // cto's gate is exactly isCtoEnabled(directory).
+    const ctoRow = mkRow({ id: "c", kind: "cto", directory_id: DIR });
+    expect(wa.SUPERVISOR_KINDS.cto.enabled(ctoRow)).toBe(dirsMod.isCtoEnabled(DIR));
+  });
+
+  test("a ceo workspace row is INERT: enabled=false → never launched by reconcile OR supervise", async () => {
+    const { runner, launcher, calls } = makeFake();
+    harnessMod.setRunner(runner);
+    wa.setLauncherForTest(launcher);
+    insertTask("proj-1");
+    dbMod.saveWorkspaceAgentRow("ws-ceo-proj-1", {
+      kind: "ceo", directory_id: DIR, work_id: "proj-1", desired: 1,
+    });
+
+    // reconcile a DESIRED-UP ceo → torn down, never launched.
+    const res = await wa.reconcileWorkspaceAgent("ws-ceo-proj-1", true);
+    expect(res.action).toBe("stopped");
+    expect(calls.launch).toHaveLength(0);
+    expect(dbMod.getWorkspaceAgentRow("ws-ceo-proj-1")!.desired).toBe(0);
+
+    // and a supervise tick on a (re-desired) ceo also never launches it.
+    dbMod.saveWorkspaceAgentRow("ws-ceo-proj-1", { desired: 1 });
+    await wa._superviseTickForTest("ws-ceo-proj-1");
+    expect(calls.launch).toHaveLength(0);
+  });
+});

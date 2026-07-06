@@ -265,7 +265,7 @@ function migrateWorkspaceTable(): void {
     CREATE TABLE IF NOT EXISTS workspace (
       id              TEXT PRIMARY KEY,
       name            TEXT,
-      kind            TEXT NOT NULL CHECK (kind IN ('cto','leader','build')),
+      kind            TEXT NOT NULL CHECK (kind IN ('cto','leader','build','ceo')),
       directory_id    TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
       work_id         TEXT REFERENCES tasks(id) ON DELETE CASCADE,
       session_id      TEXT,
@@ -1416,6 +1416,90 @@ export function migrateDropStoriesMirror(): void {
   }
 }
 
+// REVAMP-4 Phase 0 / S0c — WIDEN the `workspace.kind` CHECK to admit the new supervisor tier
+// kind 'ceo' (story st-1a82a2e1). SQLite cannot ALTER a column CHECK in place, so this is a
+// TABLE REBUILD following migrateDropStoriesMirror's sanctioned procedure EXACTLY. The baseline
+// migrateWorkspaceTable CREATE was widened in lockstep, so a FRESH db is born with the widened
+// CHECK and this step is a clean no-op there; only an EXISTING db (created with the narrow
+// 3-kind CHECK) is rebuilt. ADDITIVE + ZERO-BEHAVIOR: it does not add/drop/rename a column,
+// only relaxes the CHECK; no ceo row is created (Phase 3 owns the CEO surface).
+//
+// IDEMPOTENT: guarded on the live `workspace` CREATE SQL NOT already containing 'ceo', so it is a
+// clean no-op once converged (fresh db) or after its one-shot rebuild (existing db) — the whole
+// boot pass stays GREEN on a pre- and a post-widen db.
+//
+// B.5b REGRESSION GUARD (the crash-loop where a failed rebuild MATERIALIZED the `workspaces`
+// back-compat VIEW into a TABLE and crash-looped boot): the exact belt-and-suspenders
+// migrateDropStoriesMirror uses is baked in UNCONDITIONALLY — the rebuild runs under
+// `PRAGMA legacy_alter_table = ON` (so the DROP/RENAME never re-parses/rewrites a dependent
+// view/trigger) AND the `workspaces` compat view + its INSTEAD OF triggers are DROPPED for the
+// duration of the surgery and RECREATED (idempotently, via migrateWorkspacesView) in `finally`,
+// so a re-parse can never touch them. `foreign_keys` is OFF during the rebuild with a
+// `foreign_key_check` afterward, then restored. runMigrations is not wrapped in a transaction,
+// so the pragma toggles take effect.
+//
+// SCHEMA-FAITHFUL REBUILD: the new-table DDL is DERIVED from the LIVE `workspace` CREATE SQL by
+// string-substitution (widen the CHECK; rename the table to `workspace_new`) rather than a
+// hardcoded copy. This is deliberate — the live schema is NOT the baseline migrateWorkspaceTable
+// text: the rename migration (migrateRenameWorkspacesToDirectory) REPOINTED workspace.directory_id
+// from `workspaces` → `directory`, and ensureForwardColumns APPENDED `gave_up` + `idle_escalated_at`.
+// Deriving from the live SQL reproduces the EXACT current column set AND foreign-key targets, so a
+// hardcoded copy can neither drop a future column nor mis-point the FK (a mis-pointed FK to the now-
+// VIEW `workspaces` is exactly what a naive baseline copy would do — and foreign_key_check would
+// reject). The INSERT column list is likewise read live from PRAGMA table_info.
+export function migrateWidenWorkspaceKindCheck(): void {
+  const cur = db
+    .query<{ sql: string }, []>(`SELECT sql FROM sqlite_master WHERE type='table' AND name='workspace'`)
+    .get();
+  if (!cur) return; // no table yet (pre-baseline) — nothing to widen
+  if (cur.sql.includes("'ceo'")) return; // already widened — clean no-op
+
+  // Widen the narrow kind CHECK in the live DDL; fail LOUDLY if the expected clause is absent (an
+  // unrecognized schema shape must never silently no-op nor half-rebuild).
+  const widened = cur.sql.replace(
+    "kind IN ('cto','leader','build')",
+    "kind IN ('cto','leader','build','ceo')",
+  );
+  if (widened === cur.sql) {
+    throw new Error(
+      `migrateWidenWorkspaceKindCheck: narrow kind CHECK not found in live workspace schema — ` +
+        `refusing to rebuild. Live SQL: ${cur.sql}`,
+    );
+  }
+  const createNew = widened.replace(/CREATE TABLE\s+"?workspace"?/, "CREATE TABLE workspace_new");
+  const cols = db
+    .query<{ name: string }, []>(`PRAGMA table_info(workspace)`)
+    .all()
+    .map((r) => r.name)
+    .join(", ");
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  db.exec("PRAGMA legacy_alter_table = ON;");
+  db.exec(`DROP TRIGGER IF EXISTS workspaces_view_insert`);
+  db.exec(`DROP TRIGGER IF EXISTS workspaces_view_update`);
+  db.exec(`DROP TRIGGER IF EXISTS workspaces_view_delete`);
+  db.exec(`DROP VIEW IF EXISTS workspaces`);
+  try {
+    db.exec(createNew);
+    db.exec(`INSERT INTO workspace_new (${cols}) SELECT ${cols} FROM workspace`);
+    db.exec(`DROP TABLE workspace`);
+    db.exec(`ALTER TABLE workspace_new RENAME TO workspace`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workspace_dir  ON workspace(directory_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workspace_work ON workspace(work_id)`);
+
+    const violations = db.query<{ table: string }, []>(`PRAGMA foreign_key_check`).all();
+    if (violations.length > 0) {
+      throw new Error(
+        `migrateWidenWorkspaceKindCheck: foreign_key_check found ${violations.length} violation(s): ${JSON.stringify(violations)}`,
+      );
+    }
+  } finally {
+    migrateWorkspacesView(db);
+    db.exec("PRAGMA legacy_alter_table = OFF;");
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 // ---- BOOT MIGRATION RUNNER -------------------------------------------------
 // The ONE ordered list of boot-time schema steps, run by the single loop below.
 // ORDER IS LOAD-BEARING and was previously only documented in the comments on each
@@ -1470,6 +1554,11 @@ export function migrateDropStoriesMirror(): void {
 //                                         ADDITIVE + INSERT-ONCE idempotent; the foundation of the
 //                                         recursive PROJECT/CEO tier. Runs LAST — depends only on
 //                                         `directory`, independent of the story folds.)
+//  11. widen workspace.kind CHECK          (st-1a82a2e1 REVAMP-4 Phase 0 / S0c — admit the 'ceo'
+//                                         supervisor kind via a CHECK-widening table REBUILD
+//                                         following migrateDropStoriesMirror's procedure. ADDITIVE
+//                                         + idempotent (no-op once the CHECK contains 'ceo'); no
+//                                         ceo row created. Runs LAST — depends only on `workspace`.)
 // Every step is independently idempotent (presence-guarded ALTER/UPDATE/RENAME, IF NOT EXISTS,
 // or DROP-then-CREATE of a data-less view), so the whole pass is a no-op once converged and
 // safe to re-run on every boot.
@@ -1490,6 +1579,7 @@ const MIGRATIONS: Array<() => void> = [
   () => migrateWorkspacesView(db),
   migrateDropStoriesMirror,
   migrateMaterializeRepoNodes,
+  migrateWidenWorkspaceKindCheck,
 ];
 
 /**
@@ -2257,8 +2347,10 @@ export function saveStoryAgentRow(
 export type WorkspaceAgentRow = {
   id: string;
   name: string | null;
-  // Which agent runs in this context (CHECK-pinned in the table).
-  kind: "cto" | "leader" | "build";
+  // Which agent runs in this context (CHECK-pinned in the table). REVAMP-4 Phase 0 / S0c widened
+  // this with 'ceo' — the project-tier supervisor kind (SUPERVISOR_KINDS, src/workspace-agent.ts).
+  // No ceo agent is booted in Phase 0 (its row is inert: SUPERVISOR_KINDS.ceo.enabled === false).
+  kind: "cto" | "leader" | "build" | "ceo";
   // The DIRECTORY this runs in → today's `workspaces(id)` (renamed `directory` at cutover).
   directory_id: string | null;
   // The OPTIONAL Work this executes (tasks(id)); NULL for a CTO workspace (RFC Q3/Q5).
