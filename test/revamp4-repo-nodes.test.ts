@@ -179,3 +179,79 @@ describe("REVAMP-4 S0a — boot merged-sweep leaves the repo node untouched", ()
     expect(after!.created_at).toBe(before.created_at);
   });
 });
+
+// REVAMP-4 Phase 0 / S0b (story st-1a82a2e1) — owningRepoOf(id) walks parent_id upward and returns
+// the NEAREST node (self or ancestor) whose work_kind='repo'; null if none. ADDITIVE + zero-behavior:
+// no caller is rewired to it yet (Phase 1/2 wires the sites). These pin the walk semantics against
+// hand-built chains: repo returns itself, a leaf under a repo returns that repo, a no-repo chain and
+// a project node return null, and any malformed parent cycle terminates.
+describe("REVAMP-4 S0b — owningRepoOf parent-chain accessor", () => {
+  // Seed a tasks row with an explicit work_kind + optional parent_id. A parent MUST be inserted
+  // before its child (the parent_id self-FK is enforced), so callers seed top-down. workspace_id is
+  // the registered REPO_DIR so the FK to directory(id) is satisfied for every row.
+  function seed(id: string, workKind: string, parent: string | null): void {
+    dbMod.db
+      .query(
+        `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, parent_id)
+           VALUES (?, ?, 'in_progress', ?, ?, ?)`,
+      )
+      .run(id, REPO_DIR, dbMod.nowIso(), workKind, parent);
+  }
+
+  beforeAll(() => {
+    // The owning repo node (id == REPO_DIR) — materialized, parent_id NULL.
+    dbMod.migrateMaterializeRepoNodes();
+    // Deep chain leaf → story-node → repo (both under REPO_DIR, seeded parent-first).
+    seed("s0b-node-under-repo", "node", REPO_DIR);
+    seed("s0b-leaf-deep", "leaf", "s0b-node-under-repo");
+    // Leaf directly under the repo node.
+    seed("s0b-leaf-direct", "leaf", REPO_DIR);
+    // No-repo chain: a top-level story-node (parent_id NULL) with a leaf child — no repo ancestor.
+    seed("s0b-orphan-node", "node", null);
+    seed("s0b-orphan-leaf", "leaf", "s0b-orphan-node");
+    // A project node sits ABOVE repos (parent_id NULL here) — it is NOT itself a repo, so it owns none.
+    seed("s0b-project", "project", null);
+    // Self-parent cycle: seed with a real parent, then repoint parent_id to itself (FK still holds).
+    seed("s0b-self", "node", REPO_DIR);
+    dbMod.db.query(`UPDATE tasks SET parent_id='s0b-self' WHERE id='s0b-self'`).run();
+    // Two-node cycle with NO repo in it: cyc1 → cyc2 → cyc1.
+    seed("s0b-cyc2", "node", null);
+    seed("s0b-cyc1", "node", "s0b-cyc2");
+    dbMod.db.query(`UPDATE tasks SET parent_id='s0b-cyc1' WHERE id='s0b-cyc2'`).run();
+  });
+
+  test("a repo node returns ITSELF (self-match)", () => {
+    expect(workMod.owningRepoOf(REPO_DIR)).toBe(REPO_DIR);
+  });
+
+  test("a leaf directly under a repo node returns that repo id", () => {
+    expect(workMod.owningRepoOf("s0b-leaf-direct")).toBe(REPO_DIR);
+  });
+
+  test("a deep chain leaf → story-node → repo returns the NEAREST repo id", () => {
+    expect(workMod.owningRepoOf("s0b-leaf-deep")).toBe(REPO_DIR);
+    expect(workMod.owningRepoOf("s0b-node-under-repo")).toBe(REPO_DIR);
+  });
+
+  test("an orphan / no-repo chain returns null", () => {
+    expect(workMod.owningRepoOf("s0b-orphan-leaf")).toBeNull();
+    expect(workMod.owningRepoOf("s0b-orphan-node")).toBeNull();
+  });
+
+  test("a project node (above repos, not itself a repo) returns null", () => {
+    expect(workMod.owningRepoOf("s0b-project")).toBeNull();
+  });
+
+  test("a missing / nonexistent id returns null", () => {
+    expect(workMod.owningRepoOf("s0b-does-not-exist")).toBeNull();
+  });
+
+  test("a self-parent cycle terminates and returns null (no infinite loop)", () => {
+    expect(workMod.owningRepoOf("s0b-self")).toBeNull();
+  });
+
+  test("a two-node parent cycle with no repo terminates and returns null", () => {
+    expect(workMod.owningRepoOf("s0b-cyc1")).toBeNull();
+    expect(workMod.owningRepoOf("s0b-cyc2")).toBeNull();
+  });
+});

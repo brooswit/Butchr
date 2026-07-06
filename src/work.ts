@@ -106,6 +106,32 @@ export function workParentId(id: string): string | null {
 }
 
 /**
+ * The id of the REPO node that OWNS this Work — the NEAREST node (self or ancestor, walking
+ * `parent_id` upward) whose `work_kind==='repo'`; null if the chain reaches a top-level Work
+ * without one. "Nearest" is deliberate: in a leaf→repo→project chain this returns the REPO (the
+ * immediate owning repo), NOT the project above it; a project node itself (sitting ABOVE repos)
+ * returns null. Reads only getTask rows — the SAME lookup at each level yields BOTH the work_kind
+ * check and the parent hop, one row read per level. A visited-set guards a malformed parent CYCLE
+ * / self-parent (mirrors workResponderChain's guard) so the walk always terminates.
+ *
+ * ADDITIVE (REVAMP-4 Phase 0 / S0b): no caller is rewired to this yet — the call sites arrive in
+ * Phase 1/2 when leaf/story parent_id is repointed under the repo nodes materialized in S0a. Today
+ * repo nodes have parent_id NULL, so a repo returns itself and a story-node/leaf chain returns null;
+ * the accessor is already correct for both the current and the future (reparented) tree.
+ */
+export function owningRepoOf(id: string): string | null {
+  const visited = new Set<string>();
+  let cur: string | null = id;
+  while (cur != null && !visited.has(cur)) {
+    visited.add(cur);
+    const row = getTask(cur);
+    if (row?.work_kind === "repo") return cur;
+    cur = row?.parent_id ?? null;
+  }
+  return null;
+}
+
+/**
  * Re-export of the PURE feedback predicate (tasks.isAwaitingFeedback) under the Work
  * vocabulary, so "what counts as feedback awaiting a responder" stays single-sourced (a
  * feedback status — idea/spec_review/in_review/needs_info — or a LIVE idle build agent).

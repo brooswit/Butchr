@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Add the `owningRepoOf(id)` accessor (`src/work.ts`) — REVAMP-4 Phase 0 / S0b
+  (story st-1a82a2e1). It resolves a Work's owning repo by WALKING the `parent_id`
+  chain upward and returning the NEAREST node (self or ancestor) whose
+  `work_kind='repo'`, or `null` if the chain reaches a top-level Work without one —
+  the CTO's ruling that owning-repo is a single-accessor walk, NOT a denormalized
+  mirror column. The walk reads each level's row once (the same `getTask` yields both
+  the `work_kind` check and the parent hop) and guards a malformed parent cycle with
+  a visited-set (mirroring `workResponderChain`), so it always terminates. Nearest is
+  deliberate: a leaf→repo→project chain returns the repo (not the project above it),
+  and a project node returns `null`. ADDITIVE + zero-behavior — no caller is rewired
+  to it yet (the call sites arrive in Phase 1/2 when `parent_id` is repointed under
+  the repo nodes materialized in S0a); ships the accessor + `test/revamp4-repo-nodes.test.ts`
+  coverage only.
+
 ## [0.9.195] - 2026-07-06
 
 ### Added
