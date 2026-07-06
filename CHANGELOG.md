@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.193] - 2026-07-06
+
 ### Fixed
 - Restore real operator briefs in the unified launch path (story st-06aedeae): a
   kind-guarded `buildWorkspaceBrief` in `src/workspace-agent.ts` now writes a real
