@@ -371,13 +371,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .kind-badge.kind-leader  { color: var(--kind-leader); border-color: var(--kind-leader); }
 .kind-badge.kind-build   { color: var(--kind-build); border-color: var(--kind-build); }
 .kind-badge.kind-unknown { color: var(--kind-unknown); border-color: var(--border); }
-/* Graph in-node kind glyph (SVG) — glyph only (no room for a label at NW158×NH38).
-   Small, colored per kind, anchored top-left; sits left of the centered tg-id and above
-   the progress bar so it never collides. */
-.tg-kind { font-size: 11px; font-weight: 700; }
-.tg-kind-node    { fill: var(--kind-node); }
-.tg-kind-leaf    { fill: var(--kind-leaf); }
-.tg-kind-unknown { fill: var(--kind-unknown); }
 /* Story LIFECYCLE badge — a SECONDARY working/parked/stalled hint (list row + board card),
    OUTLINED + quiet (mirrors .chip.state-kind) so it never competes with the colored status chip
    or the S1 kind badge. Colored per state from the theme-safe --lc-* vars. */
@@ -392,12 +385,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.lc-working { border-color: var(--lc-working); color: var(--lc-working); }
 .chip.lc-parked  { border-color: var(--lc-parked);  color: var(--lc-parked);  }
 .chip.lc-stalled { border-color: var(--lc-stalled); color: var(--lc-stalled); }
-/* Graph in-node lifecycle glyph (SVG) — mirrors .tg-kind but anchored top-RIGHT (text-anchor:end),
-   glyph-only, colored per state: the quiet secondary counterpart to the top-left kind glyph. */
-.tg-lifecycle { font-size: 11px; font-weight: 700; text-anchor: end; }
-.tg-lc-working { fill: var(--lc-working); }
-.tg-lc-parked  { fill: var(--lc-parked); }
-.tg-lc-stalled { fill: var(--lc-stalled); }
 /* `plan` is a task KIND, not a lifecycle status — a decomposition task that spawns
    sub-tasks. Reuse the spec_review/info hue so it reads as an informational badge. */
 .chip.plan { background: var(--spec_review); }
@@ -859,113 +846,85 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .vt-btn:hover { background: var(--panel-2); color: var(--text); }
 .vt-btn.active { background: var(--accent); color: #fff; }
 
-/* dependency graph — inline SVG DAG of non-terminal tasks + their blockers */
-/* generations slider — how many previous finished generations the graph reveals */
-.graph-gens {
-  display: flex; align-items: center; gap: 10px; margin: 4px 0 10px;
-  flex-wrap: wrap;
-}
-.graph-gens-label { font-size: 13px; font-weight: 600; color: var(--muted); }
-.graph-gens-slider { width: 200px; max-width: 60vw; accent-color: var(--accent); cursor: pointer; }
-.graph-gens-value {
-  font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text);
-  min-width: 5.5em;
-}
-.tg-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
-.task-graph-scroll {
-  overflow: auto; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--bg); padding: 4px; max-height: 70vh;
-}
-.task-graph { display: block; }
+/* ---------- pipeline swimlanes (the "Pipeline" tab) ----------
+   Per-story horizontal lanes replacing the old SVG dependency DAG. Plain HTML/flex; status pills
+   reuse the SHARED .chip.<status> palette (no forked colors) — this block adds only layout plus a
+   small per-card EMPHASIS layer (attention lit / in-flight pulse / blocked dim). The PAGE never
+   scrolls sideways: only .swim-pipe (a lane body) is overflow-x:auto. */
+.swim-wrap { margin-top: 8px; }
+.swim-caption { font-size: 13px; color: var(--muted); margin: 0 0 14px; max-width: 68ch; line-height: 1.5; }
+.swim-caption b { color: var(--text); font-weight: 600; }
+.swim-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 18px; font-size: 11.5px; color: var(--muted); }
+.swim-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swim-ldot { width: 9px; height: 9px; border-radius: 3px; flex: none; background: var(--muted); }
+/* legend swatches pull the SAME status vars as the .chip.<status> pills, so they can't drift */
+.swim-ldot.in_progress { background: var(--in_progress); }
+.swim-ldot.needs_info  { background: var(--needs_info); }
+.swim-ldot.blocked     { background: var(--blocked); }
+.swim-ldot.merged      { background: var(--merged); }
+.swim-ldot.lc-parked   { background: var(--lc-parked); }
 
-.tg-edge { fill: none; stroke: var(--muted); stroke-width: 1.5; opacity: 0.55; }
-.tg-arrow-head { fill: var(--muted); opacity: 0.7; }
+.swim-lanes { display: flex; flex-direction: column; gap: 16px; }
+.swim-lane {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); overflow: hidden;
+}
+.swim-hd {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 13px 16px; border-bottom: 1px solid var(--border); background: var(--panel-2);
+}
+.swim-kind { flex: none; display: inline-flex; }
+.swim-title { font-weight: 650; font-size: 15px; color: var(--text); }
+.swim-laneid { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.swim-meta { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.swim-prog { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.swim-track { width: 96px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; display: inline-block; }
+.swim-track i { display: block; height: 100%; background: var(--merged); }
+.swim-prog-txt { white-space: nowrap; }
 
-.tg-node { cursor: pointer; }
-.tg-node .tg-rect {
-  fill: var(--in_progress); stroke: rgba(0, 0, 0, 0.18); stroke-width: 1;
-  transition: filter 0.12s;
+/* the lane BODY — the ONLY horizontally-scrollable region (the page body never scrolls sideways) */
+.swim-pipe { display: flex; align-items: stretch; padding: 18px 16px; overflow-x: auto; }
+.swim-step {
+  flex: 0 0 auto; width: 190px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px;
+  padding: 11px 12px; text-decoration: none; color: inherit; transition: border-color .12s, box-shadow .12s;
 }
-.tg-node:hover .tg-rect { filter: brightness(1.12); }
-.tg-node:focus { outline: none; }
-.tg-node:focus .tg-rect { stroke: var(--accent); stroke-width: 2.5; }
-.tg-node .tg-id {
-  fill: #fff; font-family: var(--mono); font-size: 11.5px; font-weight: 600;
-  text-anchor: middle; dominant-baseline: middle; pointer-events: none;
+.swim-step:hover { border-color: var(--accent); }
+.swim-step:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swim-step-top { display: flex; align-items: center; gap: 8px; }
+.swim-sid { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text); word-break: break-all; }
+.swim-sum { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+.swim-xdep { font-size: 10.5px; color: var(--blocked); font-weight: 600; }
+.swim-needs { margin-left: auto; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--needs_info); }
+.swim-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+
+/* EMPHASIS — exactly one thing lit: attention gets a ring, in-flight a gentle accent, blocked dims.
+   Built on top of the shared chips, NOT a divergent palette. */
+.swim-step.is-attn { border-color: var(--needs_info); box-shadow: 0 0 0 1px var(--needs_info); }
+.swim-step.is-active { border-color: var(--in_progress); box-shadow: 0 0 0 1px color-mix(in srgb, var(--in_progress) 60%, transparent); }
+.swim-step.is-blocked { opacity: 0.6; }
+.swim-step.is-active .swim-dot { animation: pause-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .swim-step.is-active .swim-dot { animation: none; } }
+
+/* one arrow between steps = the blocked_by flow (the ONLY edge vocabulary) */
+.swim-conn { flex: 0 0 auto; width: 28px; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.swim-conn-svg { width: 26px; height: 14px; }
+
+/* per-lane empty state (childless / all-finished story) — a compact row INSIDE the lane */
+.swim-empty { display: flex; align-items: center; gap: 12px; padding: 16px; color: var(--muted); font-size: 13px; }
+.swim-empty-txt { line-height: 1.4; }
+
+/* collapsed "N done" pile + its expanded dimmed pipeline */
+.swim-done-row {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 9px 16px; border-top: 1px dashed var(--border);
+  font-size: 12px; color: var(--muted); user-select: none;
 }
-.tg-node .tg-status {
-  fill: rgba(255, 255, 255, 0.85); font-size: 8.5px; font-weight: 700;
-  letter-spacing: 0.04em; text-transform: uppercase;
-  text-anchor: middle; dominant-baseline: middle; pointer-events: none;
-}
-/* sub-tree merge-progress bar drawn inside nodes that gate dependents */
-.tg-node .tg-prog-track { fill: rgba(0, 0, 0, 0.28); }
-.tg-node .tg-prog-fill { fill: rgba(255, 255, 255, 0.92); }
-/* Canonical 12-state graph nodes */
-.tg-node.idea .tg-rect        { fill: var(--idea); }
-.tg-node.spec_review .tg-rect { fill: var(--spec_review); }
-.tg-node.blocked .tg-rect     { fill: var(--blocked); }
-.tg-node.needs_info .tg-rect  { fill: var(--needs_info); }
-.tg-node.inactive .tg-rect    { fill: var(--inactive); }
-.tg-node.in_progress .tg-rect { fill: var(--in_progress); }
-.tg-node.idle .tg-rect        { fill: var(--idle); }
-.tg-node.in_review .tg-rect   { fill: var(--in_review); }
-.tg-node.merged .tg-rect      { fill: var(--merged); }
-.tg-node.rolling_back .tg-rect { fill: var(--rolling_back); }
-.tg-node.rolled_back .tg-rect { fill: var(--rolled_back); }
-.tg-node.failed .tg-rect      { fill: var(--failed); }
-.tg-node.aborted .tg-rect     { fill: var(--aborted); }
-/* Story (node-kind) graph statuses — same palette mapping as the .chip story colors */
-.tg-node.open .tg-rect          { fill: var(--idea); }
-.tg-node.merging .tg-rect       { fill: var(--in_progress); }
-.tg-node.merge_blocked .tg-rect { fill: var(--blocked); }
-.tg-node.done .tg-rect          { fill: var(--merged); }
-/* A STORY node is a distinct, INERT peer: heavier accent border + default cursor (no nav). */
-.tg-node.tg-story { cursor: default; }
-.tg-node.tg-story .tg-rect { stroke: var(--accent); stroke-width: 2; }
-.tg-node.tg-story:hover .tg-rect { filter: none; }
-/* Story subtask CLUSTER — a subtle translucent enclosure behind the edges + nodes, with a
-   small story-id label. Non-interactive (the nodes on top own all pointer events). */
-.tg-clusters { pointer-events: none; }
-.tg-cluster-rect {
-  fill: var(--accent); fill-opacity: 0.05;
-  stroke: var(--accent); stroke-opacity: 0.35; stroke-width: 1;
-  stroke-dasharray: 4 3;
-}
-.tg-cluster-label {
-  fill: var(--muted); font-family: var(--mono); font-size: 8.5px; font-weight: 600;
-  dominant-baseline: hanging; text-transform: none; opacity: 0.85;
-}
-/* An EMPTY (genuinely childless) story container reads as a quieter, sparser box — a parked or
-   just-created story, distinct from a story that decomposes into subtasks. */
-.tg-cluster.empty .tg-cluster-rect {
-  fill-opacity: 0.03; stroke-opacity: 0.5; stroke-dasharray: 2 3;
-}
-.tg-cluster.empty .tg-cluster-label { opacity: 0.7; font-style: italic; }
-/* CHILD-OF connectors — story→subtask containment. Deliberately DISTINCT from the blocked_by
-   dependency edges (.tg-edge): accent-hued, DASHED, thinner, and NO arrowhead, so the two edge
-   meanings never blur. Non-interactive (nodes on top own pointer events). */
-.tg-childedges { pointer-events: none; }
-.tg-childedge {
-  fill: none; stroke: var(--accent); stroke-width: 1.25;
-  stroke-dasharray: 3 3; opacity: 0.6;
-}
-/* Relationship legend — small swatches (container box / child-of / blocked-by) above the
-   status-color legend, so the graph's edge + container vocabulary is self-explaining. */
-.tg-rel-legend {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
-  margin: 4px 0 6px; font-size: 11px; color: var(--muted);
-}
-.tg-rel { display: inline-flex; align-items: center; gap: 5px; }
-.tg-rel-swatch { display: block; overflow: visible; flex: 0 0 auto; }
-/* Legacy graph nodes — kept for backward-compat */
-.tg-node.finalizing .tg-rect  { fill: var(--finalizing); }
-.tg-node.queued .tg-rect       { fill: var(--queued); }
-.tg-node.running .tg-rect      { fill: var(--running); }
-.tg-node.review .tg-rect       { fill: var(--review); }
-.tg-node.awaiting_input .tg-rect { fill: var(--awaiting); }
-.tg-node.rejected .tg-rect     { fill: var(--rejected); }
-.tg-node.failed .tg-rect       { fill: var(--failed); }
+.swim-done-row:hover { color: var(--text); }
+.swim-done-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.swim-done-caret { font-size: 10px; }
+.swim-done-pipe { padding-top: 4px; opacity: 0.75; }
+.swim-lane-ungrouped { border-style: dashed; }
 
 /* pipeline / merge-train board (workspace view) — a KANBAN board of COLUMNS holding
    active WORK (tasks AND stories as peer cards), one column per pipeline stage in

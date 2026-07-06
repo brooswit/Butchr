@@ -1117,11 +1117,10 @@ async function renderWorkspace(id) {
   const tasks = workLeaves(work);
   // Bound the long-lived module caches against this render's live work-id set (nodes + leaves),
   // dropping entries for work that has left the list so neither grows unbounded over a session.
-  pruneWorkCaches(
-    new Set((Array.isArray(work) ? work : []).map((w) => w && w.id).filter(Boolean)),
-    WORK_TREE_EXPANDED,
-    activityCache,
-  );
+  const liveWorkIds = new Set((Array.isArray(work) ? work : []).map((w) => w && w.id).filter(Boolean));
+  pruneWorkCaches(liveWorkIds, WORK_TREE_EXPANDED, activityCache);
+  // Same growth-bound for the Pipeline view's expanded-done piles (keyed by story id).
+  for (const id of SWIM_DONE_EXPANDED) if (!liveWorkIds.has(id)) SWIM_DONE_EXPANDED.delete(id);
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
 
@@ -1154,8 +1153,8 @@ async function renderWorkspace(id) {
   const paintBody = () => {
     body.innerHTML = "";
     if (dirView === "graph") {
-      body.appendChild(el("h2", {}, "Dependency graph"));
-      body.appendChild(renderGraph(work));
+      body.appendChild(el("h2", {}, "Pipeline"));
+      body.appendChild(renderSwimlanes(work));
     } else if (dirView === "board") {
       body.appendChild(el("h2", {}, "Merge train"));
       // The board is a KANBAN board of COLUMNS that folds in ALL work — stories AND
@@ -1328,6 +1327,11 @@ function openNewStoryModal(workspaceId) {
 // ask) defaults COLLAPSED so the list stays scannable. NOTE: a story's child subtask ROWS are
 // always visible (indented) regardless of this set — only the detail block toggles.
 const WORK_TREE_EXPANDED = new Set();
+// Story ids whose collapsed "N done" pile is EXPANDED in the Pipeline (swimlanes) view. Module
+// scope so an expanded pile survives the full re-render on every SSE event, mirroring
+// WORK_TREE_EXPANDED. Pruned against the live work-id set on each workspace render (below) so it
+// can't grow unbounded across a long session.
+const SWIM_DONE_EXPANDED = new Set();
 
 // <test-extract:prune-caches>
 // Bound the two long-lived module caches so they don't grow unbounded across a long session:
@@ -1497,21 +1501,6 @@ let dirView = (() => {
 function setDirView(v) {
   dirView = v;
   try { localStorage.setItem(DIRVIEW_KEY, v); } catch (e) { /* ignore */ }
-}
-
-// How many previous FINISHED generations the dependency graph reveals behind the
-// active frontier (see renderGraph / finishedGenerations). Mirrored to localStorage
-// so the operator's chosen depth survives SSE re-renders and reloads. Defaults to a
-// small value so the graph stays readable; 0 hides all finished nodes (active only).
-const GRAPH_GENS_KEY = "butchr-graph-gens";
-function graphGenDepth() {
-  try {
-    const v = parseInt(localStorage.getItem(GRAPH_GENS_KEY), 10);
-    return Number.isFinite(v) && v >= 0 ? v : 1;
-  } catch (e) { return 1; }
-}
-function setGraphGenDepth(n) {
-  try { localStorage.setItem(GRAPH_GENS_KEY, String(n)); } catch (e) { /* ignore */ }
 }
 
 function historyOpen() {
@@ -1912,7 +1901,9 @@ function appendStoryRows(tb, story, children, repaint) {
 // survives live updates without re-wiring anything.
 function buildViewToggle(repaint) {
   const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Work view" });
-  const defs = [["list", "List"], ["graph", "Graph"], ["board", "Board"]];
+  // The persisted dirView key stays "graph" (internal, in localStorage) but the tab now
+  // reads "Pipeline" — the Graph tab is the pipeline-swimlanes view.
+  const defs = [["list", "List"], ["graph", "Pipeline"], ["board", "Board"]];
   const btns = {};
   for (const [v, label] of defs) {
     const b = el("button", {
@@ -1966,47 +1957,6 @@ function gatedSubtree(rootId, dependentsOf) {
     for (const d of (dependentsOf.get(id) || [])) if (!seen.has(d)) queue.push(d);
   }
   return seen;
-}
-
-// Generation depth, back from the active frontier, of each FINISHED (non-active)
-// task in the active tasks' dependency ancestry. The active/in-flight tasks are the
-// "tip" (generation 0); a finished task that directly blocks an active task is
-// generation 1; its finished blockers are generation 2; and so on. Computed purely
-// client-side by a breadth-first walk BACKWARD along blocked_by, counting only the
-// finished hops, so the shortest distance to the tip wins. Finished tasks with no
-// dependency path to an active task aren't "previous generations" of anything
-// in flight and get no entry (they're omitted from the graph). Returns a Map of
-// finished-task-id → generation (>= 1); active tasks are intentionally absent.
-function finishedGenerations(tasks) {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
-  // Active = part of the tip, for BOTH kinds. isHistoryItem encodes the split: a NODE
-  // (story) is finished once done/aborted (open/merging/merge_blocked stay tip); a LEAF by
-  // the server's terminal set. Story statuses aren't in ACTIVE_STATUSES, so keying off
-  // !isHistoryItem (rather than ACTIVE_STATUSES) is what folds finished stories into the
-  // finished generations and keeps open stories on the active frontier.
-  const isActive = (t) => t && !isHistoryItem(t);
-  const gen = new Map();
-  // Frontier starts at the active tip (generation 0); these are not recorded in
-  // `gen` (they always render) but seed the walk into their blockers.
-  let frontier = tasks.filter(isActive).map((t) => t.id);
-  const visited = new Set(frontier);
-  let g = 0;
-  while (frontier.length) {
-    const next = [];
-    for (const id of frontier) {
-      for (const b of (byId.get(id).blocked_by || [])) {
-        if (visited.has(b)) continue;
-        const bt = byId.get(b);
-        if (!bt || isActive(bt)) continue; // active blockers seed from their own gen-0 slot
-        visited.add(b);
-        gen.set(b, g + 1);
-        next.push(b);
-      }
-    }
-    frontier = next;
-    g++;
-  }
-  return gen;
 }
 
 // Assign each node a column (level) = longest blocker-chain depth, so blockers sit
@@ -2109,337 +2059,237 @@ function storyLifecycleChip(story) {
 }
 // </test-extract:story-lifecycle-ui>
 
-// Draw a DAG of the workspace's non-terminal WORK (stories + tasks) and their blockers:
-// nodes are work items (label = id, colored by effective status), edges are blocker→blocked
-// arrows pointing left→right across topological levels. Inline SVG, no library. A STORY is a
-// first-class PEER node — it participates in blocked_by edges both ways — and its subtasks are
-// enclosed in a subtle cluster box (drawGraphSvg) rather than connected by parent/child edges.
-// Clicking a TASK node opens its detail; STORY nodes are inert (no detail route). Re-rendered
-// wholesale on each SSE event by the workspace view, so it live-updates for free.
-//
-// The active/in-flight work (the "tip") always renders; how much of the FINISHED dependency
-// history behind it shows is controlled by a generations slider (see finishedGenerations +
-// buildGraphGenSlider) so deep merge trains stay readable. `work` is the full leaf|node union.
-// A tiny inline-SVG swatch for the graph's relationship legend, reusing the graph's own edge/box
-// classes so what the legend shows is exactly what the graph draws: `blocked` = solid muted line
-// with an arrowhead, `child` = dashed accent line (no arrow), `container` = dashed story box.
-function relSwatch(kind) {
-  const s = svg("svg", { class: "tg-rel-swatch", width: 30, height: 14, viewBox: "0 0 30 14", "aria-hidden": "true" });
-  if (kind === "blocked") {
-    s.appendChild(svg("line", { class: "tg-edge", x1: 2, y1: 7, x2: 21, y2: 7 }));
-    s.appendChild(svg("path", { class: "tg-arrow-head", d: "M21,3 L28,7 L21,11 z" }));
-  } else if (kind === "child") {
-    s.appendChild(svg("line", { class: "tg-childedge", x1: 2, y1: 7, x2: 28, y2: 7 }));
-  } else {
-    s.appendChild(svg("rect", { class: "tg-cluster-rect", x: 2, y: 2, width: 26, height: 10, rx: 3, ry: 3 }));
+// ---------- pipeline swimlanes (workspace "Pipeline" view) ----------
+// Per-story horizontal LANES that replace the old force-directed dependency DAG. Each ACTIVE
+// story is a lane; its subtask leaves run left → right in blocked_by order as a pipeline of
+// status pills joined by a single arrow (the blocked_by flow). Membership is shown by the lane
+// itself — there are NO child-of edges and no double-drawn story node. Finished subtasks collapse
+// behind a per-lane toggle. Cross-story blockers surface as a small labeled badge on the affected
+// step. Front-end only, plain HTML/flex (no SVG layout engine); re-rendered wholesale on every SSE
+// event by the workspace view, so it live-updates for free. Status colors are the SHARED
+// .chip.<status> palette (identical vocabulary to List + Board) — this view adds only a small
+// EMPHASIS layer on the card (attention lit, in-flight pulsing) via swimEmphasis; it does NOT fork
+// a divergent palette.
+
+// <test-extract:swimlane-order> — pure, DOM-free intra-lane ordering, unit-tested in
+// test/swimlane-order.test.ts. Orders a story's own leaf ids left → right by longest blocked_by
+// chain WITHIN the lane (reusing graphLevels over the intra-lane edges), ties broken by the item's
+// original index so the layout is STABLE across renders. Cross-story blockers are ignored for
+// ordering — only blocked_by edges BETWEEN the passed member ids count, so a foreign blocker never
+// shifts a lane's columns. Pure: no DOM, no globals beyond graphLevels.
+function orderLaneLeaves(memberIds, byId) {
+  const idSet = new Set(memberIds);
+  const edges = [];
+  for (const id of memberIds) {
+    const w = byId.get(id);
+    if (!w) continue;
+    for (const b of (w.blocked_by || [])) {
+      if (idSet.has(b)) edges.push({ from: b, to: id });
+    }
   }
-  return s;
+  const level = graphLevels(idSet, edges);
+  const idx = new Map(memberIds.map((id, i) => [id, i]));
+  return [...memberIds].sort((a, b) => (level[a] - level[b]) || (idx.get(a) - idx.get(b)));
+}
+// Semantic EMPHASIS bucket for a subtask's CARD (not its pill color). The pill keeps its real
+// .chip.<status> color — the one shared status vocabulary; this only decides which card is visually
+// LOUD so exactly one thing pulls the eye: an ATTENTION item (needs_info / a live agent wedged at a
+// human prompt) gets a bright ring, an in-flight item a gentle accent (in_progress also gets a
+// pulsing dot, gated by prefers-reduced-motion in CSS), a not-yet-its-turn item is dimmed, and
+// everything terminal/quiet is neutral. Pure string → string.
+function swimEmphasis(st) {
+  if (st === "needs_info" || st === "needs_user_input") return "attn";
+  if (st === "in_progress" || st === "idle") return "active";
+  if (st === "blocked" || st === "inactive" || st === "merge_blocked") return "blocked";
+  return "done"; // in_review / merged / done / failed / aborted / rolled_back … — quiet
+}
+// </test-extract:swimlane-order>
+
+// A single arrow connector between two pipeline steps — the ONE edge vocabulary (blocked_by flow).
+function swimConn() {
+  return el("div", { class: "swim-conn", "aria-hidden": "true" }, [
+    svg("svg", { class: "swim-conn-svg", viewBox: "0 0 26 14" }, [
+      svg("path", { d: "M0 7h20m0 0l-5-4m5 4l-5 4", fill: "none", stroke: "currentColor", "stroke-width": "1.5" }),
+    ]),
+  ]);
 }
 
-function renderGraph(work) {
-  const byId = new Map(work.map((t) => [t.id, t]));
-  // Active tip for BOTH kinds via !isHistoryItem (story statuses aren't in ACTIVE_STATUSES):
-  // an OPEN story joins the tip, a done/aborted story folds into finished history like a task.
-  const active = work.filter((t) => !isHistoryItem(t));
-  // Reversed edges over the WHOLE list (not just the graphed subset) so a node's
-  // sub-tree progress counts dependents that have already merged off the graph.
-  const dependentsOf = reverseDeps(work);
+// One pipeline STEP: a status-colored, clickable card for a subtask leaf. Links to the task detail
+// (an <a>, so it's keyboard-focusable with a visible focus ring from CSS). The status pill reuses
+// .chip.<status>; a live in_progress agent gets the lone pulsing dot. A blocker that lives in
+// ANOTHER lane (not among this story's members) surfaces as a small "⤴ blocked by …" badge so the
+// rare cross-story dependency isn't silently dropped.
+function swimStep(leaf, memberSet, byId) {
+  const st = effStatus(leaf);
+  const emph = swimEmphasis(st);
+  const dot = st === "in_progress" ? '<span class="swim-dot" aria-hidden="true"></span>' : "";
+  const foreign = (leaf.blocked_by || []).filter((b) => !memberSet.has(b) && byId.has(b));
+  const parts = [
+    `<div class="swim-step-top"><span class="chip ${esc(st)}">${dot}${esc(st)}</span>` +
+      (emph === "attn" ? '<span class="swim-needs">needs you</span>' : "") + `</div>`,
+    `<span class="swim-sid">${esc(leaf.id)}</span>`,
+  ];
+  if (leaf.brief && leaf.brief !== leaf.id) parts.push(`<span class="swim-sum">${esc(leaf.brief)}</span>`);
+  if (foreign.length) {
+    parts.push(`<span class="swim-xdep" title="blocked by work in another lane">⤴ blocked by ${esc(foreign.join(", "))}</span>`);
+  }
+  return el("a", {
+    class: "swim-step is-" + emph,
+    href: "#/task/" + esc(leaf.id),
+    "aria-label": `subtask ${leaf.id} — ${st}`,
+    html: parts.join(""),
+  });
+}
+
+// One story LANE: header (kind badge · title · id · status + lifecycle chips · progress) over a
+// horizontally-scrollable pipeline of its ACTIVE subtasks. A childless / all-finished story shows a
+// compact parked empty-row INSIDE the lane (never a bare box). Finished subtasks collapse behind a
+// per-lane "N done" toggle whose expanded state lives in SWIM_DONE_EXPANDED (survives SSE renders).
+function swimLane(story, byId, allIds, repaint) {
+  const st = effStatus(story);
+  const p = storyProgress(story.counts);
+  const progHtml = p.total
+    ? `<span class="swim-track"><i style="width:${Math.round((100 * p.done) / p.total)}%"></i></span>` +
+      `<span class="swim-prog-txt">${p.done} / ${p.total} done</span>`
+    : `<span class="swim-prog-txt">not started</span>`;
+  const title = story.brief || story.id;
+  const hd = el("div", { class: "swim-hd", html:
+    `<span class="swim-kind">${kindBadge("node")}</span>` +
+    `<span class="swim-title" title="${esc(title)}">${esc(title)}</span>` +
+    `<span class="swim-laneid">${esc(story.id)}</span>` +
+    `<div class="swim-meta"><span class="chip ${esc(st)}">${esc(st)}</span>${storyLifecycleChip(story)}` +
+    `<div class="swim-prog">${progHtml}</div></div>` });
+
+  const members = storyMemberIds(story.id, allIds, byId);
+  const memberSet = new Set(members);
+  const active = members.filter((id) => !isHistoryItem(byId.get(id)));
+  const done = members.filter((id) => isHistoryItem(byId.get(id)));
+
+  const lane = el("div", { class: "swim-lane" }, [hd]);
 
   if (active.length === 0) {
-    return el("div", { class: "empty" }, "No active work to graph.");
+    // HONEST empty state: genuinely childless → "no subtasks yet"; decomposed-but-all-finished
+    // (or only-waiting) → a softer note. Reuses the shared parked lifecycle chip, no new palette.
+    const childless = storySubtaskTotal(story.counts) === 0;
+    const msg = childless
+      ? "No subtasks yet — parked until the leader decomposes it."
+      : "No active subtasks — all work is finished or waiting.";
+    lane.appendChild(el("div", { class: "swim-empty", html:
+      `<span class="chip lc-parked">⏸ parked</span><span class="swim-empty-txt">${esc(msg)}</span>` }));
+  } else {
+    const ordered = orderLaneLeaves(active, byId);
+    const pipe = el("div", { class: "swim-pipe" });
+    ordered.forEach((id, i) => {
+      if (i > 0) pipe.appendChild(swimConn());
+      pipe.appendChild(swimStep(byId.get(id), memberSet, byId));
+    });
+    lane.appendChild(pipe);
   }
 
-  // Finished-work generations back from the active tip, and the deepest one present.
-  const gen = finishedGenerations(work);
-  let maxGen = 0;
-  for (const g of gen.values()) if (g > maxGen) maxGen = g;
+  if (done.length) lane.appendChild(swimDoneRow(story.id, done, byId, memberSet, repaint));
+  return lane;
+}
 
-  // The graph repaints into `holder` whenever the slider moves, reading the (clamped)
-  // depth fresh each time so the persisted value drives both the control and the draw.
-  const holder = el("div", { class: "task-graph-holder" });
-  const draw = () => {
-    holder.innerHTML = "";
-    holder.appendChild(drawGraphSvg(byId, active, dependentsOf, gen, Math.min(graphGenDepth(), maxGen)));
+// Collapsed "N done" footer row for a lane; expands in place to reveal the finished subtasks as a
+// second, dimmed pipeline. Keyboard-operable (role=button + Enter/Space). Expanded state keyed by
+// story id in the module-level SWIM_DONE_EXPANDED set, so it persists across SSE re-renders.
+function swimDoneRow(storyId, done, byId, memberSet, repaint) {
+  const open = SWIM_DONE_EXPANDED.has(storyId);
+  const wrap = el("div", { class: "swim-done" });
+  const toggle = () => {
+    if (SWIM_DONE_EXPANDED.has(storyId)) SWIM_DONE_EXPANDED.delete(storyId);
+    else SWIM_DONE_EXPANDED.add(storyId);
+    repaint();
   };
-  draw();
-
-  const parts = [];
-  // Only worth a slider when there's finished history to reveal; otherwise the graph
-  // is just the active frontier and the control would do nothing.
-  if (maxGen >= 1) parts.push(buildGraphGenSlider(maxGen, draw));
-  parts.push(holder);
-  return el("div", {}, parts);
-}
-
-// Build the SVG graph for the active tip plus every finished node within `depth`
-// generations of it (finishedGenerations). Pulled out of renderGraph so the slider
-// can repaint just this subtree without rebuilding the control around it.
-function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
-  // Node set: the active tip (always shown), plus finished tasks whose generation
-  // back from the tip is within the chosen depth. A merged blocker that passes shows
-  // up as a green node, making the dependency's provenance visible; one beyond the
-  // depth is dropped along with its now-dangling edges.
-  const nodeIds = new Set(active.map((t) => t.id));
-  for (const [id, g] of gen) if (g <= depth && byId.has(id)) nodeIds.add(id);
-
-  const edges = [];
-  for (const id of nodeIds) {
-    for (const b of (byId.get(id).blocked_by || [])) {
-      if (nodeIds.has(b)) edges.push({ from: b, to: id });
-    }
-  }
-
-  // layout geometry
-  const NW = 158, NH = 38, COL_GAP = 64, ROW_GAP = 16, PAD = 14;
-  const level = graphLevels(nodeIds, edges);
-  const byLevel = new Map();
-  for (const id of nodeIds) {
-    const lv = level[id];
-    if (!byLevel.has(lv)) byLevel.set(lv, []);
-    byLevel.get(lv).push(id);
-  }
-  const maxLevel = Math.max(0, ...[...nodeIds].map((id) => level[id]));
-  const pos = new Map();
-  let maxRows = 0;
-  for (let lv = 0; lv <= maxLevel; lv++) {
-    const col = byLevel.get(lv) || [];
-    maxRows = Math.max(maxRows, col.length);
-    col.forEach((id, i) => {
-      pos.set(id, { x: PAD + lv * (NW + COL_GAP), y: PAD + i * (NH + ROW_GAP) });
+  const row = el("div", {
+    class: "swim-done-row", role: "button", tabindex: "0", "aria-expanded": open ? "true" : "false",
+    html: `<span class="swim-done-caret">${open ? "▾" : "▸"}</span> ${done.length} done`,
+    onclick: toggle,
+    onkeydown: (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); } },
+  });
+  wrap.appendChild(row);
+  if (open) {
+    const pipe = el("div", { class: "swim-pipe swim-done-pipe" });
+    orderLaneLeaves(done, byId).forEach((id, i) => {
+      if (i > 0) pipe.appendChild(swimConn());
+      pipe.appendChild(swimStep(byId.get(id), memberSet, byId));
     });
+    wrap.appendChild(pipe);
   }
-  const width = PAD * 2 + (maxLevel + 1) * NW + maxLevel * COL_GAP;
-  const height = PAD * 2 + maxRows * NH + Math.max(0, maxRows - 1) * ROW_GAP;
-
-  const root = svg("svg", {
-    class: "task-graph", width, height, viewBox: `0 0 ${width} ${height}`,
-    role: "img", "aria-label": "Task dependency graph",
-  });
-
-  // arrowhead marker, reused by every edge
-  const defs = svg("defs", {}, [
-    svg("marker", {
-      id: "tg-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5",
-      markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse",
-    }, [svg("path", { class: "tg-arrow-head", d: "M0,0 L10,5 L0,10 z" })]),
-  ]);
-  root.appendChild(defs);
-
-  // Cluster bounding-box layer, drawn FIRST so it sits BEHIND the edges + nodes: for EVERY
-  // visible STORY (node-kind) a subtle translucent rounded-rect enclosing the story node + its
-  // VISIBLE child subtasks (children = leaves in the node set owned by the story, via
-  // storyMemberIds), headed by a reused ◈ STORY <id> label (kindVisual('node'), from S1). The
-  // container is ALWAYS drawn — including the childless case — so a story never reads as a bare
-  // orphan box; ownership is shown by this ENCLOSURE (reinforced by the child-of edges below),
-  // not by dependency edges. The layered topological layout is left UNTOUCHED, so a story's
-  // children may be scattered and its box may grow or overlap neighbours — an accepted tradeoff
-  // (translucent, behind everything); we do NOT re-layout to force child adjacency. CPAD ≤ PAD
-  // keeps the box (and its label band) inside the svg's PAD margin, so nothing clips.
-  const CPAD = 12;
-  const kvNode = kindVisual("node"); // ◈ STORY — reused for every container header (S1's table)
-  const clusterLayer = svg("g", { class: "tg-clusters" });
-  for (const id of nodeIds) {
-    const story = byId.get(id);
-    if (!story || story.work_kind !== "node") continue;
-    // Members = the story node + its VISIBLE child leaves (may be just the node itself).
-    const members = [id, ...storyMemberIds(id, nodeIds, byId)];
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const m of members) {
-      const p = pos.get(m);
-      if (!p) continue;
-      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x + NW); maxY = Math.max(maxY, p.y + NH);
-    }
-    if (!isFinite(minX)) continue; // story node itself unplaced — nothing to box
-    const bx = minX - CPAD, by = minY - CPAD;
-    const bw = (maxX - minX) + CPAD * 2, bh = (maxY - minY) + CPAD * 2;
-    // HONEST empty state: label "· no subtasks yet" ONLY when the story has ZERO subtasks total
-    // (a parked/just-created story). A story whose children are all finished or hidden by the
-    // depth slider also has members.length===1, but is NOT childless (counts>0) — it gets a
-    // neutral "· subtasks not shown" header instead, so we never lie about a decomposed story.
-    const total = storySubtaskTotal(story.counts);
-    const childless = total === 0;
-    const hiddenChildren = !childless && members.length === 1;
-    const suffix = childless ? " · no subtasks yet" : hiddenChildren ? " · subtasks not shown" : "";
-    // Secondary lifecycle word + own-progress ONLY when the story HAS subtasks: a childless story is
-    // PARKED with total 0, and S2's "no subtasks yet" suffix already conveys that — appending "· parked"
-    // there would just double up. Placed BEFORE the childless/hidden suffix so the empty-state text is
-    // preserved as the trailing note.
-    const lc = childless ? null : storyLifecycle(story);
-    const prog = childless ? null : storyProgress(story.counts);
-    const lcTxt = (lc ? " · " + lc.key : "") + (prog && prog.total ? ` · ${prog.done}/${prog.total} done` : "");
-    const cg = svg("g", { class: "tg-cluster" + (childless ? " empty" : "") });
-    cg.appendChild(svg("title", {}, `story ${id}${lcTxt}${suffix}`));
-    cg.appendChild(svg("rect", { class: "tg-cluster-rect", x: bx, y: by, width: bw, height: bh, rx: 10, ry: 10 }));
-    cg.appendChild(svg("text", { class: "tg-cluster-label", x: bx + 8, y: by + 2 }, `${kvNode.glyph} ${kvNode.label} ${id}${lcTxt}${suffix}`));
-    clusterLayer.appendChild(cg);
-  }
-  root.appendChild(clusterLayer);
-
-  // Child-of connectors: a DASHED, NO-arrowhead line from each visible STORY to each of its
-  // VISIBLE child leaves — deliberately DISTINCT from the solid arrowed blocked_by edges below,
-  // so the two relationship meanings never blur (containment vs dependency). Synthesized
-  // front-end from the SAME membership rule (storyMemberIds). Drawn ABOVE the cluster box but
-  // BELOW the blocked_by edges + nodes, and kept thin so the box + child-of + blocked_by don't
-  // overwhelm a dense graph. Both endpoints are guaranteed in the node set (storyMemberIds
-  // filters to it + the pos guards), so a slider-hidden child never leaves a dangling edge.
-  const childLayer = svg("g", { class: "tg-childedges" });
-  for (const id of nodeIds) {
-    const story = byId.get(id);
-    if (!story || story.work_kind !== "node") continue;
-    const a = pos.get(id);
-    if (!a) continue;
-    for (const cid of storyMemberIds(id, nodeIds, byId)) {
-      const b = pos.get(cid);
-      if (!b) continue;
-      const x1 = a.x + NW, y1 = a.y + NH / 2;
-      const x2 = b.x, y2 = b.y + NH / 2;
-      const dx = Math.max(18, (x2 - x1) / 2);
-      childLayer.appendChild(svg("path", {
-        class: "tg-childedge",
-        d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
-      }));
-    }
-  }
-  root.appendChild(childLayer);
-
-  // edges next so nodes paint on top of them
-  const edgeLayer = svg("g", { class: "tg-edges" });
-  for (const e of edges) {
-    const a = pos.get(e.from), b = pos.get(e.to);
-    if (!a || !b) continue;
-    const x1 = a.x + NW, y1 = a.y + NH / 2;
-    const x2 = b.x, y2 = b.y + NH / 2;
-    const dx = Math.max(18, (x2 - x1) / 2);
-    edgeLayer.appendChild(svg("path", {
-      class: "tg-edge",
-      d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
-      "marker-end": "url(#tg-arrow)",
-    }));
-  }
-  root.appendChild(edgeLayer);
-
-  // nodes
-  for (const id of nodeIds) {
-    const t = byId.get(id);
-    const p = pos.get(id);
-    const st = effStatus(t);
-    const isStory = t.work_kind === "node";
-    // Sub-tree this node gates: how many of its transitive dependents have merged.
-    // Nodes that gate nothing get no bar and keep the plain two-line layout.
-    const subIds = gatedSubtree(id, dependentsOf);
-    const subTotal = subIds.size;
-    // COMPLETE, not just `merged`: a dependent STORY lands at status `done`, so a merged-only
-    // count under-reports any subtree gating a story (see isCompleteStatus / countComplete).
-    const subMerged = countComplete(subIds, byId);
-    const prog = subTotal ? ` · ${subMerged}/${subTotal} merged` : "";
-    // When a bar is present the two text lines shift up to make room for it.
-    const idY = NH / 2 - (subTotal ? 5 : 3);
-    const stY = NH / 2 + (subTotal ? 8 : 11);
-    // A STORY is a first-class PEER node drawn distinct (tg-story: heavier/accent border) but
-    // INERT — stories have no detail route, so it does not navigate (role=group, no tabindex,
-    // default cursor). A TASK node still links to its detail page (role=link, keyboard-focusable).
-    // Secondary lifecycle glyph for an OPEN story (working/parked/stalled) — null otherwise. Added to
-    // the node's title + aria-label so the derived state is announced alongside status/progress.
-    const lc = isStory ? storyLifecycle(t) : null;
-    const lcTxt = lc ? " · " + lc.key : "";
-    const g = svg("g", {
-      class: "tg-node " + st + (isStory ? " tg-story" : ""),
-      transform: `translate(${p.x},${p.y})`,
-      tabindex: isStory ? null : "0",
-      role: isStory ? "group" : "link",
-      "aria-label": `${isStory ? "story " : ""}${id} — ${st}${lcTxt}${prog}`,
-    });
-    g.appendChild(svg("title", {}, `${isStory ? "story " : ""}${id} · ${st}${lcTxt}${prog}`));
-    g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
-    // Glyph-only kind marker in the node's top-left corner (no label — the compact node
-    // has no room; the glyph + tooltip carry the type). Keyed off the authoritative
-    // work_kind, colored per kind via .tg-kind-*. Sits left of the centered tg-id text and
-    // above the progress bar, so it never collides.
-    const kv = kindVisual(t.work_kind);
-    const kg = svg("text", { class: "tg-kind tg-kind-" + kv.cls, x: 7, y: 13 }, kv.glyph);
-    kg.appendChild(svg("title", {}, kv.label));
-    g.appendChild(kg);
-    // Lifecycle glyph mirrors the kind glyph in the top-RIGHT corner (text-anchor:end via CSS), quiet
-    // and colored per state — a secondary hint that never competes with the id/status text between them.
-    if (lc) {
-      const lg = svg("text", { class: "tg-lifecycle tg-lc-" + lc.cls, x: NW - 7, y: 13 }, lc.glyph);
-      lg.appendChild(svg("title", {}, "lifecycle — " + lc.key));
-      g.appendChild(lg);
-    }
-    g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: idY }, id));
-    g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY }, st));
-    if (subTotal) {
-      const bw = NW - 16;
-      g.appendChild(svg("rect", { class: "tg-prog-track", x: 8, y: NH - 5, width: bw, height: 3, rx: 1.5 }));
-      g.appendChild(svg("rect", {
-        class: "tg-prog-fill", x: 8, y: NH - 5, height: 3, rx: 1.5,
-        width: Math.round((bw * subMerged) / subTotal),
-      }));
-    }
-    if (!isStory) {
-      const go = () => { location.hash = "#/task/" + id; };
-      g.addEventListener("click", go);
-      g.addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
-      });
-    }
-    root.appendChild(g);
-  }
-
-  // Relationship legend — teaches the three graph vocabularies so child-of and blocked-by can't
-  // blur: a dashed CONTAINER box (a story), a dashed no-arrow CHILD-OF line, and a solid arrowed
-  // BLOCKED-BY line. Each swatch reuses the very classes the graph draws with, so the legend and
-  // the graph can't drift. Sits above the status-color legend.
-  const relItems = [
-    ["container", "story container"],
-    ["child", "child-of"],
-    ["blocked", "blocked-by"],
-  ].map(([k, txt]) => el("span", { class: "tg-rel" }, [relSwatch(k), txt]));
-  const relLegend = el("div", { class: "tg-rel-legend" }, relItems);
-
-  // legend of the statuses actually present, reusing the .chip color styling
-  const present = [...new Set([...nodeIds].map((id) => effStatus(byId.get(id))))];
-  const legend = el("div", { class: "tg-legend" },
-    present.map((s) => el("span", { class: "chip " + s }, s)));
-
-  const scroll = el("div", { class: "task-graph-scroll" }, [root]);
-  return el("div", {}, [relLegend, legend, scroll]);
+  return wrap;
 }
 
-// Human-readable readout shown next to the generations slider. The endpoints get
-// descriptive labels (0 = active only, max = the full available history) so the
-// operator knows what the extremes mean.
-function graphGenValueText(n, maxGen) {
-  if (n <= 0) return "0 (active only)";
-  if (n >= maxGen) return maxGen + " (all)";
-  return String(n);
+// A catch-all lane for ACTIVE leaves whose owning story isn't a node present in this list (an
+// orphan, or a subtask of an already-finished story). Ensures NO active work is ever silently
+// dropped from the view. No progress/lifecycle header — it isn't a real story.
+function swimUngroupedLane(leaves, byId) {
+  const ids = leaves.map((w) => w.id);
+  const memberSet = new Set(ids);
+  const hd = el("div", { class: "swim-hd", html:
+    `<span class="swim-kind"><span class="kind-badge kind-unknown" title="ungrouped">• UNGROUPED</span></span>` +
+    `<span class="swim-title">Ungrouped work</span>` +
+    `<span class="swim-laneid">no owning story</span>` });
+  const lane = el("div", { class: "swim-lane swim-lane-ungrouped" }, [hd]);
+  const pipe = el("div", { class: "swim-pipe" });
+  orderLaneLeaves(ids, byId).forEach((id, i) => {
+    if (i > 0) pipe.appendChild(swimConn());
+    pipe.appendChild(swimStep(byId.get(id), memberSet, byId));
+  });
+  lane.appendChild(pipe);
+  return lane;
 }
 
-// The "Finished generations" range slider for the dependency graph. Lets the
-// operator choose how many previous finished generations (0 … maxGen) render behind
-// the active tip; the chosen value persists in localStorage (graphGenDepth) and the
-// current value is shown alongside. `onChange` repaints the graph in place.
-function buildGraphGenSlider(maxGen, onChange) {
-  // Reflect the persisted depth, clamped to what's currently available.
-  const value = Math.min(graphGenDepth(), maxGen);
-  const input = el("input", {
-    type: "range", id: "graph-gens", class: "graph-gens-slider",
-    min: "0", max: String(maxGen), step: "1", value: String(value),
-    "aria-label": "Previous finished generations to show",
-  });
-  const out = el("span", { class: "graph-gens-value" }, graphGenValueText(value, maxGen));
-  input.addEventListener("input", () => {
-    const n = Math.max(0, Math.min(maxGen, parseInt(input.value, 10) || 0));
-    setGraphGenDepth(n);
-    out.textContent = graphGenValueText(n, maxGen);
-    onChange();
-  });
-  return el("div", { class: "graph-gens" }, [
-    el("label", { class: "graph-gens-label", for: "graph-gens" }, "Finished generations"),
-    input,
-    out,
-  ]);
+// A quiet legend of the semantic emphasis vocabulary, reusing the SHARED status color vars (so the
+// swatches can't drift from the .chip palette). Purely explanatory; not interactive.
+function swimLegend() {
+  const items = [
+    ["in_progress", "in progress"],
+    ["needs_info", "needs you"],
+    ["blocked", "blocked (waiting its turn)"],
+    ["merged", "done"],
+    ["lc-parked", "parked"],
+  ];
+  return el("div", { class: "swim-legend", html: items.map(([cls, txt]) =>
+    `<span><i class="swim-ldot ${esc(cls)}"></i> ${esc(txt)}</span>`).join("") });
+}
+
+// The Pipeline view entry point (called from the workspace view where dirView === "graph"). Builds
+// into a wrapper it can repaint in place, so a lane's done-toggle re-renders instantly without
+// waiting for the next SSE tick.
+function renderSwimlanes(work) {
+  const wrap = el("div", { class: "swim-wrap" });
+  const paint = () => { wrap.innerHTML = ""; buildSwimlanes(work, wrap, paint); };
+  paint();
+  return wrap;
+}
+
+function buildSwimlanes(work, wrap, repaint) {
+  const list = Array.isArray(work) ? work : [];
+  const byId = new Map(list.map((w) => [w.id, w]));
+  const allIds = new Set(byId.keys());
+  // A leaf is "grouped" when its owning id resolves to a STORY node present in this list.
+  const ownedByPresentStory = (w) => {
+    const parent = byId.get(graphChildOf(w));
+    return !!parent && parent.work_kind === "node";
+  };
+  const stories = list.filter((w) => w.work_kind === "node" && !isHistoryItem(w));
+  const ungrouped = list.filter((w) =>
+    w.work_kind === "leaf" && !isHistoryItem(w) && !ownedByPresentStory(w));
+
+  wrap.appendChild(el("div", { class: "swim-caption", html:
+    "<b>Work pipeline.</b> Each story is a lane; its subtasks run left → right in the order they " +
+    "unblock. The item that needs you is the only thing lit; finished work collapses away." }));
+  wrap.appendChild(swimLegend());
+
+  if (stories.length === 0 && ungrouped.length === 0) {
+    wrap.appendChild(el("div", { class: "empty" }, "No active work to show."));
+    return;
+  }
+
+  const lanes = el("div", { class: "swim-lanes" });
+  for (const s of stories) lanes.appendChild(swimLane(s, byId, allIds, repaint));
+  if (ungrouped.length) lanes.appendChild(swimUngroupedLane(ungrouped, byId));
+  wrap.appendChild(lanes);
 }
 
 // ---------- pipeline / merge-train board ----------
