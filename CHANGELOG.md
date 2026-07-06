@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.196] - 2026-07-06
+
 ### Added
 - Add the `owningRepoOf(id)` accessor (`src/work.ts`) — REVAMP-4 Phase 0 / S0b
   (story st-1a82a2e1). It resolves a Work's owning repo by WALKING the `parent_id`
