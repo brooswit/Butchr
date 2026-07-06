@@ -47,16 +47,15 @@ function insertTask(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, work_kind, story_id, parent_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, work_kind, parent_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       DIR,
       status,
       opts.workKind ?? "leaf",
-      opts.storyId ?? null,
-      opts.parentId ?? null,
+      opts.parentId ?? opts.storyId ?? null,
       dbMod.nowIso(),
     );
 }
@@ -98,16 +97,12 @@ beforeAll(async () => {
     .query(`INSERT OR IGNORE INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR, join(REPO_ROOT, DIR), DIR, dbMod.nowIso());
 
-  // A real story + its materialized Work NODE (id == story id, work_kind='node'), one LEAF member,
-  // and a LAZY story (stories row only — the not-yet-materialized node case).
-  dbMod.db
-    .query(`INSERT INTO stories (id, workspace_id, status, created_at) VALUES (?, ?, 'open', ?)`)
-    .run(STORY, DIR, dbMod.nowIso());
+  // A real story materialized as its Work NODE (id == story id, work_kind='node'), one LEAF member,
+  // and a LAZY story (no rows at all — the not-yet-materialized node case; B.5b dropped the
+  // legacy stories table, so a story with no node row simply has no rows anywhere).
   insertTask(STORY, "merged", { workKind: "node" }); // node anchor (status varied per test)
-  insertTask(LEAF, "aborted", { workKind: "leaf", storyId: STORY, parentId: STORY }); // dead control member
-  dbMod.db
-    .query(`INSERT INTO stories (id, workspace_id, status, created_at) VALUES (?, ?, 'open', ?)`)
-    .run(LAZY, DIR, dbMod.nowIso()); // NO tasks node row — lazy
+  insertTask(LEAF, "aborted", { workKind: "leaf", parentId: STORY }); // dead control member
+  // LAZY: NO tasks node row (and no legacy stories row post-B.5b) — nothing seeded.
 });
 
 afterAll(() => {

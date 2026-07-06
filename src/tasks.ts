@@ -73,6 +73,9 @@ import { existsSync, readFileSync } from "node:fs";
 // its blocked_by set (see setBlockedBy). We Omit the raw column so the array shape
 // wins.
 export type TaskView = Omit<TaskRow, "blocked_by" | "tags" | "allowlist"> & {
+  // The owning STORY id, or null for a standalone task. WIRE CONTRACT re-derived from parent_id
+  // (B.5b st-78a8b4e7 — the story_id column is dropped; parent_id is the sole membership pointer).
+  story_id: string | null;
   prompt: string;
   context: string[];
   review_notes: string;
@@ -617,7 +620,7 @@ export function pendingResponder(row: TaskRow): PendingResponder | null {
   if (!unifiedWorkEnabled()) {
     // Legacy 2-level routing (BUTCHR_UNIFIED_WORK=0).
     if (row.needs_user_input) return "user";
-    if (row.story_id != null) return "story";
+    if (row.parent_id != null) return "story";
     return row.escalated_to_user ? "user" : "cto";
   }
   const resolved = resolveWorkResponder(row.id, {
@@ -664,6 +667,11 @@ export function taskView(id: string): TaskView | null {
   const blocked_by = parseBlockedBy(row.blocked_by);
   return {
     ...rowForView(row),
+    // WIRE CONTRACT (B.5b st-78a8b4e7): the external `story_id` field is re-derived from
+    // parent_id (the SOLE membership pointer now the story_id column is dropped). parent_id
+    // carried the identical value in lock-step, so the API/SSE shape is byte-for-byte unchanged
+    // — channel.ts, the CLI, and the dashboard keep reading `story_id`.
+    story_id: row.parent_id ?? null,
     prompt,
     context,
     review_notes,
@@ -965,7 +973,7 @@ export function attentionList(): AttentionItem[] {
     items.push({
       id: row.id,
       workspace_id: row.workspace_id,
-      story_id: row.story_id ?? null,
+      story_id: row.parent_id ?? null, // membership by parent_id (B.5b — story_id column dropped)
       workspace_label: getWorkspace(row.workspace_id)?.label ?? null,
       status: row.status,
       kind: row.kind,
@@ -1136,11 +1144,12 @@ function emitUpdated(id: string): void {
  * standalone tasks always resolve to null here (today's single-level behavior).
  */
 function isolatedStoryBranch(row: TaskRow): string | null {
-  if (!row.story_id) return null;
+  // Membership by parent_id (B.5b st-78a8b4e7 — the SOLE membership pointer; story_id dropped).
+  if (!row.parent_id) return null;
   if (!workspaceBranchIsolation(row.workspace_id)) return null;
-  const story = getStoryRow(row.story_id);
+  const story = getStoryRow(row.parent_id);
   if (!story || story.isolated !== 1) return null;
-  return git.storyBranchName(row.story_id);
+  return git.storyBranchName(row.parent_id);
 }
 
 /**
@@ -1155,8 +1164,9 @@ function isolatedStoryBranch(row: TaskRow): string | null {
  * (merging/done/aborted) — see the guard in finalizeMerge (story st-a632b2cc F1).
  */
 function parentStoryStatus(row: TaskRow): string | null {
-  if (!row.story_id) return null;
-  return storyStatusOf(row.story_id);
+  // Membership by parent_id (B.5b st-78a8b4e7 — the SOLE membership pointer; story_id dropped).
+  if (!row.parent_id) return null;
+  return storyStatusOf(row.parent_id);
 }
 
 /** Story statuses that still ACCEPT member merges — mirrors createSubtask's creation guard
@@ -1623,8 +1633,8 @@ function setStatus(
   // (`member-blocked`) when the story has settled with a dead member — fixing the asymmetry where a
   // merge fires a check but an abort/fail fired none. Guarded to actual story members; the story-
   // status + settled-state gating lives in notifyStoryReadiness.
-  if (row.status !== to && (to === "failed" || to === "aborted") && row.story_id) {
-    notifyStoryReadiness(row.story_id);
+  if (row.status !== to && (to === "failed" || to === "aborted") && row.parent_id) {
+    notifyStoryReadiness(row.parent_id);
   }
   return true;
 }
@@ -1823,8 +1833,8 @@ export async function createTask(
   // runs right before the first subtask worktree is branched" cut), else the default branch
   // (resolveBase → defaultBranch, so a standalone/non-isolated task is unchanged). The DB
   // row does not exist yet, so resolveBase is fed a minimal row carrying only the two fields
-  // isolatedStoryBranch reads (story_id + workspace_id).
-  const base = await resolveBase({ story_id: storyId, workspace_id: workspaceId } as TaskRow);
+  // isolatedStoryBranch reads (parent_id + workspace_id; B.5b — parent_id is the membership pointer).
+  const base = await resolveBase({ parent_id: storyId, workspace_id: workspaceId } as TaskRow);
   await git.createWorktree(dir.path, id, base);
   writeTaskMd(
     dir.path,
@@ -1842,16 +1852,14 @@ export async function createTask(
     prompt,
   );
 
-  // UNIFIED-WORK PARENT POINTER (story st-540ba705, step 6a): a story member's parent IS its
-  // story (the Work node). Materialize the story's Work node FIRST (idempotent — the FK anchor
-  // parent_id points at) so the INSERT's parent_id self-FK is satisfied even for a story
-  // created after the boot migration. parent_id is set == story_id (they stay in lock-step;
-  // story_id remains authoritative for the legacy /api/stories path until step 6d). NULL for a
-  // standalone task — today's behavior.
+  // UNIFIED-WORK PARENT POINTER (B.5b st-78a8b4e7): a story member's parent IS its story (the
+  // Work node); parent_id is the SOLE membership pointer now the legacy story_id column is dropped.
+  // The story's Work node already exists (createSubtask/assignTaskToStory 404 on a gone story → its
+  // node is present); ensureStoryWorkNode is a defensive no-op belt. NULL for a standalone task.
   if (storyId != null) ensureStoryWorkNode(storyId);
   db.query(
-    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, story_id, parent_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, parent_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     workspaceId,
@@ -1864,7 +1872,6 @@ export async function createTask(
     taskPriority,
     taskPlanPreview ? 1 : 0,
     taskVersionBump,
-    storyId,
     storyId,
     created,
   );
@@ -2644,7 +2651,7 @@ async function recordLanded(
   // delivered (every member merged/rolled_back → completion-review) OR settled-but-stuck (a
   // sibling already failed/aborted → member-blocked). story_id-guarded so STANDALONE tasks
   // never trigger it (no regression).
-  if (row.story_id) notifyStoryReadiness(row.story_id);
+  if (row.parent_id) notifyStoryReadiness(row.parent_id);
   return { task: taskView(id)! };
 }
 
@@ -2706,7 +2713,7 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   const storyStatus = parentStoryStatus(row);
   if (storyStatus && !STORY_ACCEPTS_MEMBERS.has(storyStatus)) {
     const message =
-      `parent story ${row.story_id} is ${storyStatus} — subtask merge refused ` +
+      `parent story ${row.parent_id} is ${storyStatus} — subtask merge refused ` +
       `(story no longer accepts members; task held in_review)`;
     console.warn(`[butchr] finalizeMerge(${id}): ${message}`);
     return { task: taskView(id)!, storyClosed: true, message };
@@ -3137,7 +3144,7 @@ export function escalateTask(id: string): TaskView {
   if (!isAwaitingFeedback(row)) {
     throw new HttpError(409, `task is not awaiting feedback (status=${row.status})`);
   }
-  if (row.story_id != null) {
+  if (row.parent_id != null) {
     throw new HttpError(409, "task is a story member — its feedback is terminal at the leader, nothing to escalate");
   }
   if (row.escalated_to_user) {
@@ -3160,12 +3167,12 @@ export function escalateTask(id: string): TaskView {
  * aborted/failed), is NOT complete.
  */
 export function isStoryComplete(storyId: string): boolean {
-  // `work_kind='leaf'` is explicit (B.2): members are always leaves and the node's own story_id
+  // `work_kind='leaf'` is explicit (B.2): members are always leaves and the node's own parent_id
   // is NULL so it's never selected here — the guard makes node-exclusion STRUCTURAL across the
-  // story-rollup reads rather than incidental, behavior-identical today.
+  // story-rollup reads. Membership by parent_id (B.5b st-78a8b4e7 — the story_id column is dropped).
   const members = db
     .query<{ status: TaskStatus }, [string]>(
-      `SELECT status FROM tasks WHERE story_id=? AND work_kind='leaf'`,
+      `SELECT status FROM tasks WHERE parent_id=? AND work_kind='leaf'`,
     )
     .all(storyId);
   if (members.length === 0) return false;
@@ -3214,7 +3221,7 @@ export function notifyStoryCompletionIfReady(storyId: string): boolean {
 function mergedMemberCount(storyId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')`,
     )
     .get(storyId)!.n;
 }
@@ -3224,7 +3231,7 @@ function mergedMemberCount(storyId: string): number {
 function deadMemberCount(storyId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND (status='failed' OR status='aborted')`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf' AND (status='failed' OR status='aborted')`,
     )
     .get(storyId)!.n;
 }
@@ -3246,7 +3253,7 @@ export function notifyStoryBlockedIfStuck(storyId: string): boolean {
   if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
   const members = db
     .query<{ status: TaskStatus }, [string]>(
-      `SELECT status FROM tasks WHERE story_id=? AND work_kind='leaf'`,
+      `SELECT status FROM tasks WHERE parent_id=? AND work_kind='leaf'`,
     )
     .all(storyId);
   if (members.length === 0) return false;
@@ -3332,16 +3339,16 @@ export function strandedItems(directoryId: string): StrandedItem[] {
   const items: StrandedItem[] = [];
 
   // CTO-owned findings (F1, F2) — only when the directory's CTO responder is stranded. A task
-  // WITH a story_id is owned by its story LEADER (handled per-story below), so the CTO findings
-  // consider STANDALONE tasks (story_id IS NULL) only. The `work_kind != 'node'` guard drops
-  // materialized story Work NODES (mirrors counts()/listTasks); story_id IS NULL is the distinct
-  // standalone-membership test (REVAMP-2 B.5a converts only the node guard).
+  // WITH a parent (a story member) is owned by its story LEADER (handled per-story below), so the
+  // CTO findings consider STANDALONE tasks (parent_id IS NULL) only. Membership by parent_id
+  // (B.5b st-78a8b4e7 — the story_id column is dropped; parent_id is the sole membership pointer).
+  // The `work_kind != 'node'` guard drops materialized story Work NODES (mirrors counts()/listTasks).
   if (ctoResponderStranded(directoryId)) {
     const ctoWhy = isCtoEnabled(directoryId) ? "CTO gave up (dead)" : "CTO disabled";
     // F1 — `idea` tasks (a brief awaiting a spec) whose CTO responder is stranded.
     const ideas = db
       .query<{ id: string }, [string]>(
-        `SELECT id FROM tasks WHERE workspace_id=? AND story_id IS NULL AND status='idea'
+        `SELECT id FROM tasks WHERE workspace_id=? AND parent_id IS NULL AND status='idea'
            AND work_kind != 'node'`,
       )
       .all(directoryId);
@@ -3354,7 +3361,7 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     // pull-signal for when the responder that would act on it is gone.
     const blocked = db
       .query<{ id: string; blocked_by: string | null }, [string]>(
-        `SELECT id, blocked_by FROM tasks WHERE workspace_id=? AND story_id IS NULL AND status='blocked'
+        `SELECT id, blocked_by FROM tasks WHERE workspace_id=? AND parent_id IS NULL AND status='blocked'
            AND work_kind != 'node'`,
       )
       .all(directoryId);
@@ -3422,7 +3429,7 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     // flight), yet NOT all merged/rolled_back (so it can never complete) — mirrors
     // notifyStoryBlockedIfStuck's predicate; reuse isStoryComplete for the all-merged check.
     const members = db
-      .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE story_id=?`)
+      .query<{ status: TaskStatus }, [string]>(`SELECT status FROM tasks WHERE parent_id=?`)
       .all(s.id);
     if (members.length === 0) continue;
     if (members.every((m) => isTerminal(m.status)) && !isStoryComplete(s.id)) {

@@ -59,17 +59,22 @@ function initRepo(prefix: string): string {
 }
 
 function storyRow(id: string) {
-  return dbMod.db.query<any, [string]>(`SELECT * FROM stories WHERE id=?`).get(id)!;
+  // B.5b: the `stories` mirror is dropped — the story's own `tasks` NODE row is the sole record.
+  return dbMod.db
+    .query<any, [string]>(`SELECT * FROM tasks WHERE id=? AND work_kind='node'`)
+    .get(id)!;
 }
 
 /** Insert an isolated/non-isolated story directly (no createStory → no leader launch in tests).
- *  Materializes the node's `tasks` row too (as production's createStory does) so the B.4-flipped
- *  read accessors — which now read the node's own tasks row — resolve it. */
+ *  Materializes the story's Work NODE `tasks` row (as production's createStory does) — the sole
+ *  authoritative story record post-B.5b; the read accessors resolve it via work_kind='node'. */
 function mkStory(id: string, wsId: string, isolated: 0 | 1): void {
   dbMod.db
-    .query(`INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(id, wsId, `story ${id}`, "open", isolated, dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(id);
+    .query(
+      `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief, isolated)
+       VALUES (?, ?, 'open', ?, 'node', ?, ?)`,
+    )
+    .run(id, wsId, dbMod.nowIso(), `story ${id}`, isolated);
 }
 
 /** Capture every story.attention event published during `fn`. */
@@ -301,11 +306,9 @@ describe("isolated story landing — story→main (§11.4/§11.5/§11.6/§11.7)"
     const SID = "st-smrec1";
     mkStory(SID, WS_ISO, 1);
     await seedMerged(REPO_ISO, WS_ISO, SID, "rec.txt", "rec\n");
-    // Simulate a crash mid-land: the story is stuck `merging`. migrateBackfillNodeFold() replays the
-    // boot resync (runMigrations, BEFORE the recovery scans) that re-syncs every node's tasks.status
-    // FROM stories — so the B.4-flipped recoverMergingStories (which scans the tasks nodes) sees it.
-    dbMod.db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(SID);
-    dbMod.migrateBackfillNodeFold();
+    // Simulate a crash mid-land: the story node is stuck `merging`. recoverMergingStories scans
+    // the tasks NODES (B.5b — the sole story record), so set the node's status directly.
+    dbMod.db.query(`UPDATE tasks SET status='merging' WHERE id=? AND work_kind='node'`).run(SID);
 
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
     const n = await storiesMod.recoverMergingStories();
@@ -407,10 +410,8 @@ describe("subtask merge GUARDS on the parent story's authoritative status (st-a6
         expect(storyRow(SID).status).toBe("done");
         expect(await gitMod.branchExists(REPO_ISO, storyBranch)).toBe(false); // deleted
       } else {
-        // Force the authoritative status directly. Mirror it onto the node's tasks row too — the
-        // B.4-flipped parentStoryStatus reads the NODE, and production keeps the two in lock-step
-        // (synchronous dual-write / boot resync), so the test's simulated state must as well.
-        dbMod.db.query(`UPDATE stories SET status=? WHERE id=?`).run(st, SID);
+        // Force the authoritative status directly on the story NODE (B.5b — parentStoryStatus
+        // reads the node, the sole story record).
         dbMod.db.query(`UPDATE tasks SET status=? WHERE id=? AND work_kind='node'`).run(st, SID);
       }
 
@@ -437,9 +438,7 @@ describe("subtask merge GUARDS on the parent story's authoritative status (st-a6
     const SID = "st-f2race";
     mkStory(SID, WS_ISO, 1);
     await seedMerged(REPO_ISO, WS_ISO, SID, "race.txt", "r\n");
-    // Put the story into the in-flight `merging` state (as updateStory's land request would).
-    // Mirror onto the node (B.4 reads it; production keeps the two in lock-step).
-    dbMod.db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(SID);
+    // Put the story NODE into the in-flight `merging` state (as updateStory's land request would).
     dbMod.db.query(`UPDATE tasks SET status='merging' WHERE id=? AND work_kind='node'`).run(SID);
 
     // A racing PATCH abort/done is REJECTED — abort's legal `from` is open/merge_blocked (NOT

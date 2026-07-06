@@ -55,10 +55,11 @@ function insertWorkspace(id: string): void {
  *  Materializes the node's `tasks` row too (as production's createStory does) so the B.4-flipped
  *  read accessors — reading the node's own tasks row — resolve it. */
 function insertStory(id: string, workspaceId: string, status = "open"): void {
+  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — the story IS its Work NODE row, so
+  // seed it directly (as production's createStory does; the B.4-flipped read accessors resolve it).
   dbMod.db
-    .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .query(`INSERT INTO tasks (id, workspace_id, brief, status, created_at, work_kind) VALUES (?, ?, ?, ?, ?, 'node')`)
     .run(id, workspaceId, `brief for ${id}`, status, dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(id);
 }
 
 beforeAll(async () => {
@@ -168,17 +169,13 @@ beforeEach(() => {
   //   - story_agent GLOBAL: it is a leaf/child table (nothing FK-references it), so a global wipe
   //     is safe and clears any story_agent detritus reconcileStoryAgents left when it enumerated —
   //     via the B.5a work_kind='node' read — OTHER files' open nodes and launched their leaders.
-  //   - stories + their materialized `tasks` nodes SCOPED to THIS file (`dir-storytest*`): a global
-  //     `DELETE FROM stories` would delete OTHER files' stories while their `tasks` nodes survive,
-  //     breaking the node⟺stories lock-step that reconcileStoryAgents' saveStoryAgentRow FK relies
-  //     on (and a global node delete would FK-crash on their inbound referrers). The two scoped
-  //     deletes clear this file's stories + nodes IN LOCK-STEP (as production's deleteStory removes
-  //     both together), so no stale node leaks into the next scenario and other files stay consistent.
+  //   - story `tasks` NODES SCOPED to THIS file (`dir-storytest*`): B.5b (st-78a8b4e7) dropped the
+  //     `stories` mirror, so a story IS its Work NODE row; a global node delete would FK-crash on
+  //     other files' inbound referrers, so scope the wipe to this file's workspaces.
   dbMod.db.query(`DELETE FROM story_agent`).run();
   dbMod.db
     .query(`DELETE FROM tasks WHERE work_kind='node' AND workspace_id LIKE 'dir-storytest%'`)
     .run();
-  dbMod.db.query(`DELETE FROM stories WHERE workspace_id LIKE 'dir-storytest%'`).run();
   sa._resetSupervisionStateForTest();
 });
 

@@ -73,11 +73,11 @@ test("reaper does NOT remove a butchr-story-<id> worktree of an OPEN story", asy
   const storyBranch = gitMod.storyBranchName(storyId); // butchr/story/st-reaper01
   const storyWt = gitMod.storyWorktreePath(REPO_ROOT, storyId); // <repo>/butchr-story-st-reaper01
 
-  // An OPEN story owns this worktree (the live case the reaper must respect).
+  // An OPEN story owns this worktree (the live case the reaper must respect). B.5b (st-78a8b4e7):
+  // the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
-    .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, 'open', ?)`)
-    .run(storyId, WS, "ship it", dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(storyId); // materialize the node (as createStory does) for B.4 reads
+    .query(`INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief) VALUES (?, ?, 'open', ?, 'node', ?)`)
+    .run(storyId, WS, dbMod.nowIso(), "ship it");
   // Create the real story worktree on its story branch.
   g(["worktree", "add", "-q", "-b", storyBranch, storyWt]);
   expect(existsSync(storyWt)).toBe(true);
@@ -124,13 +124,13 @@ test("F5: ABORTING an isolated story removes its worktree + branch", async () =>
   const storyId = "st-f5-abort";
   const storyBranch = gitMod.storyBranchName(storyId);
   const storyWt = gitMod.storyWorktreePath(REPO_ROOT, storyId);
-  // An ISOLATED (isolated=1) open story that owns a real worktree + branch.
+  // An ISOLATED (isolated=1) open story that owns a real worktree + branch. B.5b (st-78a8b4e7):
+  // the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
     .query(
-      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 1)`,
+      `INSERT INTO tasks (id, workspace_id, brief, status, created_at, isolated, work_kind) VALUES (?, ?, ?, 'open', ?, 1, 'node')`,
     )
     .run(storyId, WS, "ship it", dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(storyId); // materialize the node for B.4 reads
   await gitMod.ensureStoryBranch(REPO_ROOT, storyBranch);
   expect(existsSync(storyWt)).toBe(true);
   expect(branchListed(storyBranch)).toBe(true);
@@ -147,12 +147,12 @@ test("F5: DELETING an isolated story removes its worktree + branch", async () =>
   const storyId = "st-f5-delete";
   const storyBranch = gitMod.storyBranchName(storyId);
   const storyWt = gitMod.storyWorktreePath(REPO_ROOT, storyId);
+  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
     .query(
-      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 1)`,
+      `INSERT INTO tasks (id, workspace_id, brief, status, created_at, isolated, work_kind) VALUES (?, ?, ?, 'open', ?, 1, 'node')`,
     )
     .run(storyId, WS, "ship it", dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(storyId); // materialize the node for B.4 reads
   await gitMod.ensureStoryBranch(REPO_ROOT, storyBranch);
   expect(existsSync(storyWt)).toBe(true);
   expect(branchListed(storyBranch)).toBe(true);
@@ -170,22 +170,22 @@ test("F5: a NON-isolated story abort + delete do NOT error (and touch no story b
   // A non-isolated story has no story worktree/branch — abort/delete must skip removeStoryBranch
   // entirely and never throw.
   const abortId = "st-f5-noniso-abort";
+  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
     .query(
-      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 0)`,
+      `INSERT INTO tasks (id, workspace_id, brief, status, created_at, isolated, work_kind) VALUES (?, ?, ?, 'open', ?, 0, 'node')`,
     )
     .run(abortId, WS, "no iso", dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(abortId); // materialize the node for B.4 reads
   expect(() => storiesMod.updateStory(abortId, { status: "aborted" })).not.toThrow();
   expect(storiesMod.getStory(abortId)!.status).toBe("aborted");
 
   const deleteId = "st-f5-noniso-delete";
+  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
     .query(
-      `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, 'open', ?, 0)`,
+      `INSERT INTO tasks (id, workspace_id, brief, status, created_at, isolated, work_kind) VALUES (?, ?, ?, 'open', ?, 0, 'node')`,
     )
     .run(deleteId, WS, "no iso", dbMod.nowIso());
-  dbMod.ensureStoryWorkNode(deleteId); // materialize the node for B.4 reads
   expect(() => storiesMod.deleteStory(deleteId)).not.toThrow();
   expect(storiesMod.getStory(deleteId)).toBeNull();
 
