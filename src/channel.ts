@@ -613,7 +613,11 @@ export class AttentionBridge {
     }
     if (this.scopeDir && dirId !== this.scopeDir) return false;
     // NON-STORY tasks only — awaiting the CTO ('cto'), a non-story failure, or dead-blocked. A
-    // non-story 'user' escalation falls through to false (dropped → the webapp surfaces it).
+    // non-story 'user' escalation falls through to false (dropped → the webapp surfaces it). A
+    // 'ceo' responder (REVAMP-4 P3a) likewise falls through to false here — DORMANT: no project
+    // nodes materialize in prod so pendingResponder never yields 'ceo', and a project-scope
+    // ownership branch is deferred to P3b (which wires the live CEO feed). Until then a 'ceo'
+    // item is dropped to the webapp/user surface, exactly like a non-story 'user' escalation.
     return (
       storyId == null &&
       (responder === "cto" || status === "failed" || status === "aborted" || deadBlocked)

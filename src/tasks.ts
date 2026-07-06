@@ -25,6 +25,7 @@ import type { TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.
 // likewise hoisted functions called only at runtime, so the cycle resolves with no
 // load-time TDZ. Gated by unifiedWorkEnabled() (config.unifiedWork, DEFAULT ON).
 import { isTopLevelWork, owningRepoOf, resolveWorkResponder, unifiedWorkEnabled } from "./work.ts";
+import type { WorkResponder } from "./work.ts";
 import {
   classifyPathType,
   computeEstimateStats,
@@ -559,10 +560,47 @@ function readTaskMdSafe(
 
 /**
  * A resolved RESPONDER — the structural target of a task's pending feedback (design §1/§3):
- * `story` (the story leader, terminal for a story member), `cto`, or `user`. The possible
+ * `story` (the story leader, terminal for a story member), `cto`, `ceo`, or `user`. The possible
  * values of `pending_responder` on a TaskView / TaskListView / AttentionItem.
+ *
+ * REVAMP-4 P3a (story st-1a82a2e1): widened with `ceo` — the supervisor of a PROJECT container.
+ * DORMANT: no project nodes materialize in prod yet, so pendingResponder can never return `ceo`
+ * for any real shape (it is reachable only via a test-synthesized project node). See
+ * flattenResponder for the dual (compile-time + runtime) exhaustiveness guard that surfaces this.
  */
-export type PendingResponder = "story" | "cto" | "user";
+export type PendingResponder = "story" | "cto" | "ceo" | "user";
+
+/**
+ * Flatten a recursive WorkResponder (work.ts) onto the PendingResponder vocabulary: any parent
+ * story NODE → `story` (the leader), a repo container → `cto`, a project container → `ceo`, the
+ * escalation short-circuit → `user`.
+ *
+ * The `default` arm is a DUAL exhaustiveness guard so a future WorkResponder variant can NEVER
+ * silently fall through this seam:
+ *   1. COMPILE-TIME (`const _exhaustive: never = r`) — under a real type-checker (`tsc` / the IDE;
+ *      tsconfig is `strict`) an unhandled variant makes `r` non-`never` and FAILS the check.
+ *      NOTE: this repo's gate is `bun build`, which STRIPS types WITHOUT checking them (verified),
+ *      so the `never` alone is not caught by the bundler — hence guard #2.
+ *   2. RUNTIME (`throw`) — an unhandled kind reaching here THROWS loudly rather than returning a
+ *      bogus value, so `bun test` (the gate that actually runs code) fails for ANY exercised shape
+ *      whose responder kind is unmapped. Belt-and-suspenders for the no-tsc bundler gate.
+ */
+function flattenResponder(r: WorkResponder): PendingResponder {
+  switch (r.kind) {
+    case "work":
+      return "story";
+    case "cto":
+      return "cto";
+    case "ceo":
+      return "ceo";
+    case "user":
+      return "user";
+    default: {
+      const _exhaustive: never = r;
+      throw new Error(`unhandled WorkResponder kind: ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+}
 
 /**
  * Is a task currently AWAITING FEEDBACK (design §3)? True iff its status is a feedback state
@@ -634,10 +672,10 @@ export function pendingResponder(row: TaskRow): PendingResponder | null {
     needsUserInput:
       !!row.needs_user_input || (isTopLevelWork(row.id) && !!row.escalated_to_user),
   });
-  // Map the recursive WorkResponder onto the existing PendingResponder vocabulary: any
-  // parent NODE → `story` (the depth-1/2 instance), the base case → `cto`, the escalation
-  // short-circuit → `user`.
-  return resolved.kind === "work" ? "story" : resolved.kind;
+  // Map the recursive WorkResponder onto the existing PendingResponder vocabulary via the
+  // COMPILE-TIME-EXHAUSTIVE flattenResponder: any parent NODE → `story`, a repo container → `cto`,
+  // a project container → `ceo` (dormant — no project nodes in prod), the escalation → `user`.
+  return flattenResponder(resolved);
 }
 
 /** Merge the DB row with the on-disk task.md for the detail view. */
@@ -1039,6 +1077,11 @@ export function operatorActionableItems(row: WorkspaceAgentRow): AttentionItem[]
           i.status === "aborted"),
     );
   }
+  // REVAMP-4 P3a: a 'ceo' workspace row (SUPERVISOR_KINDS.ceo) falls through to the trailing `[]`
+  // — DORMANT. A ceo is never launched in prod (enabled=const false) so operatorActionableItems is
+  // never called with a ceo row, and pending_responder can never be 'ceo' (no project nodes), so a
+  // 'ceo' item matches NEITHER branch above. The live project-scoped CEO feed (a `ceo` branch
+  // filtering pending_responder==='ceo' within a project scope) is deferred to P3b.
   return [];
 }
 

@@ -3062,10 +3062,13 @@ async function renderTask(id) {
   if (t.session_id) wrap.appendChild(renderTranscriptPanel(t.id));
 
   // AWAITING-WHO BANNER. For a task awaiting feedback, surface WHO is expected to act — the
-  // server-computed STRUCTURAL `pending_responder` (story|cto|user). `user` is emphasized
+  // server-computed STRUCTURAL `pending_responder` (story|cto|ceo|user). `user` is emphasized
   // ("awaiting you"); `cto` / `story` are muted (an agent — the CTO, or the story leader —
   // handles it, but you can also act). butchr is responder-agnostic: the action controls
   // below render regardless. Null pending_responder (non-feedback state) shows no banner.
+  // REVAMP-4 P3a: `ceo` (a project container's supervisor) is DORMANT — the server never emits
+  // it (no project nodes in prod), so a defensive `ceo` value would fall to the muted `else`
+  // (awaiting-cto styling); the dedicated CEO banner is P3c, when the CEO surface lands.
   if (t.pending_responder) {
     const stepLbl = feedbackStepLabel(t);
     const stepStr = stepLbl ? ` (${esc(stepLbl)})` : "";

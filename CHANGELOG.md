@@ -17,7 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.198] - 2026-07-06
+### Changed
+
+- **REVAMP-4 Phase 3 / P3a — extend the responder to the CEO rung (PROJECT-aware routing).** The
+  recursive Work responder (`src/work.ts`) now derives EVERY tier — including the terminals — from
+  the actual container ancestors via a single unified upward walk (`containerLadderChain`), which
+  both `resolveWorkResponder` (the head) and `workResponderChain` (the whole chain) are computed
+  from, so they can never diverge. A `work_kind='project'` container ancestor contributes a new
+  `{ kind: "ceo"; project_id }` tier between the repo's `{ cto }` and the trailing `{ user }`; the
+  `WorkResponder` union and `PendingResponder` (`src/tasks.ts`) gain the `ceo` case, flattened
+  through a new `flattenResponder` with a compile-time `never` exhaustiveness guard so no future
+  responder kind can silently fall through. **Byte-identical today:** no project nodes materialize
+  in production, so a repo's `parent_id` is NULL and the ladder remains exactly `{ cto }` then
+  `{ user }` for every current shape (standalone leaf, story member, story node, repo node) —
+  `resolveWorkResponder`/`workResponderChain`/`pendingResponder` are unchanged. The `ceo` rung is
+  DORMANT: the routing consumers (`channel.ts` `routeOwns`, `tasks.ts` `operatorActionableItems`,
+  the dashboard banner in `public/app.js`) degrade a `ceo` responder to the webapp/user surface, and
+  the live CEO feed + project ownership scope are deferred to P3b/P3c/P3d. No flag, no `ceo_enabled`
+  wiring, no CEO agent boot, no project-node materializer.
 
 ### Changed
 

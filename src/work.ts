@@ -158,25 +158,33 @@ export { isAwaitingFeedback as isWorkAwaitingFeedback };
 // --- RECURSIVE PARENT-CHAIN RESPONDER ----------------------------------------
 //
 // Feedback (a question, a spec to approve, a diff to review, an idle agent) bubbles to the
-// PARENT, recursively: a Work's feedback routes to the workspace executing its PARENT Work;
-// it is TERMINAL there unless that parent raises it to ITS parent — leaf → node → … →
-// top-level Work → CTO → user. The recursion bottoms out at top-level Work (parent_id NULL),
-// whose parent-responder is the CTO; the CTO's single escalation boundary above it is the
-// user. EXCEPTION — needs_user_input: a feedback state only a human can answer routes
-// STRAIGHT to the user, short-circuiting the whole bubble-up (the generalized form of
-// today's escalated_to_user).
+// PARENT, recursively: a Work's feedback routes to the SUPERVISOR of its nearest ancestor
+// CONTAINER, walking up — leaf → story-node (leader) → … → repo (CTO) → project (CEO) → user.
+// The walk derives EVERY tier — including the terminals — from the actual container ancestors
+// (the "container ladder"), so there is no hardcoded cto→user base: a repo's supervisor is the
+// CTO, a project's is the CEO, and above the last/root container (parent_id NULL) is the user.
+// EXCEPTION — needs_user_input: a feedback state only a human can answer routes STRAIGHT to the
+// user, short-circuiting the whole bubble-up (the generalized form of today's escalated_to_user).
+//
+// REVAMP-4 P3a (story st-1a82a2e1): widened to the CEO rung. BYTE-IDENTICAL today — no project
+// nodes exist, so a repo's parent_id is NULL and the ladder is exactly {cto} then {user} for
+// every current shape. A project node inserted above a repo simply slots {ceo} between them.
 
 /**
  * A resolved Work responder (the recursive generalization of PendingResponder):
- *  - `{ kind: "work", work_id }` — the PARENT Work; the workspace EXECUTING it responds (the
- *    recursive form of today's 'story'/leader). work_id is the responding NODE's id.
- *  - `{ kind: "cto" }` — the base case: a top-level Work's parent-responder.
- *  - `{ kind: "user" }` — the CTO's single escalation boundary, and the needs_user_input
+ *  - `{ kind: "work", work_id }` — a story NODE; the workspace EXECUTING it responds (the leader,
+ *    the recursive form of today's 'story'). work_id is the responding NODE's id.
+ *  - `{ kind: "cto" }` — the supervisor of a REPO container (work_kind='repo').
+ *  - `{ kind: "ceo"; project_id }` — the supervisor of a PROJECT container (work_kind='project').
+ *    project_id is the responding PROJECT node's id. REVAMP-4 P3a — dormant until a CEO feed
+ *    exists (no project nodes materialize in prod yet; reachable only via a test project node).
+ *  - `{ kind: "user" }` — above the root container (parent_id NULL), and the needs_user_input
  *    short-circuit target.
  */
 export type WorkResponder =
   | { kind: "work"; work_id: string }
   | { kind: "cto" }
+  | { kind: "ceo"; project_id: string }
   | { kind: "user" };
 
 /** Options shared by the responder resolvers. */
@@ -188,36 +196,117 @@ export type WorkResponderOpts = {
 };
 
 /**
- * The IMMEDIATE responder for a Work's pending feedback — one tier of the bubble-up:
+ * Push the CONTAINER LADDER tiers, from container `start` upward: `repo → { cto }`, `project →
+ * { ceo, project_id }` (REVAMP-4 P3a), stopping at `parent_id` NULL or a non-container row. The
+ * shared `visited` set guards a malformed container cycle so the walk always terminates. This is
+ * the generalized replacement for the OLD code's hardcoded trailing `{ cto }` — a repo's supervisor
+ * is the CTO, a project's is the CEO, and the ladder can climb repo → project → … above it.
+ */
+function walkContainerLadder(
+  start: string,
+  chain: WorkResponder[],
+  visited: Set<string>,
+): void {
+  let cur: string | null = start;
+  while (cur != null && !visited.has(cur)) {
+    visited.add(cur);
+    const k = getTask(cur)?.work_kind;
+    if (k === "repo") chain.push({ kind: "cto" });
+    else if (k === "project") chain.push({ kind: "ceo", project_id: cur });
+    else break; // a non-container reached the ladder — malformed; stop defensively
+    cur = workParentId(cur);
+  }
+}
+
+/**
+ * The CONTAINER-LADDER walk — the SINGLE source of truth both public resolvers derive from, so
+ * `resolveWorkResponder` (the head) and `workResponderChain` (the whole thing) can NEVER diverge.
+ *
+ * It mirrors the OLD resolver's structure exactly, generalizing ONLY the terminal:
+ *  (a) The origin IS a container (a repo/project `id` — a repo-level or project-level ask): its OWN
+ *      supervisor tier heads the chain, then the ladder continues ABOVE it (repo → cto, then a
+ *      project parent → ceo, …).
+ *  (b) The origin is a leaf / story node / missing row: walk its STRICT ancestors, pushing a
+ *      `{ work }` tier for EVERY non-container ancestor (leaf OR node — byte-identical to the old
+ *      resolver, which distinguished only repo-vs-not, NOT node-vs-leaf), stopping at the first
+ *      CONTAINER or `parent_id` NULL. Then the container ladder from that first container upward.
+ *      If there is NO container ancestor (a legacy parent-NULL top-level Work, or a missing row),
+ *      the default base is `{ cto }` — byte-identical to the old unconditional trailing `{ cto }`.
+ *
+ * A trailing `{ user }` is always the final terminal. The visited-set is seeded with `id` (case b)
+ * so a malformed self-parent / parent CYCLE pushes each ancestor at most once and terminates.
+ *
+ * BYTE-IDENTICAL today (no project nodes): parent-NULL leaf/node → [{cto},{user}]; standalone leaf
+ * under a repo → [{cto},{user}]; story member → [{work,N},{cto},{user}]; a deep leaf → [{work,…}…,
+ * {cto},{user}]; repo (parent NULL) → [{cto},{user}]. NEW (test-only, a project above a repo): a
+ * repo → [{cto},{ceo},{user}]; a leaf under it → [{cto},{ceo},{user}]; the project itself →
+ * [{ceo},{user}].
+ */
+function containerLadderChain(id: string): WorkResponder[] {
+  const chain: WorkResponder[] = [];
+  const originKind = getTask(id)?.work_kind;
+
+  // (a) The origin IS a container: its own supervisor tier heads the chain, then the ladder above.
+  if (originKind === "repo" || originKind === "project") {
+    walkContainerLadder(id, chain, new Set<string>());
+    chain.push({ kind: "user" });
+    return chain;
+  }
+
+  // (b) A leaf / story node / missing row: STRICT-ancestor `{ work }` tiers up to the first
+  //     container (or NULL). Seed visited with `id` so a self-parent pushes exactly once (old rule).
+  const visited = new Set<string>([id]);
+  let cur: string | null = workParentId(id);
+  let container: string | null = null;
+  while (cur != null) {
+    const k = getTask(cur)?.work_kind;
+    if (k === "repo" || k === "project") {
+      container = cur; // reached the container ladder — stop pushing `{ work }` tiers
+      break;
+    }
+    chain.push({ kind: "work", work_id: cur }); // every non-container ancestor is a `{ work }` tier
+    if (visited.has(cur)) break; // malformed parent cycle/self-parent — pushed once, now stop
+    visited.add(cur);
+    cur = workParentId(cur);
+  }
+  if (container == null) {
+    chain.push({ kind: "cto" }); // default CTO base (byte-identical old trailing `{ cto }`)
+  } else {
+    walkContainerLadder(container, chain, visited);
+  }
+  chain.push({ kind: "user" });
+  return chain;
+}
+
+/**
+ * The IMMEDIATE responder for a Work's pending feedback — the head of the container-ladder walk:
  *  - needsUserInput → `{ user }` (short-circuit, no parent walk).
- *  - parent_id != null → `{ work, work_id: parent_id }` (the parent NODE — terminal there
- *    unless the parent itself raises it on up, which is what workResponderChain unrolls).
- *  - top-level Work (parent_id NULL) → `{ cto }` (the base case).
- * Pure read of the row. A missing row is treated as top-level (→ cto), mirroring how a gone
- * parent bottoms out the chain. This is the recursive generalization of tasks.pendingResponder
- * (where the old 'story' tier is now ANY parent node, and 'cto'/'user' stay the terminals).
+ *  - otherwise → the head of the container-ladder chain: a non-container parent (a story node, or
+ *    any leaf/node ancestor) → `{ work }`; a repo container → `{ cto }`; a project container →
+ *    `{ ceo }`; a legacy parent-NULL top-level Work → the default `{ cto }` base.
+ * Pure read of the rows. A missing row is treated as a top-level Work → `{ cto }` (mirroring the old
+ * resolver's isTopLevelWork base). This is the recursive generalization of tasks.pendingResponder.
  */
 export function resolveWorkResponder(
   id: string,
   opts: WorkResponderOpts = {},
 ): WorkResponder {
   if (opts.needsUserInput) return { kind: "user" };
-  // A repo-node parent (or NULL) is the base case: the CTO is the repo's supervisor. Only a
-  // real parent NODE (a story) is a `{ work }` tier. isTopLevelWork folds both into one check.
-  if (isTopLevelWork(id)) return { kind: "cto" };
-  return { kind: "work", work_id: workParentId(id)! };
+  // The immediate responder is the chain head; the ladder always appends `{ user }`, so [0] exists.
+  return containerLadderChain(id)[0]!;
 }
 
 /**
- * The FULL ordered bubble-up CHAIN for a Work's feedback, from the immediate parent up to the
- * user — the recursive walk leaf → node → … → top-level → CTO → user. Each ancestor NODE is a
- * `{ work }` tier (the workspace executing it responds); the chain then always ends `{ cto }`
- * then `{ user }`. EXCEPTION: needsUserInput short-circuits the whole walk to `[{ user }]`.
+ * The FULL ordered bubble-up CHAIN for a Work's feedback, from the immediate responder up to the
+ * user — the container-ladder walk leaf → story-node(s) (leader) → repo (CTO) → project (CEO) →
+ * user. Each ancestor story NODE is a `{ work }` tier; the container ancestors contribute `{ cto }`
+ * / `{ ceo }`; the chain always ends `{ user }`. EXCEPTION: needsUserInput short-circuits the whole
+ * walk to `[{ user }]`.
  *
- * Arbitrary nesting depth (RFC Q8): the chain length grows with the parent_id depth, no cap.
- * A visited-set guards against a malformed parent CYCLE / self-parent (data that should never
- * exist, but must never hang the walk): once a row is revisited the ancestor walk stops and
- * the chain bottoms out at cto→user, so the function always terminates.
+ * Arbitrary nesting depth (RFC Q8): the chain length grows with the parent_id depth, no cap. A
+ * visited-set guards against a malformed parent CYCLE / self-parent (data that should never exist,
+ * but must never hang the walk): once a row is revisited the walk stops and the chain bottoms out
+ * at `{ user }`, so the function always terminates.
  *
  * NOTE: this returns the static escalation PATH (who COULD own it as it bubbles), not a live
  * "who owns it right now" cursor — advancing along the chain is the explicit raise action a
@@ -229,21 +318,5 @@ export function workResponderChain(
   opts: WorkResponderOpts = {},
 ): WorkResponder[] {
   if (opts.needsUserInput) return [{ kind: "user" }];
-  const chain: WorkResponder[] = [];
-  const visited = new Set<string>([id]);
-  let parentId = workParentId(id);
-  while (parentId != null) {
-    // REPO BOUNDARY (REVAMP-4 S1): a repo node is the CTO's own container — stop BEFORE pushing a
-    // `{ work }` tier for it; the trailing push({cto}) below is exactly the repo's responder. This
-    // keeps chains byte-identical to the pre-repoint tree (standalone leaf → [cto,user]; a story
-    // member → [work(storyNode), cto, user]).
-    if (getTask(parentId)?.work_kind === "repo") break;
-    chain.push({ kind: "work", work_id: parentId });
-    if (visited.has(parentId)) break; // malformed parent cycle — stop the ancestor walk
-    visited.add(parentId);
-    parentId = workParentId(parentId);
-  }
-  chain.push({ kind: "cto" });
-  chain.push({ kind: "user" });
-  return chain;
+  return containerLadderChain(id);
 }
