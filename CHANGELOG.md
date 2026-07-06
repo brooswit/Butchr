@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.206] - 2026-07-06
+
 ### Added
 
 - **REVAMP-4 project READ surfaces — `GET /api/projects` + `GET /api/projects/:id/ceo` (story st-04869886).**
