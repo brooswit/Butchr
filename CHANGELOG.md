@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.194] - 2026-07-06
+
 ### Removed
 - Delete the two legacy launcher modules — `src/cto-agent.ts` and `src/story-agent.ts`
   (~1333 LOC) — completing REVAMP-1 Phase C (story st-bb6cd55b, S5). Earlier phases
