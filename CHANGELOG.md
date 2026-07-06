@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.185] - 2026-07-06
+
 - **Story nodes surface a derived working/parked/stalled lifecycle (so a container doesn't just read "OPEN").** A purely front-end, additive signal (`storyLifecycle`) derived from data every StoryView already carries — the per-status `counts` rollup + `leader{running,desired}` + status — with NO new backend field, scoped to OPEN stories only (merging/merge_blocked/done already carry a descriptive status chip). The rule, robust to empty counts: `▶ working` when subtasks are in flight (in_progress/in_review) OR the leader is up driving actionable work; `⚠ stalled` when work remains but the leader that should drive it is DESIRED yet DOWN (nothing moving); `⏸ parked` otherwise (just-created, all children finished-yet-open, or work with no leader ever desired). Rendered quietly (outlined chip / glyph, never competing with the colored status chip or the S1 kind badge) at four sites via one shared helper — the graph story node (top-right glyph + title/aria), the graph cluster container label (lifecycle word + own-children `d/t done` progress, appended only when the story HAS subtasks so it doesn't double up the "no subtasks yet" empty-state), the list story row, and the board story card. Adds a `storyProgress(counts)` own-children rollup (COMPLETE over true total, idle pseudo-bucket dropped, reusing `isCompleteStatus`/`storySubtaskTotal`). Front-end only (`public/app.js` + `public/style.css`); covered by `test/story-lifecycle-ui.test.ts`.
 
 ## [0.9.184] - 2026-07-06
