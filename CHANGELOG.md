@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.189] - 2026-07-06
+
 ### Changed
 - Internal (REVAMP-1 Phase C S2): moved the live story-leader lifecycle hooks
   (`onStoryCreated`, `onStoryStatusChanged`, `stopStoryAgent`, `storyAgentStatus`,
