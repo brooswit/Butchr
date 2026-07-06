@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.205] - 2026-07-06
+
 ### Added
 
 - **REVAMP-4 Projects front-end — design-first clickable MOCKUP (`public/projects-mockup.html`).**
