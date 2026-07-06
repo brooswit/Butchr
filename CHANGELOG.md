@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.201] - 2026-07-06
+
 ### Added
 
 - **REVAMP-4 Phase 3 / P3c — CEO lifecycle (a CEO agent can boot + supervise a project).** The
