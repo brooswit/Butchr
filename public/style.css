@@ -56,6 +56,12 @@
   --kind-build: var(--merged);   /* green — build agent */
   --kind-unknown: var(--muted);  /* fallback for an unmapped kind */
 
+  /* story LIFECYCLE colors — a SECONDARY, front-end-derived working/parked/stalled hint on OPEN
+     stories (so a container doesn't just read "OPEN"). Deliberately quiet; theme-safe via vars. */
+  --lc-working: var(--merged);   /* green — actively moving / leader driving work */
+  --lc-parked:  var(--muted);    /* neutral gray — open but nothing in flight */
+  --lc-stalled: #b45309;         /* amber-700 — work waiting but its leader is down */
+
   /* diff add/del — themeable so they read on both light and dark surfaces */
   --diff-add-text: #006933;
   --diff-del-text: #b6073c;
@@ -106,6 +112,7 @@ html[data-theme="dark"] {
      node/leader inherit the dark --accent/--blocked; cto/build lifted here. */
   --kind-cto: #d97706;     /* amber-600, lifted for dark */
   --kind-build: #22a76a;   /* green, lifted for dark surfaces */
+  --lc-stalled: #d97706;   /* amber-600, lifted for dark (working=merged/parked=muted theme via vars) */
   /* Legacy */
   --finalizing: #6366f1;   /* indigo — old "finalizing" state (removed) */
   --queued: #6c727a;
@@ -371,6 +378,26 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tg-kind-node    { fill: var(--kind-node); }
 .tg-kind-leaf    { fill: var(--kind-leaf); }
 .tg-kind-unknown { fill: var(--kind-unknown); }
+/* Story LIFECYCLE badge — a SECONDARY working/parked/stalled hint (list row + board card),
+   OUTLINED + quiet (mirrors .chip.state-kind) so it never competes with the colored status chip
+   or the S1 kind badge. Colored per state from the theme-safe --lc-* vars. */
+.chip.lc-working, .chip.lc-parked, .chip.lc-stalled {
+  background: transparent;
+  border: 1px solid var(--border);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 10px;
+}
+.chip.lc-working { border-color: var(--lc-working); color: var(--lc-working); }
+.chip.lc-parked  { border-color: var(--lc-parked);  color: var(--lc-parked);  }
+.chip.lc-stalled { border-color: var(--lc-stalled); color: var(--lc-stalled); }
+/* Graph in-node lifecycle glyph (SVG) — mirrors .tg-kind but anchored top-RIGHT (text-anchor:end),
+   glyph-only, colored per state: the quiet secondary counterpart to the top-left kind glyph. */
+.tg-lifecycle { font-size: 11px; font-weight: 700; text-anchor: end; }
+.tg-lc-working { fill: var(--lc-working); }
+.tg-lc-parked  { fill: var(--lc-parked); }
+.tg-lc-stalled { fill: var(--lc-stalled); }
 /* `plan` is a task KIND, not a lifecycle status — a decomposition task that spawns
    sub-tasks. Reuse the spec_review/info hue so it reads as an informational badge. */
 .chip.plan { background: var(--spec_review); }

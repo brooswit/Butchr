@@ -1871,6 +1871,8 @@ function appendStoryRows(tb, story, children, repaint) {
       ? ' <span class="chip needs_user_input" title="an open story ask was escalated to YOU — expand to answer">needs your input</span>'
       : ' <span class="chip awaiting-cto" title="an open story ask owned by the CTO agent (handled automatically) — you can also answer">awaiting CTO</span>';
   }
+  // Secondary lifecycle chip (working/parked/stalled), quiet, AUGMENTING the status chip — see storyLifecycleChip.
+  chipsHtml += storyLifecycleChip(story);
   const leader = story.leader || {};
   const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
   const meta = workRollup(story.counts) + " · " + leaderState;
@@ -2060,6 +2062,53 @@ function storySubtaskTotal(counts) {
 }
 // </test-extract:graph-membership>
 
+// <test-extract:story-lifecycle-ui>
+// Story lifecycle — a SECONDARY, purely front-end-DERIVED signal (story st-f4858e23 ask #4) so a
+// story container doesn't just read "OPEN". Derived from data every StoryView already carries —
+// the per-status `counts` rollup + leader{running,desired} + status — with NO new backend field.
+// Scoped to OPEN stories ONLY: merging / merge_blocked / done already carry a descriptive status
+// chip, so signaling them here would just double up. Returns one LIFECYCLE entry, or null when
+// there's nothing to add (non-open story / not a node). Precedence, robust to empty counts:
+//   ▶ working — subtasks in flight, or the leader is up driving actionable work
+//   ⏸ parked  — open but nothing in flight (just-created, or all children finished-yet-open)
+//   ⚠ stalled — work remains but the leader that should drive it is DESIRED yet DOWN (nothing moving)
+const LIFECYCLE = {
+  working: { key: "working", glyph: "▶", cls: "working" },
+  parked:  { key: "parked",  glyph: "⏸", cls: "parked"  },
+  stalled: { key: "stalled", glyph: "⚠", cls: "stalled" },
+};
+function storyLifecycle(story) {
+  if (!story || story.work_kind !== "node" || story.status !== "open") return null;
+  const c = story.counts || {};
+  const leader = story.leader || {};
+  const moving = (c.in_progress || 0) + (c.in_review || 0); // work actively in flight
+  // All non-finished children. `idle` is peeled OUT of in_progress into its own bucket, so it can't
+  // double-count moving; even if it did, remaining is only ever tested > 0, so the tip is harmless.
+  const remaining = moving + (c.blocked || 0) + (c.idle || 0);
+  if (moving > 0) return LIFECYCLE.working; // work literally in flight — WORKING regardless of leader
+  if (remaining > 0 && leader.desired && !leader.running) return LIFECYCLE.stalled; // ⚠ leader down
+  if (remaining > 0 && leader.running) return LIFECYCLE.working; // leader up with actionable/idle work
+  return LIFECYCLE.parked; // nothing in flight, or work but no leader ever desired
+}
+// The story's OWN-children progress from its `counts` rollup — done (COMPLETE statuses, mirroring
+// workRollup's ✓ via isCompleteStatus) over the TRUE total (storySubtaskTotal, which drops the idle
+// pseudo-bucket). Distinct from the graph's dependency-subtree bar (gatedSubtree). total is 0 for a
+// childless story, so callers gate the "d/t done" render on total > 0.
+function storyProgress(counts) {
+  const c = counts || {};
+  const done = Object.keys(c).reduce((n, k) => (isCompleteStatus(k) ? n + (c[k] || 0) : n), 0);
+  return { done, total: storySubtaskTotal(c) };
+}
+// Shared lifecycle CHIP (HTML string) for the list row + board card — '' when there's no lifecycle
+// to show. Subtle by design (see .chip.lc-*): it must not compete with the colored status chip or
+// the S1 kind badge.
+function storyLifecycleChip(story) {
+  const lc = storyLifecycle(story);
+  if (!lc) return "";
+  return ` <span class="chip lc-${esc(lc.cls)}" title="story lifecycle — ${esc(lc.key)}">${esc(lc.glyph)} ${esc(lc.key)}</span>`;
+}
+// </test-extract:story-lifecycle-ui>
+
 // Draw a DAG of the workspace's non-terminal WORK (stories + tasks) and their blockers:
 // nodes are work items (label = id, colored by effective status), edges are blocker→blocked
 // arrows pointing left→right across topological levels. Inline SVG, no library. A STORY is a
@@ -2208,13 +2257,21 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     // (a parked/just-created story). A story whose children are all finished or hidden by the
     // depth slider also has members.length===1, but is NOT childless (counts>0) — it gets a
     // neutral "· subtasks not shown" header instead, so we never lie about a decomposed story.
-    const childless = storySubtaskTotal(story.counts) === 0;
+    const total = storySubtaskTotal(story.counts);
+    const childless = total === 0;
     const hiddenChildren = !childless && members.length === 1;
     const suffix = childless ? " · no subtasks yet" : hiddenChildren ? " · subtasks not shown" : "";
+    // Secondary lifecycle word + own-progress ONLY when the story HAS subtasks: a childless story is
+    // PARKED with total 0, and S2's "no subtasks yet" suffix already conveys that — appending "· parked"
+    // there would just double up. Placed BEFORE the childless/hidden suffix so the empty-state text is
+    // preserved as the trailing note.
+    const lc = childless ? null : storyLifecycle(story);
+    const prog = childless ? null : storyProgress(story.counts);
+    const lcTxt = (lc ? " · " + lc.key : "") + (prog && prog.total ? ` · ${prog.done}/${prog.total} done` : "");
     const cg = svg("g", { class: "tg-cluster" + (childless ? " empty" : "") });
-    cg.appendChild(svg("title", {}, `story ${id}${suffix}`));
+    cg.appendChild(svg("title", {}, `story ${id}${lcTxt}${suffix}`));
     cg.appendChild(svg("rect", { class: "tg-cluster-rect", x: bx, y: by, width: bw, height: bh, rx: 10, ry: 10 }));
-    cg.appendChild(svg("text", { class: "tg-cluster-label", x: bx + 8, y: by + 2 }, `${kvNode.glyph} ${kvNode.label} ${id}${suffix}`));
+    cg.appendChild(svg("text", { class: "tg-cluster-label", x: bx + 8, y: by + 2 }, `${kvNode.glyph} ${kvNode.label} ${id}${lcTxt}${suffix}`));
     clusterLayer.appendChild(cg);
   }
   root.appendChild(clusterLayer);
@@ -2282,14 +2339,18 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     // A STORY is a first-class PEER node drawn distinct (tg-story: heavier/accent border) but
     // INERT — stories have no detail route, so it does not navigate (role=group, no tabindex,
     // default cursor). A TASK node still links to its detail page (role=link, keyboard-focusable).
+    // Secondary lifecycle glyph for an OPEN story (working/parked/stalled) — null otherwise. Added to
+    // the node's title + aria-label so the derived state is announced alongside status/progress.
+    const lc = isStory ? storyLifecycle(t) : null;
+    const lcTxt = lc ? " · " + lc.key : "";
     const g = svg("g", {
       class: "tg-node " + st + (isStory ? " tg-story" : ""),
       transform: `translate(${p.x},${p.y})`,
       tabindex: isStory ? null : "0",
       role: isStory ? "group" : "link",
-      "aria-label": `${isStory ? "story " : ""}${id} — ${st}${prog}`,
+      "aria-label": `${isStory ? "story " : ""}${id} — ${st}${lcTxt}${prog}`,
     });
-    g.appendChild(svg("title", {}, `${isStory ? "story " : ""}${id} · ${st}${prog}`));
+    g.appendChild(svg("title", {}, `${isStory ? "story " : ""}${id} · ${st}${lcTxt}${prog}`));
     g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
     // Glyph-only kind marker in the node's top-left corner (no label — the compact node
     // has no room; the glyph + tooltip carry the type). Keyed off the authoritative
@@ -2299,6 +2360,13 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     const kg = svg("text", { class: "tg-kind tg-kind-" + kv.cls, x: 7, y: 13 }, kv.glyph);
     kg.appendChild(svg("title", {}, kv.label));
     g.appendChild(kg);
+    // Lifecycle glyph mirrors the kind glyph in the top-RIGHT corner (text-anchor:end via CSS), quiet
+    // and colored per state — a secondary hint that never competes with the id/status text between them.
+    if (lc) {
+      const lg = svg("text", { class: "tg-lifecycle tg-lc-" + lc.cls, x: NW - 7, y: 13 }, lc.glyph);
+      lg.appendChild(svg("title", {}, "lifecycle — " + lc.key));
+      g.appendChild(lg);
+    }
     g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: idY }, id));
     g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY }, st));
     if (subTotal) {
@@ -2569,7 +2637,7 @@ function boardStoryCard(s, lane, byId) {
   card.innerHTML = `
     <div class="bc-top">
       <span class="bc-id">${kindBadge("node")}<span class="bc-story-id">${esc(s.id)}</span></span>
-      <span class="bc-chips">${chip(effStatus(s))}</span>
+      <span class="bc-chips">${chip(effStatus(s))}${storyLifecycleChip(s)}</span>
     </div>
     <div class="bc-meta">
       <span class="bc-when" title="${esc(meta)}">${esc(workRollup(s.counts))} · ${kindBadge("leader")} ${esc(leaderState)}</span>
