@@ -142,7 +142,7 @@ function seedTask(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, story_id, blocked_by, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, parent_id, blocked_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -163,14 +163,14 @@ function seedStory(
   status: "open" | "merge_blocked",
   leader: { desired: 0 | 1; gave_up: 0 | 1 },
 ) {
+  // The leader workspace row's work_id FK references the story's Work NODE (a `tasks` anchor
+  // row, work_kind='node'). Post-B.5b the node IS the story (the legacy stories table is
+  // dropped); the anchor has parent_id NULL, so it is never counted as a member.
   dbMod.db
     .query(
-      `INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, work_kind, brief, isolated, created_at) VALUES (?, ?, ?, 'node', ?, ?, ?)`,
     )
-    .run(id, ws, `brief ${id}`, status, 1, dbMod.nowIso());
-  // The leader workspace row's work_id FK references the story's Work NODE (a `tasks` anchor
-  // row). Materialize it (the anchor has story_id NULL, so it is never counted as a member).
-  dbMod.ensureStoryWorkNode(id);
+    .run(id, ws, status, `brief ${id}`, 1, dbMod.nowIso());
   dbMod.saveWorkspaceAgentRow(`ws-leader-${id}`, {
     kind: "leader",
     directory_id: ws,

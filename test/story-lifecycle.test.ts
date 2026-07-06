@@ -204,12 +204,13 @@ describe("story-status CAS / from-guard (st-a632b2cc F2)", () => {
    *  Also materializes the node's `tasks` row (as production does) so the B.4-flipped read
    *  accessors — reading the node's own tasks row — resolve it at the given status. */
   function mkStoryAt(id: string, status: string): void {
+    // B.5b (st-78a8b4e7): the `stories` mirror is dropped — seed the story's Work NODE row directly
+    // (as production's createStory does) so the B.4-flipped read accessors resolve it.
     dbMod.db
       .query(
-        `INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, workspace_id, brief, status, isolated, created_at, work_kind) VALUES (?, ?, ?, ?, ?, ?, 'node')`,
       )
       .run(id, WS, `story ${id}`, status, 0, dbMod.nowIso());
-    dbMod.ensureStoryWorkNode(id);
   }
 
   test("(a) RE-OPEN from `done` is REJECTED — a PATCH {status:'open'} no-ops, status stays done", () => {

@@ -1,9 +1,10 @@
 // WORK + WORKSPACE UNIFICATION — step 1 SCHEMA FOUNDATION (story st-540ba705).
 // Proves the additive/inert step-1 shapes exist and that NOTHING existing broke:
-//   1. tasks.parent_id (nullable self-FK) is present AND coexists with story_id — both
-//      columns survive, parent_id is NULL on every existing row, and a real parent/child
-//      link can be written while story_id is ALSO set (coexistence), with the self-FK
-//      enforced (a bogus parent_id is rejected).
+//   1. tasks.parent_id (nullable self-FK) is the SOLE membership pointer on the converged
+//      schema — REVAMP-2 Phase B.5b (st-78a8b4e7) DROPPED tasks.story_id, so parent_id
+//      survives while story_id is GONE, parent_id is NULL on every existing row, a real
+//      parent/child link can be written via parent_id, and the self-FK is enforced (a
+//      bogus parent_id is rejected).
 //   2. the new singular `workspace` table exists with the full expected column set.
 //   3. POST-6c shape — the st-540ba705 step-6c cutover INVERTED the step-1 alias: `directory`
 //      is now the authoritative TABLE and `workspaces` is the writable back-compat VIEW over
@@ -60,7 +61,7 @@ const m = await import(process.env.DB_TS);
 // --- STRUCTURE + CONVERGENCE snapshot (no extra rows yet, for idempotence) ---
 const snap = () => ({
   schema: m.db.query("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(),
-  tasks: m.db.query("SELECT id, status, story_id, parent_id FROM tasks ORDER BY id").all(),
+  tasks: m.db.query("SELECT id, status, parent_id FROM tasks ORDER BY id").all(),
   workspaces: m.db.query("SELECT id FROM workspaces ORDER BY id").all().map((r) => r.id),
 });
 const snapA = snap();
@@ -79,24 +80,23 @@ const directoryIds = m.db.query("SELECT id FROM directory ORDER BY id").all().ma
 const workspacesIds = m.db.query("SELECT id FROM workspaces ORDER BY id").all().map((r) => r.id);
 const listDirectoriesIds = m.listDirectories().map((r) => r.id);
 
-// Existing queries still run (stories table from the baseline; tasks/workspaces selects).
+// Existing queries still run on the converged post-B.5b schema (the stories mirror is
+// GONE; tasks/workspaces selects still work).
 let existingQueriesOk = true;
 try {
-  m.db.query("SELECT COUNT(*) AS n FROM stories").get();
   m.db.query("SELECT id, status FROM tasks ORDER BY id").all();
   m.db.query("SELECT id, path FROM workspaces ORDER BY id").all();
 } catch (e) { existingQueriesOk = false; }
 
 // --- WRITE-EXERCISE (after the idempotence snapshot so it can't perturb it) ---
-// parent/child link + story_id coexistence + self-FK enforcement on the converged schema.
-const write = { childInserted: false, coexist: null, fkRejected: false };
+// parent/child link via parent_id + self-FK enforcement on the converged (post-drop) schema.
+const write = { childInserted: false, child: null, fkRejected: false };
 const ts = "2026-06-02T00:00:00.000Z";
-m.db.query("INSERT INTO stories (id, workspace_id, status, created_at) VALUES ('s-1', 'dir-1', 'open', ?)").run(ts);
 m.db.query("INSERT INTO tasks (id, workspace_id, status, created_at) VALUES ('parent', 'dir-1', 'idea', ?)").run(ts);
-// A child with BOTH a real parent_id (self-FK) AND a story_id set — proves coexistence.
-m.db.query("INSERT INTO tasks (id, workspace_id, status, created_at, story_id, parent_id) VALUES ('child', 'dir-1', 'idea', ?, 's-1', 'parent')").run(ts);
+// A child linked to its parent via the parent_id self-FK (story_id no longer exists).
+m.db.query("INSERT INTO tasks (id, workspace_id, status, created_at, parent_id) VALUES ('child', 'dir-1', 'idea', ?, 'parent')").run(ts);
 write.childInserted = true;
-write.coexist = m.db.query("SELECT story_id, parent_id FROM tasks WHERE id='child'").get();
+write.child = m.db.query("SELECT parent_id FROM tasks WHERE id='child'").get();
 // A bogus parent_id must be rejected by the self-FK (foreign_keys is ON).
 try {
   m.db.query("INSERT INTO tasks (id, workspace_id, status, created_at, parent_id) VALUES ('orphan', 'dir-1', 'idea', ?, 'does-not-exist')").run(ts);
@@ -129,19 +129,19 @@ afterAll(() => {
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-describe("step 1 — tasks.parent_id (nullable self-FK, coexists with story_id)", () => {
-  test("parent_id is present alongside story_id (coexistence, not a replacement)", () => {
+describe("step 1 — tasks.parent_id (nullable self-FK, sole membership pointer post-B.5b)", () => {
+  test("parent_id is present and story_id is GONE (B.5b dropped the column)", () => {
     expect(out.taskCols).toContain("parent_id");
-    expect(out.taskCols).toContain("story_id");
+    expect(out.taskCols).not.toContain("story_id");
   });
 
   test("parent_id is NULL on every existing row", () => {
     for (const t of out.snapA.tasks) expect(t.parent_id).toBeNull();
   });
 
-  test("a parent/child link can be written with story_id ALSO set (coexistence)", () => {
+  test("a parent/child link can be written via parent_id", () => {
     expect(out.write.childInserted).toBe(true);
-    expect(out.write.coexist).toEqual({ story_id: "s-1", parent_id: "parent" });
+    expect(out.write.child).toEqual({ parent_id: "parent" });
   });
 
   test("the self-FK is enforced — a bogus parent_id is rejected", () => {

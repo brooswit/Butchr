@@ -174,8 +174,7 @@ function makeFake(opts: { throwOnLaunch?: boolean } = {}) {
 beforeEach(() => {
   cfgMod.config.unifiedWorkspaceEnabled = true; // ON for most cases; the inert case flips it off
   dbMod.db.query(`DELETE FROM workspace`).run();
-  dbMod.db.query(`DELETE FROM tasks`).run();
-  dbMod.db.query(`DELETE FROM stories`).run();
+  dbMod.db.query(`DELETE FROM tasks`).run(); // node rows live here too post-B.5b (stories table dropped)
   wa._resetSupervisionStateForTest();
   cfgMod.config.ctoMidProbeEverySupervisions = 1; // probe every tick unless a case overrides
   livenessMod.setCmdlineLister(() => []); // default: "unknown" liveness → adopt-safe
@@ -372,22 +371,29 @@ describe("unified workspace supervisor", () => {
 // workspace down, (2) boot reconcile won't revive a terminal node's leader, and (3) the
 // REQUIRED trap: an OPEN node whose RAW tasks.status='merged' is NOT treated as terminal.
 describe("leader teardown on node-Work completion (unified)", () => {
-  /** Seed a `stories` row (AUTHORITATIVE status) + its materialized Work node (as production's
-   *  createStory does) so the B.4-flipped reads — which now read the node's OWN tasks row — resolve
-   *  it at this status. isolated=0 so a `done` PATCH lands immediately. */
+  /** Seed the story's materialized Work NODE (work_kind='node') carrying the AUTHORITATIVE status,
+   *  as production's createStory does, so the B.4-flipped reads — which read the node's OWN tasks
+   *  row — resolve it at this status. isolated=0 so a `done` PATCH lands immediately. Post-B.5b the
+   *  node IS the story (the legacy `stories` table is dropped). */
   function insertStory(id: string, status: string): void {
     dbMod.db
       .query(
-        `INSERT OR IGNORE INTO stories (id, workspace_id, brief, status, created_at, isolated)
-         VALUES (?, ?, ?, ?, ?, 0)`,
+        `INSERT OR IGNORE INTO tasks (id, workspace_id, status, work_kind, brief, isolated, created_at)
+         VALUES (?, ?, ?, 'node', ?, 0, ?)`,
       )
-      .run(id, DIR, `brief ${id}`, status, dbMod.nowIso());
-    dbMod.ensureStoryWorkNode(id); // node carries the story's status (work_kind='node')
+      .run(id, DIR, status, `brief ${id}`, dbMod.nowIso());
   }
 
   /** Seed a LIVE leader `workspace` row for a story node (+ the FK-target materialized `tasks` row). */
   function seedLiveLeader(wsId: string, storyId: string, live: Set<string>): string {
-    dbMod.ensureStoryWorkNode(storyId); // the materialized story NODE — FK target of the leader's work_id
+    // The materialized story NODE — FK target of the leader's work_id (belt; insertStory usually
+    // created it already). Post-B.5b the node row IS the story.
+    dbMod.db
+      .query(
+        `INSERT OR IGNORE INTO tasks (id, workspace_id, status, work_kind, brief, isolated, created_at)
+         VALUES (?, ?, 'open', 'node', ?, 0, ?)`,
+      )
+      .run(storyId, DIR, `brief ${storyId}`, dbMod.nowIso());
     dbMod.saveWorkspaceAgentRow(wsId, {
       kind: "leader",
       directory_id: DIR,
@@ -472,8 +478,7 @@ describe("leader teardown on node-Work completion (unified)", () => {
   test("a node in a TRANSIENT state (merging / merge_blocked) KEEPS its leader (not terminal)", async () => {
     for (const status of ["merging", "merge_blocked"] as const) {
       dbMod.db.query(`DELETE FROM workspace`).run();
-      dbMod.db.query(`DELETE FROM tasks`).run();
-      dbMod.db.query(`DELETE FROM stories`).run();
+      dbMod.db.query(`DELETE FROM tasks`).run(); // node rows live here too post-B.5b
       wa._resetSupervisionStateForTest();
       const { runner, launcher, calls, live } = makeFake();
       harnessMod.setRunner(runner);
@@ -1339,22 +1344,20 @@ describe("create-time unified rows (st-93384200 Bug 3)", () => {
   test("a leader whose story is MERGING / MERGE_BLOCKED is NOT torn down by reconcile OR supervise (keep-alive)", async () => {
     for (const status of ["merging", "merge_blocked"] as const) {
       dbMod.db.query(`DELETE FROM workspace`).run();
-      dbMod.db.query(`DELETE FROM tasks`).run();
-      dbMod.db.query(`DELETE FROM stories`).run();
+      dbMod.db.query(`DELETE FROM tasks`).run(); // node rows live here too post-B.5b
       wa._resetSupervisionStateForTest();
       const { runner, launcher, calls, live } = makeFake();
       harnessMod.setRunner(runner);
       wa.setLauncherForTest(launcher);
 
       const storyId = `st-keep-${status}`;
-      // AUTHORITATIVE transient status; isolated=0 is irrelevant here (no PATCH).
+      // The materialized story NODE (FK target of the leader's work_id) carrying the story's REAL
+      // AUTHORITATIVE transient status, so the B.4-flipped nodeWorkIsTerminal (which reads the node's
+      // OWN tasks row through storyStatusOf) sees it. Post-B.5b the node IS the story. isolated=0 is
+      // irrelevant here (no PATCH).
       dbMod.db
-        .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?,?,?,?,?,0)`)
+        .query(`INSERT INTO tasks (id, workspace_id, brief, status, work_kind, isolated, created_at) VALUES (?,?,?,?,'node',0,?)`)
         .run(storyId, DIR, `brief ${storyId}`, status, dbMod.nowIso());
-      // The materialized story node (FK target of the leader's work_id) carrying the story's REAL
-      // status — via ensureStoryWorkNode (as production does), so the B.4-flipped nodeWorkIsTerminal
-      // (which reads the node's OWN tasks row through storyStatusOf) sees this transient status.
-      dbMod.ensureStoryWorkNode(storyId);
       const wsId = `ws-leader-${storyId}`;
       dbMod.saveWorkspaceAgentRow(wsId, {
         kind: "leader", directory_id: DIR, work_id: storyId, desired: 1, has_agent: 1, session_id: `sess-${wsId}`,
@@ -1399,10 +1402,10 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     }
     dbMod.db
       .query(
-        `INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, story_id, parent_id, created_at)
-         VALUES (?, ?, ?, 'leaf', ?, ?, ?)`,
+        `INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, parent_id, created_at)
+         VALUES (?, ?, ?, 'leaf', ?, ?)`,
       )
-      .run(id, DIR, opts.status, story, story, dbMod.nowIso());
+      .run(id, DIR, opts.status, story, dbMod.nowIso());
   }
 
   /** Capture published `story.attention` events. */
@@ -1430,12 +1433,10 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
   // Isolate the attention set from any tasks/stories other describes in this file left behind
   // (attentionList queries globally; our partitions are story_id/dir-scoped, but clear to be safe).
   beforeEach(() => {
-    dbMod.db.query(`DELETE FROM tasks WHERE workspace_id=?`).run(DIR);
-    dbMod.db.query(`DELETE FROM stories WHERE workspace_id=?`).run(DIR);
+    dbMod.db.query(`DELETE FROM tasks WHERE workspace_id=?`).run(DIR); // node rows live here too post-B.5b
   });
   afterEach(() => {
     dbMod.db.query(`DELETE FROM tasks WHERE workspace_id=?`).run(DIR);
-    dbMod.db.query(`DELETE FROM stories WHERE workspace_id=?`).run(DIR);
   });
 
   // ---- operatorActionableItems: partition the EXISTING attention set the routeOwns way --------
@@ -1606,12 +1607,10 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
   test("leaderStoryAwaitsCompletion counts as actionable — an idle leader on an all-merged story pushes once", () => {
     // A story with every member merged (isStoryComplete) but NO leaf awaiting the leader.
     // The story's live status is read off its NODE `tasks` row (REVAMP B.4 read-flip), so the node
-    // must carry an OPEN story status; the `stories` mirror is kept for realism (the dual-write).
+    // must carry an OPEN story status. Post-B.5b the node IS the story (the legacy `stories` table
+    // is dropped), so a single node row is the whole seed.
     dbMod.db
-      .query(`INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, created_at) VALUES (?, ?, 'open', 'node', ?)`)
-      .run("st-complete", DIR, dbMod.nowIso());
-    dbMod.db
-      .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, 'open', ?)`)
+      .query(`INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, brief, created_at) VALUES (?, ?, 'open', 'node', ?, ?)`)
       .run("st-complete", DIR, "goal brief", dbMod.nowIso());
     insertLeaf("m-merged", { status: "merged", story_id: "st-complete" });
     seedOperator("ws-leader-st-complete", "leader", "st-complete");
