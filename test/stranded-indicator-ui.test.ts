@@ -75,6 +75,8 @@ describe("strandedKindLabel — friendly condition labels", () => {
     expect(h.strandedKindLabel("dead_blocked")).toBe("dead-blocked task");
     expect(h.strandedKindLabel("stuck_story")).toBe("stuck story");
     expect(h.strandedKindLabel("merge_blocked")).toBe("merge-blocked story");
+    // PART 2 (story st-a32c8138): the LIVE-but-IDLE responder kind.
+    expect(h.strandedKindLabel("idle_responder")).toBe("idle — not acting");
     expect(h.strandedKindLabel("something_new")).toBe("something_new");
   });
 });
@@ -91,6 +93,12 @@ describe("strandedHref — kind-branched link target (stories have NO task-detai
     expect(h.strandedHref("merge_blocked", "st-mb-4", "dir-B")).toBe("#/workspace/dir-B");
     expect(h.strandedHref("stuck_story", "st-stuck-3", "dir-B")).not.toContain("#/task/");
     expect(h.strandedHref("merge_blocked", "st-mb-4", "dir-B")).not.toContain("#/task/");
+  });
+  test("idle_responder (PART 2) links to the OWNING workspace/CTO view, never #/task/<workId>", () => {
+    const h = makeHarness();
+    // workId IS the directory id, so it routes to the workspace exactly like the story kinds.
+    expect(h.strandedHref("idle_responder", "dir-C", "dir-C")).toBe("#/workspace/dir-C");
+    expect(h.strandedHref("idle_responder", "dir-C", "dir-C")).not.toContain("#/task/");
   });
 });
 
@@ -146,6 +154,39 @@ describe("strandedMarkup — the distinct pull-signal panel", () => {
     expect(html).toContain("A &amp; B &lt;repo&gt;");
     expect(html).toContain("idea &lt;pending&gt; &amp; &quot;stuck&quot;");
     expect(html).not.toContain("<repo>");
+  });
+
+  test("PART 2 — an idle_responder entry folds into the ONE panel with a distinct idle badge + workspace href", () => {
+    const h = makeHarness();
+    // A dead/disabled item and a LIVE-but-IDLE item coexist in the SAME panel (combined count 2).
+    const html = h.strandedMarkup({
+      totals: { stranded: 2 },
+      workspaces: [
+        {
+          id: "dir-A",
+          label: "Project Alpha",
+          path: "/home/me/alpha",
+          stranded: 2,
+          strandedItems: [
+            { workId: "task-idea-1", kind: "idea", reason: "idea task pending; CTO gave up (dead)" },
+            { workId: "dir-A", kind: "idle_responder", reason: "CTO idle — 3 item(s) awaiting action, responder not acting" },
+          ],
+        },
+      ],
+    });
+    // ONE panel, combined count of both kinds.
+    expect(html).toContain("stranded-panel");
+    expect(html).toContain(">2</span>");
+    // The idle entry: friendly label + distinct badge class + verbatim reason.
+    expect(html).toContain("idle — not acting");
+    expect(html).toContain("stranded-kind--idle");
+    expect(html).toContain("CTO idle — 3 item(s) awaiting action, responder not acting");
+    // The idle summary routes to the workspace/CTO view (workId === directory id), never #/task/.
+    expect(html).toContain('href="#/workspace/dir-A"');
+    expect(html).not.toContain("#/task/dir-A");
+    // The dead/disabled sibling still renders in the same panel (distinct, red badge — no idle mod).
+    expect(html).toContain("idea awaiting spec");
+    expect(html).toContain("idea task pending; CTO gave up (dead)");
   });
 
   test("absent (empty string) when nothing is stranded — totals.stranded === 0", () => {

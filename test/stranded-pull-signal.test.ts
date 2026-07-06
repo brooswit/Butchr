@@ -35,6 +35,11 @@ const WS_CTO_GAVEUP = "s2-ws-cto-gaveup";
 const WS_CTO_DISABLED = "s2-ws-cto-disabled";
 const WS_CTO_LIVE = "s2-ws-cto-live";
 const WS_STORY = "s2-ws-story"; // CTO live here, so only leader findings appear
+// OPERATOR-IDLE → HIGHER-UP, PART 2 (story st-a32c8138): the LIVE-but-IDLE CTO cases.
+const WS_CTO_IDLE = "s2-ws-cto-idle"; // enabled + gave_up=0 + durable idle=1, owns actionable work
+const WS_CTO_IDLE_EMPTY = "s2-ws-cto-idle-empty"; // idle=1 but ZERO actionable → SILENT
+const WS_CTO_ACTIVE = "s2-ws-cto-active"; // live-and-working (idle=0) → invariant preserved
+const WS_CTO_DEAD_IDLE = "s2-ws-cto-dead-idle"; // gave_up=1 AND idle=1 → only the dead kind (mutual excl.)
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-stranded-data-"));
@@ -61,6 +66,10 @@ beforeAll(async () => {
   insWs(WS_CTO_DISABLED, 0);
   insWs(WS_CTO_LIVE, 1);
   insWs(WS_STORY, 1);
+  insWs(WS_CTO_IDLE, 1);
+  insWs(WS_CTO_IDLE_EMPTY, 1);
+  insWs(WS_CTO_ACTIVE, 1);
+  insWs(WS_CTO_DEAD_IDLE, 1);
 
   // CTO workspace-agent rows. The deterministic id is `ws-cto-<directory>` (db.ts seedUnified).
   //  - GAVEUP: enabled (cto_enabled=1) but gave_up=1 → stranded (dead).
@@ -83,6 +92,39 @@ beforeAll(async () => {
     directory_id: WS_STORY,
     desired: 1,
     gave_up: 0,
+  });
+  // PART 2 idle CTOs. All enabled (cto_enabled=1) and gave_up=0 so ctoResponderStranded is FALSE
+  // → the LIVE branch runs. `idle` is the durable PART-1 projection (set directly here, exactly as
+  // gave_up is, so the projection stays a sync DB read with no probe).
+  dbMod.saveWorkspaceAgentRow(`ws-cto-${WS_CTO_IDLE}`, {
+    kind: "cto",
+    directory_id: WS_CTO_IDLE,
+    desired: 1,
+    gave_up: 0,
+    idle: 1,
+  });
+  dbMod.saveWorkspaceAgentRow(`ws-cto-${WS_CTO_IDLE_EMPTY}`, {
+    kind: "cto",
+    directory_id: WS_CTO_IDLE_EMPTY,
+    desired: 1,
+    gave_up: 0,
+    idle: 1,
+  });
+  dbMod.saveWorkspaceAgentRow(`ws-cto-${WS_CTO_ACTIVE}`, {
+    kind: "cto",
+    directory_id: WS_CTO_ACTIVE,
+    desired: 1,
+    gave_up: 0,
+    idle: 0, // live-and-working
+  });
+  // DEAD_IDLE: gave_up=1 (stranded) AND idle=1 — the idle branch is the `else` of the stranded
+  // branch, so this must surface ONLY the dead kind, never idle_responder (mutual exclusion).
+  dbMod.saveWorkspaceAgentRow(`ws-cto-${WS_CTO_DEAD_IDLE}`, {
+    kind: "cto",
+    directory_id: WS_CTO_DEAD_IDLE,
+    desired: 1,
+    gave_up: 1,
+    idle: 1,
   });
 });
 
@@ -260,6 +302,78 @@ describe("F4 merge_blocked — stranded leader responder", () => {
   test("LIVE leader: the merge_blocked story surfaces NOTHING", () => {
     seedStory("st-f4-live", WS_STORY, "merge_blocked", { desired: 1, gave_up: 0 });
     expect(kindsFor(WS_STORY, "st-f4-live")).toEqual([]);
+  });
+});
+
+describe("idle_responder — a LIVE-but-IDLE CTO (story st-a32c8138, PART 2)", () => {
+  /** The idle_responder items in strandedItems(ws) for a directory. */
+  function idleItems(ws: string) {
+    return tasksMod.strandedItems(ws).filter((i) => i.kind === "idle_responder");
+  }
+
+  test("(a) idle CTO owning ≥1 actionable item surfaces ONE idle_responder summary on the dashboard + /health", () => {
+    // A standalone `failed` task is a CTO-owned actionable item (operatorActionableItems).
+    seedTask("s2-idle-failed", WS_CTO_IDLE, "failed");
+    const items = idleItems(WS_CTO_IDLE);
+    // ONE responder-level summary (NOT one-per-item), keyed to the directory/workspace id.
+    expect(items).toHaveLength(1);
+    expect(items[0]!.workId).toBe(WS_CTO_IDLE);
+    expect(items[0]!.reason).toContain("CTO idle");
+    expect(items[0]!.reason).toContain("1 item");
+
+    const ws = dashWs(WS_CTO_IDLE);
+    expect(ws.strandedItems.some((i) => i.kind === "idle_responder")).toBe(true);
+    // Folds into the SAME stranded count + needsAttention. The failed task is counted ONCE in
+    // REVIEW_STATES (ws.failed) and the idle summary is a distinct +1 in stranded — no double-count.
+    expect(ws.stranded).toBeGreaterThanOrEqual(1);
+    expect(ws.needsAttention).toBe(ws.review + ws.failed + ws.stranded);
+    // /health rollup (strandedTotals is exactly what healthResponse folds in).
+    expect(
+      tasksMod.strandedTotals().items.some(
+        (i) => i.workId === WS_CTO_IDLE && i.kind === "idle_responder",
+      ),
+    ).toBe(true);
+  });
+
+  test("(b) a live-and-working CTO (idle=0) surfaces NOTHING — invariant preserved", () => {
+    seedTask("s2-active-failed", WS_CTO_ACTIVE, "failed");
+    expect(idleItems(WS_CTO_ACTIVE)).toEqual([]);
+    const ws = dashWs(WS_CTO_ACTIVE);
+    expect(ws.stranded).toBe(0);
+    expect(ws.strandedItems).toEqual([]);
+    // needsAttention is exactly the REVIEW_STATES sum (the failed task) — no stranded inflation.
+    expect(ws.needsAttention).toBe(ws.review + ws.failed);
+  });
+
+  test("(c) an idle CTO with ZERO actionable items surfaces NOTHING (noise rule)", () => {
+    // idle=1 but no idea/blocked/failed/review task owned by the CTO → operatorActionableItems is
+    // empty → SILENT (mirrors PART 1's push-side noise rule).
+    expect(idleItems(WS_CTO_IDLE_EMPTY)).toEqual([]);
+    expect(dashWs(WS_CTO_IDLE_EMPTY).stranded).toBe(0);
+  });
+
+  test("(d) coexistence — a dead/disabled responder and an idle CTO both render in ONE list with distinct kinds", () => {
+    // WS_CTO_GAVEUP carries dead-responder items (idea/dead_blocked from F1/F2); WS_CTO_IDLE carries
+    // the idle_responder summary. strandedTotals is the single aggregated list (the one panel).
+    const all = tasksMod.strandedTotals().items;
+    const deadKinds = all
+      .filter((i) => i.workId === "s2-idea-gaveup" || i.workId === "s2-blk-gaveup")
+      .map((i) => i.kind);
+    const idle = all.filter((i) => i.workId === WS_CTO_IDLE && i.kind === "idle_responder");
+    expect(deadKinds).toContain("idea"); // a dead/disabled kind
+    expect(idle).toHaveLength(1); // and the idle kind, in the SAME list
+    // The combined total counts BOTH (distinct entries, distinct kinds).
+    expect(tasksMod.strandedTotals().total).toBe(all.length);
+    expect(new Set(all.map((i) => i.kind)).size).toBeGreaterThanOrEqual(2);
+  });
+
+  test("mutual exclusion — a CTO that is gave_up (dead) AND idle surfaces ONLY the dead kind", () => {
+    // The idle branch is the `else` of ctoResponderStranded, so a stranded CTO never ALSO emits
+    // idle_responder even when its durable idle flag is set.
+    seedTask("s2-deadidle-idea", WS_CTO_DEAD_IDLE, "idea");
+    const kinds = tasksMod.strandedItems(WS_CTO_DEAD_IDLE).map((i) => i.kind);
+    expect(kinds).toContain("idea");
+    expect(kinds).not.toContain("idle_responder");
   });
 });
 

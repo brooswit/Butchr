@@ -844,6 +844,7 @@ const STRANDED_KIND_LABEL = {
   dead_blocked: "dead-blocked task",
   stuck_story: "stuck story",
   merge_blocked: "merge-blocked story",
+  idle_responder: "idle — not acting",
 };
 function strandedKindLabel(kind) {
   return STRANDED_KIND_LABEL[kind] || String(kind || "");
@@ -854,7 +855,11 @@ function strandedKindLabel(kind) {
 // | workspace/<id> | task/<id>, and the story card is inert) — so a story id must route to its
 // OWNING WORKSPACE, never #/task/<storyId> (that would mis-render a node id in the task view).
 function strandedHref(kind, workId, workspaceId) {
-  if (kind === "stuck_story" || kind === "merge_blocked") {
+  // STORY-kind findings (stuck_story / merge_blocked) carry a STORY id and route to their owning
+  // workspace. The idle_responder summary (story st-a32c8138, PART 2) is a RESPONDER-level entry
+  // whose workId IS the directory/workspace id, so it likewise routes to the workspace/CTO view —
+  // never #/task/<workId> (that would mis-render a directory id in the task view).
+  if (kind === "stuck_story" || kind === "merge_blocked" || kind === "idle_responder") {
     return "#/workspace/" + esc(workspaceId);
   }
   return "#/task/" + esc(workId);
@@ -875,8 +880,13 @@ function strandedMarkup(data) {
       const items = w.strandedItems
         .map((it) => {
           const href = strandedHref(it.kind, it.workId, w.id);
+          // Distinct badge for the LIVE-but-IDLE case (story st-a32c8138, PART 2) so an idle
+          // responder reads visually apart from a dead/disabled one within the SAME list.
+          const kindClass = it.kind === "idle_responder"
+            ? "stranded-kind stranded-kind--idle"
+            : "stranded-kind";
           return `<li class="stranded-item"><a class="stranded-link" href="${href}">`
-            + `<span class="stranded-kind">${esc(strandedKindLabel(it.kind))}</span>`
+            + `<span class="${kindClass}">${esc(strandedKindLabel(it.kind))}</span>`
             + `<span class="stranded-reason">${esc(it.reason)}</span></a></li>`;
         })
         .join("");
@@ -889,8 +899,8 @@ function strandedMarkup(data) {
         <span class="stranded-icon" aria-hidden="true">⚠</span>
         <h2>Stranded work <span class="stranded-count">${esc(String(total))}</span></h2>
       </div>
-      <p class="stranded-lead">A responder is <strong>dead or disabled</strong> — this work is
-        pending with no agent to act on it, so a human must intervene.</p>
+      <p class="stranded-lead">A responder is <strong>dead, disabled, or idle</strong> — this work
+        is pending with no agent acting on it, so a human must intervene.</p>
       ${groups}
     </div>`;
 }

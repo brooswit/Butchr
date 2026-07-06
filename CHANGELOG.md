@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **OPERATOR-IDLE → HIGHER-UP, PART 2 (story st-a32c8138): the LIVE-but-IDLE CTO now surfaces on
+  the dashboard as a sibling of the existing stranded-work indicator — ONE coherent "a responder is
+  not acting on its owned work (dead, disabled, OR idle)" signal, not two overlapping widgets.**
+  The stranded projection (`tasks.strandedItems`) — already a pure sync DB read that surfaces work
+  whose owning CTO/leader is dead-while-desired (`gave_up`) or disabled — is extended with a new
+  `idle_responder` kind: when a directory's CTO is LIVE (enabled, not `gave_up`) but its durable
+  `workspace.idle` projection (populated by PART 1, no liveness probe) is set AND it owns ≥1
+  actionable item, it contributes ONE responder-level summary entry (`"CTO idle — N item(s)
+  awaiting action, responder not acting"`). Reuses PART 1's exported `operatorActionableItems`
+  verbatim (no new actionable-set definition). The idle branch is the mutually-exclusive `else` of
+  the dead/disabled branch (a CTO is stranded OR live-idle, never both), and emits ONE summary
+  entry rather than one-per-item precisely because an idle CTO's actionable items are review-states
+  already counted in `needsAttention` — the summary is a distinct `+1`, so nothing is double-counted.
+  Invariants preserved: a LIVE-AND-WORKING CTO (`idle=0`) contributes NOTHING (byte-for-byte
+  unchanged needsAttention), and an idle CTO with ZERO actionable items is SILENT (mirrors PART 1's
+  push-side noise rule). Because `strandedTotals`/`strandedItems` already feed both `/health` and
+  `/api/dashboard`, both surfaces fold the idle case into `stranded`/`needsAttention` for free.
+  The dashboard panel (`public/app.js` stranded-indicator block) renders idle entries in the SAME
+  panel with a distinct `idle — not acting` badge (cyan `--idle` tone vs the dead/disabled red),
+  routes the summary to its workspace/CTO view, and updates the lead copy to "dead, disabled, or
+  idle"; the single count/stat-tile and per-workspace bucket fold the idle entry into the same total.
+
 ## [0.9.180] - 2026-07-06
 
 ### Added

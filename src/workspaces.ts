@@ -515,11 +515,12 @@ export function workspaceDetail(id: string): WorkspaceView {
  *  - `failed`         — the terminal `failed` state (a dispatch/spec-gen give-up or a
  *                       post-merge verify revert) — execution failures a human should see.
  *  - `needsAttention` — what to look at right now (= review + failed + stranded).
- *  - `stranded`       — agent-INDEPENDENT pull-signal (story st-a4cc6082, S2): pending work
- *                       (idea / dead-blocked task; stuck / merge_blocked story) whose OWNING
- *                       responder (CTO or story leader) is dead-while-desired (gave_up) or
- *                       disabled, so it would otherwise strand with NO push-channel signal.
- *                       FOLDED into needsAttention so the existing badge lights up; a LIVE
+ *  - `stranded`       — agent-INDEPENDENT pull-signal (story st-a4cc6082, S2 + st-a32c8138 PART 2):
+ *                       pending work whose OWNING responder (CTO or story leader) is NOT acting on
+ *                       it — dead-while-desired (gave_up) or disabled (idea / dead-blocked task;
+ *                       stuck / merge_blocked story), OR a LIVE CTO gone durably IDLE while owning
+ *                       ≥1 actionable item (the `idle_responder` summary). FOLDED into
+ *                       needsAttention so the existing badge lights up; a LIVE-AND-WORKING
  *                       responder ⇒ stranded=0 ⇒ needsAttention byte-for-byte unchanged.
  */
 export type DashboardWorkspace = {
@@ -589,8 +590,9 @@ export function dashboard(): Dashboard {
     // FEEDBACK states awaiting a human (kept under the `review` field name).
     const review = (c.spec_review ?? 0) + (c.in_review ?? 0) + (c.needs_info ?? 0);
     const failed = c.failed ?? 0; // the terminal `failed` state — see comment above
-    // STRANDED pull-signal (story st-a4cc6082, S2): pending items whose owning responder is
-    // dead-while-desired (gave_up) or disabled — SYNC DB projection, no liveness probe.
+    // STRANDED pull-signal (story st-a4cc6082 S2 + st-a32c8138 PART 2): pending items whose owning
+    // responder is not acting — dead-while-desired (gave_up) / disabled, or a LIVE CTO durably idle
+    // with owned actionable work — a SYNC DB projection, no liveness probe.
     const strandedItemsList = strandedItems(d.id);
     const stranded = strandedItemsList.length;
     // = review + failed (REVIEW_STATES) + stranded. A LIVE responder ⇒ stranded=0 ⇒ this equals

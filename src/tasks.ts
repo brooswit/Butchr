@@ -3284,15 +3284,22 @@ export function notifyStoryReadiness(storyId: string): boolean {
 
 // --- STRANDED-WORK PULL-SIGNAL (story st-a4cc6082, S2) -----------------------
 // An agent-INDEPENDENT, human-facing PULL signal for pending work whose OWNING responder (the
-// CTO of a directory, or a story LEADER) is dead-while-desired (S1's durable workspace.gave_up)
-// or DISABLED, so the work strands with NO push-channel signal. Read straight from the DB —
-// gave_up, isCtoEnabled, leader desired, story.status — so dashboard() stays a SYNC projection
-// with NO per-request liveness probe. THE CRITICAL PROPERTY: a LIVE responder (gave_up=0 AND
-// enabled/desired) is NOT stranded and contributes NOTHING, so the existing REVIEW_STATES
-// needsAttention is byte-for-byte unchanged. idea/blocked/story-ids are all OUTSIDE
-// REVIEW_STATES, so a stranded item is NEVER double-counted against the review/failed buckets.
+// CTO of a directory, or a story LEADER) is NOT ACTING on it — either dead-while-desired (S1's
+// durable workspace.gave_up) or DISABLED, so the work strands with NO push-channel signal; OR
+// (story st-a32c8138, PART 2) a LIVE CTO that has gone durably IDLE (workspace.idle) while still
+// owning ≥1 actionable item — the top-tier `idle_responder` case whose higher-up is the HUMAN,
+// so it surfaces HERE rather than on a push channel (a leader's idle→CTO push is PART 1's).
+// Read straight from the DB — gave_up, isCtoEnabled, leader desired, story.status, and the
+// durable workspace.idle projection (a gave_up-shaped input) — so dashboard() stays a SYNC
+// projection with NO per-request liveness probe. THE CRITICAL PROPERTY: a LIVE-AND-WORKING
+// responder (gave_up=0 AND enabled/desired AND idle=0) is NOT stranded and contributes NOTHING,
+// so the existing REVIEW_STATES needsAttention is byte-for-byte unchanged. The dead/disabled
+// kinds surface idea/blocked/story-ids that are all OUTSIDE REVIEW_STATES; the `idle_responder`
+// kind is ONE responder-level summary entry (NOT one-per-item), so it never re-counts an idle
+// CTO's actionable items (which are review-states already in needsAttention) — the summary is a
+// distinct +1. So a stranded item is NEVER double-counted against the review/failed buckets.
 
-export type StrandedKind = "idea" | "dead_blocked" | "stuck_story" | "merge_blocked";
+export type StrandedKind = "idea" | "dead_blocked" | "stuck_story" | "merge_blocked" | "idle_responder";
 /** One pending item whose owning responder is stranded (see strandedItems). */
 export type StrandedItem = { workId: string; kind: StrandedKind; reason: string };
 
@@ -3358,6 +3365,28 @@ export function strandedItems(directoryId: string): StrandedItem[] {
         kind: "dead_blocked",
         reason: `blocked on dead dependency ${dead.join(", ")}; ${ctoWhy}`,
       });
+    }
+  } else {
+    // LIVE-but-IDLE CTO (story st-a32c8138, PART 2) — the top-tier `idle_responder` case, the
+    // mutually-exclusive counterpart of the dead/disabled branch above (a CTO is stranded OR
+    // live-idle, never both, so the two never double-signal the same responder). The CTO here is
+    // ENABLED and NOT gave_up, but its durable workspace.idle projection (set/cleared by PART 1's
+    // reconcileOperatorIdle — a gave_up-shaped sync input, NO probe) says it has gone quiet. Gate
+    // the (cheap-but-non-trivial) operatorActionableItems scan behind idle===1 so it runs ONLY for
+    // an idle CTO. Emit ONE responder-level SUMMARY entry (not one-per-item): the CTO's actionable
+    // items are review-states already counted in needsAttention, so a per-item fold would
+    // double-count — the summary is a distinct +1 "responder not acting" signal. Idle with ZERO
+    // actionable is SILENT (mirrors PART 1's push-side noise rule).
+    const ctoRow = getWorkspaceAgentRow(`ws-cto-${directoryId}`);
+    if (ctoRow?.idle === 1) {
+      const owned = operatorActionableItems(ctoRow);
+      if (owned.length > 0) {
+        items.push({
+          workId: directoryId,
+          kind: "idle_responder",
+          reason: `CTO idle — ${owned.length} item(s) awaiting action, responder not acting`,
+        });
+      }
     }
   }
 

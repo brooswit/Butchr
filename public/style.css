@@ -463,6 +463,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   font-size: 11px; font-weight: 700; color: var(--failed);
   text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
 }
+/* The LIVE-but-IDLE responder case (story st-a32c8138, PART 2): same panel, but the badge reads
+   in the idle (cyan) tone so it is visually distinct from a dead/disabled (red) responder. */
+.stranded-panel .stranded-kind--idle { color: var(--idle); }
 .stranded-panel .stranded-reason { font-size: 13px; color: var(--muted); }
 
 /* STORY-LEVEL ASK panel — an open story ask (pending_ask) surfaced under its story row:
