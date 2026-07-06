@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Graph view now shows story→subtask hierarchy explicitly: every visible story renders as an always-present labeled container (◈ STORY <id>, with an honest "no subtasks yet" only when genuinely childless) and its children connect via dashed no-arrow child-of connectors, visually distinct from the solid arrowed blocked_by dependency edges, with a new relationship legend distinguishing container / child-of / blocked-by.
+
 ## [0.9.183] - 2026-07-06
 
 ### Changed

@@ -2032,6 +2032,34 @@ function graphLevels(nodeIds, edges) {
   return level;
 }
 
+// <test-extract:graph-membership> — pure, DOM-free story→subtask membership, unit-tested in
+// test/graph-hierarchy.test.ts. The graph's containment (and S3's future grouping) derives from
+// this ONE set of rules, so app.js and the tests can't drift.
+// A leaf's owning story id: parent_id wins over story_id (the canonical membership rule). A story
+// NODE carries neither, so this is only meaningful for leaves.
+function graphChildOf(w) { return w && (w.parent_id || w.story_id); }
+// The VISIBLE member leaves of a story: every id in `ids` (the rendered node set) whose work item
+// is a LEAF owned by `storyId`. Returns leaf ids only — NOT the story itself; callers add the
+// story node. Because it filters to `ids`, a member hidden by the generations/depth slider is
+// excluded here, so no dangling child-of edge is ever synthesized for a hidden child.
+function storyMemberIds(storyId, ids, byId) {
+  const out = [];
+  for (const cid of ids) {
+    const c = byId.get(cid);
+    if (c && c.work_kind === "leaf" && graphChildOf(c) === storyId) out.push(cid);
+  }
+  return out;
+}
+// A story's TRUE subtask total from its server-computed per-status `counts` rollup (idle is a
+// pseudo-bucket, not a real subtask — excluded, mirroring workRollup). Drives the HONEST empty
+// state: only a story with ZERO subtasks total is "no subtasks yet"; a story whose children are
+// all finished or slider-hidden has counts>0 and is NOT childless.
+function storySubtaskTotal(counts) {
+  const c = counts || {};
+  return Object.keys(c).reduce((n, k) => (k === "idle" ? n : n + (c[k] || 0)), 0);
+}
+// </test-extract:graph-membership>
+
 // Draw a DAG of the workspace's non-terminal WORK (stories + tasks) and their blockers:
 // nodes are work items (label = id, colored by effective status), edges are blocker→blocked
 // arrows pointing left→right across topological levels. Inline SVG, no library. A STORY is a
@@ -2043,6 +2071,22 @@ function graphLevels(nodeIds, edges) {
 // The active/in-flight work (the "tip") always renders; how much of the FINISHED dependency
 // history behind it shows is controlled by a generations slider (see finishedGenerations +
 // buildGraphGenSlider) so deep merge trains stay readable. `work` is the full leaf|node union.
+// A tiny inline-SVG swatch for the graph's relationship legend, reusing the graph's own edge/box
+// classes so what the legend shows is exactly what the graph draws: `blocked` = solid muted line
+// with an arrowhead, `child` = dashed accent line (no arrow), `container` = dashed story box.
+function relSwatch(kind) {
+  const s = svg("svg", { class: "tg-rel-swatch", width: 30, height: 14, viewBox: "0 0 30 14", "aria-hidden": "true" });
+  if (kind === "blocked") {
+    s.appendChild(svg("line", { class: "tg-edge", x1: 2, y1: 7, x2: 21, y2: 7 }));
+    s.appendChild(svg("path", { class: "tg-arrow-head", d: "M21,3 L28,7 L21,11 z" }));
+  } else if (kind === "child") {
+    s.appendChild(svg("line", { class: "tg-childedge", x1: 2, y1: 7, x2: 28, y2: 7 }));
+  } else {
+    s.appendChild(svg("rect", { class: "tg-cluster-rect", x: 2, y: 2, width: 26, height: 10, rx: 3, ry: 3 }));
+  }
+  return s;
+}
+
 function renderGraph(work) {
   const byId = new Map(work.map((t) => [t.id, t]));
   // Active tip for BOTH kinds via !isHistoryItem (story statuses aren't in ACTIVE_STATUSES):
@@ -2132,26 +2176,24 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
   ]);
   root.appendChild(defs);
 
-  // Cluster bounding-box layer, drawn FIRST so it sits BEHIND the edges + nodes: for each
-  // STORY (node-kind) present, a subtle translucent rounded-rect enclosing the story node +
-  // its VISIBLE child subtasks (children = leaves in the node set whose parent_id||story_id
-  // matches the story), with a small story-id label. Parent/child ownership is shown by this
-  // ENCLOSURE, not by edges. The layered topological layout is left UNTOUCHED, so a story's
-  // children may be scattered and its box may grow or overlap neighbours — an accepted
-  // tradeoff (translucent, behind everything); we do NOT re-layout to force child adjacency.
-  // A story with no visible child draws no box (the bare node suffices). CPAD ≤ PAD keeps the
-  // box (and its label band) inside the svg's PAD margin, so nothing clips.
+  // Cluster bounding-box layer, drawn FIRST so it sits BEHIND the edges + nodes: for EVERY
+  // visible STORY (node-kind) a subtle translucent rounded-rect enclosing the story node + its
+  // VISIBLE child subtasks (children = leaves in the node set owned by the story, via
+  // storyMemberIds), headed by a reused ◈ STORY <id> label (kindVisual('node'), from S1). The
+  // container is ALWAYS drawn — including the childless case — so a story never reads as a bare
+  // orphan box; ownership is shown by this ENCLOSURE (reinforced by the child-of edges below),
+  // not by dependency edges. The layered topological layout is left UNTOUCHED, so a story's
+  // children may be scattered and its box may grow or overlap neighbours — an accepted tradeoff
+  // (translucent, behind everything); we do NOT re-layout to force child adjacency. CPAD ≤ PAD
+  // keeps the box (and its label band) inside the svg's PAD margin, so nothing clips.
   const CPAD = 12;
+  const kvNode = kindVisual("node"); // ◈ STORY — reused for every container header (S1's table)
   const clusterLayer = svg("g", { class: "tg-clusters" });
   for (const id of nodeIds) {
     const story = byId.get(id);
     if (!story || story.work_kind !== "node") continue;
-    const members = [id];
-    for (const cid of nodeIds) {
-      const c = byId.get(cid);
-      if (c && c.work_kind === "leaf" && (c.parent_id || c.story_id) === id) members.push(cid);
-    }
-    if (members.length < 2) continue; // no visible children → just the node, no box
+    // Members = the story node + its VISIBLE child leaves (may be just the node itself).
+    const members = [id, ...storyMemberIds(id, nodeIds, byId)];
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const m of members) {
       const p = pos.get(m);
@@ -2159,15 +2201,50 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
       minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
       maxX = Math.max(maxX, p.x + NW); maxY = Math.max(maxY, p.y + NH);
     }
+    if (!isFinite(minX)) continue; // story node itself unplaced — nothing to box
     const bx = minX - CPAD, by = minY - CPAD;
     const bw = (maxX - minX) + CPAD * 2, bh = (maxY - minY) + CPAD * 2;
-    const cg = svg("g", { class: "tg-cluster" });
-    cg.appendChild(svg("title", {}, `story ${id}`));
+    // HONEST empty state: label "· no subtasks yet" ONLY when the story has ZERO subtasks total
+    // (a parked/just-created story). A story whose children are all finished or hidden by the
+    // depth slider also has members.length===1, but is NOT childless (counts>0) — it gets a
+    // neutral "· subtasks not shown" header instead, so we never lie about a decomposed story.
+    const childless = storySubtaskTotal(story.counts) === 0;
+    const hiddenChildren = !childless && members.length === 1;
+    const suffix = childless ? " · no subtasks yet" : hiddenChildren ? " · subtasks not shown" : "";
+    const cg = svg("g", { class: "tg-cluster" + (childless ? " empty" : "") });
+    cg.appendChild(svg("title", {}, `story ${id}${suffix}`));
     cg.appendChild(svg("rect", { class: "tg-cluster-rect", x: bx, y: by, width: bw, height: bh, rx: 10, ry: 10 }));
-    cg.appendChild(svg("text", { class: "tg-cluster-label", x: bx + 8, y: by + 2 }, id));
+    cg.appendChild(svg("text", { class: "tg-cluster-label", x: bx + 8, y: by + 2 }, `${kvNode.glyph} ${kvNode.label} ${id}${suffix}`));
     clusterLayer.appendChild(cg);
   }
   root.appendChild(clusterLayer);
+
+  // Child-of connectors: a DASHED, NO-arrowhead line from each visible STORY to each of its
+  // VISIBLE child leaves — deliberately DISTINCT from the solid arrowed blocked_by edges below,
+  // so the two relationship meanings never blur (containment vs dependency). Synthesized
+  // front-end from the SAME membership rule (storyMemberIds). Drawn ABOVE the cluster box but
+  // BELOW the blocked_by edges + nodes, and kept thin so the box + child-of + blocked_by don't
+  // overwhelm a dense graph. Both endpoints are guaranteed in the node set (storyMemberIds
+  // filters to it + the pos guards), so a slider-hidden child never leaves a dangling edge.
+  const childLayer = svg("g", { class: "tg-childedges" });
+  for (const id of nodeIds) {
+    const story = byId.get(id);
+    if (!story || story.work_kind !== "node") continue;
+    const a = pos.get(id);
+    if (!a) continue;
+    for (const cid of storyMemberIds(id, nodeIds, byId)) {
+      const b = pos.get(cid);
+      if (!b) continue;
+      const x1 = a.x + NW, y1 = a.y + NH / 2;
+      const x2 = b.x, y2 = b.y + NH / 2;
+      const dx = Math.max(18, (x2 - x1) / 2);
+      childLayer.appendChild(svg("path", {
+        class: "tg-childedge",
+        d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
+      }));
+    }
+  }
+  root.appendChild(childLayer);
 
   // edges next so nodes paint on top of them
   const edgeLayer = svg("g", { class: "tg-edges" });
@@ -2242,13 +2319,24 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     root.appendChild(g);
   }
 
+  // Relationship legend — teaches the three graph vocabularies so child-of and blocked-by can't
+  // blur: a dashed CONTAINER box (a story), a dashed no-arrow CHILD-OF line, and a solid arrowed
+  // BLOCKED-BY line. Each swatch reuses the very classes the graph draws with, so the legend and
+  // the graph can't drift. Sits above the status-color legend.
+  const relItems = [
+    ["container", "story container"],
+    ["child", "child-of"],
+    ["blocked", "blocked-by"],
+  ].map(([k, txt]) => el("span", { class: "tg-rel" }, [relSwatch(k), txt]));
+  const relLegend = el("div", { class: "tg-rel-legend" }, relItems);
+
   // legend of the statuses actually present, reusing the .chip color styling
   const present = [...new Set([...nodeIds].map((id) => effStatus(byId.get(id))))];
   const legend = el("div", { class: "tg-legend" },
     present.map((s) => el("span", { class: "chip " + s }, s)));
 
   const scroll = el("div", { class: "task-graph-scroll" }, [root]);
-  return el("div", {}, [legend, scroll]);
+  return el("div", {}, [relLegend, legend, scroll]);
 }
 
 // Human-readable readout shown next to the generations slider. The endpoints get
