@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **REVAMP-4 project READ surfaces — `GET /api/projects` + `GET /api/projects/:id/ceo` (story st-04869886).**
+  Two pure-additive, read-only endpoints so a real Projects UI can list and inspect project nodes
+  (the tier previously shipped create/write + per-id reads but no list/status reads).
+  `GET /api/projects` lists every project node (`work_kind='project'`) newest-first via a new
+  `listProjects()` accessor (mirrors `listStories`); this route previously 404'd.
+  `GET /api/projects/:id/ceo` returns the managed CEO agent's status — `{ enabled, overridden,
+  globalGate, live }` — the CEO analog of `GET /api/workspaces/:id/cto`, derived by a new
+  `ceoAgentStatus()` helper over the `ws-ceo-<id>` runtime row (404 if the project node is gone).
+  No schema, write, or behavior changes.
+
 ## [0.9.205] - 2026-07-06
 
 ### Added

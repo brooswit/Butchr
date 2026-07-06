@@ -488,6 +488,18 @@ export function getProject(id: string): TaskRow | null {
   );
 }
 
+/** ALL project nodes (work_kind='project' `tasks` rows), newest-first. A GLOBAL list — projects are
+ *  tree-tops (parent_id NULL), so there is no workspace scope to filter by; mirrors listStories'
+ *  newest-first ordering. Backs GET /api/projects (REVAMP-4 P3c read surface). */
+export function listProjects(): TaskRow[] {
+  return db
+    .query<TaskRow, []>(
+      `SELECT id, workspace_id, brief, ceo_enabled, status, created_at
+         FROM tasks WHERE work_kind='project' ORDER BY created_at DESC`,
+    )
+    .all();
+}
+
 /** Mint a project id not already taken by any `tasks` row (mirrors uniqueStoryId's retry shape). */
 function uniqueProjectId(): string {
   for (let i = 0; i < 100; i++) {

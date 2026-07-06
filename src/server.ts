@@ -27,6 +27,7 @@ import {
   getWorkspace,
   getWorkspaceByPath,
   listProjectRepos,
+  listProjects,
   listWorkspaces,
   registerRepoUnderProject,
   registerWorkspace,
@@ -46,6 +47,7 @@ import {
 // the CtoStatus response shape + `cto.updated` emission identical. The legacy launcher
 // cto-agent.ts was deleted in Phase C S5.
 import {
+  ceoAgentStatus,
   ctoAgentName,
   ctoAgentStatus,
   restartCtoAgent,
@@ -764,11 +766,25 @@ route("POST", "/api/projects", async (req) => {
   const body = await readJson(req);
   return json(createProject(body.workspace, body.brief));
 });
+// ALL project nodes, newest-first (a global list — projects are tree-tops). The read surface the
+// Projects UI lists from (REVAMP-4 P3c). Pure-additive; this route previously 404'd.
+route("GET", "/api/projects", async () => {
+  return json(listProjects());
+});
 // A project node's row (for verification). 404 if it is not a project node.
 route("GET", "/api/projects/:id", async (_req, p) => {
   const project = getProject(p.id!);
   if (!project) throw new HttpError(404, `project not found: ${p.id}`);
   return json(project);
+});
+// A project's managed CEO agent STATUS (REVAMP-4 P3c) — the CEO analog of GET /api/workspaces/:id/cto.
+// { enabled (isCeoEnabled resolved), overridden (explicit ceo_enabled override), globalGate
+// (config.ceoAgentEnabled), live (the ws-ceo-<id> runtime row is desired && running) }. A pure READ.
+// 404 if the project node is gone.
+route("GET", "/api/projects/:id/ceo", async (_req, p) => {
+  const status = await ceoAgentStatus(p.id!);
+  if (!status) throw new HttpError(404, `project not found: ${p.id}`);
+  return json(status);
 });
 // Enable/disable a project's managed CEO agent (boot auto-start + supervision). `ceo_enabled`:
 // true/false forces it on/off; null CLEARS the override → inherit config.ceoAgentEnabled. Mirrors

@@ -58,7 +58,7 @@ import type { AttentionItem } from "./tasks.ts";
 // transitively — its only workspace-agent-importing dependency would be stories.ts, which the
 // dispatcher never imports), so this introduces NO import cycle and no shared module is needed.
 import { isGenuinelyIdle, shouldProbeTick } from "./dispatcher.ts";
-import { ensureHerdrWorkspace, isCeoEnabled, isCtoEnabled } from "./workspaces.ts";
+import { ensureHerdrWorkspace, getProject, isCeoEnabled, isCtoEnabled } from "./workspaces.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import type { SendInput } from "./harness.ts";
@@ -1127,6 +1127,43 @@ async function publishCtoStatus(directoryId: string): Promise<CtoStatus> {
 /** A directory's current managed-CTO-agent status. A READ — does NOT publish (like legacy ctoAgentStatus). */
 export function ctoAgentStatus(directoryId: string): Promise<CtoStatus> {
   return toCtoStatus(directoryId);
+}
+
+// ---- MANAGED CEO AGENT STATUS (PER-PROJECT) ---------------------------------
+// The CEO analog of the CTO status read (REVAMP-4 P3c). A project node's managed CEO agent is a
+// unified `workspace` runtime row keyed `ws-ceo-<projectNodeId>` (kind='ceo'), materialized by
+// setWorkspaceCeoEnabled. This is a pure READ for the dashboard's project CEO card — the four
+// fields are the S5 CEO-card contract, so do NOT rename them.
+
+/** The unified `workspace` row id backing a project node's CEO agent (== setWorkspaceCeoEnabled). */
+function ceoWsId(projectNodeId: string): string {
+  return `ws-ceo-${projectNodeId}`;
+}
+
+/** The dashboard/API view of a project node's managed CEO agent state (REVAMP-4 P3c CEO card). */
+export type CeoStatus = {
+  /** Per-project enable (project.ceo_enabled tri-state, or the global default). */
+  enabled: boolean;
+  /** The project row carries an EXPLICIT ceo_enabled override (vs inheriting the global gate). */
+  overridden: boolean;
+  /** The GLOBAL default gate (config.ceoAgentEnabled / BUTCHR_CEO_AGENT). */
+  globalGate: boolean;
+  /** The managed CEO runtime row is wanted up AND a live herdr agent is registered under it. */
+  live: boolean;
+};
+
+/** A project node's current managed-CEO-agent status. A READ — does NOT publish (mirrors
+ *  ctoAgentStatus). Returns null if the id is not a project node. */
+export async function ceoAgentStatus(projectNodeId: string): Promise<CeoStatus | null> {
+  const project = getProject(projectNodeId);
+  if (!project) return null;
+  const s = await workspaceAgentStatus(ceoWsId(projectNodeId));
+  return {
+    enabled: isCeoEnabled(projectNodeId),
+    overridden: project.ceo_enabled !== null,
+    globalGate: config.ceoAgentEnabled,
+    live: s.desired && s.running,
+  };
 }
 
 /** START (or adopt) a directory's CTO agent via the unified path, then publish `cto.updated`. */
