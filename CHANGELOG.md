@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.180] - 2026-07-06
+
 ### Added
 - **OPERATOR-IDLE → HIGHER-UP, PART 1 (story st-a32c8138): the build-agent idle→responder
   signal is generalized up to OPERATOR agents (a story LEADER or the CTO).** When an operator
