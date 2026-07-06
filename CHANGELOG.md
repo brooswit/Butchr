@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Restore real operator briefs in the unified launch path (story st-06aedeae): a
+  kind-guarded `buildWorkspaceBrief` in `src/workspace-agent.ts` now writes a real
+  CTO/leader role brief to a launched operator's `brief.md` (previously an ~80-byte stub,
+  so a unified-launched operator booted with no role and idled). The CTO brief is ported
+  from the legacy launcher (create-stories-not-tasks + channel routing); the leader brief
+  stays tight — a one-line title clamped from the story's live brief plus an instruction to
+  `GET /api/work/<storyId>` for the live brief + subtasks at runtime (re-fetched each resume
+  so mid-flight edits are honored), never a 4KB embed — with a non-stub fallback when the
+  story row is gone. Both briefs carry the concrete never-park open-loop-ask invariant (an
+  idle operator raises an ask that registers `pending_ask` and wakes it, rather than going
+  silent). Covered by new `buildWorkspaceBrief` cases in `test/workspace-agent.test.ts`.
+
 ## [0.9.192] - 2026-07-06
 
 ### Changed
