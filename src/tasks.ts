@@ -1775,7 +1775,7 @@ export async function createTask(
   prompt = validatePrompt(prompt);
   // STORY MEMBERSHIP (Phase 5): an optional story_id grouping this task as a SUBTASK of a
   // story. Validated by a DIRECT db read of the stories table (NOT importing stories.ts —
-  // that would close an import cycle, the same reason story-agent.ts reads story rows
+  // that would close an import cycle, the same reason workspace-agent.ts reads story rows
   // directly): the story must exist (404) and live in THIS task's workspace (400). Checked
   // here, BEFORE the worktree is created, so a bad story never strands an orphaned worktree.
   if (storyId != null) {

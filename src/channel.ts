@@ -8,7 +8,7 @@
 // notification to stdout. The CTO's Claude Code surfaces that line into the running
 // session so it reacts immediately instead of waiting for its next poll.
 //
-// It is launched as a SEPARATE process by the CTO's Claude Code (see src/cto-agent.ts), NOT
+// It is launched as a SEPARATE process by the CTO's Claude Code (see src/workspace-agent.ts), NOT
 // hosted inside butchr — so it talks to butchr over the network (SSE), exactly like
 // the dashboard does, and reconnects when that stream drops.
 //

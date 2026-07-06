@@ -20,7 +20,7 @@ import {
 } from "./workspace-agent.ts";
 // RUNTIME-ONLY circular import: tasks.ts statically imports workspaces.ts, and strandedItems is
 // a hoisted function CALLED only at request time (dashboard()), never at module-eval — so the
-// cycle resolves with no load-time TDZ (mirrors tasks.ts's work.ts/cto-agent.ts cycles).
+// cycle resolves with no load-time TDZ (mirrors tasks.ts's work.ts/workspace-agent.ts cycles).
 import { strandedItems } from "./tasks.ts";
 import type { StrandedItem } from "./tasks.ts";
 import { ALL_STATUSES, db, nowIso, REVIEW_STATES, saveWorkspaceAgentRow, sumStatuses } from "./db.ts";

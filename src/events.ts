@@ -14,7 +14,7 @@ export type ButchrEvent =
   | { type: "dispatch.paused"; paused: boolean }
   // The managed CTO agent's lifecycle state changed (started/stopped/restarted/
   // adopted/relaunched) — carries the refreshed CtoStatus so the dashboard's CTO
-  // card reflects it live. See src/cto-agent.ts.
+  // card reflects it live. See src/workspace-agent.ts.
   | { type: "cto.updated"; cto: unknown }
   // NETWORK CONNECTIVITY to the model API was RESTORED after an outage (a debounced
   // DOWN→UP transition — see src/connectivity.ts). EVENT-ONLY: butchr takes no action;

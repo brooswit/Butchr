@@ -43,7 +43,6 @@ const WS_STD = "e2e-std-ws";
 
 let tasksMod: typeof import("../src/tasks.ts");
 let storiesMod: typeof import("../src/stories.ts");
-let storyAgentMod: typeof import("../src/story-agent.ts");
 let workspacesMod: typeof import("../src/workspaces.ts");
 let dbMod: typeof import("../src/db.ts");
 let taskmdMod: typeof import("../src/taskmd.ts");
@@ -152,7 +151,6 @@ beforeAll(async () => {
   taskmdMod = await import("../src/taskmd.ts");
   tasksMod = await import("../src/tasks.ts");
   storiesMod = await import("../src/stories.ts");
-  storyAgentMod = await import("../src/story-agent.ts");
   workspacesMod = await import("../src/workspaces.ts");
   verifyMod = await import("../src/verify.ts");
   gitMod = await import("../src/git.ts");
@@ -266,7 +264,7 @@ describe("F-ACTIVATE — full isolated-story flow, opened AFTER the flag is ON",
     const complete = events.find((e) => e.reason === "complete");
     expect(complete).toBeTruthy();
     expect(complete.target).toBe("cto");
-    expect(storyAgentMod.isStoryLeaderDesired(row)).toBe(false);
+    expect(["open", "merging", "merge_blocked"].includes(row.status)).toBe(false);
   });
 
   test("RED story-level re-gate is a HARD BLOCK → merge_blocked, main UNTOUCHED, gate-red to the leader", async () => {
@@ -299,7 +297,7 @@ describe("F-ACTIVATE — full isolated-story flow, opened AFTER the flag is ON",
     expect(red).toBeTruthy();
     expect(red.target).toBe("story");
     expect(red.detail).toContain("boom");
-    expect(storyAgentMod.isStoryLeaderDesired(row)).toBe(true);
+    expect(["open", "merging", "merge_blocked"].includes(row.status)).toBe(true);
   });
 });
 

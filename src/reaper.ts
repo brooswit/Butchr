@@ -159,7 +159,7 @@ export async function reapOrphans(
   // keyed strictly by TASK id, so the per-workspace managed CTO agents (each tracked
   // in its own `cto_agent` row under the name `<config.ctoAgentName>-<workspaceId>` —
   // never a task id) are never matched here and their panes are never orphaned/reaped.
-  // See src/cto-agent.ts.
+  // See src/workspace-agent.ts.
   if (herdrUp) {
     // Same terminal membership as the worktree sweep above — derived from db, bound as
     // placeholders so the SQL IN-list can never drift from isTerminal/ALL_STATUSES. The

@@ -38,7 +38,7 @@ import {
 // CTO-agent routes now go through the UNIFIED workspace supervisor (REVAMP-1 Phase C, S3):
 // these names are thin CTO-compat wrappers over `ws-cto-<id>` in workspace-agent.ts that keep
 // the CtoStatus response shape + `cto.updated` emission identical. The legacy launcher
-// cto-agent.ts is no longer imported by server.ts.
+// cto-agent.ts was deleted in Phase C S5.
 import {
   ctoAgentName,
   ctoAgentStatus,
@@ -1018,7 +1018,7 @@ async function attachAgentTerminal(agentName: string): Promise<Response> {
 }
 
 // ---- MANAGED CTO AGENT (PER-WORKSPACE) -------------------------------------
-// butchr runs ONE CTO agent PER REGISTERED WORKSPACE (src/cto-agent.ts) — a
+// butchr runs ONE CTO agent PER REGISTERED WORKSPACE (src/workspace-agent.ts) — a
 // first-class, channel-connected Claude session that runs in that repo's ROOT and IS
 // the project's principal/dev agent, with no worktree/branch/review/merge. These
 // routes are all SCOPED to a workspace: status + start/stop/restart controls + an

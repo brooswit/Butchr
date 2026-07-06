@@ -14,8 +14,8 @@ import * as git from "./git.ts";
 import { generateStoryId } from "./ids.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
-// REVAMP-1 Phase C S2: the story lifecycle hooks now live in workspace-agent.ts (moved out of
-// story-agent.ts alongside teardownLeaderWorkspaceForWork).
+// REVAMP-1 Phase C: the story lifecycle hooks live in workspace-agent.ts (moved there in S2
+// alongside teardownLeaderWorkspaceForWork; the legacy story-agent.ts launcher was deleted in S5).
 import {
   onStoryCreated,
   onStoryStatusChanged,
@@ -137,7 +137,7 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
      VALUES (?, ?, 'open', ?, 'node', ?, ?)`,
   ).run(id, workspaceId, created, brief.trim(), isolated);
   // A new `open` story gets a managed STORY-LEADER agent (Phase 3): mark it desired +
-  // launch it. Thin hook into story-agent.ts so the CRUD here stays clean; the hook marks
+  // launch it. Thin hook into workspace-agent.ts so the CRUD here stays clean; the hook marks
   // desired synchronously and fires the launch best-effort (never fails story creation).
   onStoryCreated(id);
   return getStory(id)!;
@@ -315,7 +315,7 @@ export function updateStory(
     });
   }
   // Drive the STORY-LEADER agent off the REAL status change (Phase 3): `done`/`aborted` stop the
-  // leader (desired-down + teardown); `open` (re)launches it. Thin hook into story-agent.ts.
+  // leader (desired-down + teardown); `open` (re)launches it. Thin hook into workspace-agent.ts.
   onStoryStatusChanged(id, target);
   // UNIFIED-PATH completion teardown: a genuine story terminal (`done`/`aborted`) tears the
   // node's leader WORKSPACE row down too (the legacy onStoryStatusChanged only zeroes the
@@ -611,7 +611,7 @@ export function deleteStory(id: string): void {
   const story = getStory(id);
   if (!story) throw new HttpError(404, `story not found: ${id}`);
   // FIRST abort the LIVE members so none is orphaned by the detach/DELETE below. Fire-and-forget
-  // (deleteStory is deliberately synchronous — see story-agent.ts stopStoryAgent's note), but the
+  // (deleteStory is deliberately synchronous — see workspace-agent.ts stopStoryAgent's note), but the
   // member SELECT inside the cascade runs synchronously NOW (before its first await), so it
   // captures every in-flight member while story_id is still set — the subsequent NULLing can't
   // hide a live member from the abort. abortTask works by task id, so the detach below never

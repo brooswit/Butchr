@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Delete the two legacy launcher modules — `src/cto-agent.ts` and `src/story-agent.ts`
+  (~1333 LOC) — completing REVAMP-1 Phase C (story st-bb6cd55b, S5). Earlier phases
+  extracted every live export into the unified supervisor (`src/workspace-agent.ts`) and
+  retired the flag, leaving these files with zero live (non-test) importers; this subtask
+  removes the orphaned files plus their now-redundant unit tests (`test/cto-agent.test.ts`,
+  `test/story-agent.test.ts` — their lifecycle/reconcile/supervision/status coverage is
+  re-asserted against the unified launcher in `test/workspace-agent.test.ts`). The four
+  behavior tests that referenced the deleted modules via test-only helpers were rewired to
+  the unified surface (`stopCtoAgent`/`onStoryCreated` in `workspace-agent.ts`) or inlined,
+  and dangling scar comments across `src/` were re-pointed to `workspace-agent.ts`. The
+  `story_agent` table + DB accessors are unchanged (still mirror-written/read by
+  `storyAgentStatus`).
+
 ## [0.9.193] - 2026-07-06
 
 ### Fixed

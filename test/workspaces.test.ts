@@ -2,8 +2,9 @@
 //
 // isCtoEnabled resolution: the per-workspace `cto_enabled` column WINS over the
 // GLOBAL default config.ctoAgentEnabled (1 → on, 0 → off, NULL → inherit the global
-// default; an unknown workspace → not enabled). Relocated here from cto-agent.test.ts
-// when isCtoEnabled moved to its cycle-free home in workspaces.ts (REVAMP-1 Phase C).
+// default; an unknown workspace → not enabled). Relocated here from the (now-deleted)
+// cto-agent.test.ts when isCtoEnabled moved to its cycle-free home in workspaces.ts
+// (REVAMP-1 Phase C).
 //
 // config fields are set DIRECTLY on the imported config object (not via env) so the
 // test is deterministic regardless of bun's shared-config import order.

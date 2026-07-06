@@ -489,7 +489,7 @@ export function connectivityChannelFlag(): string {
 
 /**
  * LAUNCH AUTO-CONFIRM for a freshly-dispatched WORKER — the symmetric counterpart to
- * the CTO's launch auto-confirm (cto-agent.ts performLaunch). When connectivity is ON,
+ * the CTO's launch auto-confirm (workspace-agent.ts autoConfirmWorkspaceStartup). When connectivity is ON,
  * a worker carries `--dangerously-load-development-channels` (connectivityChannelFlag),
  * and Claude Code stops on the BLOCKING dev-channels consent prompt the first time the
  * session loads it ("1. I am using this for local development"); left unanswered the

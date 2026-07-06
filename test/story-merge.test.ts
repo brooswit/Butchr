@@ -34,7 +34,6 @@ const WS_STD = "smerge-std-ws";
 
 let tasksMod: typeof import("../src/tasks.ts");
 let storiesMod: typeof import("../src/stories.ts");
-let storyAgentMod: typeof import("../src/story-agent.ts");
 let dbMod: typeof import("../src/db.ts");
 let taskmdMod: typeof import("../src/taskmd.ts");
 let verifyMod: typeof import("../src/verify.ts");
@@ -133,7 +132,6 @@ beforeAll(async () => {
   taskmdMod = await import("../src/taskmd.ts");
   tasksMod = await import("../src/tasks.ts");
   storiesMod = await import("../src/stories.ts");
-  storyAgentMod = await import("../src/story-agent.ts");
   verifyMod = await import("../src/verify.ts");
   gitMod = await import("../src/git.ts");
   eventsMod = await import("../src/events.ts");
@@ -197,7 +195,7 @@ describe("isolated story landing — story→main (§11.4/§11.5/§11.6/§11.7)"
     expect(complete.target).toBe("cto");
     expect(complete.story_id).toBe(SID);
     // Only a landed story reaches done → the leader is no longer desired (torn down).
-    expect(storyAgentMod.isStoryLeaderDesired(row)).toBe(false);
+    expect(["open", "merging", "merge_blocked"].includes(row.status)).toBe(false);
   });
 
   test("RED re-gate → merge_blocked, main UNTOUCHED, story branch intact, gate-red event to the LEADER", async () => {
@@ -230,7 +228,7 @@ describe("isolated story landing — story→main (§11.4/§11.5/§11.6/§11.7)"
     expect(red.target).toBe("story");
     expect(red.detail).toContain("boom");
     // The leader is KEPT UP (still desired) to fix the RED with more subtasks.
-    expect(storyAgentMod.isStoryLeaderDesired(row)).toBe(true);
+    expect(["open", "merging", "merge_blocked"].includes(row.status)).toBe(true);
   });
 
   test("merge_blocked re-attempt: a fix subtask + a GREEN re-PATCH lands the story", async () => {
@@ -299,7 +297,7 @@ describe("isolated story landing — story→main (§11.4/§11.5/§11.6/§11.7)"
     expect(conflict.detail).toContain("story worktree");
     expect(conflict.detail).toContain(SID);
     // Leader kept up to re-attempt after a human resolves the conflict.
-    expect(storyAgentMod.isStoryLeaderDesired(row)).toBe(true);
+    expect(["open", "merging", "merge_blocked"].includes(row.status)).toBe(true);
   });
 
   test("BOOT RECOVERY: a story left `merging` is re-driven to done by recoverMergingStories", async () => {

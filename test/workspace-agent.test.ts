@@ -26,8 +26,6 @@ let livenessMod: typeof import("../src/liveness.ts");
 let wa: typeof import("../src/workspace-agent.ts");
 let storiesMod: typeof import("../src/stories.ts");
 let dirsMod: typeof import("../src/workspaces.ts");
-let ctoMod: typeof import("../src/cto-agent.ts");
-let saMod: typeof import("../src/story-agent.ts");
 let eventsMod: typeof import("../src/events.ts");
 let tasksMod: typeof import("../src/tasks.ts");
 let originalRunner: AgentRunner;
@@ -83,8 +81,6 @@ beforeAll(async () => {
   wa = await import("../src/workspace-agent.ts");
   storiesMod = await import("../src/stories.ts");
   dirsMod = await import("../src/workspaces.ts");
-  ctoMod = await import("../src/cto-agent.ts");
-  saMod = await import("../src/story-agent.ts");
   eventsMod = await import("../src/events.ts");
   tasksMod = await import("../src/tasks.ts");
   originalRunner = harnessMod.getRunner();
@@ -807,8 +803,8 @@ describe("unregisterWorkspace race-prevention (st-93384200 Bug 2)", () => {
 
 // ── CTO-COMPAT SURFACE (REVAMP-1 Phase C, S3) ───────────────────────────────
 // The /api/workspaces/:id/cto/* routes (server.ts) + unregisterWorkspace teardown now call
-// the thin CTO-compat wrappers in workspace-agent.ts instead of the legacy launcher
-// (cto-agent.ts). These prove the two invariants the dashboard depends on: (1) the route
+// the thin CTO-compat wrappers in workspace-agent.ts (the legacy per-workspace launcher was
+// deleted in Phase C S5). These prove the two invariants the dashboard depends on: (1) the route
 // response is the legacy CtoStatus SHAPE (keyed by the directory id, enabled from cto_enabled);
 // (2) the LIFECYCLE ops (start/stop/restart) re-publish `cto.updated` exactly as legacy
 // publishStatus did, while the STATUS read does NOT publish.
@@ -970,7 +966,7 @@ describe("CTO enable/disable/stop authority via the unified workspace table (st-
     expect(calls.launch.map((c) => c.id)).toEqual([WS_CTO]);
   });
 
-  test("the cto/stop path sets unified desired=0 AND keeps the legacy cto_agent.desired=0 mirror (transient — cto_enabled unchanged)", async () => {
+  test("the cto/stop path sets unified desired=0 (transient — cto_enabled unchanged)", async () => {
     const { runner, launcher, calls, live } = makeFake();
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
@@ -980,15 +976,12 @@ describe("CTO enable/disable/stop authority via the unified workspace table (st-
     });
     const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(WS_CTO)!);
     live.add(name);
-    dbMod.saveCtoAgentRow(DIR, { desired: 1 }); // legacy mirror row, desired-up
 
-    await ctoMod.stopCtoAgent(DIR);
+    await wa.stopCtoAgent(DIR);
 
     // Unified row driven DESIRED-down + torn down.
     expect(dbMod.getWorkspaceAgentRow(WS_CTO)!.desired).toBe(0);
     expect(calls.teardown).toContain(name);
-    // MIRROR INVARIANT: the legacy cto_agent.desired=0 mirror is STILL written.
-    expect(dbMod.getCtoAgentRow(DIR)!.desired).toBe(0);
     // Transient: cto_enabled is unchanged (re-enable/boot can bring it back up).
     expect(dirsMod.isCtoEnabled(DIR)).toBe(true);
     // And the supervisor does not relaunch the desired-down row.
@@ -1316,8 +1309,8 @@ describe("create-time unified rows (st-93384200 Bug 3)", () => {
 
     await flush(); // let the create-time kick settle
 
-    // The LEGACY launchStoryAgent direct path did NOT fire (it would set story_agent.session_id);
-    // only the desired=1 MIRROR was written there.
+    // onStoryCreated writes ONLY the desired=1 MIRROR to the legacy story_agent row (no
+    // session_id) — the launch runs through the unified ws-leader row, not a story_agent path.
     expect(dbMod.getStoryAgentRow(story.id)?.session_id ?? null).toBeNull();
     expect(dbMod.getStoryAgentRow(story.id)?.desired).toBe(1);
 
@@ -1346,7 +1339,7 @@ describe("create-time unified rows (st-93384200 Bug 3)", () => {
 
     // No `stories` row for this id → getStoryRow returns null. The hook must bail (record-and-skip),
     // NOT insert a directory_id=null leader row (which would be invisible to unregister enumeration).
-    saMod.onStoryCreated("st-does-not-exist");
+    wa.onStoryCreated("st-does-not-exist");
     await flush();
 
     expect(dbMod.getWorkspaceAgentRow("ws-leader-st-does-not-exist")).toBeNull();

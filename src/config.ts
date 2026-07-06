@@ -628,7 +628,7 @@ export const config = {
   // workspace agents but with NO worktree/branch/review/merge. Each receives ONLY
   // that workspace's PUSH attention notifications via the one-way CTO channel
   // (src/channel.ts, scoped to the workspace_id), and each workspace's dashboard card
-  // exposes an 'Open CTO terminal' button for it. See src/cto-agent.ts.
+  // exposes an 'Open CTO terminal' button for it. See src/workspace-agent.ts.
 
   /**
    * GLOBAL DEFAULT for the per-workspace CTO-agent enable. DEFAULT OFF so nothing
@@ -683,7 +683,7 @@ export const config = {
    * Path to the EDITABLE CTO system prompt / brief that primes the agent on launch.
    * When unset, butchr writes a documented default to `<dataDir>/cto-brief.md` (and
    * reuses it thereafter) so an operator can edit it in place. The file's contents
-   * become the agent's positional prompt (`-- "$(cat …)"`). See cto-agent.ts.
+   * become the agent's positional prompt (`-- "$(cat …)"`). See src/workspace-agent.ts.
    */
   ctoBriefPath: env("BUTCHR_CTO_BRIEF", ""),
 
@@ -709,12 +709,12 @@ export const config = {
   /**
    * Command template that LAUNCHES a workspace's CTO agent (run via `bash -lc`,
    * wrapped under `script` for a PTY + log, cwd = the workspace's repo root).
-   * Placeholders, all substituted by
-   * cto-agent.ts:
+   * Placeholders, all substituted by the unified launcher in
+   * src/workspace-agent.ts:
    *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (see `ctoAgentModel`).
    *  - `{{SESSION_FLAG}}` → `--session-id <uuid>` on a FRESH start, or
    *    `--resume <id>` on every supervised relaunch / boot-adopt so the CTO keeps
-   *    full context and never cold-starts (session continuity; see src/cto-agent.ts).
+   *    full context and never cold-starts (session continuity; see src/workspace-agent.ts).
    *  - `{{MCP_CONFIG}}`   → the generated MCP config registering the channel server.
    *  - `{{PROMPT_FILE}}`  → the editable CTO brief file (`ctoBriefPath`).
    * `--dangerously-skip-permissions` lets it call the butchr API/CLI without prompts.
@@ -735,10 +735,10 @@ export const config = {
    * INCLUDING the channel wiring (Phase 4 of the STORIES epic): the leader gets a one-way
    * attention feed SCOPED to its story's subtasks via the same `butchr-cto-channel` stdio
    * server, just with BUTCHR_CHANNEL_STORY set. Placeholders (substituted by
-   * src/story-agent.ts):
+   * the unified launcher in src/workspace-agent.ts):
    *  - `{{MODEL_FLAG}}`   → `--model <model>` or empty (reuses `ctoAgentModel`).
    *  - `{{SESSION_FLAG}}` → `--session-id <uuid>` fresh, or `--resume <id>` on every
-   *    supervised relaunch / boot-adopt (session continuity; see src/story-agent.ts).
+   *    supervised relaunch / boot-adopt (session continuity; see src/workspace-agent.ts).
    *  - `{{MCP_CONFIG}}`   → the generated per-story MCP config registering the channel
    *    server (scoped to the story via BUTCHR_CHANNEL_STORY).
    *  - `{{PROMPT_FILE}}`  → the per-story generated leader brief file.

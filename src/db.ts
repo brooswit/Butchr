@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS settings (
 // 'singleton'; the migration below drops that shape — pre-1.0, destroying the old
 // singleton row is fine.)
 //   - session_id: the Claude Code session UUID, RESUMED (--resume) on every
-//     supervised relaunch + boot-adopt so the CTO never cold-starts (see src/cto-agent.ts).
+//     supervised relaunch + boot-adopt so the CTO never cold-starts (see src/workspace-agent.ts).
 //   - herdr_workspace: its live herdr workspace grouping handle (per-butchr-workspace,
 //     stable). The CTO is addressed/torn-down BY NAME — no per-agent pane/tab is stored.
 //   - desired: 1 when the operator/boot wants it UP (supervisor relaunches on death),
@@ -207,7 +207,7 @@ function migrateCtoAgentPerWorkspace(): void {
 // shape to drop, unlike migrateCtoAgentPerWorkspace), so this is a plain CREATE-IF-NOT-EXISTS.
 // Runs AFTER createBaselineSchema (which creates `stories`) so the FK target exists.
 //   - session_id: the Claude Code session UUID, RESUMED (--resume) on every supervised
-//     relaunch + boot-adopt so the leader never cold-starts (see src/story-agent.ts).
+//     relaunch + boot-adopt so the leader never cold-starts (see src/workspace-agent.ts).
 //   - herdr_workspace: its live herdr workspace grouping handle (the leader shares its
 //     workspace's herdr workspace, like the CTO agent). Addressed/torn-down BY NAME — no
 //     per-agent pane/tab is stored.
@@ -1600,7 +1600,7 @@ export type StoryRow = {
 // ===========================================================================
 // The SINGLE seam through which the rest of the codebase reads a story row BY ID.
 // They live HERE (not stories.ts) on purpose: db.ts is the cycle-free low-level
-// module that tasks.ts / workspace-agent.ts / story-agent.ts / reaper.ts already
+// module that tasks.ts / workspace-agent.ts / reaper.ts already
 // import, so routing their previously-inline `SELECT ... WHERE id=?` reads through
 // these adds NO new import edge (importing stories.ts back into those modules would
 // close the tasks↔stories cycle the inline SQL was written to dodge).
@@ -2042,7 +2042,7 @@ export function setSetting(key: string, value: string): void {
 // ---- MANAGED CTO AGENT (per-workspace records) ----------------------------
 // One row per registered workspace (keyed by workspace_id), tracking that
 // workspace's CTO agent runtime handles. See the cto_agent table comment above and
-// src/cto-agent.ts.
+// src/workspace-agent.ts.
 export type CtoAgentRow = {
   workspace_id: string;
   session_id: string | null;
@@ -2123,7 +2123,7 @@ export function saveCtoAgentRow(
 // ---- MANAGED STORY-LEADER AGENT (per-story records) -----------------------
 // One row per story whose leader has ever launched/been desired (keyed by story_id).
 // MIRRORS CtoAgentRow exactly. See the story_agent table comment above and
-// src/story-agent.ts.
+// src/workspace-agent.ts.
 export type StoryAgentRow = {
   story_id: string;
   session_id: string | null;

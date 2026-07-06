@@ -3,11 +3,12 @@
 // A WORKSPACE is the (agent + directory) EXECUTION CONTEXT in which Work runs — the
 // place and the agent, distinct from Work itself (see docs/rfc-work-workspace-unification.md
 // §2.2). This module is the SINGLE supervision loop that GENERALIZES the three agent
-// surfaces — the per-workspace CTO agent (src/cto-agent.ts), the per-story story leader
-// (src/story-agent.ts), and the per-task build agent (src/dispatcher.ts) — into ONE
-// concept distinguished by `kind` ('cto'|'leader'|'build'), supervised uniformly over the
-// `workspace` table. It collapses the two near-identical cto/story supervisors (a
-// deliberate mirror-not-extract until now) into one kind-agnostic state machine.
+// surfaces — the per-workspace CTO agent, the per-story story leader, and the per-task
+// build agent (src/dispatcher.ts) — into ONE concept distinguished by `kind`
+// ('cto'|'leader'|'build'), supervised uniformly over the `workspace` table. It collapsed
+// the two near-identical cto/story supervisors (a deliberate mirror-not-extract until the
+// unification) into one kind-agnostic state machine; the legacy cto-agent.ts / story-agent.ts
+// launchers were deleted in REVAMP-1 Phase C S5.
 //
 // IDENTITY is NAME-ONLY (story st-a77b050f, generalized across all kinds): an agent is
 // addressed, torn down, and liveness-checked BY NAME — no per-agent pane/tab is stored.
@@ -85,14 +86,14 @@ export function workspaceAgentName(row: WorkspaceAgentRow): string {
 // The role/instructions written to a launched operator workspace's brief.md, restored in
 // the UNIFIED launch path (the inert default launcher used to write an ~80-byte stub, so a
 // unified-launched CTO/leader booted with no role and idled). The text is PORTED (copied,
-// not imported) from the two legacy launchers Phase C (st-bb6cd55b) deletes — cto-agent.ts
+// not imported) from the two legacy launchers Phase C (st-bb6cd55b) deleted — cto-agent.ts
 // DEFAULT_BRIEF and story-agent.ts buildStoryLeaderBrief — so the unified path is
-// self-contained once those files are gone. Both briefs carry the concrete NEVER-PARK
+// self-contained now those files are gone. Both briefs carry the concrete NEVER-PARK
 // invariant (an idle operator raises an open-loop ask rather than going silent —
 // st-926eea1c): the ask registers pending_ask, notifies the responder, and the answer wakes
 // the waiter.
 
-/** The CTO operator brief (static). Ported from cto-agent.ts DEFAULT_BRIEF. */
+/** The CTO operator brief (static). Ported from the legacy CTO launcher's DEFAULT_BRIEF. */
 const CTO_WORKSPACE_BRIEF = `# butchr CTO agent
 
 You are the **butchr CTO** for THIS repository — a persistent, butchr-managed Claude
@@ -272,8 +273,8 @@ function storyBriefTitle(brief: string | null): string {
 }
 
 /**
- * The per-story leader brief — ADAPTED (not verbatim-ported) from story-agent.ts
- * buildStoryLeaderBrief. Keyed on `storyId` (the leader workspace's work_id) with a
+ * The per-story leader brief — ADAPTED (not verbatim-ported) from the legacy story-leader
+ * launcher's buildStoryLeaderBrief. Keyed on `storyId` (the leader workspace's work_id) with a
  * one-line `title`; it does NOT embed the full story brief — instead it instructs the
  * leader to GET the live brief + subtasks itself, so the prompt stays tight and fresh.
  */
@@ -453,7 +454,7 @@ export type WorkspaceAgentStatus = {
 };
 
 // ---- supervision state (in-memory, PER WORKSPACE ROW) ---------------------
-// Mirrors cto-agent's wsStates / story-agent's storyStates, keyed by the workspace id.
+// The unified successor to the legacy cto/story per-agent state maps, keyed by the workspace id.
 type SupState = {
   launchInFlight: Promise<WorkspaceAgentStatus> | null;
   consecutiveFailures: number;
@@ -509,8 +510,8 @@ function workspaceDir(id: string): string {
 
 /**
  * Decide the session id + flag for a workspace launch. FRESH → a brand-new `--session-id`;
- * otherwise RESUME the persisted session, else a fresh id. Mirrors cto-agent.resolveCtoSession
- * (no operator-seeded map at this layer). Pure + exported for testing.
+ * otherwise RESUME the persisted session, else a fresh id (no operator-seeded map at this
+ * layer). Pure + exported for testing.
  */
 export function resolveWorkspaceSession(
   row: WorkspaceAgentRow | null,
@@ -525,8 +526,8 @@ export function resolveWorkspaceSession(
 /**
  * Write the per-workspace channel MCP config — the same one-way `butchr-cto-channel`
  * bridge the CTO/leader use, SCOPED per kind (cto → the directory; leader → its story;
- * build → connectivity-only). Returns the config path. Generalizes
- * cto-agent.writeChannelMcpConfig / story-agent.writeStoryChannelMcpConfig.
+ * build → connectivity-only). Returns the config path. Generalizes the legacy per-cto and
+ * per-story channel MCP-config writers.
  */
 function writeWorkspaceMcpConfig(row: WorkspaceAgentRow): string {
   mkdirSync(workspaceDir(row.id), { recursive: true });
@@ -684,7 +685,7 @@ function guarded(
 
 /**
  * The 'live agent registered → adopt, else launch' decision, shared by start + reconcile.
- * Mirrors cto-agent.adoptOrLaunch EXACTLY (incl. the reboot-recovery /proc gate): a
+ * Mirrors the legacy adopt-or-launch decision EXACTLY (incl. the reboot-recovery /proc gate): a
  * registered-but-DEAD pane (host reboot left a husk shell) is torn down + the name freed
  * before a `--resume` relaunch; an alive/indeterminate one is adopted (never double-launch).
  */
@@ -881,16 +882,16 @@ export function liveWorkspaceFor(workId: string): WorkspaceAgentRow | null {
 // callers address a DIRECTORY by its id; the unified `workspace` row backing that directory's
 // CTO agent is `ws-cto-<id>`. These thin wrappers map that id and adapt the unified
 // WorkspaceAgentStatus back to the legacy CtoStatus shape the dashboard consumes, so the route
-// response JSON is byte-identical and cto-agent.ts is no longer a live (non-test) src importer.
+// response JSON is byte-identical. The legacy cto-agent.ts launcher was deleted in Phase C S5.
 //
 // The LIFECYCLE ops (start/stop/restart) re-publish `cto.updated` with the CtoStatus payload
-// EXACTLY as the legacy publishStatus did (cto-agent.ts:462-465) — the unified start/stop path
+// EXACTLY as the legacy publishStatus did — the unified start/stop path
 // publishes `story.attention`, NOT `cto.updated`, so without this the dashboard CTO card (and
 // server.ts's live update) would stop refreshing on start/stop/restart. The plain STATUS read
 // does NOT publish (matching the legacy ctoAgentStatus, which never did).
 
 /** The dashboard/API view of a directory's managed CTO agent state (the legacy CtoStatus shape;
- *  relocated here from cto-agent.ts so nothing dangling remains once that file is deleted). */
+ *  relocated here from cto-agent.ts, which was deleted in Phase C S5). */
 export type CtoStatus = {
   /** The workspace (directory) this CTO agent belongs to. */
   workspaceId: string;
@@ -1035,7 +1036,8 @@ export async function teardownLeaderWorkspaceForWork(workId: string): Promise<vo
   }
 }
 
-/** Reconcile ONE workspace toward its desired state (mirrors cto-agent.reconcileCtoAgent). */
+/** Reconcile ONE workspace toward its desired state (the unified successor to the legacy
+ *  per-cto/per-story reconcile). */
 export async function reconcileWorkspaceAgent(
   id: string,
   herdrUp: boolean,
@@ -1371,7 +1373,8 @@ function publishLeaderIdle(
   });
 }
 
-// One supervision tick over ALL workspaces (mirrors cto-agent.superviseTick). Each
+// One supervision tick over ALL workspaces (the unified successor to the legacy cto/story
+// supervise tick). Each
 // desired-up-but-dead workspace is relaunched (RESUMING the same session) with bounded
 // per-workspace exponential backoff.
 async function superviseTick(): Promise<void> {
@@ -1384,7 +1387,7 @@ async function superviseWorkspace(id: string): Promise<void> {
   const row = getWorkspaceAgentRow(id);
   if (!row || row.desired !== 1) return; // wanted down (or gone)
   // A DISABLED CTO is never relaunched — short-circuit BEFORE the dead-while-desired relaunch/
-  // backoff branch below (mirrors cto-agent.superviseWorkspace's top `if (!isCtoEnabled) return`).
+  // backoff branch below (the legacy per-cto supervisor had the same top `if (!isCtoEnabled) return`).
   // A stray desired=1 ws-cto row whose directory has cto_enabled effectively false thus never
   // triggers a launch attempt. ADDED ALONGSIDE existing gates; touches no other kind.
   if (row.kind === "cto" && !isCtoEnabled(row.directory_id ?? "")) return;
@@ -1493,14 +1496,13 @@ export function _resetSupervisionStateForTest(id?: string): void {
 }
 
 // ============================================================================
-// LEGACY STORY-LEADER LIFECYCLE HOOKS (moved here from story-agent.ts —
-// REVAMP-1 Phase C S2). These are the LIVE story create/status/teardown hooks
-// the CRUD layer (stories.ts) and unregisterWorkspace (workspaces.ts) call. They
-// materialize + tear down the unified `workspace` leader row; the legacy `story_agent`
-// table is still mirror-written here because storyAgentStatus — the story view's `leader`
-// field — reads it. The (now uncalled) story-agent.ts supervisor, deleted in a later
-// subtask, imports the shared helpers below back from HERE, so this module never imports
-// story-agent.ts (keeping that deletion a clean cut).
+// STORY-LEADER LIFECYCLE HOOKS (moved here from the legacy story-agent.ts launcher —
+// REVAMP-1 Phase C S2; that launcher was deleted in S5). These are the LIVE story
+// create/status/teardown hooks the CRUD layer (stories.ts) and unregisterWorkspace
+// (workspaces.ts) call. They materialize + tear down the unified `workspace` leader row;
+// the legacy `story_agent` table is still mirror-written here because storyAgentStatus —
+// the story view's `leader` field — reads it. This is now the SOLE story-leader path: the
+// old story-agent.ts supervisor (which used to share the helpers below) is gone.
 // ============================================================================
 
 /** The view of a story's managed leader-agent state (mirrors CtoStatus / WorkspaceAgentStatus). */
@@ -1533,16 +1535,16 @@ export function storyAgentName(storyId: string): string {
  * no-op. saveStoryAgentRow requires the FK target (the story row) to exist; but deleteStory
  * is SYNCHRONOUS and fires the leader's launch/teardown FIRE-AND-FORGET, so a story (and its
  * cascade-linked story_agent row) can vanish WHILE a launch/supervise/reconcile write is in
- * flight. Routing every story-agent write through here keeps those best-effort paths from
- * FK-crashing on that race. Shared with story-agent.ts's (now uncalled) supervisor.
+ * flight. Routing every story-leader write through here keeps those best-effort paths from
+ * FK-crashing on that race.
  */
 export function saveRow(storyId: string, patch: Parameters<typeof saveStoryAgentRow>[1]): void {
   if (getStoryRow(storyId)) saveStoryAgentRow(storyId, patch);
 }
 
-// ---- legacy story-leader supervision state (SHARED with story-agent.ts's supervisor) ----
-// A SINGLE map, hosted here so the moved teardown hooks and story-agent.ts's supervisor
-// serialize against the SAME per-story launchInFlight (exact single-instance semantics). Kept
+// ---- legacy story-leader supervision state ----
+// A SINGLE map, hosted here so the moved teardown hooks serialize against the SAME per-story
+// launchInFlight (exact single-instance semantics). Kept
 // separate from the unified supStates above so a legacy stopStoryAgent never entangles with the
 // unified ws-leader launch guard.
 type StoryLeaderState = {

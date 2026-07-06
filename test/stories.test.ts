@@ -21,7 +21,7 @@ let storiesMod: typeof import("../src/stories.ts");
 let tasksMod: typeof import("../src/tasks.ts");
 let dbMod: typeof import("../src/db.ts");
 let eventsMod: typeof import("../src/events.ts");
-let storyAgentMod: typeof import("../src/story-agent.ts");
+let wa: typeof import("../src/workspace-agent.ts");
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-stories-data-"));
@@ -36,7 +36,7 @@ beforeAll(async () => {
   storiesMod = await import("../src/stories.ts");
   tasksMod = await import("../src/tasks.ts");
   eventsMod = await import("../src/events.ts");
-  storyAgentMod = await import("../src/story-agent.ts");
+  wa = await import("../src/workspace-agent.ts");
 
   const insWs = (id: string) =>
     dbMod.db
@@ -404,9 +404,10 @@ describe("Phase 6: marking a story done reports up + tears the leader down", () 
     const story = storiesMod.createStory(WS_A, "Done story");
     // onStoryCreated marked the leader desired-up synchronously.
     expect(dbMod.getStoryAgentRow(story.id)?.desired).toBe(1);
-    // Let the fire-and-forget launch settle so the subsequent stop isn't a no-op behind
-    // an in-flight launch (guarded serializes lifecycle ops per story).
-    await storyAgentMod.launchStoryAgent(story.id).catch(() => {});
+    // Re-assert the leader via the unified create-time hook (idempotent — guarded serializes
+    // it against the launch createStory already kicked) so the subsequent stop isn't a no-op
+    // behind an in-flight launch.
+    wa.onStoryCreated(story.id);
 
     const events = await captureStoryEvents(story.id, () => {
       storiesMod.updateStory(story.id, { status: "done" });
@@ -426,7 +427,7 @@ describe("Phase 6: marking a story done reports up + tears the leader down", () 
 
   test("a no-op re-PATCH to done does not re-fire the completion report", async () => {
     const story = storiesMod.createStory(WS_A, "Done-once story");
-    await storyAgentMod.launchStoryAgent(story.id).catch(() => {});
+    wa.onStoryCreated(story.id);
     storiesMod.updateStory(story.id, { status: "done" });
     await waitFor(() => dbMod.getStoryAgentRow(story.id)?.desired === 0);
     // A second done PATCH (status already done) must NOT publish another 'complete'.
