@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.192] - 2026-07-06
+
 ### Changed
 - **Config surface (REVAMP-1 Phase C S4):** removed the `unifiedWorkspaceEnabled` config knob
   and its `BUTCHR_UNIFIED_WORKSPACE` env var (`src/config.ts`) plus the
