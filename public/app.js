@@ -2103,6 +2103,17 @@ function swimEmphasis(st) {
   if (st === "blocked" || st === "inactive" || st === "merge_blocked") return "blocked";
   return "done"; // in_review / merged / done / failed / aborted / rolled_back … — quiet
 }
+// A COMPACT lane title from a story's brief. A butchr node has no short-title field — only `brief`,
+// which is a multi-thousand-char spec whose FIRST LINE alone can run hundreds of chars. Take the
+// first non-empty line and hard-clamp it (~70 chars, trailing whitespace trimmed, single ellipsis)
+// so the header never becomes a wall of text; the full brief still lives in the header tooltip. The
+// CSS belt on .swim-title (nowrap + ellipsis) is the second line of defence. Falls back to the id.
+// Pure string → string.
+function laneTitle(brief, id, max = 70) {
+  const first = String(brief || "").split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+  if (!first) return id;
+  return first.length > max ? first.slice(0, max).trimEnd() + "…" : first;
+}
 // </test-extract:swimlane-order>
 
 // A single arrow connector between two pipeline steps — the ONE edge vocabulary (blocked_by flow).
@@ -2129,7 +2140,9 @@ function swimStep(leaf, memberSet, byId) {
       (emph === "attn" ? '<span class="swim-needs">needs you</span>' : "") + `</div>`,
     `<span class="swim-sid">${esc(leaf.id)}</span>`,
   ];
-  if (leaf.brief && leaf.brief !== leaf.id) parts.push(`<span class="swim-sum">${esc(leaf.brief)}</span>`);
+  // A LEAF's description lives in `summary` (its `brief` is always null); it's null until the
+  // agent writes one, so a not-yet-run subtask is honestly id-only.
+  if (leaf.summary && leaf.summary !== leaf.id) parts.push(`<span class="swim-sum">${esc(leaf.summary)}</span>`);
   if (foreign.length) {
     parts.push(`<span class="swim-xdep" title="blocked by work in another lane">⤴ blocked by ${esc(foreign.join(", "))}</span>`);
   }
@@ -2152,10 +2165,12 @@ function swimLane(story, byId, allIds, repaint) {
     ? `<span class="swim-track"><i style="width:${Math.round((100 * p.done) / p.total)}%"></i></span>` +
       `<span class="swim-prog-txt">${p.done} / ${p.total} done</span>`
     : `<span class="swim-prog-txt">not started</span>`;
-  const title = story.brief || story.id;
+  // Compact one-line title (clamped) for display; the FULL brief goes in the tooltip.
+  const title = laneTitle(story.brief, story.id);
+  const fullTitle = story.brief || story.id;
   const hd = el("div", { class: "swim-hd", html:
     `<span class="swim-kind">${kindBadge("node")}</span>` +
-    `<span class="swim-title" title="${esc(title)}">${esc(title)}</span>` +
+    `<span class="swim-title" title="${esc(fullTitle)}">${esc(title)}</span>` +
     `<span class="swim-laneid">${esc(story.id)}</span>` +
     `<div class="swim-meta"><span class="chip ${esc(st)}">${esc(st)}</span>${storyLifecycleChip(story)}` +
     `<div class="swim-prog">${progHtml}</div></div>` });

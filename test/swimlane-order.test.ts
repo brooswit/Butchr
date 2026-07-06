@@ -28,11 +28,12 @@ function extractFn(name: string): string {
 const harness = `
 ${extractFn("graphLevels")}
 ${extract("swimlane-order")}
-return { orderLaneLeaves, swimEmphasis };
+return { orderLaneLeaves, swimEmphasis, laneTitle };
 `;
-const { orderLaneLeaves, swimEmphasis } = new Function(harness)() as {
+const { orderLaneLeaves, swimEmphasis, laneTitle } = new Function(harness)() as {
   orderLaneLeaves: (memberIds: string[], byId: Map<string, any>) => string[];
   swimEmphasis: (st: string) => string;
+  laneTitle: (brief: string | null | undefined, id: string, max?: number) => string;
 };
 
 const mk = (items: Array<{ id: string; blocked_by?: string[] }>) =>
@@ -88,4 +89,29 @@ test("swimEmphasis maps statuses to the intended emphasis bucket", () => {
   expect(swimEmphasis("merged")).toBe("done");
   expect(swimEmphasis("in_review")).toBe("done");
   expect(swimEmphasis("aborted")).toBe("done");
+});
+
+// ---------- laneTitle: compact one-line title from a multi-thousand-char brief ----------
+
+test("laneTitle takes the first non-empty line and clamps it with an ellipsis", () => {
+  const brief = "Redesign the Graph tab into per-story pipeline swimlanes so the linear-chain data reads cleanly\n\nMore detail on the next line that should never appear.";
+  const t = laneTitle(brief, "st-x", 70);
+  expect(t.length).toBeLessThanOrEqual(71); // 70 chars + ellipsis
+  expect(t.endsWith("…")).toBe(true);
+  expect(t).not.toContain("\n");
+  expect(t.startsWith("Redesign the Graph tab")).toBe(true);
+});
+
+test("laneTitle leaves a short first line untouched (no ellipsis)", () => {
+  expect(laneTitle("Idle agents never silent\n\nbody...", "st-y")).toBe("Idle agents never silent");
+});
+
+test("laneTitle falls back to the id when the brief is empty/blank/missing", () => {
+  expect(laneTitle("", "st-z")).toBe("st-z");
+  expect(laneTitle(null, "st-z")).toBe("st-z");
+  expect(laneTitle("   \n  \n", "st-z")).toBe("st-z");
+});
+
+test("laneTitle skips leading blank lines to the first real line", () => {
+  expect(laneTitle("\n\n  Phase C — retire launchers  \nmore", "st-w")).toBe("Phase C — retire launchers");
 });
