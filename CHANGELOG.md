@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.178] - 2026-07-06
+
 ### Changed
 - **A story NODE's own `tasks` row now DUAL-WRITES the story's REAL state in lock-step
   with the still-authoritative `stories` table (REVAMP Phase B.3, story st-6372812d).**
