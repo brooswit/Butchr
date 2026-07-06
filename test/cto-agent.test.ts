@@ -63,10 +63,9 @@ beforeAll(async () => {
   // Pin the CTO-agent config deterministically (mutating the singleton is robust to
   // import order — unlike env, which only wins if this file imports config first).
   cfgMod.config.ctoAgentEnabled = false; // prove per-workspace cto_enabled=1 WINS
-  // This file exercises the LEGACY per-kind CTO supervisor. Pin the unified-workspace gate
-  // OFF (it DEFAULTS ON as of step 6b, where the unified supervisor would otherwise no-op
-  // the legacy reconcile/supervise paths under test).
-  cfgMod.config.unifiedWorkspaceEnabled = false;
+  // This file exercises the LEGACY per-kind CTO reconcile/supervise paths directly. These are
+  // no longer wired into boot (the unified-workspace supervisor is the sole boot authority as of
+  // REVAMP-1 Phase C S4) but remain callable and are exercised here until S5 deletes the module.
   cfgMod.config.ctoAgentSessionSeeds = new Map([[DIR, SEED]]);
   cfgMod.config.ctoAgentName = "butchr-cto-agent";
   cfgMod.config.ctoBriefPath = "";

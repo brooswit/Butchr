@@ -13,7 +13,6 @@ import {
 import { config } from "./config.ts";
 import {
   ensureWorkspaceAgentRow,
-  isUnifiedWorkspaceEnabled,
   startWorkspaceAgent,
   stopCtoAgent,
   stopWorkspaceAgent,
@@ -449,9 +448,7 @@ export function isCtoEnabled(workspaceId: string): boolean {
  * supervisor honors it — DISABLED → stopWorkspaceAgent (immediate teardown + desired=0);
  * ENABLED → ensure the row exists + desired=1 so the supervisor relaunches it. The unified path
  * is AUTHORITATIVE; the legacy cto_agent.desired writes are KEPT as a mirror (MIRROR-AND-DEFER).
- * The mirror is itself gated on isUnifiedWorkspaceEnabled() (the master switch) so it stays
- * fully inert in production while the unified supervisor is off, matching stopWorkspaceAgent's
- * own self-gating. Async because the disable teardown is awaited.
+ * Async because the disable teardown is awaited.
  */
 export async function setWorkspaceCtoEnabled(id: string, value: unknown): Promise<WorkspaceView> {
   if (!getWorkspace(id)) throw new HttpError(404, `workspace not found: ${id}`);
@@ -460,14 +457,12 @@ export async function setWorkspaceCtoEnabled(id: string, value: unknown): Promis
   else if (typeof value === "boolean") stored = value ? 1 : 0;
   else throw new HttpError(400, "cto_enabled must be a boolean (or null to use the default)");
   const view = updateWorkspaceColumn(id, "cto_enabled", stored);
-  if (isUnifiedWorkspaceEnabled()) {
-    const wsId = `ws-cto-${id}`;
-    if (isCtoEnabled(id)) {
-      ensureWorkspaceAgentRow(wsId, { kind: "cto", directory_id: id });
-      saveWorkspaceAgentRow(wsId, { desired: 1 });
-    } else {
-      await stopWorkspaceAgent(wsId);
-    }
+  const wsId = `ws-cto-${id}`;
+  if (isCtoEnabled(id)) {
+    ensureWorkspaceAgentRow(wsId, { kind: "cto", directory_id: id });
+    saveWorkspaceAgentRow(wsId, { desired: 1 });
+  } else {
+    await stopWorkspaceAgent(wsId);
   }
   return view;
 }
@@ -646,20 +641,18 @@ export function dashboard(): Dashboard {
 /**
  * CREATE-TIME unified `workspace` cto row for a directory (story st-93384200, Bug 3). Called by
  * registerWorkspace right after the directory row is inserted so the unified supervisor — the
- * SOLE launcher when the flag is ON — owns this directory's CTO immediately (launch AND
- * relaunch-on-death) WITHOUT waiting for a restart to re-seed it from the legacy cto_agent table.
+ * SOLE launcher — owns this directory's CTO immediately (launch AND relaunch-on-death) WITHOUT
+ * waiting for a restart to re-seed it from the legacy cto_agent table.
  * `desired` reflects whether the CTO is ENABLED (the per-workspace override resolved against the
  * global default); a disabled / globally-off CTO gets desired=0 and is NOT launched (the unified
  * reconcile/supervise already tears down any stray desired=1 cto row for a disabled directory).
  * The legacy cto_agent path has NO direct CTO start at registration (the CTO comes up via the
  * supervisor), so there is nothing to gate off here. The optional low-latency launch kick is
  * serialized behind the SAME per-id launchInFlight guard the supervisor uses
- * (workspace-agent.guarded), so it can't double-launch with a racing supervise tick. No-op while
- * the unified supervisor is gated OFF (mirror-and-defer; the legacy directory row is unaffected).
+ * (workspace-agent.guarded), so it can't double-launch with a racing supervise tick.
  * EXPORTED for direct testing — registerWorkspace itself needs a live herdr to drive end-to-end.
  */
 export function ensureCtoWorkspaceRow(directoryId: string): void {
-  if (!isUnifiedWorkspaceEnabled()) return;
   const wsId = `ws-cto-${directoryId}`;
   const ctoOn = isCtoEnabled(directoryId);
   ensureWorkspaceAgentRow(wsId, { kind: "cto", directory_id: directoryId }); // work_id NULL, has_agent 0

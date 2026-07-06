@@ -1,4 +1,4 @@
-// UNIFIED WORKSPACE SUPERVISOR (story st-540ba705, step 3 — gated OFF + fully INERT).
+// UNIFIED WORKSPACE SUPERVISOR (story st-540ba705).
 //
 // A WORKSPACE is the (agent + directory) EXECUTION CONTEXT in which Work runs — the
 // place and the agent, distinct from Work itself (see docs/rfc-work-workspace-unification.md
@@ -22,13 +22,11 @@
 // workspace demotes its siblings (db.demoteSiblingWorkspaceAgents) so only one owns the
 // agent.
 //
-// GATING / INERTNESS (HARD): every public entry point no-ops while
-// config.unifiedWorkspaceEnabled is OFF (the default), and this module is NOT imported by
-// src/index.ts — so nothing here runs in production. The EXISTING cto_agent / story_agent
-// supervisors + the per-task build-agent dispatch remain the sole authoritative paths; the
-// coexistence/cutover that replaces them with this loop is the separately-authorized step 6,
-// out of scope here. Turning the flag on today exercises this loop (and the tests) WITHOUT
-// removing the old supervisors.
+// AUTHORITY: this is the SOLE authority over the cto/leader operator agents — wired into boot
+// (src/index.ts) as the only operator-agent reconcile + supervisor. BUILD agents stay
+// DISPATCHER-owned (per-task lifecycle/watcher) — not supervised here. (Phase C S4 retired the
+// legacy per-kind cto_agent / story_agent supervisor boot path and the env gate that once
+// toggled between it and this unified path.)
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
@@ -67,11 +65,6 @@ import { startAgentInFreshTab } from "./herdr.ts";
 import { claudeLiveness } from "./liveness.ts";
 import { autoConfirmStartupPrompts, classifyStartupScreen } from "./startup-confirm.ts";
 import type { AutoConfirmResult, ConfirmRule } from "./startup-confirm.ts";
-
-/** Is the unified-workspace supervisor ENABLED? OFF by default (fully inert when off). */
-export function isUnifiedWorkspaceEnabled(): boolean {
-  return config.unifiedWorkspaceEnabled;
-}
 
 /**
  * The herdr agent name for a workspace row — NAME-ONLY identity, derived per kind to
@@ -170,9 +163,9 @@ let superviseTimer: ReturnType<typeof setInterval> | null = null;
 // actual agent LAUNCH is a dependency it calls through this seam, so tests drive the loop
 // against the new table with a fake launcher (no real herdr/claude) and the cutover can
 // swap a richer launcher in. The DEFAULT performs the genuinely-shared herdr mechanics for
-// the OPERATOR kinds (cto/leader); build-context provisioning (a git worktree + branch,
-// which the dispatcher owns) is wired at the step-6 cutover, so the default launcher throws
-// for kind='build' rather than pretending to provision one. Inert either way (gated off).
+// the OPERATOR kinds (cto/leader); build-context provisioning (a git worktree + branch) stays
+// DISPATCHER-owned and is never provisioned here, so the default launcher throws for
+// kind='build' rather than pretending to provision one.
 export interface WorkspaceLauncher {
   /** Launch (or relaunch) the agent for this workspace; RESUME unless `fresh`. */
   launch(row: WorkspaceAgentRow, fresh: boolean): Promise<void>;
@@ -282,7 +275,7 @@ const defaultLauncher: WorkspaceLauncher = {
     if (row.kind === "build") {
       throw new Error(
         `unified workspace ${row.id}: build-kind launch (worktree + branch provisioning) ` +
-          `is wired at the step-6 cutover; not provisioned by the inert default launcher`,
+          `stays DISPATCHER-owned; not provisioned by this launcher`,
       );
     }
     const cwd = directoryPath(row.directory_id);
@@ -470,25 +463,24 @@ export function ensureWorkspaceAgentRow(
 }
 
 /**
- * START (or adopt) a workspace's agent. No-op (returns the current status) when the unified
- * supervisor is gated OFF, so this is inert in production. Marks it DESIRED-up; adopts a
- * live agent (single-instance) or launches — RESUMING the persisted session unless `fresh`.
+ * START (or adopt) a workspace's agent. No-op (returns the current status) when the workspace
+ * row is gone. Marks it DESIRED-up; adopts a live agent (single-instance) or launches —
+ * RESUMING the persisted session unless `fresh`.
  */
 export function startWorkspaceAgent(
   id: string,
   opts: { fresh?: boolean } = {},
 ): Promise<WorkspaceAgentStatus> {
   const row = getWorkspaceAgentRow(id);
-  if (!row || !isUnifiedWorkspaceEnabled()) return workspaceAgentStatus(id);
+  if (!row) return workspaceAgentStatus(id);
   return ensureStarted(row, !!opts.fresh).then((r) => r.status);
 }
 
 /**
  * STOP a workspace's agent: mark it DESIRED-down (survives a restart), clear its owned-agent
- * marker, and tear it down + free its name. Idempotent. No-op when gated OFF.
+ * marker, and tear it down + free its name. Idempotent.
  */
 export function stopWorkspaceAgent(id: string): Promise<WorkspaceAgentStatus> {
-  if (!isUnifiedWorkspaceEnabled()) return workspaceAgentStatus(id);
   // STOP MUST WIN over an in-flight launch. guarded() early-returns the in-flight launch promise
   // when launchInFlight is set, which would SWALLOW the stop body below — so the desired=0 write
   // must NOT live only inside guarded(). Mark stop-requested + write desired-down SYNCHRONOUSLY
@@ -708,12 +700,10 @@ async function reassertStopAfterLaunch(id: string): Promise<boolean> {
  * tear down its LEADER workspace(s) — desired-down + close the pane + free the name — so the
  * supervisor stops relaunching them. The unified counterpart of onStoryStatusChanged's
  * stopStoryAgent (an unconditional desired-down, robust whether or not currently live). No-op
- * when the gate is OFF (the legacy story-agent path owns teardown then) or the node has no
- * leader workspace row. Best-effort per row; never throws to the caller. Only LEADER rows are
- * touched — a node's cto/build workspaces are left alone.
+ * when the node has no leader workspace row. Best-effort per row; never throws to the caller.
+ * Only LEADER rows are touched — a node's cto/build workspaces are left alone.
  */
 export async function teardownLeaderWorkspaceForWork(workId: string): Promise<void> {
-  if (!isUnifiedWorkspaceEnabled()) return;
   for (const row of listWorkspaceAgentRowsForWork(workId)) {
     if (row.kind !== "leader") continue;
     await stopWorkspaceAgent(row.id).catch(() => {});
@@ -725,7 +715,6 @@ export async function reconcileWorkspaceAgent(
   id: string,
   herdrUp: boolean,
 ): Promise<{ action: "disabled" | "skipped" | "stopped" | "adopted" | "launched" }> {
-  if (!isUnifiedWorkspaceEnabled()) return { action: "disabled" };
   const row = getWorkspaceAgentRow(id);
   if (!row) return { action: "disabled" };
   // A LEADER for a TERMINAL node-Work must NEVER be adopted/relaunched (mirror legacy
@@ -757,14 +746,12 @@ export async function reconcileWorkspaceAgent(
 }
 
 /**
- * BOOT RECONCILE: bring every DESIRED-up workspace into its desired state once. INERT — a
- * no-op (returns zeroes) while gated OFF, and NOT wired into src/index.ts. Mirrors
- * reconcileCtoAgents / reconcileStoryAgents.
+ * BOOT RECONCILE: bring every DESIRED-up workspace into its desired state once. Wired into
+ * src/index.ts as the sole operator-agent boot reconcile.
  */
 export async function reconcileWorkspaceAgents(
   herdrUp: boolean,
 ): Promise<{ adopted: number; launched: number; skipped: number }> {
-  if (!isUnifiedWorkspaceEnabled()) return { adopted: 0, launched: 0, skipped: 0 };
   let adopted = 0;
   let launched = 0;
   let skipped = 0;
@@ -1059,18 +1046,16 @@ function publishLeaderIdle(
   });
 }
 
-// One supervision tick over ALL workspaces (mirrors cto-agent.superviseTick). Gated OFF →
-// a no-op (nothing is supervised). Each desired-up-but-dead workspace is relaunched
-// (RESUMING the same session) with bounded per-workspace exponential backoff.
+// One supervision tick over ALL workspaces (mirrors cto-agent.superviseTick). Each
+// desired-up-but-dead workspace is relaunched (RESUMING the same session) with bounded
+// per-workspace exponential backoff.
 async function superviseTick(): Promise<void> {
-  if (!isUnifiedWorkspaceEnabled()) return;
   for (const row of listWorkspaceAgentRows()) {
     await superviseWorkspace(row.id);
   }
 }
 
 async function superviseWorkspace(id: string): Promise<void> {
-  if (!isUnifiedWorkspaceEnabled()) return;
   const row = getWorkspaceAgentRow(id);
   if (!row || row.desired !== 1) return; // wanted down (or gone)
   // A DISABLED CTO is never relaunched — short-circuit BEFORE the dead-while-desired relaunch/
@@ -1159,9 +1144,9 @@ async function superviseWorkspace(id: string): Promise<void> {
   });
 }
 
-/** Start the unified-workspace supervisor poll loop. No-op when gated OFF or already running. */
+/** Start the unified-workspace supervisor poll loop. No-op when already running. */
 export function startWorkspaceAgentSupervisor(): void {
-  if (superviseTimer || !isUnifiedWorkspaceEnabled()) return;
+  if (superviseTimer) return;
   superviseTimer = setInterval(() => void superviseTick(), config.ctoSuperviseMs);
 }
 
@@ -1185,13 +1170,12 @@ export function _resetSupervisionStateForTest(id?: string): void {
 // ============================================================================
 // LEGACY STORY-LEADER LIFECYCLE HOOKS (moved here from story-agent.ts —
 // REVAMP-1 Phase C S2). These are the LIVE story create/status/teardown hooks
-// the CRUD layer (stories.ts) and unregisterWorkspace (workspaces.ts) call. With
-// the unified-workspace flag ON (the live default, config.ts) they materialize +
-// tear down the unified `workspace` leader row; the legacy `story_agent` table is
-// still mirror-written here because storyAgentStatus — the story view's `leader`
-// field — reads it. The story-agent.ts supervisor (inert under the flag, deleted
-// in a later subtask) imports the shared helpers below back from HERE, so this
-// module never imports story-agent.ts (keeping that deletion a clean cut).
+// the CRUD layer (stories.ts) and unregisterWorkspace (workspaces.ts) call. They
+// materialize + tear down the unified `workspace` leader row; the legacy `story_agent`
+// table is still mirror-written here because storyAgentStatus — the story view's `leader`
+// field — reads it. The (now uncalled) story-agent.ts supervisor, deleted in a later
+// subtask, imports the shared helpers below back from HERE, so this module never imports
+// story-agent.ts (keeping that deletion a clean cut).
 // ============================================================================
 
 /** The view of a story's managed leader-agent state (mirrors CtoStatus / WorkspaceAgentStatus). */
@@ -1225,7 +1209,7 @@ export function storyAgentName(storyId: string): string {
  * is SYNCHRONOUS and fires the leader's launch/teardown FIRE-AND-FORGET, so a story (and its
  * cascade-linked story_agent row) can vanish WHILE a launch/supervise/reconcile write is in
  * flight. Routing every story-agent write through here keeps those best-effort paths from
- * FK-crashing on that race. Shared with story-agent.ts's (inert) supervisor.
+ * FK-crashing on that race. Shared with story-agent.ts's (now uncalled) supervisor.
  */
 export function saveRow(storyId: string, patch: Parameters<typeof saveStoryAgentRow>[1]): void {
   if (getStoryRow(storyId)) saveStoryAgentRow(storyId, patch);
@@ -1273,7 +1257,7 @@ export function guardedStory(
  *
  * NOTE (REVAMP-1 Phase C S2): the legacy flag-OFF `launchStoryAgent` branch was intentionally
  * DROPPED here per the CEO-approved unified flip — the unified `workspace` path is now the SOLE
- * launcher (a later subtask removes config.unifiedWorkspaceEnabled entirely).
+ * launcher (Phase C S4 removed the flag that once toggled it).
  */
 export function onStoryCreated(storyId: string): void {
   saveRow(storyId, { desired: 1 }); // legacy story_agent MIRROR (kept; storyAgentStatus reads it)

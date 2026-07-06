@@ -630,12 +630,10 @@ export async function reconcileCtoAgent(
 export async function reconcileCtoAgents(
   herdrUp: boolean,
 ): Promise<{ adopted: number; launched: number; skipped: number }> {
-  // SINGLE-SUPERVISION GUARD (story st-540ba705, step 6b): when the unified-workspace
-  // supervisor is ON it is the SOLE authority over the cto/leader agents (it re-adopts
-  // them BY NAME from the migrated `workspace` rows). This legacy per-kind path then
-  // no-ops so no agent is double-supervised — a belt-and-suspenders guard atop index.ts
-  // boot already skipping it. Read directly off config to avoid a workspace-agent import.
-  if (config.unifiedWorkspaceEnabled) return { adopted: 0, launched: 0, skipped: 0 };
+  // LEGACY PATH (REVAMP-1 Phase C): the unified-workspace supervisor is now the SOLE boot
+  // authority over the cto/leader agents (see src/index.ts) — this per-kind reconcile has NO
+  // production caller and is retained only until S5 deletes this file. Still exercised directly
+  // by cto-agent unit tests.
   let adopted = 0;
   let launched = 0;
   let skipped = 0;
@@ -661,10 +659,9 @@ export async function reconcileCtoAgents(
 // per-workspace exponential backoff, giving up after config.ctoMaxRestarts consecutive
 // failures until the operator intervenes.
 async function superviseTick(): Promise<void> {
-  // SINGLE-SUPERVISION GUARD (step 6b): no-op while the unified-workspace supervisor owns
-  // the cto/leader agents (see reconcileCtoAgents) — so even a still-running legacy timer
-  // can't double-supervise. Mirrors the story-agent guard.
-  if (config.unifiedWorkspaceEnabled) return;
+  // LEGACY PATH (REVAMP-1 Phase C): the unified-workspace supervisor owns the cto/leader
+  // agents now; startCtoSupervisor has no production caller (see src/index.ts) and this loop
+  // is retained only until S5 deletes this file.
   for (const row of listCtoAgentRows()) {
     await superviseWorkspace(row.workspace_id);
   }

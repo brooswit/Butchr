@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Config surface (REVAMP-1 Phase C S4):** removed the `unifiedWorkspaceEnabled` config knob
+  and its `BUTCHR_UNIFIED_WORKSPACE` env var (`src/config.ts`) plus the
+  `isUnifiedWorkspaceEnabled()` accessor (`src/workspace-agent.ts`), permanently committing to
+  the unified workspace supervisor and retiring the legacy per-kind CTO/story-leader supervisor
+  boot path (CEO-approved). Boot (`src/index.ts`) now always runs `reconcileWorkspaceAgents` +
+  `startWorkspaceAgentSupervisor` as the sole operator-agent authority; the
+  `reconcileCtoAgents` / `startCtoSupervisor` / `reconcileStoryAgents` / `startStoryAgentSupervisor`
+  boot branch and its imports are gone, and shutdown drops the now-unused
+  `stopCtoSupervisor` / `stopStoryAgentSupervisor` calls. Every remaining always-true flag guard
+  in `src/workspace-agent.ts` and `src/workspaces.ts` was simplified out. `cto-agent.ts` /
+  `story-agent.ts` are untouched behaviorally (their supervisor/reconcile entry points now have
+  zero production callers) and are deleted in S5; their unit tests still exercise them directly.
+  No behavior change under the production default (the flag has been on since step 6b).
+
 ## [0.9.191] - 2026-07-06
 
 ### Changed

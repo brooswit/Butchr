@@ -801,31 +801,13 @@ export const config = {
    */
   unifiedWork: envBool("BUTCHR_UNIFIED_WORK", true),
 
-  // ---- UNIFIED WORKSPACE ABSTRACTION (story st-540ba705, step 3; ACTIVATED 6b) ------
-  /**
-   * MASTER GATE for the UNIFIED WORKSPACE supervisor (src/workspace-agent.ts) — the
-   * single supervision loop that generalizes the OPERATOR agent kinds (story leader /
-   * CTO) into one (agent + directory) execution context over the `workspace` table (see
-   * docs/rfc-work-workspace-unification.md §2.2). DEFAULT ON as of the step-6b cutover:
-   * the unified supervisor is now wired into boot (src/index.ts) as the SOLE authority
-   * over the cto/leader agents — it re-adopts each BY NAME from the `workspace` rows the
-   * step-6b boot migration (db.migrateWorkspaceAgentRows) populated from cto_agent /
-   * story_agent, so the live CTO + leaders survive the cutover restart unorphaned. When
-   * ON, the legacy per-kind cto + story supervisors self-gate to a no-op (single, not
-   * double, supervision). BUILD agents stay DISPATCHER-owned (per-task lifecycle/watcher)
-   * — NOT migrated or supervised here. Set BUTCHR_UNIFIED_WORKSPACE=0 to fall back to the
-   * legacy parallel supervisors (the cto_agent / story_agent tables are LEFT INTACT this
-   * step; their hard removal is a later post-restart release).
-   */
-  unifiedWorkspaceEnabled: envBool("BUTCHR_UNIFIED_WORKSPACE", true),
-
   /**
    * RECURSIVE BRANCH-ISOLATION GATE (story st-540ba705, step 4 — DEFAULT OFF). The OFF
    * feature flag for the ARBITRARY-DEPTH generalization of story B's 3-level branch
    * isolation (docs/rfc-work-workspace-unification.md §4, Q9): every NODE Work can own a
    * branch, children merge into the nearest branched ancestor, and it re-gates + merges
    * upward (the depth-2 story-branch model is its single-level instance). DEFAULT OFF and
-   * fully INERT — mirroring unifiedWork / unifiedWorkspaceEnabled: while off, nothing in
+   * fully INERT — mirroring unifiedWork: while off, nothing in
    * the live dispatch / review / merge path branches on it (the recursive resolvers +
    * git.mergeWorkBranch have NO live caller this step), so today's single-level merge path
    * stays byte-for-byte authoritative and `/api/tasks` + `/api/stories` are byte-identical.

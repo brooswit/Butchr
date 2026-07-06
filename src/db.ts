@@ -1291,8 +1291,8 @@ export function migrateWorkspaceAgentRows(): void {
 // authoritative story record (B.4 flipped every read; B.3 kept the mirror in lock-step), so the
 // legacy `stories` table + `tasks.story_id` column are now pure dead weight. This drops them.
 //
-// story_agent is NOT dropped here (descoped to Phase C — it still has LIVE readers/writers under
-// config.unifiedWorkspaceEnabled: onStoryCreated/stopStoryAgent write it, storyAgentStatus reads
+// story_agent is NOT dropped here (descoped to Phase C — it still has LIVE readers/writers:
+// onStoryCreated/stopStoryAgent write it, storyAgentStatus reads
 // it via storyView → GET /api/work). But story_agent.story_id FK-references stories(id) — the
 // ONLY remaining FK to `stories` — so we first REBUILD story_agent to re-point that FK at
 // tasks(id) ON DELETE CASCADE (the story node), preserving its cascade cleanup (deleteStory

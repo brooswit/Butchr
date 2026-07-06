@@ -78,10 +78,10 @@ beforeAll(async () => {
   sa = await import("../src/story-agent.ts");
   originalRunner = harnessMod.getRunner();
 
-  // This file exercises the LEGACY per-kind story-leader supervisor. Pin the unified-workspace
-  // gate OFF (it DEFAULTS ON as of step 6b, where the unified supervisor would otherwise no-op
-  // the legacy reconcile/supervise paths under test).
-  cfgMod.config.unifiedWorkspaceEnabled = false;
+  // This file exercises the LEGACY per-kind story-leader reconcile/supervise paths directly.
+  // These are no longer wired into boot (the unified-workspace supervisor is the sole boot
+  // authority as of REVAMP-1 Phase C S4) but remain callable and are exercised here until S5
+  // deletes the module.
   // Pin the supervision/launch config deterministically (reuses the CTO knobs).
   cfgMod.config.ctoAgentName = "butchr-cto-agent";
   cfgMod.config.ctoMaxRestarts = 3;

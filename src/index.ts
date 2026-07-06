@@ -3,14 +3,7 @@
 import { snapshotOnShutdown, startBackupLoop, stopBackupLoop } from "./backup.ts";
 import { config } from "./config.ts";
 import { startConnectivityMonitor, stopConnectivityMonitor } from "./connectivity.ts";
-import { reconcileCtoAgents, startCtoSupervisor, stopCtoSupervisor } from "./cto-agent.ts";
 import {
-  reconcileStoryAgents,
-  startStoryAgentSupervisor,
-  stopStoryAgentSupervisor,
-} from "./story-agent.ts";
-import {
-  isUnifiedWorkspaceEnabled,
   reconcileWorkspaceAgents,
   startWorkspaceAgentSupervisor,
   stopWorkspaceAgentSupervisor,
@@ -42,7 +35,7 @@ async function main(): Promise<void> {
   // HOUSEKEEPING — runs FIRST (before any reconcile/recovery): drop stale workspace
   // registrations whose path lives under the OS temp dir (leftovers from selftest /
   // integration runs whose tmp dirs are long gone). Pruning EARLY — before
-  // reconcileRunningTasks and reconcileCtoAgents — means butchr doesn't waste work
+  // reconcileRunningTasks and reconcileWorkspaceAgents — means butchr doesn't waste work
   // re-adopting agents or launching CTO sessions for workspaces it's about to delete.
   // unregisterWorkspace cascades to tasks + tears down panes/worktrees/CTO agent; real
   // (/home/...) workspaces are never touched. Best-effort per workspace (never aborts boot).
@@ -144,9 +137,9 @@ async function main(): Promise<void> {
 
   // BIND THE HTTP SERVER EARLY — BEFORE any operator-agent (CTO/leader) reconcile below.
   // Bun.serve binds the port synchronously, and the health/liveness endpoints come up with
-  // it. The operator-agent boot reconcile (reconcileWorkspaceAgents, or the legacy
-  // reconcileCtoAgents/reconcileStoryAgents) can adopt panes that are still parked at a
-  // startup prompt; its per-pane auto-confirm is now fire-and-forget (src/workspace-agent.ts)
+  // it. The operator-agent boot reconcile (reconcileWorkspaceAgents) can adopt panes that are
+  // still parked at a startup prompt; its per-pane auto-confirm is now fire-and-forget
+  // (src/workspace-agent.ts)
   // so it can no longer block, but we ALSO bind first so agent supervision can NEVER gate the
   // port bind under the systemd start timeout (the 0.9.136 crash-loop root cause). All
   // prerequisites already ran above: initFileLogging() (top of main), the db (initialized at
@@ -155,45 +148,18 @@ async function main(): Promise<void> {
   // reconcile/supervisor + dispatcher run AFTER the bind.
   startServer();
 
-  // MANAGED OPERATOR AGENTS (CTO + story leaders). At the step-6b cutover these two
-  // parallel supervisors are GENERALIZED into ONE unified-workspace supervisor
-  // (src/workspace-agent.ts) over the `workspace` table — gated by
-  // config.unifiedWorkspaceEnabled (DEFAULT ON as of 6b). We run EXACTLY ONE path so no
-  // agent is double-supervised: when the gate is ON the unified supervisor is the sole
-  // authority (it re-adopts every migrated cto/leader workspace row BY NAME — Story D
-  // identity — so the live CTO + this story's leader survive the restart unorphaned); when
-  // OFF the legacy per-kind cto + story supervisors run, byte-unchanged. (The old
-  // reconcile/supervise entry points ALSO self-gate to a no-op when the flag is ON, a
-  // belt-and-suspenders guard atop this skip.)
-  if (isUnifiedWorkspaceEnabled()) {
-    const ws = await reconcileWorkspaceAgents(herdrUp);
-    if (ws.adopted > 0 || ws.launched > 0) {
-      console.log(`[butchr] workspace agents: ${ws.adopted} adopted, ${ws.launched} launched`);
-    }
-    startWorkspaceAgentSupervisor();
-  } else {
-    // LEGACY PATH (gate OFF): the two parallel per-kind supervisors.
-    // Managed CTO agents — ONE PER REGISTERED WORKSPACE (each default OFF unless that
-    // workspace opts in via cto_enabled, or the global BUTCHR_CTO_AGENT default).
-    // Reconcile every enabled workspace's desired state ONCE (adopt a live pane that
-    // survived this restart, or (re)launch it RESUMING its session), then start the
-    // supervisor that relaunches them on death.
-    const cto = await reconcileCtoAgents(herdrUp);
-    if (cto.adopted > 0 || cto.launched > 0) {
-      console.log(`[butchr] CTO agents: ${cto.adopted} adopted, ${cto.launched} launched`);
-    }
-    startCtoSupervisor();
-
-    // Managed STORY-LEADER agents — ONE PER OPEN STORY (Phase 3 of the STORIES epic). Same
-    // boot pattern as the CTO agents: reconcile every open story's leader to its desired
-    // state ONCE (adopt a surviving pane, or (re)launch RESUMING its session), then start the
-    // supervisor that relaunches them on death.
-    const stories = await reconcileStoryAgents(herdrUp);
-    if (stories.adopted > 0 || stories.launched > 0) {
-      console.log(`[butchr] story leaders: ${stories.adopted} adopted, ${stories.launched} launched`);
-    }
-    startStoryAgentSupervisor();
+  // MANAGED OPERATOR AGENTS (CTO + story leaders): the unified-workspace supervisor
+  // (src/workspace-agent.ts) over the `workspace` table is the SOLE authority — it re-adopts
+  // every cto/leader workspace row BY NAME (Story D identity) so the live CTO + this story's
+  // leader survive the restart unorphaned. Reconcile every desired-up row ONCE (adopt a
+  // surviving pane, or (re)launch RESUMING its session), then start the supervisor that
+  // relaunches them on death. BUILD agents stay DISPATCHER-owned (per-task watcher). (Phase C
+  // S4 retired the legacy per-kind cto + story supervisor boot path and its enable flag.)
+  const ws = await reconcileWorkspaceAgents(herdrUp);
+  if (ws.adopted > 0 || ws.launched > 0) {
+    console.log(`[butchr] workspace agents: ${ws.adopted} adopted, ${ws.launched} launched`);
   }
+  startWorkspaceAgentSupervisor();
 
   startDispatcher();
   // Periodic, SQLite-safe snapshots of the source-of-truth db (see src/backup.ts)
@@ -216,13 +182,8 @@ async function main(): Promise<void> {
     stopDispatcher();
     // Stop SUPERVISING the managed operator agents, but leave their panes alive — the next
     // boot re-adopts and resumes each (session continuity), and the reaper tracks them
-    // separately and never orphans them. We stop ALL THREE supervisor loops unconditionally
-    // (each is idempotent — a no-op when its timer was never started), so whichever path boot
-    // took (the unified supervisor when config.unifiedWorkspaceEnabled is ON, else the legacy
-    // per-kind cto + story supervisors) is cleanly torn down.
+    // separately and never orphans them.
     stopWorkspaceAgentSupervisor();
-    stopCtoSupervisor();
-    stopStoryAgentSupervisor();
     stopBackupLoop();
     stopConnectivityMonitor();
     await snapshotOnShutdown();

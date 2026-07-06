@@ -1,8 +1,7 @@
 // Tests for the UNIFIED WORKSPACE SUPERVISOR (src/workspace-agent.ts, story st-540ba705
 // step 3) — the ONE supervision loop that generalizes the three agent kinds (build / story
 // leader / CTO) into a single (agent + directory) execution context over the `workspace`
-// table. It is gated OFF + INERT in production; these tests flip config.unifiedWorkspaceEnabled
-// ON to exercise the loop, and one case proves it is a no-op while OFF.
+// table. It is the SOLE boot authority over the cto/leader operator agents (src/index.ts).
 //
 // The supervisor delegates the actual agent LAUNCH through an injectable seam
 // (setLauncherForTest), so the supervision LOGIC (adopt/relaunch/backoff/dead-detection/1:N)
@@ -172,7 +171,6 @@ function makeFake(opts: { throwOnLaunch?: boolean } = {}) {
 }
 
 beforeEach(() => {
-  cfgMod.config.unifiedWorkspaceEnabled = true; // ON for most cases; the inert case flips it off
   dbMod.db.query(`DELETE FROM workspace`).run();
   dbMod.db.query(`DELETE FROM tasks`).run(); // node rows live here too post-B.5b (stories table dropped)
   wa._resetSupervisionStateForTest();
@@ -346,22 +344,6 @@ describe("unified workspace supervisor", () => {
     expect(a.has_agent).toBe(0);
   });
 
-  test("INERT while gated OFF — start / supervise / reconcile are no-ops", async () => {
-    cfgMod.config.unifiedWorkspaceEnabled = false;
-    const { runner, launcher, calls } = makeFake();
-    harnessMod.setRunner(runner);
-    wa.setLauncherForTest(launcher);
-    dbMod.saveWorkspaceAgentRow("w1", { kind: "cto", directory_id: DIR, desired: 1 });
-
-    await wa.startWorkspaceAgent("w1");
-    await wa._superviseTickForTest("w1");
-    const recon = await wa.reconcileWorkspaceAgents(true);
-
-    expect(calls.launch.length).toBe(0); // nothing launched while gated off
-    expect(recon).toEqual({ adopted: 0, launched: 0, skipped: 0 });
-    // The row is untouched — never marked live by the gated-off path.
-    expect(dbMod.getWorkspaceAgentRow("w1")!.has_agent).toBe(0);
-  });
 });
 
 // ── leader teardown on node-Work completion (unified) ────────────────────────
@@ -834,7 +816,6 @@ describe("CTO-compat surface via the unified workspace table (Phase C S3)", () =
   const CDIR = "dir-cto-compat";
   const CWS = `ws-cto-${CDIR}`;
   let savedGlobalCtoEnabled: boolean;
-  let savedUnified: boolean;
 
   /** Capture published `cto.updated` events. */
   function captureCto() {
@@ -849,8 +830,6 @@ describe("CTO-compat surface via the unified workspace table (Phase C S3)", () =
 
   beforeEach(() => {
     savedGlobalCtoEnabled = cfgMod.config.ctoAgentEnabled;
-    savedUnified = cfgMod.config.unifiedWorkspaceEnabled;
-    cfgMod.config.unifiedWorkspaceEnabled = true;
     cfgMod.config.ctoAgentEnabled = true; // directory has no override → global default enables it
     insertDir(CDIR);
     dbMod.saveWorkspaceAgentRow(CWS, {
@@ -859,7 +838,6 @@ describe("CTO-compat surface via the unified workspace table (Phase C S3)", () =
   });
   afterEach(() => {
     cfgMod.config.ctoAgentEnabled = savedGlobalCtoEnabled;
-    cfgMod.config.unifiedWorkspaceEnabled = savedUnified;
     wa.setLauncherForTest(null);
     wa._resetSupervisionStateForTest(CWS);
     dbMod.db.query(`DELETE FROM workspace WHERE directory_id=?`).run(CDIR);
@@ -1419,13 +1397,6 @@ describe("create-time unified rows (st-93384200 Bug 3)", () => {
     expect(r.desired).toBe(0);
     await flush();
     expect(calls.launch.length).toBe(0);
-  });
-
-  test("ensureCtoWorkspaceRow is INERT when the unified supervisor is gated OFF (no row written)", () => {
-    cfgMod.config.unifiedWorkspaceEnabled = false; // reset to true by the top-level beforeEach
-    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
-    dirsMod.ensureCtoWorkspaceRow(DIR);
-    expect(dbMod.getWorkspaceAgentRow(`ws-cto-${DIR}`)).toBeNull();
   });
 
   test("a leader whose story is MERGING / MERGE_BLOCKED is NOT torn down by reconcile OR supervise (keep-alive)", async () => {
