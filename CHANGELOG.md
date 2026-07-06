@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.181] - 2026-07-06
+
 ### Added
 - **OPERATOR-IDLE → HIGHER-UP, PART 2 (story st-a32c8138): the LIVE-but-IDLE CTO now surfaces on
   the dashboard as a sibling of the existing stranded-work indicator — ONE coherent "a responder is
