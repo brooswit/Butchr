@@ -256,6 +256,33 @@ function effStatus(t) {
   if (t.status === "in_progress" && t.needs_user_input) return "needs_user_input";
   return t.status === "in_progress" && t.idle ? "idle" : t.status;
 }
+// A single GENERIC kind -> visual lookup. Every work-item and every agent surface reads
+// its badge from this ONE table, so adding a future kind (REVAMP-4's container `repo`/
+// `project`, or new agent perspectives) is ONE new row here — never a new code branch.
+// `node`/`leaf` are the authoritative work_kind values (STORY container / TASK leaf);
+// `cto`/`leader`/`build` are the structurally-known agent kinds passed in by each render
+// site (there is no agent-`kind` field on the wire). Unknown kinds fall back to a generic
+// neutral badge (see kindVisual) so the UI never crashes on an unmapped kind.
+// <test-extract:kind-badge>
+const KIND_VISUAL = {
+  node:   { label: "STORY",  glyph: "◈", cls: "node"   }, // ◈ container work-item
+  leaf:   { label: "TASK",   glyph: "▪", cls: "leaf"   }, // ▪ leaf work-item
+  cto:    { label: "CTO",    glyph: "★", cls: "cto"    }, // ★ per-repo dev/CTO agent
+  leader: { label: "LEADER", glyph: "◆", cls: "leader" }, // ◆ story-leader agent
+  build:  { label: "BUILD",  glyph: "⚙", cls: "build"  }, // ⚙ leaf build agent
+};
+// Resolve a kind to its visual, with a safe fallback for an unmapped kind: a neutral
+// badge glyphed "•" and labelled with the raw kind uppercased (never throws).
+function kindVisual(k) {
+  return KIND_VISUAL[k] || { label: String(k || "?").toUpperCase(), glyph: "•", cls: "unknown" };
+}
+// The shared kind-badge emitter — an outlined pill (label + glyph) for a work-item or
+// agent kind, returned as an HTML string so it slots into any innerHTML cluster.
+function kindBadge(k) {
+  const v = kindVisual(k);
+  return `<span class="kind-badge kind-${esc(v.cls)}" title="${esc(v.label)}">${esc(v.glyph)} ${esc(v.label)}</span>`;
+}
+// </test-extract:kind-badge>
 // Renders a task's badge cluster — the status chip plus the optional plan-preview /
 // conflict badges — as an HTML string. Each badge's markup lives here only, so how
 // a chip *looks* can't drift across the views. Which badges a view shows stays the
@@ -278,7 +305,8 @@ function taskChips(t, { plan = false, kind = false, responder = false } = {}) {
           : "idle state"
       )}">${esc(kindStr)}${awaited ? ": " + esc(awaited) : ""}</span>`
     : "";
-  return (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
+  return kindBadge("leaf") + " "
+    + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
     + chip(st)
     + kindChip
     + (responder ? responderChip(t) : "")
@@ -515,7 +543,7 @@ async function ctoPanel(dirId) {
   card.innerHTML = `
     <div class="row" style="justify-content:space-between; align-items:center; gap:10px">
       <div>
-        <h2 style="margin:0">CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
+        <h2 style="margin:0">${kindBadge("cto")} CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
         <div class="meta" style="margin-top:4px">${bits.map(esc).join(" · ") || "not started"}</div>
         ${s.lastError ? `<div class="meta err" style="margin-top:4px">last error: ${esc(s.lastError)}</div>` : ""}
       </div>
@@ -1061,7 +1089,7 @@ async function ctoMiniBadge(dirId, slot) {
   try {
     const s = await api("GET", "/workspaces/" + dirId + "/cto");
     const { state, cls } = ctoState(s);
-    slot.innerHTML = `<span class="cto-badge ${cls}">CTO ${esc(state)}</span>`;
+    slot.innerHTML = `${kindBadge("cto")} <span class="cto-badge ${cls}">${esc(state)}</span>`;
   } catch {
     slot.innerHTML = "";
   }
@@ -1818,7 +1846,7 @@ function taskRow(t, depth) {
     <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
     <td>${taskChips(t, { kind: feedback, responder: true })}${tagChips(t)}</td>
     <td class="when">${esc(fmtTime(t.created_at))}</td>
-    <td>${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
+    <td>${isLive(t) ? kindBadge("build") + " " : ""}${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
   wireTermLink(tr, t.id);
   return tr;
 }
@@ -1834,7 +1862,7 @@ function appendStoryRows(tb, story, children, repaint) {
   const brief = story.brief || "(no brief)";
   // status chip (+ open-ask attention): user-owned ask = the red needs_user_input pill;
   // cto-owned = the muted awaiting-cto note — mirroring the task-level awaiting-who emphasis.
-  let chipsHtml = chip(effStatus(story));
+  let chipsHtml = kindBadge("node") + " " + chip(effStatus(story));
   if (story.pending_ask != null) {
     chipsHtml += story.ask_responder === "user"
       ? ' <span class="chip needs_user_input" title="an open story ask was escalated to YOU — expand to answer">needs your input</span>'
@@ -1848,7 +1876,7 @@ function appendStoryRows(tb, story, children, repaint) {
   tr.innerHTML = `
     <td class="id"><span class="work-caret">${expanded ? "▾" : "▸"}</span><span class="story-brief" title="${esc(brief)}">${esc(brief)}</span></td>
     <td>${chipsHtml}</td>
-    <td class="when" title="${esc(meta)}">${esc(meta)}</td>
+    <td class="when" title="${esc(meta)}">${esc(workRollup(story.counts))} · ${kindBadge("leader")} ${esc(leaderState)}</td>
     <td></td>`;
   tr.addEventListener("click", () => {
     if (WORK_TREE_EXPANDED.has(story.id)) WORK_TREE_EXPANDED.delete(story.id);
@@ -2183,6 +2211,14 @@ function drawGraphSvg(byId, active, dependentsOf, gen, depth) {
     });
     g.appendChild(svg("title", {}, `${isStory ? "story " : ""}${id} · ${st}${prog}`));
     g.appendChild(svg("rect", { class: "tg-rect", width: NW, height: NH, rx: 6, ry: 6 }));
+    // Glyph-only kind marker in the node's top-left corner (no label — the compact node
+    // has no room; the glyph + tooltip carry the type). Keyed off the authoritative
+    // work_kind, colored per kind via .tg-kind-*. Sits left of the centered tg-id text and
+    // above the progress bar, so it never collides.
+    const kv = kindVisual(t.work_kind);
+    const kg = svg("text", { class: "tg-kind tg-kind-" + kv.cls, x: 7, y: 13 }, kv.glyph);
+    kg.appendChild(svg("title", {}, kv.label));
+    g.appendChild(kg);
     g.appendChild(svg("text", { class: "tg-id", x: NW / 2, y: idY }, id));
     g.appendChild(svg("text", { class: "tg-status", x: NW / 2, y: stY }, st));
     if (subTotal) {
@@ -2397,7 +2433,7 @@ function boardAppendBlockers(card, w, byId) {
           title,
         });
     row.innerHTML = isStory
-      ? `<span class="story-badge">story</span><span class="bk-id">${esc(bid)}</span>${chip(st)}`
+      ? `${kindBadge("node")}<span class="bk-id">${esc(bid)}</span>${chip(st)}`
       : `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
     blk.appendChild(row);
   }
@@ -2417,6 +2453,7 @@ function boardCard(t, lane, byId) {
     </div>
     <div class="bc-meta">
       <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
+      ${isLive(t) ? kindBadge("build") : ""}
       ${termLink ? `<span class="bc-term">${termLink}</span>` : ""}
     </div>
     ${tagChips(t) ? `<div class="bc-tags">${tagChips(t)}</div>` : ""}
@@ -2440,11 +2477,11 @@ function boardStoryCard(s, lane, byId) {
   const meta = workRollup(s.counts) + " · " + leaderState;
   card.innerHTML = `
     <div class="bc-top">
-      <span class="bc-id"><span class="story-badge">story</span><span class="bc-story-id">${esc(s.id)}</span></span>
+      <span class="bc-id">${kindBadge("node")}<span class="bc-story-id">${esc(s.id)}</span></span>
       <span class="bc-chips">${chip(effStatus(s))}</span>
     </div>
     <div class="bc-meta">
-      <span class="bc-when" title="${esc(meta)}">${esc(meta)}</span>
+      <span class="bc-when" title="${esc(meta)}">${esc(workRollup(s.counts))} · ${kindBadge("leader")} ${esc(leaderState)}</span>
     </div>`;
 
   if (lane.key === "blocked") boardAppendBlockers(card, s, byId);

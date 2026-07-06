@@ -47,6 +47,15 @@
   --awaiting: #be185d;     /* old "awaiting_input" state */
   --rejected: #b6073c;     /* red-600 — old "rejected" (now aborted) */
 
+  /* work-item + agent KIND badge colors (generic KIND_VISUAL table in app.js).
+     Adding a future kind (repo/project) = one var here + one KIND_VISUAL row. */
+  --kind-node: var(--accent);    /* STORY container — blue accent (rarer, more prominent) */
+  --kind-leaf: var(--muted);     /* TASK leaf — quiet neutral metadata */
+  --kind-cto: #b45309;           /* amber-700 — CTO agent */
+  --kind-leader: var(--blocked); /* violet — story leader agent */
+  --kind-build: var(--merged);   /* green — build agent */
+  --kind-unknown: var(--muted);  /* fallback for an unmapped kind */
+
   /* diff add/del — themeable so they read on both light and dark surfaces */
   --diff-add-text: #006933;
   --diff-del-text: #b6073c;
@@ -93,6 +102,10 @@ html[data-theme="dark"] {
   --rolled_back: #a3814f;  /* brown, lifted for dark (terminal revert) */
   --failed: #c0263a;       /* red, lifted for dark surfaces */
   --aborted: #545a62;
+  /* KIND badge colors — lifted mid-tones so the outlined pills read on dark surfaces.
+     node/leader inherit the dark --accent/--blocked; cto/build lifted here. */
+  --kind-cto: #d97706;     /* amber-600, lifted for dark */
+  --kind-build: #22a76a;   /* green, lifted for dark surfaces */
   /* Legacy */
   --finalizing: #6366f1;   /* indigo — old "finalizing" state (removed) */
   --queued: #6c727a;
@@ -329,6 +342,35 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   border-color: var(--muted);
   color: var(--muted);
 }
+/* KIND badge — a small OUTLINED pill showing a work-item's type (STORY/TASK) or an
+   agent's kind (CTO/leader/build), driven by the generic KIND_VISUAL table in app.js.
+   Mirrors the outlined `.chip.state-kind` precedent (quiet, not filled)
+   so it reads as type metadata alongside — never competing with — the colored status
+   chips. Each `.kind-<k>` colors the border+text from its `--kind-*` var; an unmapped
+   kind lands on `.kind-unknown` (neutral muted). Theme-safe via the --kind-* vars. */
+.kind-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: var(--font); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em; line-height: 1.4;
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 0 5px; vertical-align: middle; white-space: nowrap;
+}
+/* TASK/leaf stays deliberately quiet — every leaf carries it across list+board+history. */
+.kind-badge.kind-leaf    { color: var(--kind-leaf); border-color: var(--border); font-weight: 500; }
+/* STORY is the rarer, more important signal — a touch more prominent (accent border + tint). */
+.kind-badge.kind-node    { color: var(--kind-node); border-color: var(--kind-node); background: color-mix(in srgb, var(--kind-node) 8%, transparent); }
+.kind-badge.kind-cto     { color: var(--kind-cto); border-color: var(--kind-cto); }
+.kind-badge.kind-leader  { color: var(--kind-leader); border-color: var(--kind-leader); }
+.kind-badge.kind-build   { color: var(--kind-build); border-color: var(--kind-build); }
+.kind-badge.kind-unknown { color: var(--kind-unknown); border-color: var(--border); }
+/* Graph in-node kind glyph (SVG) — glyph only (no room for a label at NW158×NH38).
+   Small, colored per kind, anchored top-left; sits left of the centered tg-id and above
+   the progress bar so it never collides. */
+.tg-kind { font-size: 11px; font-weight: 700; }
+.tg-kind-node    { fill: var(--kind-node); }
+.tg-kind-leaf    { fill: var(--kind-leaf); }
+.tg-kind-unknown { fill: var(--kind-unknown); }
 /* `plan` is a task KIND, not a lifecycle status — a decomposition task that spawns
    sub-tasks. Reuse the spec_review/info hue so it reads as an informational badge. */
 .chip.plan { background: var(--spec_review); }
@@ -933,13 +975,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
 .board-card.story-card .bc-story-id { color: var(--muted); }
-.story-badge {
-  font-family: var(--font); font-size: 10px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--muted); background: var(--panel-2);
-  border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 1px 6px;
-}
 .board-card .bc-chips { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 .board-card .bc-meta {
   display: flex; align-items: center; gap: 10px;
