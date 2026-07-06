@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **An idle story LEADER is never a silent dead-end — the idle→CTO escalation now REPEATS on a flat cadence + survives a butchr restart (story st-926eea1c, S1).** The leader-idle push (`reconcileOperatorIdle`, `src/workspace-agent.ts`) is now a DURABLE standing signal: a genuinely-idle, desired-up leader re-fires `story.attention {reason:'leader-idle'}` every `config.idleEscalateEveryMs` (a single flat knob, default **15 min** — `BUTCHR_IDLE_ESCALATE_EVERY_MS`) until it goes active or is retired (`desired=0`). This replaces the in-process `supState.lastIdleSignaled` flag, which reset on every restart — so after a restart the push fired once then went silent forever — with a new additive `workspace.idle_escalated_at` timestamp column (`ensureColumn`, mirroring the `gave_up` pattern) that is stamped on each cadence fire and cleared to NULL **atomically** with the `idle→0` flip in `setWorkspaceIdle` and with the `desired→0` teardown (no linger-race). The old **zero-actionable suppression is DROPPED** on both rails — the leader→CTO push AND the CTO→dashboard `idle_responder` pull-signal (`tasks.strandedItems`) — so a leader/CTO parked with zero owned items (the REVAMP-4 limbo) still surfaces; `operatorActionableItems` is now payload CONTEXT, not a gate. The genuine-idle gate (`isGenuinelyIdle`/`workspaceQuietMs`) is unchanged, so an ACTIVE agent is never flagged. The leader-idle payload + the durable `idle_context` now carry a Q2 HOLD LABEL distinguishing **"held pending &lt;ask&gt; (open ask)"** (responder ANSWERS) from **"done, awaiting retire (no open ask)"** (responder WINDS DOWN). Covered by the reworked cadence/restart-survival/Q2-label suites in `test/workspace-agent.test.ts` and the dropped-suppression case in `test/stranded-pull-signal.test.ts`.
+
 ## [0.9.187] - 2026-07-06
 
 ### Changed

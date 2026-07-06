@@ -38,6 +38,7 @@ import {
   type WorkspaceRow,
   db,
   demoteSiblingWorkspaceAgents,
+  getStoryRow,
   getWorkspaceAgentRow,
   storyStatusOf,
   listWorkspaceAgentRows,
@@ -135,15 +136,6 @@ type SupState = {
   /** Supervise-tick counter for the throttled operator mid-session pane probe. */
   superviseTicks: number;
   /**
-   * The in-process de-dup for the operator-idle → higher-up push (story st-a32c8138): true once
-   * we have FIRED the `leader-idle` event for the CURRENT idle+has-actionable episode. Mirrors
-   * AttentionBridge.lastIdle — we fire ONCE on the compound transition and re-arm (→false) only
-   * when the operator goes active OR its actionable set drops to zero, so a real state change
-   * re-fires but a repeated supervise tick does not. The durable `workspace.idle` flip-guard
-   * (setWorkspaceIdle) is the second, DB-level de-dup layer.
-   */
-  lastIdleSignaled: boolean;
-  /**
    * A stop was requested while a launch-claim was (or might be) in flight. guarded() swallows
    * the stop body when launchInFlight is set, so this flag (paired with a SYNCHRONOUS desired=0)
    * lets the completing launch's tail re-check (reassertStopAfterLaunch) force desired-down — so
@@ -162,7 +154,6 @@ function supState(id: string): SupState {
       nextRetryAt: 0,
       superviseTicks: 0,
       stopRequested: false,
-      lastIdleSignaled: false,
     };
     supStates.set(id, s);
   }
@@ -502,16 +493,18 @@ export function stopWorkspaceAgent(id: string): Promise<WorkspaceAgentStatus> {
   // launch's tail re-check (reassertStopAfterLaunch) then forces desired-down deterministically.
   const st = supState(id);
   st.stopRequested = true;
-  st.lastIdleSignaled = false; // gone → re-arm the operator-idle push for a future session
   if (getWorkspaceAgentRow(id)) {
     // Clear the durable idle projection alongside has_agent so a stopped operator never reads
     // stale idle=1 (st-a32c8138 — keep workspace.idle honest for PART 2's dashboard projection).
+    // idle_escalated_at → NULL re-arms the repeating idle escalation for a future session
+    // (story st-926eea1c — the desired→0 counterpart of setWorkspaceIdle's atomic idle→0 clear).
     saveWorkspaceAgentRow(id, {
       desired: 0,
       has_agent: 0,
       started_at: null,
       idle: 0,
       idle_context: null,
+      idle_escalated_at: null,
     });
   }
   return guarded(id, async () => {
@@ -595,13 +588,13 @@ async function reassertStopAfterLaunch(id: string): Promise<boolean> {
   if (!st.stopRequested && !(row.kind === "leader" && nodeWorkIsTerminal(row.work_id))) {
     return false;
   }
-  st.lastIdleSignaled = false; // gone → re-arm the operator-idle push for a future session
   saveWorkspaceAgentRow(id, {
     desired: 0,
     has_agent: 0,
     started_at: null,
     idle: 0,
     idle_context: null,
+    idle_escalated_at: null, // re-arm the repeating idle escalation for a future session (st-926eea1c)
   });
   await launcher.teardown(workspaceAgentName(row)).catch(() => {});
   st.stopRequested = false;
@@ -851,79 +844,116 @@ export function probeWorkspaceMidSession(id: string, name: string): Promise<void
   }).catch(() => {});
 }
 
+/** The Q2 HOLD LABEL for an idle leader (story st-926eea1c, CTO refinement 3): NAMES what the
+ * leader is sitting on AND whether an OPEN ask exists, so the responder knows ANSWER-vs-WIND-DOWN.
+ *   - an OPEN story-level pending_ask → "held pending <ask> (open ask)" ⇒ the responder ANSWERS.
+ *   - else a genuinely-complete story (leaderStoryAwaitsCompletion / isStoryComplete) →
+ *     "done, awaiting retire (no open ask)" ⇒ the responder WINDS DOWN (desired=0).
+ *   - else generic "idle".
+ * Pure read (getStoryRow + attention predicates). S1 only READS pending_ask to surface the label;
+ * S2 adds the leader BEHAVIOR that raises the ask. A non-leader / no-story row → generic idle. */
+type IdleHold = { label: string; hasOpenAsk: boolean; awaitsCompletion: boolean };
+function idleHoldLabel(row: WorkspaceAgentRow): IdleHold {
+  const story = row.kind === "leader" && row.work_id ? getStoryRow(row.work_id) : null;
+  const ask = story?.pending_ask?.trim() || null;
+  if (ask) return { label: `held pending ${ask} (open ask)`, hasOpenAsk: true, awaitsCompletion: false };
+  if (leaderStoryAwaitsCompletion(row)) {
+    return { label: "done, awaiting retire (no open ask)", hasOpenAsk: false, awaitsCompletion: true };
+  }
+  return { label: "idle", hasOpenAsk: false, awaitsCompletion: false };
+}
+
 /**
- * OPERATOR-IDLE → HIGHER-UP reconciliation for ONE live operator workspace (story st-a32c8138) —
- * the operator generalization of the build-agent idle→responder signal. Two effects, both driven
- * off the SAME genuine-idle gate the mid-session probe uses (isGenuinelyIdle(workspaceQuietMs)):
+ * OPERATOR-IDLE → HIGHER-UP reconciliation for ONE live operator workspace (stories st-a32c8138 +
+ * st-926eea1c) — the operator generalization of the build-agent idle→responder signal. Two effects,
+ * both driven off the SAME genuine-idle gate the mid-session probe uses (isGenuinelyIdle(
+ * workspaceQuietMs)) — the genuine-idle gate is AUTHORITATIVE and UNCHANGED, so an ACTIVE agent is
+ * NEVER flagged:
  *
  *  1. DURABLE IDLE PROJECTION (both cto|leader): setWorkspaceIdle records PURE genuine-idle (a
- *     gave_up-shaped durable input) + the agent.log tail as idle_context on the flip. PART 2
+ *     gave_up-shaped durable input) + the agent.log tail as idle_context on the flip. For a LEADER
+ *     the idle_context is PREFIXED with the Q2 hold label (held-pending-ask vs done-awaiting-retire),
+ *     so the durable snapshot NAMES the hold + whether an open ask exists (CTO refinement 3). PART 2
  *     (warm-slate-c7b8) reads this as a sync DB projection for the CTO dashboard case.
  *
- *  2. LEADER → CTO PUSH (leader only): when the leader is idle AND owns ≥1 actionable item (the
- *     NOISE RULE — operatorActionableItems, plus its story-level completion bubble-up), fire ONE
- *     `story.attention {target:cto, reason:'leader-idle'}` to its higher-up. Idle with ZERO
- *     actionable is SILENT. De-duped by the in-process st.lastIdleSignaled flag (fire once on the
- *     compound transition; re-arm only when the operator goes active OR its actionable set empties)
- *     — a real transition re-fires, a repeated tick does not. The CTO's own idle case is NOT
- *     pushed: PART 2 surfaces it on the dashboard from the durable idle + this same helper.
+ *  2. LEADER → CTO REPEATING PUSH (leader only): a genuinely-idle, desired-up leader re-fires a
+ *     `story.attention {target:cto, reason:'leader-idle'}` on a FLAT cadence (config.idleEscalateEveryMs
+ *     = 15 min) until it goes active OR is retired (desired=0) — an idle leader is NEVER a silent
+ *     dead-end (story st-926eea1c). The old zero-actionable SUPPRESSION is DROPPED: genuine-idle
+ *     ALONE escalates, so a leader parked on an unmet cross-story gate (zero owned items) still
+ *     nags. operatorActionableItems is now payload CONTEXT (how many/which owned items) only.
+ *
+ *     The cadence is deduped by the DURABLE workspace.idle_escalated_at timestamp — NOT an
+ *     in-process flag. This is the fix: the retired st.lastIdleSignaled reset on every butchr
+ *     restart, so after a restart the push re-fired once then went silent forever. The durable
+ *     stamp SURVIVES a restart, so a still-idle leader keeps re-firing on cadence. It is cleared to
+ *     NULL ATOMICALLY with the idle→0 flip (setWorkspaceIdle) and the desired→0 teardown, re-arming
+ *     a fresh future episode. The CTO's own idle case is NOT pushed: PART 2 surfaces it on the
+ *     dashboard from the durable idle + operatorActionableItems.
  *
  * The `leader-idle` event carries NO `marker`: it is a LIVE transition signal (never resynced), so
  * — like `ask-answered`/`complete` — it must bypass the bridge's reconnect-resync de-dup set; a
- * count-based marker would WRONGLY suppress a genuine later episode with the same count. The two
- * de-dup layers are the DB idle-flip guard (setWorkspaceIdle) + the in-process transition flag.
+ * count-based marker would WRONGLY suppress a genuine later episode with the same count.
  *
  * Best-effort + synchronous (a cheap peek+guard); never throws so a supervise tick is unaffected.
- * `deps.idle` is injectable for tests (defaults to the production genuine-idle gate).
+ * `deps.idle` / `deps.now` are injectable for tests (default to the production genuine-idle gate +
+ * Date.now, so the cadence is drivable deterministically).
  */
 export function reconcileOperatorIdle(
   row: WorkspaceAgentRow,
-  st: { lastIdleSignaled: boolean },
-  deps: { idle?: () => boolean } = {},
+  deps: { idle?: () => boolean; now?: () => number } = {},
 ): void {
   const idleNow = (deps.idle ?? (() => isGenuinelyIdle(workspaceQuietMs(row.id))))();
-  // 1) Durable projection (both cto|leader): PURE genuine-idle (not the compound), context =
-  //    agent.log tail on the flip. PART 2 reads this for the CTO dashboard case.
-  setWorkspaceIdle(row.id, idleNow, () =>
-    readWorkspaceLogTail(row.id, config.idleContextLines),
-  );
+  const now = (deps.now ?? Date.now)();
 
-  // 2) Leader → CTO push only. The CTO's own idle case is surfaced by PART 2 on the dashboard
-  //    (from the durable idle + operatorActionableItems), so it is NOT pushed here.
+  // 1) Durable projection (both cto|leader): PURE genuine-idle (not the compound). For a leader the
+  //    idle_context tail is PREFIXED with the Q2 hold label; captured only on the 0→1 flip.
+  setWorkspaceIdle(row.id, idleNow, () => {
+    const tail = readWorkspaceLogTail(row.id, config.idleContextLines);
+    if (row.kind !== "leader") return tail;
+    const label = idleHoldLabel(row).label;
+    return tail ? `[${label}]\n${tail}` : `[${label}]`;
+  });
+
+  // 2) Leader → CTO repeating push only. The CTO's own idle case is surfaced by PART 2 on the
+  //    dashboard (from the durable idle + operatorActionableItems), so it is NOT pushed here.
   if (row.kind !== "leader") return;
+  // Active OR retired → nothing to escalate. Both are the "resolved" condition; idle_escalated_at
+  // has already been re-armed (NULL) by setWorkspaceIdle's idle→0 clear / the desired→0 teardown.
+  if (!idleNow || row.desired !== 1) return;
 
-  // 3) Noise rule: fire ONCE on the idle+has-actionable transition. Idle with zero actionable is
-  //    silent. Re-arm (→ fire again) only when the leader goes active OR its actionable set empties.
-  const items = idleNow ? operatorActionableItems(row) : [];
-  const awaitsCompletion = idleNow && leaderStoryAwaitsCompletion(row);
-  const compound = idleNow && (items.length > 0 || awaitsCompletion);
-  if (compound && !st.lastIdleSignaled) {
-    publishLeaderIdle(row, items, awaitsCompletion);
-    st.lastIdleSignaled = true;
-  } else if (!compound) {
-    st.lastIdleSignaled = false; // re-arm — re-fires only after a real state change
-  }
+  // 3) Durable repeating cadence: re-fire only when the flat interval has elapsed since the last
+  //    escalation (idle_escalated_at). NULL (a fresh/re-armed episode) fires immediately. NO
+  //    zero-actionable suppression — genuine-idle alone escalates. `row` is fetched fresh each
+  //    supervise tick, and in this branch idleNow is true (so setWorkspaceIdle did not clear the
+  //    stamp), making row.idle_escalated_at authoritative.
+  const last = row.idle_escalated_at;
+  if (last != null && now - last < config.idleEscalateEveryMs) return; // still within the cadence
+  publishLeaderIdle(row, operatorActionableItems(row), idleHoldLabel(row));
+  saveWorkspaceAgentRow(row.id, { idle_escalated_at: now });
 }
 
-/** Build + publish the `leader-idle` story.attention to the CTO: a short human hook of the count
- * and WHAT the idle leader is sitting on (item ids + reasons, plus the completion-review case). */
+/** Build + publish the `leader-idle` story.attention to the CTO: the Q2 hold label (what the leader
+ * is held on + whether an open ask exists) plus the count and ids of the owned items it is sitting
+ * on (payload CONTEXT — no longer a gate). */
 function publishLeaderIdle(
   row: WorkspaceAgentRow,
   items: AttentionItem[],
-  awaitsCompletion: boolean,
+  hold: IdleHold,
 ): void {
-  const count = items.length + (awaitsCompletion ? 1 : 0);
+  const count = items.length + (hold.awaitsCompletion ? 1 : 0);
   const parts = items.slice(0, 4).map((i) => `${i.id} (${i.reason})`);
-  if (awaitsCompletion) parts.push("story ready for completion review");
+  if (hold.awaitsCompletion) parts.push("story ready for completion review");
   if (items.length > 4) parts.push(`+${items.length - 4} more`);
+  const owned = parts.length ? `: ${parts.join(", ")}` : "";
   publish({
     type: "story.attention",
     story_id: row.work_id ?? "",
     workspace_id: row.directory_id ?? "",
     target: "cto",
     reason: "leader-idle",
-    detail: `${count} item(s) awaiting the leader: ${parts.join(", ")}`,
-    // No marker — a live transition signal, deduped in-process (st.lastIdleSignaled), never resynced.
+    detail: `leader idle — ${hold.label}; ${count} item(s) awaiting${owned}`,
+    // No marker — a live transition signal, deduped by the DURABLE idle_escalated_at, never resynced.
   });
 }
 
@@ -966,7 +996,7 @@ async function superviseWorkspace(id: string): Promise<void> {
     if (row.kind === "cto" || row.kind === "leader") {
       // Durable operator-idle projection + the idle→higher-up push (story st-a32c8138). Runs every
       // tick (a cheap peek+guard); shares the probe's genuine-idle gate. Best-effort — never throws.
-      reconcileOperatorIdle(row, st);
+      reconcileOperatorIdle(row);
       st.superviseTicks++;
       if (shouldProbeTick(st.superviseTicks, config.ctoMidProbeEverySupervisions)) {
         await probeWorkspaceMidSession(id, name);

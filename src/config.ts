@@ -547,6 +547,17 @@ export const config = {
   idleContextLines: envInt("BUTCHR_IDLE_CONTEXT_LINES", 40),
 
   /**
+   * REPEATING idle-escalation cadence (story st-926eea1c S1), in ms. When a story LEADER is
+   * genuinely idle AND desired-up, workspace-agent.reconcileOperatorIdle re-fires the leader-idle
+   * push to its CTO every `idleEscalateEveryMs`, stamping the durable workspace.idle_escalated_at
+   * so an idle leader is NEVER a silent dead-end — it keeps nagging until it goes active or is
+   * retired (desired=0), even across a butchr restart. A FLAT interval (CEO decision Q1 — NOT
+   * exponential backoff): one knob, no backoff math. Default 15 minutes; prompt-retiring the
+   * healthy done-case keeps it below this floor so the nag only bites a done-but-un-retired agent.
+   */
+  idleEscalateEveryMs: envInt("BUTCHR_IDLE_ESCALATE_EVERY_MS", 15 * 60 * 1000),
+
+  /**
    * MID-SESSION PROMPT PROBE cadence, in watcher ticks. The per-task build-agent
    * watcher loops every ~1s but only stat()s the run-log mtime; it never reads pane
    * CONTENT. To catch a build agent that hits a human-only prompt AFTER launch (a

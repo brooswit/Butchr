@@ -537,6 +537,17 @@ ensureColumn("tasks", "idle_context", "TEXT");
 // supervision. Owned by workspace-agent.superviseWorkspace; default 0.
 ensureColumn("workspace", "gave_up", "INTEGER NOT NULL DEFAULT 0");
 
+// `idle_escalated_at` is the DURABLE timestamp (epoch ms) of the LAST leader-idle escalation
+// published for this workspace, powering the REPEATING idle escalation (story st-926eea1c S1).
+// It REPLACES the in-process supState.lastIdleSignaled flag, which reset on every butchr restart
+// (so after a restart the push re-fired once then went silent forever). Persisting it means a
+// still-idle leader keeps re-firing on the flat cadence (config.idleEscalateEveryMs) EVEN across a
+// process restart. NULL = no escalation outstanding / re-armed. Owned by
+// workspace-agent.reconcileOperatorIdle (stamped=now on each cadence fire); cleared to NULL ATOMICALLY
+// with the idle→0 flip in setWorkspaceIdle and with the desired→0 teardown, so a resolved
+// (active-or-retired) operator re-arms a fresh future episode. Nullable, default NULL.
+ensureColumn("workspace", "idle_escalated_at", "INTEGER");
+
 // `needs_user_input` flags a running task whose agent is hung ALIVE at a pre-MCP OS/CLI
 // dialog (e.g. a channel-confirm prompt) that ONLY A HUMAN can answer by sending keystrokes
 // to the live pane. Like `idle`, it is an orthogonal FLAG on a LIVE in_progress agent — NOT
@@ -2211,6 +2222,9 @@ export type WorkspaceAgentRow = {
   // 1 = the supervisor gave up relaunching this desired-up agent at the restart cap
   // (dead-and-abandoned); cleared when it becomes healthy or an operator restarts it.
   gave_up: number;
+  // Epoch-ms of the last leader-idle escalation published for this workspace (story st-926eea1c);
+  // NULL when none outstanding / re-armed. Durable so the repeating idle push survives a restart.
+  idle_escalated_at: number | null;
   herdr_workspace: string | null;
   created_at: string;
   updated_at: string | null;
@@ -2539,6 +2553,7 @@ export function saveWorkspaceAgentRow(
     idle: cur?.idle ?? 0,
     idle_context: cur?.idle_context ?? null,
     gave_up: cur?.gave_up ?? 0,
+    idle_escalated_at: cur?.idle_escalated_at ?? null,
     herdr_workspace: cur?.herdr_workspace ?? null,
     created_at: cur?.created_at ?? nowIso(),
     updated_at: cur?.updated_at ?? null,
@@ -2549,9 +2564,9 @@ export function saveWorkspaceAgentRow(
   db.query(
     `INSERT INTO workspace
        (id, name, kind, directory_id, work_id, session_id, desired, started_at,
-        restarts, last_error, has_agent, idle, idle_context, gave_up, herdr_workspace,
-        created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        restarts, last_error, has_agent, idle, idle_context, gave_up, idle_escalated_at,
+        herdr_workspace, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name=excluded.name,
        kind=excluded.kind,
@@ -2566,6 +2581,7 @@ export function saveWorkspaceAgentRow(
        idle=excluded.idle,
        idle_context=excluded.idle_context,
        gave_up=excluded.gave_up,
+       idle_escalated_at=excluded.idle_escalated_at,
        herdr_workspace=excluded.herdr_workspace,
        updated_at=excluded.updated_at`,
   ).run(
@@ -2583,6 +2599,7 @@ export function saveWorkspaceAgentRow(
     next.idle,
     next.idle_context,
     next.gave_up,
+    next.idle_escalated_at,
     next.herdr_workspace,
     next.created_at,
     nowIso(),
@@ -2630,7 +2647,18 @@ export function setWorkspaceIdle(
   }
   // Going idle → snapshot the agent.log tail as context (empty → NULL); clearing → NULL.
   const context = want === 1 ? captureContext?.() || null : null;
-  db.query(
-    `UPDATE workspace SET idle=?, idle_context=?, updated_at=? WHERE id=? AND has_agent=1 AND idle<>?`,
-  ).run(want, context, nowIso(), id, want);
+  // ATOMIC RE-ARM (story st-926eea1c S1): clearing to idle=0 ALSO clears the durable
+  // idle_escalated_at in the SAME write, so a leader going active can never linger-race with the
+  // repeating-escalation cadence. On the 0→1 flip the timestamp is left untouched (a fresh episode
+  // starts NULL/re-armed already, and the first escalation stamps it in reconcileOperatorIdle).
+  if (want === 0) {
+    db.query(
+      `UPDATE workspace SET idle=0, idle_context=NULL, idle_escalated_at=NULL, updated_at=?
+         WHERE id=? AND has_agent=1 AND idle<>0`,
+    ).run(nowIso(), id);
+  } else {
+    db.query(
+      `UPDATE workspace SET idle=1, idle_context=?, updated_at=? WHERE id=? AND has_agent=1 AND idle<>1`,
+    ).run(context, nowIso(), id);
+  }
 }

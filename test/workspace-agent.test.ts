@@ -1486,11 +1486,15 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     expect(thunkRuns).toBe(0);
     expect(dbMod.getWorkspaceAgentRow("ws-leader-idlecol")!.idle_context).toBe("tail-context");
 
-    // Clearing → context wiped.
+    // Stamp a durable escalation timestamp, then clear idle → the SAME write wipes BOTH the
+    // context AND idle_escalated_at (story st-926eea1c: atomic re-arm, no linger-race).
+    dbMod.saveWorkspaceAgentRow("ws-leader-idlecol", { idle_escalated_at: 12345 });
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-idlecol")!.idle_escalated_at).toBe(12345);
     dbMod.setWorkspaceIdle("ws-leader-idlecol", false);
     row = dbMod.getWorkspaceAgentRow("ws-leader-idlecol")!;
     expect(row.idle).toBe(0);
     expect(row.idle_context).toBeNull();
+    expect(row.idle_escalated_at).toBeNull(); // atomically re-armed with the idle→0 flip
   });
 
   test("setWorkspaceIdle — ignores a non-operator (build) kind and a dead (has_agent=0) row", () => {
@@ -1516,141 +1520,230 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     expect(dbMod.getWorkspaceAgentRow("ws-leader-dead")!.idle).toBe(0); // dead → untouched
   });
 
-  // ---- reconcileOperatorIdle: the noise rule + the leader→CTO push ------------------------------
+  // ---- reconcileOperatorIdle: the REPEATING idle escalation (story st-926eea1c S1) --------------
+  // The push is now a DURABLE cadence keyed off workspace.idle_escalated_at (NOT the retired
+  // in-process flag), the zero-actionable suppression is DROPPED, and the leader-idle payload +
+  // idle_context carry the Q2 hold label. `deps.now` drives the cadence deterministically.
 
-  test("(a) a LEADER idle with ≥1 actionable → EXACTLY ONE leader-idle event to the CTO with count/context", () => {
+  /** Count the leader-idle events emitted so far. */
+  const idleCount = (events: Array<Record<string, unknown>>) =>
+    events.filter((e) => e.reason === "leader-idle").length;
+
+  test("(a) a genuinely-idle leader re-fires on the FLAT cadence, repeatedly, until active", () => {
+    const CADENCE = cfgMod.config.idleEscalateEveryMs; // FLAT 15 min (CEO Q1)
     insertLeaf("m1", { status: "in_review", story_id: "st-push" });
     insertLeaf("m2", { status: "failed", story_id: "st-push" });
     seedOperator("ws-leader-st-push", "leader", "st-push");
+    const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-push")!;
     const { events, unsub } = captureAttention();
-    const st = { lastIdleSignaled: false };
+    let t = 1_000_000;
     try {
-      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-push")!, st, {
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t }); // fresh episode → fires (1)
+      expect(idleCount(events)).toBe(1);
+      const ev = events[0];
+      expect(ev.target).toBe("cto");
+      expect(ev.story_id).toBe("st-push");
+      expect(String(ev.detail)).toContain("2 item(s)");
+      expect(ev.marker).toBeUndefined(); // live transition signal — never resynced
+      // Durable projection + stamp populated.
+      expect(row().idle).toBe(1);
+      expect(row().idle_escalated_at).toBe(t);
+
+      // Within the cadence → SILENT.
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + CADENCE - 1 });
+      expect(idleCount(events)).toBe(1);
+
+      // At/after the cadence → re-fires, repeatedly.
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + CADENCE });
+      expect(idleCount(events)).toBe(2);
+      expect(row().idle_escalated_at).toBe(t + CADENCE);
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + 2 * CADENCE });
+      expect(idleCount(events)).toBe(3);
+    } finally {
+      unsub();
+    }
+  });
+
+  test("(b) escalation STOPS when the agent goes active OR desired=0 (idle_escalated_at cleared atomically)", () => {
+    const CADENCE = cfgMod.config.idleEscalateEveryMs;
+    insertLeaf("m1", { status: "in_review", story_id: "st-stop" });
+    seedOperator("ws-leader-st-stop", "leader", "st-stop");
+    const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-stop")!;
+    const { events, unsub } = captureAttention();
+    let t = 5_000_000;
+    try {
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t }); // fires (1) + stamps
+      expect(idleCount(events)).toBe(1);
+
+      // Goes ACTIVE → setWorkspaceIdle clears idle=0 AND idle_escalated_at atomically; no fire.
+      wa.reconcileOperatorIdle(row(), { idle: () => false, now: () => t + 10 * CADENCE });
+      expect(idleCount(events)).toBe(1);
+      expect(row().idle).toBe(0);
+      expect(row().idle_escalated_at).toBeNull();
+
+      // desired=0 path: a live idle stamp is re-armed by the teardown write. Re-idle + stamp, then
+      // simulate the desired→0 teardown clear and confirm no fire while wanted-down.
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + 11 * CADENCE }); // re-fires
+      expect(row().idle_escalated_at).toBe(t + 11 * CADENCE);
+      dbMod.saveWorkspaceAgentRow("ws-leader-st-stop", { desired: 0, idle_escalated_at: null });
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + 99 * CADENCE });
+      // desired=0 → the leader push is suppressed (wanted-down), stamp stays cleared.
+      expect(row().idle_escalated_at).toBeNull();
+    } finally {
+      unsub();
+    }
+  });
+
+  test("(c) idle + ZERO actionable STILL escalates (the dropped suppression)", () => {
+    // A member NOT awaiting the leader (in_progress) → ZERO actionable, and NO open ask / completion.
+    insertLeaf("m-busy", { status: "in_progress", story_id: "st-zero" });
+    seedOperator("ws-leader-st-zero", "leader", "st-zero");
+    expect(
+      tasksMod.operatorActionableItems(dbMod.getWorkspaceAgentRow("ws-leader-st-zero")!).length,
+    ).toBe(0);
+    const { events, unsub } = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-zero")!, {
         idle: () => true,
+        now: () => 1,
       });
     } finally {
       unsub();
     }
-    const idleEvents = events.filter((e) => e.reason === "leader-idle");
-    expect(idleEvents.length).toBe(1);
-    expect(idleEvents[0].target).toBe("cto");
-    expect(idleEvents[0].story_id).toBe("st-push");
-    expect(String(idleEvents[0].detail)).toContain("2 item(s)");
-    expect(idleEvents[0].marker).toBeUndefined(); // live transition signal — never resynced
-    expect(st.lastIdleSignaled).toBe(true);
-    // Durable projection populated (pure genuine-idle).
-    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-push")!.idle).toBe(1);
+    // OLD behavior was SILENT; the dropped suppression means it now STILL fires.
+    expect(idleCount(events)).toBe(1);
+    expect(String(events[0].detail)).toContain("0 item(s)");
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-zero")!.idle).toBe(1);
   });
 
-  test("(b) a LEADER idle with ZERO actionable is SILENT (durable idle still set)", () => {
-    // A member NOT awaiting the leader (in_progress, not idle) → not actionable.
-    insertLeaf("m-busy", { status: "in_progress", story_id: "st-silent" });
-    seedOperator("ws-leader-st-silent", "leader", "st-silent");
-    const { events, unsub } = captureAttention();
-    const st = { lastIdleSignaled: false };
-    try {
-      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-silent")!, st, {
-        idle: () => true,
-      });
-    } finally {
-      unsub();
-    }
-    expect(events.filter((e) => e.reason === "leader-idle").length).toBe(0);
-    expect(st.lastIdleSignaled).toBe(false);
-    // Idle IS durably projected even though the push is silent (PART 2 reads this).
-    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-silent")!.idle).toBe(1);
-  });
-
-  test("(c) an ACTIVE leader (not genuinely idle) is NEVER flagged — no event, no durable idle", () => {
+  test("(d) an ACTIVE leader (not genuinely idle) is NEVER flagged — no event, no durable idle, no stamp", () => {
     insertLeaf("m1", { status: "in_review", story_id: "st-active" });
     seedOperator("ws-leader-st-active", "leader", "st-active");
     const { events, unsub } = captureAttention();
-    const st = { lastIdleSignaled: false };
     try {
-      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-active")!, st, {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-active")!, {
         idle: () => false,
+        now: () => 1,
       });
     } finally {
       unsub();
     }
-    expect(events.filter((e) => e.reason === "leader-idle").length).toBe(0);
-    expect(st.lastIdleSignaled).toBe(false);
-    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-active")!.idle).toBe(0);
+    expect(idleCount(events)).toBe(0);
+    const row = dbMod.getWorkspaceAgentRow("ws-leader-st-active")!;
+    expect(row.idle).toBe(0);
+    expect(row.idle_escalated_at).toBeNull();
   });
 
-  test("(d) the event fires ONCE across repeated ticks and re-fires only after a real transition", () => {
-    insertLeaf("m1", { status: "in_review", story_id: "st-once" });
-    seedOperator("ws-leader-st-once", "leader", "st-once");
-    const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-once")!;
-    const st = { lastIdleSignaled: false };
-    let idle = true;
+  test("(e) REVAMP-4 leader: parked with ZERO owned, gate clears elsewhere — keeps firing on cadence until active", () => {
+    const CADENCE = cfgMod.config.idleEscalateEveryMs;
+    // The exact limbo the story kills: a leader parked on an unmet cross-story gate owns NOTHING.
+    // Materialize the node (no members) so work_id's FK resolves.
+    dbMod.db
+      .query(`INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, created_at) VALUES (?, ?, 'open', 'node', ?)`)
+      .run("st-parked", DIR, dbMod.nowIso());
+    seedOperator("ws-leader-st-parked", "leader", "st-parked");
+    expect(
+      tasksMod.operatorActionableItems(dbMod.getWorkspaceAgentRow("ws-leader-st-parked")!).length,
+    ).toBe(0);
+    const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-parked")!;
     const { events, unsub } = captureAttention();
+    let t = 7_000_000;
     try {
-      // Three idle ticks in a row → exactly ONE event (the transition), de-duped by lastIdleSignaled.
-      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
-      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
-      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
-      expect(events.filter((e) => e.reason === "leader-idle").length).toBe(1);
-
-      // Operator goes ACTIVE (re-arm), then idle again → a NEW episode re-fires.
-      idle = false;
-      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
-      expect(st.lastIdleSignaled).toBe(false);
-      idle = true;
-      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
-      expect(events.filter((e) => e.reason === "leader-idle").length).toBe(2);
+      // It keeps nagging on cadence even with zero owned — never a silent dead-end.
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t });
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + CADENCE });
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => t + 2 * CADENCE });
+      expect(idleCount(events)).toBe(3);
+      // Answered/woken → active → stops.
+      wa.reconcileOperatorIdle(row(), { idle: () => false, now: () => t + 3 * CADENCE });
+      wa.reconcileOperatorIdle(row(), { idle: () => false, now: () => t + 4 * CADENCE });
+      expect(idleCount(events)).toBe(3);
     } finally {
       unsub();
     }
   });
 
-  test("leaderStoryAwaitsCompletion counts as actionable — an idle leader on an all-merged story pushes once", () => {
-    // A story with every member merged (isStoryComplete) but NO leaf awaiting the leader.
-    // The story's live status is read off its NODE `tasks` row (REVAMP B.4 read-flip), so the node
-    // must carry an OPEN story status. Post-B.5b the node IS the story (the legacy `stories` table
-    // is dropped), so a single node row is the whole seed.
+  test("(f) escalation SURVIVES a butchr restart — a stale idle_escalated_at + still-idle re-fires on cadence", () => {
+    insertLeaf("m1", { status: "in_review", story_id: "st-restart" });
+    seedOperator("ws-leader-st-restart", "leader", "st-restart");
+    // Simulate the state AFTER a restart: the durable row already carries idle=1 + a STALE stamp
+    // (from before the restart), and the in-process SupState is fresh (the old in-process flag is
+    // GONE — this is the bug the durable timestamp fixes: an in-process flag would have been reset
+    // to false and then, more importantly, could never persist a cadence across the restart).
+    const CADENCE = cfgMod.config.idleEscalateEveryMs;
+    const staleAt = 100;
+    dbMod.saveWorkspaceAgentRow("ws-leader-st-restart", { idle: 1, idle_escalated_at: staleAt });
+    wa._resetSupervisionStateForTest(); // drop any in-process supervision state (fresh process)
+    const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-restart")!;
+    const { events, unsub } = captureAttention();
+    try {
+      // now - staleAt >> CADENCE → the still-idle leader re-fires despite the process restart.
+      wa.reconcileOperatorIdle(row(), { idle: () => true, now: () => staleAt + CADENCE + 1 });
+      expect(idleCount(events)).toBe(1);
+      expect(row().idle_escalated_at).toBe(staleAt + CADENCE + 1);
+    } finally {
+      unsub();
+    }
+  });
+
+  test("(g) Q2 labels: held-pending-ask vs done-awaiting-retire drive the payload + idle_context", () => {
+    // (g1) OPEN pending_ask → "held pending … (open ask)" ⇒ responder ANSWERS.
+    dbMod.db
+      .query(
+        `INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, brief, pending_ask, ask_responder, created_at)
+         VALUES (?, ?, 'open', 'node', ?, ?, 'cto', ?)`,
+      )
+      .run("st-ask", DIR, "goal", "need the API port", dbMod.nowIso());
+    seedOperator("ws-leader-st-ask", "leader", "st-ask");
+    let cap = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-ask")!, {
+        idle: () => true,
+        now: () => 1,
+      });
+    } finally {
+      cap.unsub();
+    }
+    expect(String(cap.events[0].detail)).toContain("held pending need the API port (open ask)");
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-ask")!.idle_context).toContain(
+      "held pending need the API port (open ask)",
+    );
+
+    // (g2) genuinely-complete story, NO open ask → "done, awaiting retire (no open ask)" ⇒ WIND DOWN.
     dbMod.db
       .query(`INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, brief, created_at) VALUES (?, ?, 'open', 'node', ?, ?)`)
-      .run("st-complete", DIR, "goal brief", dbMod.nowIso());
-    insertLeaf("m-merged", { status: "merged", story_id: "st-complete" });
-    seedOperator("ws-leader-st-complete", "leader", "st-complete");
-
-    expect(
-      tasksMod.leaderStoryAwaitsCompletion(dbMod.getWorkspaceAgentRow("ws-leader-st-complete")!),
-    ).toBe(true);
-    // No leaf is actionable (merged is terminal-not-attention), so the push comes SOLELY from the
-    // completion bubble-up.
-    expect(
-      tasksMod.operatorActionableItems(dbMod.getWorkspaceAgentRow("ws-leader-st-complete")!).length,
-    ).toBe(0);
-
-    const { events, unsub } = captureAttention();
-    const st = { lastIdleSignaled: false };
+      .run("st-done", DIR, "goal", dbMod.nowIso());
+    insertLeaf("m-merged", { status: "merged", story_id: "st-done" });
+    seedOperator("ws-leader-st-done", "leader", "st-done");
+    cap = captureAttention();
     try {
-      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-complete")!, st, {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-done")!, {
         idle: () => true,
+        now: () => 1,
       });
     } finally {
-      unsub();
+      cap.unsub();
     }
-    const idleEvents = events.filter((e) => e.reason === "leader-idle");
-    expect(idleEvents.length).toBe(1);
-    expect(String(idleEvents[0].detail)).toContain("completion review");
+    expect(String(cap.events[0].detail)).toContain("done, awaiting retire (no open ask)");
+    expect(String(cap.events[0].detail)).toContain("completion review");
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-done")!.idle_context).toContain(
+      "done, awaiting retire (no open ask)",
+    );
   });
 
   test("the CTO idle case populates durable idle but pushes NO event (PART 2 surfaces it on the dashboard)", () => {
     insertLeaf("t-cto", { status: "in_review", story_id: null }); // responder 'cto' → CTO owns it
     seedOperator("ws-cto-dir2", "cto", null);
     const { events, unsub } = captureAttention();
-    const st = { lastIdleSignaled: false };
     try {
-      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-cto-dir2")!, st, {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-cto-dir2")!, {
         idle: () => true,
+        now: () => 1,
       });
     } finally {
       unsub();
     }
-    expect(events.filter((e) => e.reason === "leader-idle").length).toBe(0); // no push for the CTO
+    expect(idleCount(events)).toBe(0); // no push for the CTO
     expect(dbMod.getWorkspaceAgentRow("ws-cto-dir2")!.idle).toBe(1); // but the durable idle IS set
   });
 });

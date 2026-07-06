@@ -345,11 +345,16 @@ describe("idle_responder — a LIVE-but-IDLE CTO (story st-a32c8138, PART 2)", (
     expect(ws.needsAttention).toBe(ws.review + ws.failed);
   });
 
-  test("(c) an idle CTO with ZERO actionable items surfaces NOTHING (noise rule)", () => {
-    // idle=1 but no idea/blocked/failed/review task owned by the CTO → operatorActionableItems is
-    // empty → SILENT (mirrors PART 1's push-side noise rule).
-    expect(idleItems(WS_CTO_IDLE_EMPTY)).toEqual([]);
-    expect(dashWs(WS_CTO_IDLE_EMPTY).stranded).toBe(0);
+  test("(c) an idle CTO with ZERO actionable items STILL surfaces (story st-926eea1c — dropped suppression)", () => {
+    // idle=1 but no idea/blocked/failed/review task owned by the CTO. The old noise rule SUPPRESSED
+    // this; story st-926eea1c DROPS that suppression (PULL-rail parity) so an idle responder is
+    // never a silent dead-end — it surfaces ONE summary with a "no owned items" reason.
+    const items = idleItems(WS_CTO_IDLE_EMPTY);
+    expect(items).toHaveLength(1);
+    expect(items[0]!.workId).toBe(WS_CTO_IDLE_EMPTY);
+    expect(items[0]!.reason).toContain("CTO idle");
+    expect(items[0]!.reason).toContain("no owned items");
+    expect(dashWs(WS_CTO_IDLE_EMPTY).stranded).toBeGreaterThanOrEqual(1);
   });
 
   test("(d) coexistence — a dead/disabled responder and an idle CTO both render in ONE list with distinct kinds", () => {

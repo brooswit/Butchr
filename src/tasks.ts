@@ -3383,18 +3383,21 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     // the (cheap-but-non-trivial) operatorActionableItems scan behind idle===1 so it runs ONLY for
     // an idle CTO. Emit ONE responder-level SUMMARY entry (not one-per-item): the CTO's actionable
     // items are review-states already counted in needsAttention, so a per-item fold would
-    // double-count — the summary is a distinct +1 "responder not acting" signal. Idle with ZERO
-    // actionable is SILENT (mirrors PART 1's push-side noise rule).
+    // double-count — the summary is a distinct +1 "responder not acting" signal. The zero-actionable
+    // SUPPRESSION is DROPPED (story st-926eea1c — PULL-rail parity with PART 1's push side): an idle
+    // CTO with ZERO owned items STILL surfaces, so an idle responder is never a silent dead-end.
     const ctoRow = getWorkspaceAgentRow(`ws-cto-${directoryId}`);
     if (ctoRow?.idle === 1) {
       const owned = operatorActionableItems(ctoRow);
-      if (owned.length > 0) {
-        items.push({
-          workId: directoryId,
-          kind: "idle_responder",
-          reason: `CTO idle — ${owned.length} item(s) awaiting action, responder not acting`,
-        });
-      }
+      const detail =
+        owned.length > 0
+          ? `${owned.length} item(s) awaiting action, responder not acting`
+          : `no owned items, responder not acting`;
+      items.push({
+        workId: directoryId,
+        kind: "idle_responder",
+        reason: `CTO idle — ${detail}`,
+      });
     }
   }
 
