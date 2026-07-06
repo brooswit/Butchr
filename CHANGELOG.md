@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.183] - 2026-07-06
+
 ### Changed
 
 - REVAMP-2 Phase B.5a (story st-78a8b4e7) — byte-identical read-conversion of the
