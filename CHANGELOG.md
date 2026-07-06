@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.179] - 2026-07-06
+
 ### Changed
 - **The node-state read accessors now read a story NODE's OWN `tasks` row instead of the
   `stories` table — `tasks.*` is the source of truth, `stories.*` is the (still-present)
