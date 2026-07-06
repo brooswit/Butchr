@@ -96,7 +96,14 @@ export function resolveWork(id: string): ResolvedWork {
   const story = getStory(id);
   if (story) return { kind: "node", story };
   const task = getTask(id);
-  if (task) return { kind: "leaf", task };
+  // REVAMP-4 S0a: a CONTAINER node ('repo'/'project') is a real `tasks` row, so getTask finds it —
+  // but it is neither a story node (getStory, guarded on work_kind='node', returned null above) nor
+  // a servable leaf. Exclude the container kinds so it falls through to a clean 404 rather than
+  // being mis-served as a leaf via taskView. Byte-identical for leaf/node (the only rows that
+  // reach here today): a 'leaf' resolves as leaf; a stray 'node' still resolves as leaf as before.
+  if (task && task.work_kind !== "repo" && task.work_kind !== "project") {
+    return { kind: "leaf", task };
+  }
   throw new HttpError(404, `work not found: ${id}`);
 }
 

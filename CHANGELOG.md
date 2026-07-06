@@ -17,7 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.194] - 2026-07-06
+### Added
+- Introduce CONTAINER node kinds (`repo`/`project`) into the unified `tasks` tree —
+  REVAMP-4 Phase 0 / S0a (story st-1a82a2e1), the foundation of the recursive
+  PROJECT/CEO tier. The `work_kind` discriminator is widened to
+  `leaf | node | repo | project`, and one idempotent boot migration
+  (`migrateMaterializeRepoNodes`) materializes a `work_kind='repo'` node per
+  `directory` row with the node id EQUAL to the directory id, so a repo becomes a
+  node in the SAME recursive tree while the `directory` table stays its 1:1 config
+  sidecar keyed by the shared id (no moved config, no new FK). ADDITIVE and
+  ZERO-BEHAVIOR: container nodes carry the inert `merged` terminal anchor and are
+  invisible to every existing story/leaf loop — the leaf-only reads
+  (`listTasks`/metrics/health/workspace counts/`isWorkLeaf`) and the boot merged-sweep
+  narrow to `work_kind='leaf'`, and `resolveWork` 404s a container id rather than
+  mis-serving it as a leaf.
 
 ### Removed
 - Delete the two legacy launcher modules — `src/cto-agent.ts` and `src/story-agent.ts`

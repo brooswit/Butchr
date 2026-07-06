@@ -89,9 +89,12 @@ function counts(workspaceId: string): Record<string, number> {
       // EXCLUDE materialized story Work NODES (st-540ba705 step 6a — see tasks.listTasks): a
       // story's anchor `tasks` row is not a real task and must not inflate the workspace's
       // per-status counts (it would otherwise add a phantom `merged` per story). The
-      // work_kind='node' discriminator is the node membership test (REVAMP-2 B.5a).
+      // work_kind='leaf' discriminator is the real-task membership test (REVAMP-2 B.5a).
+      // REVAMP-4 S0a: was `work_kind != 'node'`; narrowed to `= 'leaf'` (a pure identity when only
+      // leaf/node exist) so the new CONTAINER nodes ('repo'/'project') — the repo node has
+      // workspace_id == this id — are ALSO excluded from the counts, the same as a story node.
       `SELECT status, COUNT(*) AS n FROM tasks
-        WHERE workspace_id=? AND work_kind != 'node'
+        WHERE workspace_id=? AND work_kind='leaf'
         GROUP BY status`,
     )
     .all(workspaceId);
@@ -783,7 +786,10 @@ export async function unregisterWorkspace(id: string): Promise<void> {
     // Skip story Work NODES STRUCTURALLY (B.2): a node has no bare-id worktree/branch to clean,
     // and today it is skipped only because its inert anchor status is 'merged'. The work_kind
     // guard keeps it skipped once B.3 makes node status real, not via that magic value.
-    if (t.work_kind !== "node" && t.status !== "merged") {
+    // REVAMP-4 S0a: was `t.work_kind !== "node"`; narrowed to `=== "leaf"` (a pure identity when
+    // only leaf/node exist) so the new CONTAINER nodes ('repo'/'project') — which likewise have
+    // no bare-id worktree — are ALSO skipped, never fed to git.cleanup.
+    if (t.work_kind === "leaf" && t.status !== "merged") {
       await git.cleanup(dir.path, t.id).catch(() => {});
     }
   }

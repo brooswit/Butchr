@@ -524,12 +524,15 @@ export function listTasks(workspaceId: string): TaskRow[] {
   // task/leaf, so it must never surface in the task LIST views (taskListView / allTasksView).
   // Keeping it out preserves the byte-identical `/api/tasks` list and a clean `/api/work` leaf
   // set; getTask() (by id) still resolves it for the parent_id routing/FK walks. The
-  // `work_kind != 'node'` filter is exact — a story Work NODE is exactly a work_kind='node'
-  // row, so no real task is ever excluded (REVAMP-2 B.5a). (Step 6d folds stories into work.)
+  // `work_kind='leaf'` filter is exact — a real task is exactly a work_kind='leaf' row, so no
+  // real task is ever excluded (REVAMP-2 B.5a). (Step 6d folds stories into work.)
+  // REVAMP-4 S0a: was `work_kind != 'node'`; narrowed to `= 'leaf'` (a pure identity when only
+  // leaf/node exist) so the new CONTAINER nodes ('repo'/'project') are ALSO excluded — a repo
+  // node (id == its directory id) must never surface in the task list, the same as a story node.
   return db
     .query<TaskRow, [string]>(
       `SELECT * FROM tasks
-        WHERE workspace_id=? AND work_kind != 'node'
+        WHERE workspace_id=? AND work_kind='leaf'
         ORDER BY created_at DESC`,
     )
     .all(workspaceId);
@@ -3342,14 +3345,17 @@ export function strandedItems(directoryId: string): StrandedItem[] {
   // WITH a parent (a story member) is owned by its story LEADER (handled per-story below), so the
   // CTO findings consider STANDALONE tasks (parent_id IS NULL) only. Membership by parent_id
   // (B.5b st-78a8b4e7 — the story_id column is dropped; parent_id is the sole membership pointer).
-  // The `work_kind != 'node'` guard drops materialized story Work NODES (mirrors counts()/listTasks).
+  // The `work_kind='leaf'` guard keeps only real tasks — dropping materialized story Work NODES and
+  // (REVAMP-4 S0a) the CONTAINER nodes ('repo'/'project') alike (mirrors counts()/listTasks). The
+  // `status='idea'`/`status='blocked'` filters already exclude the 'merged'-anchored containers, so
+  // this is a no-op today; the narrowing keeps the "mirrors counts()/listTasks" contract exact.
   if (ctoResponderStranded(directoryId)) {
     const ctoWhy = isCtoEnabled(directoryId) ? "CTO gave up (dead)" : "CTO disabled";
     // F1 — `idea` tasks (a brief awaiting a spec) whose CTO responder is stranded.
     const ideas = db
       .query<{ id: string }, [string]>(
         `SELECT id FROM tasks WHERE workspace_id=? AND parent_id IS NULL AND status='idea'
-           AND work_kind != 'node'`,
+           AND work_kind='leaf'`,
       )
       .all(directoryId);
     for (const t of ideas) {
@@ -3362,7 +3368,7 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     const blocked = db
       .query<{ id: string; blocked_by: string | null }, [string]>(
         `SELECT id, blocked_by FROM tasks WHERE workspace_id=? AND parent_id IS NULL AND status='blocked'
-           AND work_kind != 'node'`,
+           AND work_kind='leaf'`,
       )
       .all(directoryId);
     for (const t of blocked) {

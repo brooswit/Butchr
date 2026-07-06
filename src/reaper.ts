@@ -146,7 +146,10 @@ export async function reapOrphans(
       // A story Work NODE is never a bare-id worktree (story checkouts use STORY_WORKTREE_PREFIX,
       // handled above), but exclude it STRUCTURALLY so a node is never force-reaped here even if
       // its status becomes non-terminal in B.3 (B.2: node-exclusion via work_kind, not 'merged').
-      if (task && task.work_kind === "node") continue;
+      // REVAMP-4 S0a: was `=== "node"`; widened to `!== "leaf"` so the CONTAINER nodes
+      // ('repo'/'project') are ALSO skipped — a repo node is born status='merged' (terminal) with
+      // NO branch/worktree, so absent this guard a bare-id worktree collision could force-reap it.
+      if (task && task.work_kind !== "leaf") continue;
       if (task && !isTerminal(task.status)) continue; // live task — leave alone
 
       const reason = task ? `task ${task.status}` : "no task row";

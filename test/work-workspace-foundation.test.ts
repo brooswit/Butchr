@@ -186,6 +186,11 @@ describe("step 1 — existing behavior is UNAFFECTED", () => {
       "t-queued": "inactive", // queued → in_progress → inactive (no pane = ready)
       "t-running": "in_progress", // running → in_progress (pane = LIVE)
       "t-merged": "merged", // canonical, unchanged
+      // REVAMP-4 S0a: the boot pass now ALSO materializes one work_kind='repo' node per directory
+      // (migrateMaterializeRepoNodes) with the node id == the directory id and the inert 'merged'
+      // terminal anchor — so the sole seeded directory `dir-1` gets a `dir-1` repo node here. This
+      // is the additive materialization, invisible to every leaf/node loop (see revamp4-repo-nodes).
+      "dir-1": "merged",
     });
   });
 

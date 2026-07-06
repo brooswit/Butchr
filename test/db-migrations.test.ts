@@ -127,6 +127,11 @@ describe("boot migration runner — convergence", () => {
       "t-rejected": "aborted",
       "t-merged": "merged",
       "t-failed": "failed",
+      // REVAMP-4 S0a: the boot pass now ALSO materializes one work_kind='repo' node per directory
+      // (migrateMaterializeRepoNodes), id == directory id, carrying the inert 'merged' terminal
+      // anchor — so the sole seeded directory `dir-1` gets a `dir-1` repo node. Additive +
+      // invisible to leaf/node loops (see revamp4-repo-nodes.test.ts).
+      "dir-1": "merged",
     });
   });
 });

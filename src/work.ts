@@ -87,11 +87,16 @@ export function isWorkNode(id: string): boolean {
   return getTask(id)?.work_kind === "node";
 }
 
-/** Is this Work a LEAF (today's "task")? The `work_kind` complement of isWorkNode — a missing row
- *  is treated as a leaf (callers needing existence check getWork separately). See the
- *  lazy-materialization trap noted on isWorkNode. */
+/** Is this Work a LEAF (today's "task")? A missing row is treated as a leaf (callers needing an
+ *  existence check use getWork separately). See the lazy-materialization trap noted on isWorkNode.
+ *
+ *  REVAMP-4 S0a: this is NO LONGER the plain `!== "node"` complement of isWorkNode — the CONTAINER
+ *  node kinds ('repo'/'project') are neither a leaf NOR a story node, so both predicates return
+ *  false for them and a container is invisible to leaf/node logic alike. Existing behavior is
+ *  preserved exactly: a 'leaf' row and a missing row are still leaves; a 'node' row is still not. */
 export function isWorkLeaf(id: string): boolean {
-  return getTask(id)?.work_kind !== "node";
+  const k = getTask(id)?.work_kind;
+  return k === undefined || k === "leaf";
 }
 
 /** The id of a Work's PARENT (the node it bubbles feedback up to), or null for a top-level

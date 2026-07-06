@@ -1211,6 +1211,42 @@ export function ensureStoryWorkNode(_storyId: string): void {
   // source of truth post-B.5b. See the doc comment above.
 }
 
+// REVAMP-4 Phase 0 / S0a — CONTAINER (repo) node materialization (story st-1a82a2e1, ADDITIVE +
+// INSERT-ONCE IDEMPOTENT). Materialize each registered repo as a `tasks` NODE in the SAME
+// recursive Work tree, discriminated by work_kind='repo' — the foundation of the recursive
+// PROJECT/CEO tier. This is the additive, zero-behavior first step: repos become in-tree nodes
+// so a later phase can reparent stories under their repo and add a project tier above repos.
+//
+//   - id = the `directory` id VERBATIM (a `dir-…` id) so a repo node shares its id with its
+//     `directory` row (e.g. dir-8b35f904). That shared id IS the link to the config sidecar —
+//     the `directory` table STAYS the repo's 1:1 config record (gate_cmd/version_file/…); NOTHING
+//     is moved or duplicated onto the tasks node and there is NO new FK column.
+//   - workspace_id = the same id (self). tasks.workspace_id is NOT NULL and FK-references
+//     directory(id); the repo's own directory row satisfies it, and ON DELETE CASCADE ties the
+//     repo node's lifetime to its directory (unregister the repo → its node cascades away).
+//   - status = 'merged' — the SAME stable, inert TERMINAL anchor a materialized story node
+//     carries (mirrors migrateBackfillNodeFold), so no lifecycle loop ever acts on it. Combined
+//     with work_kind='repo' it is doubly invisible: every leaf-only loop filters `work_kind='leaf'`
+//     and the boot merged-sweep (recoverMergedTasks) only looks at `status='in_review' AND leaf`.
+//   - created_at = the directory's own created_at (tasks.created_at is NOT NULL with no default).
+//   - parent_id left NULL — no project tier yet (a LATER phase reparents). Every other NOT-NULL
+//     column takes its schema DEFAULT (kind='task', has_agent=0, isolated=0, …) exactly as the
+//     story-node INSERT (migrateUnifyStoryParent) relies on.
+//
+// INSERT OR IGNORE ⇒ insert-once: a re-run (or a repo whose node already exists) is a no-op.
+// BACKWARD-SAFE (dev-runs-migrate-live-db hazard): a purely ADDITIVE insert into `tasks`; it
+// never DROPs/RENAMEs/repoints anything, and B.2's structural node-exclusion means no live loop
+// acts on the new rows. Runs LAST in the ordered pass (the converged idempotent position); it
+// depends only on `directory` (always present post-baseline/rename), independent of the story
+// folds. Presence-guarded implicitly — a fresh db with no directories inserts nothing.
+export function migrateMaterializeRepoNodes(): void {
+  db.exec(
+    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at, work_kind)
+       SELECT id, id, 'merged', created_at, 'repo'
+         FROM directory`,
+  );
+}
+
 // UNIFIED-WORKSPACE ACTIVATION MIGRATION (story st-540ba705, step 6b — BACKWARD-SAFE +
 // IDEMPOTENT). Populate the unified `workspace` table from the two legacy operator-agent
 // tables so the unified supervisor (src/workspace-agent.ts), activated this step, re-adopts
@@ -1429,6 +1465,11 @@ export function migrateDropStoriesMirror(): void {
 //                                         stories-sourcing folds (7b/7c) have applied; those carry
 //                                         a tableExists('stories') guard so the pass stays green
 //                                         once this has converged. STAGED — the live flip is HELD.)
+//  10. materialize repo NODES             (st-1a82a2e1 REVAMP-4 Phase 0 / S0a — one work_kind='repo'
+//                                         `tasks` node per `directory` row, id == directory id.
+//                                         ADDITIVE + INSERT-ONCE idempotent; the foundation of the
+//                                         recursive PROJECT/CEO tier. Runs LAST — depends only on
+//                                         `directory`, independent of the story folds.)
 // Every step is independently idempotent (presence-guarded ALTER/UPDATE/RENAME, IF NOT EXISTS,
 // or DROP-then-CREATE of a data-less view), so the whole pass is a no-op once converged and
 // safe to re-run on every boot.
@@ -1448,6 +1489,7 @@ const MIGRATIONS: Array<() => void> = [
   migrateWorkspaceAgentRows,
   () => migrateWorkspacesView(db),
   migrateDropStoriesMirror,
+  migrateMaterializeRepoNodes,
 ];
 
 /**
@@ -1994,7 +2036,17 @@ export type TaskRow = {
   // a node's tasks.status excludes nodes via `work_kind='leaf'` (structurally, NOT via the magic
   // 'merged' status). DELIBERATELY STRIPPED from the serialized views (FOLD_VIEW_OMIT, tasks.ts)
   // so TaskView/TaskListView stay byte-identical; read it only off a raw getTask() row.
-  work_kind: "leaf" | "node";
+  //
+  // REVAMP-4 Phase 0 / S0a (story st-1a82a2e1): widened with the CONTAINER node kinds 'repo' and
+  // 'project' — nodes in the SAME recursive `tasks` tree discriminated by work_kind, the
+  // foundation of the recursive PROJECT/CEO tier. A 'repo' node is materialized 1:1 per
+  // `directory` row (id == directory id — migrateMaterializeRepoNodes) as its ADDITIVE, inert
+  // in-tree handle; the `directory` table stays the repo's 1:1 config sidecar keyed by the same
+  // id. Container nodes are INVISIBLE to every existing story/leaf loop: leaf-only reads filter
+  // `work_kind='leaf'` (so they never pick up a container) and node/story reads filter
+  // `work_kind='node'` (so a repo is never mistaken for a story). 'project' has no materializer
+  // yet — it is the reserved kind the project tier lands on next.
+  work_kind: "leaf" | "node" | "repo" | "project";
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -2313,18 +2365,21 @@ export type MetricRow = {
 
 /** Fetch the raw per-task rows the metrics aggregation needs; computeMetrics() turns them into dashboard aggregates with no further DB access. */
 export function metricRows(): MetricRow[] {
-  // `work_kind != 'node'` excludes story Work NODES (B.2). metricRows is the ONE aggregate over
+  // `work_kind='leaf'` counts only real LEAF tasks (B.2). metricRows is the ONE aggregate over
   // tasks.status that lacked ANY node filter, so the inert node anchor (status='merged') was
   // miscounted as a real merged task in byStatus.merged / totalMerged / total — a latent
   // inconsistency vs every sibling rollup (workspace counts, health), which already exclude the
   // node. Filtering here both fixes that and prevents B.3 (real node status) from corrupting the
   // metrics. This is the single documented output change in B.2 (see CHANGELOG); every other
   // converted site is behavior-identical.
+  // REVAMP-4 S0a: was `work_kind != 'node'`; narrowed to `= 'leaf'` (a pure identity when only
+  // leaf/node exist) so the new CONTAINER nodes ('repo'/'project', status='merged') are ALSO
+  // excluded — a repo node must never be miscounted as a merged task, the same as a story node.
   return db
     .query<MetricRow, []>(
       `SELECT status, started_at, completed_at, merged_at,
               conflict, auto_merged, revert_reason, ci_status
-         FROM tasks WHERE work_kind != 'node'`,
+         FROM tasks WHERE work_kind='leaf'`,
     )
     .all();
 }
