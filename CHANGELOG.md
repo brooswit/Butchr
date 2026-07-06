@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.191] - 2026-07-06
+
 ### Changed
 - Internal (REVAMP-1 Phase C S3): rerouted the `/api/workspaces/:id/cto/*` routes
   (`src/server.ts`) and the `unregisterWorkspace` CTO teardown (`src/workspaces.ts`) off the
