@@ -2476,3 +2476,49 @@ export function saveWorkspaceAgentRow(
     nowIso(),
   );
 }
+
+/**
+ * Flag/unflag a LIVE OPERATOR workspace (kind cto|leader) as `idle` (agent alive but its
+ * agent.log has been quiet past the idle window), capturing/clearing the `idle_context`
+ * snapshot in lockstep. A byte-faithful mirror of tasks.setIdle (the build-agent machinery):
+ *   - PEEK the current row first: a no-op unless this is a genuine FLIP of a live operator
+ *     agent (kind cto|leader AND has_agent=1 AND idle<>want), so a per-supervise-tick call
+ *     while a stall persists writes nothing;
+ *   - the (log-reading) `captureContext` thunk runs ONLY on the 0→1 flip (empty → NULL);
+ *     clearing (→0) wipes the context to NULL;
+ *   - the UPDATE re-guards atomically with `AND has_agent=1 AND idle<>?`.
+ *
+ * DELIBERATELY EMITS NO SSE — unlike setIdle (tasks have a `task.updated` surface). Operator
+ * idle is a DURABLE PROJECTION INPUT with the SAME shape as `gave_up` (st-a4cc6082): the
+ * dashboard/health reads it as a SYNC DB projection with no per-request liveness probe (PART 2,
+ * warm-slate-c7b8), and the `workspace.updated` SSE carries the DIRECTORY view (WorkspaceView),
+ * NOT this agent row, so publishing it here would be a category error. The higher-up push
+ * (leader-idle → CTO) rides the story.attention rail from superviseWorkspace, not this write.
+ */
+export function setWorkspaceIdle(
+  id: string,
+  idle: boolean,
+  captureContext?: () => string,
+): void {
+  const want = idle ? 1 : 0;
+  // Peek first: only a genuine flip of a LIVE operator agent does anything — and only then do
+  // we run the (log-reading) capture thunk.
+  const cur = db
+    .query<{ idle: number; kind: string; has_agent: number }, [string]>(
+      `SELECT idle, kind, has_agent FROM workspace WHERE id=?`,
+    )
+    .get(id);
+  if (
+    !cur ||
+    (cur.kind !== "cto" && cur.kind !== "leader") ||
+    cur.has_agent === 0 ||
+    cur.idle === want
+  ) {
+    return;
+  }
+  // Going idle → snapshot the agent.log tail as context (empty → NULL); clearing → NULL.
+  const context = want === 1 ? captureContext?.() || null : null;
+  db.query(
+    `UPDATE workspace SET idle=?, idle_context=?, updated_at=? WHERE id=? AND has_agent=1 AND idle<>?`,
+  ).run(want, context, nowIso(), id, want);
+}

@@ -98,6 +98,27 @@ export function detectStartupPrompt(
  */
 export function looksLikePrompt(screen: string): boolean {
   if (!screen || !screen.trim()) return false;
+  if (looksLikeBlockingDialog(screen)) return true;
+  // A numbered options menu: at least two consecutive numbered choices (1. … 2. …). A lone
+  // "1." can appear in ordinary output, so require the second option to call it a menu.
+  const opt1 = /(^|\n)\s*[❯>*]?\s*1\.\s+\S/.test(screen);
+  const opt2 = /(^|\n)\s*[❯>*]?\s*2\.\s+\S/.test(screen);
+  return opt1 && opt2;
+}
+
+/**
+ * A STRONG blocking-dialog anchor — the EXPLICIT dialog phrasings only (an actual y/n confirm, an
+ * "enter to confirm/continue/proceed" line, the dev-channels consent banner + its option line, or
+ * a folder-trust dialog), DELIBERATELY EXCLUDING the loose numbered-list heuristic. This is the
+ * mid-session real-anchor discipline (mirrors st-e9f8bfc5): a bare numbered list (`1.`/`2.`) is
+ * ORDINARY operator output between turns — NOT proof of a blocking dialog — so classifying a paused
+ * active session as `stuck` off it false-flags an active CTO (workspace-agent probeWorkspaceForPrompt).
+ * `classifyStartupScreen({ strictStuck })` uses THIS instead of looksLikePrompt so ordinary output
+ * reads `quiet`; the launch path still uses the fuller looksLikePrompt (a numbered menu at startup
+ * IS a selection dialog). Blank/whitespace → false.
+ */
+export function looksLikeBlockingDialog(screen: string): boolean {
+  if (!screen || !screen.trim()) return false;
   const signals: RegExp[] = [
     /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]/i, // bare yes/no confirmation
     /(press\s+enter\s+to|enter\s+to)\s+(confirm|continue|proceed)/i, // explicit enter-to-confirm (not a bare "press enter")
@@ -105,12 +126,7 @@ export function looksLikePrompt(screen: string): boolean {
     /i am using this for local development/i, //     dev-channels consent option line
     /trust the files|do you trust|trust this (folder|workspace|directory)/i, // folder-trust dialog
   ];
-  if (signals.some((re) => re.test(screen))) return true;
-  // A numbered options menu: at least two consecutive numbered choices (1. … 2. …). A lone
-  // "1." can appear in ordinary output, so require the second option to call it a menu.
-  const opt1 = /(^|\n)\s*[❯>*]?\s*1\.\s+\S/.test(screen);
-  const opt2 = /(^|\n)\s*[❯>*]?\s*2\.\s+\S/.test(screen);
-  return opt1 && opt2;
+  return signals.some((re) => re.test(screen));
 }
 
 /**
@@ -160,10 +176,21 @@ export type StartupClassification =
   | { kind: "active" }
   | { kind: "quiet" };
 
-/** Classify a startup `screen` into rule / stuck / active / quiet. Pure + unit-testable. */
+/**
+ * Classify a startup `screen` into rule / stuck / active / quiet. Pure + unit-testable.
+ *
+ * `strictStuck` (default false) tightens the `stuck` branch for the MID-SESSION operator probe:
+ * when set, an unrecognized pane is `stuck` ONLY if it shows a REAL blocking-dialog anchor
+ * (looksLikeBlockingDialog — an actual y/n / dev-channels / trust prompt), NOT the loose
+ * numbered-list heuristic. This stops a paused-but-active operator whose pane incidentally shows
+ * ordinary numbered output from being mis-surfaced as a stuck dialog (story st-a32c8138 scope 5).
+ * The LAUNCH path leaves it false, so its classification stays BYTE-IDENTICAL (a numbered menu at
+ * startup IS a selection dialog).
+ */
 export function classifyStartupScreen(
   screen: string,
   rules: ConfirmRule[] = STARTUP_CONFIRM_RULES,
+  opts: { strictStuck?: boolean } = {},
 ): StartupClassification {
   const rule = detectStartupPrompt(screen, rules);
   if (rule) return { kind: "rule", rule };
@@ -177,7 +204,11 @@ export function classifyStartupScreen(
   // `active` kind (not `quiet`) is the 2026-06-20 fix: only an active pane means "past startup",
   // so the poll loop can keep polling a blank pane until the dev-channels dialog finally renders.
   if (looksLikeActiveSession(screen)) return { kind: "active" };
-  if (looksLikePrompt(screen)) return { kind: "stuck" };
+  // MID-SESSION (strictStuck): require a REAL dialog anchor before surfacing `stuck`, so an
+  // ordinary numbered list in a paused active pane reads `quiet` (scope 5); the launch path uses
+  // the fuller looksLikePrompt (numbered menu included) and is unchanged.
+  const stuck = opts.strictStuck ? looksLikeBlockingDialog(screen) : looksLikePrompt(screen);
+  if (stuck) return { kind: "stuck" };
   return { kind: "quiet" };
 }
 

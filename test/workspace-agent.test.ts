@@ -15,6 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRunner, PaneInfo, SendInput, StartedAgent } from "../src/harness.ts";
+import type { ConfirmRule } from "../src/startup-confirm.ts";
 import type { WorkspaceAgentRow } from "../src/db.ts";
 import type { WorkspaceLauncher } from "../src/workspace-agent.ts";
 
@@ -28,6 +29,8 @@ let storiesMod: typeof import("../src/stories.ts");
 let dirsMod: typeof import("../src/workspaces.ts");
 let ctoMod: typeof import("../src/cto-agent.ts");
 let saMod: typeof import("../src/story-agent.ts");
+let eventsMod: typeof import("../src/events.ts");
+let tasksMod: typeof import("../src/tasks.ts");
 let originalRunner: AgentRunner;
 
 /** Let fire-and-forget teardowns (updateStory's `void teardownLeaderWorkspaceForWork`) settle. */
@@ -83,6 +86,8 @@ beforeAll(async () => {
   dirsMod = await import("../src/workspaces.ts");
   ctoMod = await import("../src/cto-agent.ts");
   saMod = await import("../src/story-agent.ts");
+  eventsMod = await import("../src/events.ts");
+  tasksMod = await import("../src/tasks.ts");
   originalRunner = harnessMod.getRunner();
 
   // Deterministic supervision knobs (the unified loop reuses the CTO knobs).
@@ -935,6 +940,7 @@ describe("operator mid-session pane probe (probeWorkspaceForPrompt — logic)", 
     screen: string | (() => Promise<string>),
     err = { v: null as string | null },
     idle = true,
+    rules: ConfirmRule[] | undefined = undefined,
   ) {
     const calls = { reads: 0, sends: [] as SendInput[], setError: [] as Array<string | null> };
     return {
@@ -946,6 +952,7 @@ describe("operator mid-session pane probe (probeWorkspaceForPrompt — logic)", 
         idle: () => idle,
         getError: () => err.v,
         setError: (_id: string, msg: string | null) => { err.v = msg; calls.setError.push(msg); },
+        rules,
       },
     };
   }
@@ -959,12 +966,24 @@ describe("operator mid-session pane probe (probeWorkspaceForPrompt — logic)", 
   });
 
   test("SURFACES an UNMATCHED prompt-like pane via last_error (sentinel-prefixed snapshot)", async () => {
-    const stuck = "Some tool wants permission:\n  1. Accept\n  2. Reject";
-    const { deps, calls, err } = makeDeps(stuck);
+    // strictStuck (st-a32c8138 scope 5): the mid-session probe surfaces only a REAL dialog anchor,
+    // not a bare numbered list. A GENUINE blocking dialog (y/n) that NO rule can auto-answer
+    // (empty rules) still reaches `stuck` → surfaced.
+    const stuck = "Some tool wants permission — allow? (y/n)";
+    const { deps, calls, err } = makeDeps(stuck, { v: null }, true, []);
     await wa.probeWorkspaceForPrompt("w", "n", deps);
     expect(calls.sends).toEqual([]); // no rule → no safe keystroke
     expect(err.v?.startsWith(wa.WORKSPACE_STUCK_PREFIX)).toBe(true);
-    expect(err.v).toContain("Accept");
+    expect(err.v).toContain("permission");
+  });
+
+  test("does NOT surface a BARE numbered-list pane (the false-positive fix, strictStuck)", async () => {
+    // The exact false-positive: an active operator between turns whose pane shows ordinary
+    // numbered output. Under strictStuck this is `quiet` → NOT surfaced, no keystroke.
+    const { deps, calls, err } = makeDeps("Some tool wants permission:\n  1. Accept\n  2. Reject");
+    await wa.probeWorkspaceForPrompt("w", "n", deps);
+    expect(calls.sends).toEqual([]);
+    expect(err.v).toBeNull();
   });
 
   test("a 'quiet' read CLEARS a prior probe-set signal (self-clearing lifecycle)", async () => {
@@ -1079,11 +1098,14 @@ describe("operator mid-session pane probe (superviseWorkspace wiring)", () => {
     expect(dbMod.getWorkspaceAgentRow("w-rule")!.last_error).toBeNull();
   });
 
-  test("2. UNRECOGNIZED prompt on a genuinely-idle operator → last_error SET, no keystroke", async () => {
+  test("2. a BARE numbered-list pane on a genuinely-idle operator → NOT surfaced (false-positive fix)", async () => {
     const { runner, launcher, live } = makeFake();
     const sends: unknown[] = [];
-    const stuck = "An unknown mid-run consent:\n  1. Foo\n  2. Bar";
-    runner.agentRead = async () => stuck;
+    // The exact false-positive (st-a32c8138 scope 5): an active operator between turns whose
+    // agent.log went quiet but whose pane shows ORDINARY numbered output. strictStuck classifies
+    // it `quiet` — NOT a stuck dialog — so no last_error is written and no keystroke is sent.
+    const numbered = "An unknown mid-run consent:\n  1. Foo\n  2. Bar";
+    runner.agentRead = async () => numbered;
     runner.send = async (_n, input) => { sends.push(input); };
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
@@ -1093,9 +1115,8 @@ describe("operator mid-session pane probe (superviseWorkspace wiring)", () => {
     await wa._superviseTickForTest("w-stuck");
 
     const err = dbMod.getWorkspaceAgentRow("w-stuck")!.last_error;
-    expect(err?.startsWith(wa.WORKSPACE_STUCK_PREFIX)).toBe(true);
-    expect(err).toContain("Foo");
-    expect(sends).toEqual([]); // no rule → nothing sent
+    expect(err).toBeNull();
+    expect(sends).toEqual([]); // ordinary output → nothing sent
   });
 
   test("3. an ACTIVE leader (log fresh) → COMPLETE no-op: pane is NEVER read, no keystroke/signal", async () => {
@@ -1132,21 +1153,20 @@ describe("operator mid-session pane probe (superviseWorkspace wiring)", () => {
     expect(reads.length).toBe(2);
   });
 
-  test("5. SELF-CLEAR: a stuck signal is cleared once a later read goes quiet", async () => {
+  test("5. SELF-CLEAR: a prior probe-set stuck signal is cleared once a later read goes quiet", async () => {
     const { runner, launcher, live } = makeFake();
-    let screen = "Unhandled dialog:\n  1. A\n  2. B";
-    runner.agentRead = async () => screen;
+    runner.agentRead = async () => "● back to work, no prompt"; // quiet/ordinary output
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
     seedLive("w-selfclear", "leader", live); // leader kind → kind-agnostic, no cto_enabled gate
     setAgentLog("w-selfclear", IDLE);
+    // Seed a prior probe-set stuck signal (an earlier surfaced dialog the agent has since moved
+    // past) so we exercise the self-clear path independent of what currently reaches `stuck`.
+    dbMod.saveWorkspaceAgentRow("w-selfclear", {
+      last_error: wa.WORKSPACE_STUCK_PREFIX + "earlier surfaced dialog",
+    });
 
-    // First tick: stuck dialog up + genuinely idle → surfaced via last_error.
-    await wa._superviseTickForTest("w-selfclear");
-    expect(dbMod.getWorkspaceAgentRow("w-selfclear")!.last_error?.startsWith(wa.WORKSPACE_STUCK_PREFIX)).toBe(true);
-
-    // The agent moves past it; the pane is now quiet → next probe clears the signal.
-    screen = "● back to work, no prompt";
+    // The pane is now quiet → the probe clears its OWN prior signal.
     await wa._superviseTickForTest("w-selfclear");
     expect(dbMod.getWorkspaceAgentRow("w-selfclear")!.last_error).toBeNull();
   });
@@ -1353,5 +1373,285 @@ describe("create-time unified rows (st-93384200 Bug 3)", () => {
       expect(dbMod.getWorkspaceAgentRow(wsId)!.desired).toBe(1);
       expect((await wa.workspaceAgentStatus(wsId)).running).toBe(true);
     }
+  });
+});
+
+// OPERATOR-IDLE → HIGHER-UP (story st-a32c8138, PART 1): the durable idle projection, the shared
+// noise-rule helper, and the leader→CTO push.
+describe("operator-idle → higher-up (story st-a32c8138)", () => {
+  /** Insert a leaf task in a given attention state, with optional story membership (story_id +
+   *  parent_id → a member whose pending_responder resolves to 'story'; both null → a standalone
+   *  task whose responder resolves to 'cto'). */
+  function insertLeaf(
+    id: string,
+    opts: { status: string; story_id?: string | null },
+  ): void {
+    const story = opts.story_id ?? null;
+    if (story) {
+      // Materialize the parent story NODE task so parent_id's FK resolves AND resolveWorkResponder
+      // (unified routing, default ON) walks parent_id → a 'story' responder for the member.
+      dbMod.db
+        .query(
+          `INSERT OR IGNORE INTO tasks (id, workspace_id, status, work_kind, created_at)
+           VALUES (?, ?, 'inactive', 'node', ?)`,
+        )
+        .run(story, DIR, dbMod.nowIso());
+    }
+    dbMod.db
+      .query(
+        `INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, story_id, parent_id, created_at)
+         VALUES (?, ?, ?, 'leaf', ?, ?, ?)`,
+      )
+      .run(id, DIR, opts.status, story, story, dbMod.nowIso());
+  }
+
+  /** Capture published `story.attention` events. */
+  function captureAttention() {
+    const events: Array<Record<string, unknown>> = [];
+    const unsub = eventsMod.subscribe((e) => {
+      if ((e as { type?: string }).type === "story.attention") {
+        events.push(e as unknown as Record<string, unknown>);
+      }
+    });
+    return { events, unsub };
+  }
+
+  function seedOperator(id: string, kind: "cto" | "leader", work_id: string | null): void {
+    dbMod.saveWorkspaceAgentRow(id, {
+      kind,
+      directory_id: DIR,
+      work_id,
+      desired: 1,
+      has_agent: 1,
+      session_id: `sess-${id}`,
+    });
+  }
+
+  // Isolate the attention set from any tasks/stories other describes in this file left behind
+  // (attentionList queries globally; our partitions are story_id/dir-scoped, but clear to be safe).
+  beforeEach(() => {
+    dbMod.db.query(`DELETE FROM tasks WHERE workspace_id=?`).run(DIR);
+    dbMod.db.query(`DELETE FROM stories WHERE workspace_id=?`).run(DIR);
+  });
+  afterEach(() => {
+    dbMod.db.query(`DELETE FROM tasks WHERE workspace_id=?`).run(DIR);
+    dbMod.db.query(`DELETE FROM stories WHERE workspace_id=?`).run(DIR);
+  });
+
+  // ---- operatorActionableItems: partition the EXISTING attention set the routeOwns way --------
+
+  test("operatorActionableItems — a LEADER owns its story's members (responder 'story' + failed), nothing else", () => {
+    insertLeaf("m-review", { status: "in_review", story_id: "st-own" }); // responder 'story'
+    insertLeaf("m-failed", { status: "failed", story_id: "st-own" }); // a member failure
+    insertLeaf("m-other", { status: "in_review", story_id: "st-other" }); // another story's member
+    insertLeaf("t-cto", { status: "in_review", story_id: null }); // a standalone (cto) task
+
+    seedOperator("ws-leader-st-own", "leader", "st-own");
+    const items = tasksMod.operatorActionableItems(
+      dbMod.getWorkspaceAgentRow("ws-leader-st-own")!,
+    );
+    const ids = items.map((i) => i.id).sort();
+    expect(ids).toEqual(["m-failed", "m-review"]);
+  });
+
+  test("operatorActionableItems — the CTO owns the dir's NON-story tasks (responder 'cto' + failed), never a story member", () => {
+    insertLeaf("t-cto", { status: "in_review", story_id: null }); // responder 'cto'
+    insertLeaf("t-failed", { status: "failed", story_id: null }); // a non-story failure
+    insertLeaf("m-review", { status: "in_review", story_id: "st-x" }); // a story member → leader's
+
+    seedOperator("ws-cto-dir", "cto", null);
+    const items = tasksMod.operatorActionableItems(
+      dbMod.getWorkspaceAgentRow("ws-cto-dir")!,
+    );
+    const ids = items.map((i) => i.id).sort();
+    expect(ids).toEqual(["t-cto", "t-failed"]);
+  });
+
+  // ---- setWorkspaceIdle: the durable, gave_up-shaped projection ---------------------------------
+
+  test("setWorkspaceIdle — flips 0→1 with context, is a no-op on repeat, clears on 1→0", () => {
+    seedOperator("ws-leader-idlecol", "leader", null);
+    dbMod.setWorkspaceIdle("ws-leader-idlecol", true, () => "tail-context");
+    let row = dbMod.getWorkspaceAgentRow("ws-leader-idlecol")!;
+    expect(row.idle).toBe(1);
+    expect(row.idle_context).toBe("tail-context");
+
+    // Repeat while still idle → the peek guard bails; the (log-reading) thunk must NOT re-run.
+    let thunkRuns = 0;
+    dbMod.setWorkspaceIdle("ws-leader-idlecol", true, () => {
+      thunkRuns++;
+      return "should-not-capture";
+    });
+    expect(thunkRuns).toBe(0);
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-idlecol")!.idle_context).toBe("tail-context");
+
+    // Clearing → context wiped.
+    dbMod.setWorkspaceIdle("ws-leader-idlecol", false);
+    row = dbMod.getWorkspaceAgentRow("ws-leader-idlecol")!;
+    expect(row.idle).toBe(0);
+    expect(row.idle_context).toBeNull();
+  });
+
+  test("setWorkspaceIdle — ignores a non-operator (build) kind and a dead (has_agent=0) row", () => {
+    insertTask("t-build");
+    dbMod.saveWorkspaceAgentRow("ws-build-idle", {
+      kind: "build",
+      directory_id: DIR,
+      work_id: "t-build",
+      desired: 1,
+      has_agent: 1,
+    });
+    dbMod.setWorkspaceIdle("ws-build-idle", true, () => "x");
+    expect(dbMod.getWorkspaceAgentRow("ws-build-idle")!.idle).toBe(0); // build kind → untouched
+
+    dbMod.saveWorkspaceAgentRow("ws-leader-dead", {
+      kind: "leader",
+      directory_id: DIR,
+      work_id: null,
+      desired: 1,
+      has_agent: 0,
+    });
+    dbMod.setWorkspaceIdle("ws-leader-dead", true, () => "x");
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-dead")!.idle).toBe(0); // dead → untouched
+  });
+
+  // ---- reconcileOperatorIdle: the noise rule + the leader→CTO push ------------------------------
+
+  test("(a) a LEADER idle with ≥1 actionable → EXACTLY ONE leader-idle event to the CTO with count/context", () => {
+    insertLeaf("m1", { status: "in_review", story_id: "st-push" });
+    insertLeaf("m2", { status: "failed", story_id: "st-push" });
+    seedOperator("ws-leader-st-push", "leader", "st-push");
+    const { events, unsub } = captureAttention();
+    const st = { lastIdleSignaled: false };
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-push")!, st, {
+        idle: () => true,
+      });
+    } finally {
+      unsub();
+    }
+    const idleEvents = events.filter((e) => e.reason === "leader-idle");
+    expect(idleEvents.length).toBe(1);
+    expect(idleEvents[0].target).toBe("cto");
+    expect(idleEvents[0].story_id).toBe("st-push");
+    expect(String(idleEvents[0].detail)).toContain("2 item(s)");
+    expect(idleEvents[0].marker).toBeUndefined(); // live transition signal — never resynced
+    expect(st.lastIdleSignaled).toBe(true);
+    // Durable projection populated (pure genuine-idle).
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-push")!.idle).toBe(1);
+  });
+
+  test("(b) a LEADER idle with ZERO actionable is SILENT (durable idle still set)", () => {
+    // A member NOT awaiting the leader (in_progress, not idle) → not actionable.
+    insertLeaf("m-busy", { status: "in_progress", story_id: "st-silent" });
+    seedOperator("ws-leader-st-silent", "leader", "st-silent");
+    const { events, unsub } = captureAttention();
+    const st = { lastIdleSignaled: false };
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-silent")!, st, {
+        idle: () => true,
+      });
+    } finally {
+      unsub();
+    }
+    expect(events.filter((e) => e.reason === "leader-idle").length).toBe(0);
+    expect(st.lastIdleSignaled).toBe(false);
+    // Idle IS durably projected even though the push is silent (PART 2 reads this).
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-silent")!.idle).toBe(1);
+  });
+
+  test("(c) an ACTIVE leader (not genuinely idle) is NEVER flagged — no event, no durable idle", () => {
+    insertLeaf("m1", { status: "in_review", story_id: "st-active" });
+    seedOperator("ws-leader-st-active", "leader", "st-active");
+    const { events, unsub } = captureAttention();
+    const st = { lastIdleSignaled: false };
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-active")!, st, {
+        idle: () => false,
+      });
+    } finally {
+      unsub();
+    }
+    expect(events.filter((e) => e.reason === "leader-idle").length).toBe(0);
+    expect(st.lastIdleSignaled).toBe(false);
+    expect(dbMod.getWorkspaceAgentRow("ws-leader-st-active")!.idle).toBe(0);
+  });
+
+  test("(d) the event fires ONCE across repeated ticks and re-fires only after a real transition", () => {
+    insertLeaf("m1", { status: "in_review", story_id: "st-once" });
+    seedOperator("ws-leader-st-once", "leader", "st-once");
+    const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-once")!;
+    const st = { lastIdleSignaled: false };
+    let idle = true;
+    const { events, unsub } = captureAttention();
+    try {
+      // Three idle ticks in a row → exactly ONE event (the transition), de-duped by lastIdleSignaled.
+      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
+      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
+      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
+      expect(events.filter((e) => e.reason === "leader-idle").length).toBe(1);
+
+      // Operator goes ACTIVE (re-arm), then idle again → a NEW episode re-fires.
+      idle = false;
+      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
+      expect(st.lastIdleSignaled).toBe(false);
+      idle = true;
+      wa.reconcileOperatorIdle(row(), st, { idle: () => idle });
+      expect(events.filter((e) => e.reason === "leader-idle").length).toBe(2);
+    } finally {
+      unsub();
+    }
+  });
+
+  test("leaderStoryAwaitsCompletion counts as actionable — an idle leader on an all-merged story pushes once", () => {
+    // A story with every member merged (isStoryComplete) but NO leaf awaiting the leader.
+    // The story's live status is read off its NODE `tasks` row (REVAMP B.4 read-flip), so the node
+    // must carry an OPEN story status; the `stories` mirror is kept for realism (the dual-write).
+    dbMod.db
+      .query(`INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, created_at) VALUES (?, ?, 'open', 'node', ?)`)
+      .run("st-complete", DIR, dbMod.nowIso());
+    dbMod.db
+      .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, 'open', ?)`)
+      .run("st-complete", DIR, "goal brief", dbMod.nowIso());
+    insertLeaf("m-merged", { status: "merged", story_id: "st-complete" });
+    seedOperator("ws-leader-st-complete", "leader", "st-complete");
+
+    expect(
+      tasksMod.leaderStoryAwaitsCompletion(dbMod.getWorkspaceAgentRow("ws-leader-st-complete")!),
+    ).toBe(true);
+    // No leaf is actionable (merged is terminal-not-attention), so the push comes SOLELY from the
+    // completion bubble-up.
+    expect(
+      tasksMod.operatorActionableItems(dbMod.getWorkspaceAgentRow("ws-leader-st-complete")!).length,
+    ).toBe(0);
+
+    const { events, unsub } = captureAttention();
+    const st = { lastIdleSignaled: false };
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-st-complete")!, st, {
+        idle: () => true,
+      });
+    } finally {
+      unsub();
+    }
+    const idleEvents = events.filter((e) => e.reason === "leader-idle");
+    expect(idleEvents.length).toBe(1);
+    expect(String(idleEvents[0].detail)).toContain("completion review");
+  });
+
+  test("the CTO idle case populates durable idle but pushes NO event (PART 2 surfaces it on the dashboard)", () => {
+    insertLeaf("t-cto", { status: "in_review", story_id: null }); // responder 'cto' → CTO owns it
+    seedOperator("ws-cto-dir2", "cto", null);
+    const { events, unsub } = captureAttention();
+    const st = { lastIdleSignaled: false };
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-cto-dir2")!, st, {
+        idle: () => true,
+      });
+    } finally {
+      unsub();
+    }
+    expect(events.filter((e) => e.reason === "leader-idle").length).toBe(0); // no push for the CTO
+    expect(dbMod.getWorkspaceAgentRow("ws-cto-dir2")!.idle).toBe(1); // but the durable idle IS set
   });
 });

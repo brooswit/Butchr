@@ -39,6 +39,12 @@ export type ButchrEvent =
   //                            and cannot resolve it — §11.4), so it goes to the CTO directly,
   //                            NOT the leader. `detail` carries the resolution runbook.
   //       · `ask`            — a leader raised a story-level ask to the CTO.
+  //       · `leader-idle`    — the story LEADER agent has gone GENUINELY IDLE while still sitting
+  //                            on ≥1 item awaiting ITS action (story st-a32c8138): the operator
+  //                            generalization of the build-agent idle→responder signal, bubbled to
+  //                            its higher-up (the CTO). Fired ONCE on the idle+has-actionable
+  //                            transition from superviseWorkspace; `detail` = the count + a short
+  //                            list of what it is sitting on. SILENT when idle with zero actionable.
   //   - `user` is the CTO ESCALATING an open ask up to the user (reason `ask`). NO channel
   //     bridge owns `target:user` — consumeStoryAttention DROPS it (the CTO + leader feeds stay
   //     silent); the dashboard's SSE consumer is what surfaces a user-owned ask.
@@ -67,7 +73,8 @@ export type ButchrEvent =
         | "merge-conflict"
         | "ask"
         | "ask-answered"
-        | "member-blocked";
+        | "member-blocked"
+        | "leader-idle";
       detail: string | null;
       marker?: string | null;
     }

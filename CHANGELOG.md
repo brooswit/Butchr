@@ -17,6 +17,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **OPERATOR-IDLE → HIGHER-UP, PART 1 (story st-a32c8138): the build-agent idle→responder
+  signal is generalized up to OPERATOR agents (a story LEADER or the CTO).** When an operator
+  agent goes GENUINELY IDLE (its `agent.log` quiet past the idle window — the SAME gate the
+  mid-session dialog-probe uses) `superviseWorkspace` now records a DURABLE `workspace.idle` +
+  `idle_context` projection (new `db.setWorkspaceIdle`, a byte-faithful mirror of `tasks.setIdle`:
+  peek-then-flip guard, context thunk only on the 0→1 flip, atomic re-guard). It is a PURE
+  genuine-idle projection — the SAME `gave_up`-shaped durable input the stranded-work signal uses —
+  so PART 2's dashboard can read it as a sync DB projection with no per-request liveness probe. On
+  a stop/teardown the column is cleared alongside `has_agent` so a dead operator never reads a
+  stale idle.
+- **The NOISE RULE — a shared `tasks.operatorActionableItems(row)` helper.** It REUSES the existing
+  attention set (`attentionList`) and partitions it EXACTLY as `channel.routeOwns` does (a LEADER
+  owns its story's members whose feedback resolves to `story` + their failures; the CTO owns the
+  dir's NON-story tasks awaiting it + their failures), via a new additive `story_id` field on
+  `AttentionItem`. The leader's story-level completion bubble-up (`leaderStoryAwaitsCompletion`,
+  reusing `isStoryComplete`) counts too. Exported + unit-tested in isolation — PART 2 reuses it
+  verbatim for the CTO dashboard case.
+- **A LEADER that is idle AND owns ≥1 actionable item PUSHES a `story.attention {reason:'leader-idle',
+  target:cto}` event to its higher-up (the CTO)** on the idle+has-actionable TRANSITION (de-duped by
+  an in-process transition flag + the durable idle-flip guard; the event carries no reconnect-resync
+  `marker`, so a genuine later episode re-fires). Idle with ZERO actionable is SILENT. The CTO's own
+  idle case is NOT pushed — PART 2 surfaces it on the dashboard. `resolveWorkResponder` is READ ONLY
+  (its shape is unchanged).
+
+### Fixed
+- **The operator mid-session dialog-probe no longer false-flags an ACTIVE CTO.** `probeWorkspaceForPrompt`
+  used the loose `looksLikePrompt` numbered-list heuristic, so a paused-but-active operator whose
+  pane incidentally showed ordinary numbered output was misread as a stuck dialog and written to
+  `last_error` every ~15s. `classifyStartupScreen` gains a `strictStuck` option (used ONLY by the
+  mid-session probe) that requires a REAL blocking-dialog anchor (`looksLikeBlockingDialog` — an
+  actual y/n / dev-channels / trust / enter-to-confirm prompt, not a bare numbered list) before
+  surfacing `stuck`. The launch/startup path is BYTE-IDENTICAL (a numbered menu at startup is still
+  a selection dialog); a genuine blocking dialog is still surfaced.
+
 ## [0.9.179] - 2026-07-06
 
 ### Changed

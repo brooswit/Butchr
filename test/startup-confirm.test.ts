@@ -10,6 +10,7 @@ import {
   classifyStartupScreen,
   detectStartupPrompt,
   looksLikeActiveSession,
+  looksLikeBlockingDialog,
   looksLikePrompt,
 } from "../src/startup-confirm.ts";
 
@@ -518,5 +519,51 @@ describe("auto-confirm does NOT give up during the BLANK pre-dialog window (st-2
     expect(reads).toBe(6);
     expect(result.answered).toEqual([]);
     expect(result.stuckScreen).toBeUndefined();
+  });
+});
+
+// strictStuck (story st-a32c8138 scope 5): the mid-session operator probe must require a REAL
+// blocking-dialog anchor, not a bare numbered list, before surfacing a pane as `stuck`.
+describe("looksLikeBlockingDialog (STRONG anchors only — no bare numbered list)", () => {
+  test("TRUE on the explicit dialog phrasings", () => {
+    expect(looksLikeBlockingDialog("Overwrite existing file? (y/n)")).toBe(true);
+    expect(looksLikeBlockingDialog("WARNING: Loading development channels")).toBe(true);
+    expect(looksLikeBlockingDialog("I am using this for local development")).toBe(true);
+    expect(looksLikeBlockingDialog("Do you trust the files in this folder?")).toBe(true);
+    expect(looksLikeBlockingDialog("Press Enter to continue")).toBe(true);
+  });
+
+  test("FALSE on a bare numbered list (ordinary operator output) and blank", () => {
+    expect(looksLikeBlockingDialog("Pick:\n  1. Keep\n  2. Discard")).toBe(false);
+    expect(looksLikeBlockingDialog("An unknown mid-run consent:\n  1. Foo\n  2. Bar")).toBe(false);
+    expect(looksLikeBlockingDialog("")).toBe(false);
+    expect(looksLikeBlockingDialog("   \n ")).toBe(false);
+  });
+});
+
+describe("classifyStartupScreen strictStuck (mid-session probe tightening)", () => {
+  test("a bare numbered list is `quiet` under strictStuck but `stuck` on the launch path (default)", () => {
+    const numbered = "Some tool wants permission:\n  1. Accept\n  2. Reject";
+    expect(classifyStartupScreen(numbered, undefined, { strictStuck: true }).kind).toBe("quiet");
+    // Launch path (default) is UNCHANGED — a numbered menu at startup is still a selection dialog.
+    expect(classifyStartupScreen(numbered).kind).toBe("stuck");
+  });
+
+  test("a REAL dialog anchor with no rule is still `stuck` under strictStuck", () => {
+    // Empty rules so nothing auto-confirms → a genuine y/n dialog surfaces as `stuck`.
+    expect(classifyStartupScreen("Delete everything? (y/n)", [], { strictStuck: true }).kind).toBe(
+      "stuck",
+    );
+  });
+
+  test("a known dialog still auto-confirms (rule wins), and an active pane is `active`, under strictStuck", () => {
+    expect(
+      classifyStartupScreen("Do you trust the files in this folder?", undefined, {
+        strictStuck: true,
+      }).kind,
+    ).toBe("rule");
+    expect(
+      classifyStartupScreen("● working…\n  esc to interrupt", undefined, { strictStuck: true }).kind,
+    ).toBe("active");
   });
 });

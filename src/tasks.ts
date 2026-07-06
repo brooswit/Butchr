@@ -18,7 +18,7 @@ import {
   storyStatusOf,
 } from "./db.ts";
 import { isCtoEnabled } from "./cto-agent.ts";
-import type { TaskRow, TaskStatus, WorkspaceRow } from "./db.ts";
+import type { TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.ts";
 // RECURSIVE PARENT-CHAIN RESPONDER (story st-540ba705, step 6a). pendingResponder now
 // delegates the LIVE feedback routing to work.ts's recursive resolver over `parent_id`
 // (see pendingResponder). This is a RUNTIME-ONLY circular import — work.ts imports the
@@ -876,6 +876,11 @@ export type AttentionReason =
 export type AttentionItem = {
   id: string;
   workspace_id: string;
+  /** The owning STORY (row.story_id), or null for a standalone (non-story) task. Additive
+   * (st-a32c8138): lets operatorActionableItems partition the feed by story membership the SAME
+   * way channel.routeOwns does (a leader owns its story's members; the CTO owns non-story tasks).
+   * Existing consumers ignore it. */
+  story_id: string | null;
   workspace_label: string | null;
   status: TaskStatus;
   kind: TaskKind;
@@ -960,6 +965,7 @@ export function attentionList(): AttentionItem[] {
     items.push({
       id: row.id,
       workspace_id: row.workspace_id,
+      story_id: row.story_id ?? null,
       workspace_label: getWorkspace(row.workspace_id)?.label ?? null,
       status: row.status,
       kind: row.kind,
@@ -970,6 +976,65 @@ export function attentionList(): AttentionItem[] {
     });
   }
   return items;
+}
+
+/**
+ * The ACTIONABLE items an OPERATOR agent (a CTO or a story LEADER) is sitting on — the shared
+ * "noise rule" set for the operator-idle → higher-up signal (story st-a32c8138). REUSES the
+ * EXISTING attention set (attentionList) and partitions it EXACTLY as channel.routeOwns does —
+ * it is NOT a new definition of "actionable":
+ *   - a LEADER (workspace.work_id = its story_id) owns its OWN story's members whose feedback is
+ *     TERMINAL at the leader (resolved responder 'story') OR that have FAILED (failed/aborted — a
+ *     terminal failure has no responder, but the leader still owns its members' failures). A
+ *     member escalation the leader must answer resolves to responder 'story', so it is already a
+ *     leaf item here — no separate "story ask" path is needed.
+ *   - the CTO (workspace.work_id = NULL, dir-scoped) owns the dir's NON-story tasks awaiting it
+ *     (responder 'cto') OR failed/aborted; a story member NEVER belongs to the CTO, and a
+ *     'user'-escalated task falls through (the dashboard surfaces it).
+ * A non-operator row → []. PURE read (attentionList + the row); PART 2 (warm-slate-c7b8) reuses
+ * this VERBATIM for the CTO dashboard case, so it is exported + unit-tested in isolation.
+ *
+ * NOTE: the leader's story-level COMPLETION bubble-up (all members merged → verify the goal) is
+ * NOT a leaf task and so is NOT returned here — it is a separate condition, leaderStoryAwaitsCompletion.
+ */
+export function operatorActionableItems(row: WorkspaceAgentRow): AttentionItem[] {
+  if (row.kind === "leader") {
+    const story = row.work_id;
+    if (!story) return [];
+    return attentionList().filter(
+      (i) =>
+        i.story_id === story &&
+        (i.pending_responder === "story" ||
+          i.status === "failed" ||
+          i.status === "aborted"),
+    );
+  }
+  if (row.kind === "cto") {
+    const dir = row.directory_id;
+    return attentionList().filter(
+      (i) =>
+        i.story_id == null &&
+        (!dir || i.workspace_id === dir) &&
+        (i.pending_responder === "cto" ||
+          i.status === "failed" ||
+          i.status === "aborted"),
+    );
+  }
+  return [];
+}
+
+/**
+ * The LEADER-only story-level COMPLETION condition for the noise rule: the leader's story has
+ * every member merged/rolled_back (isStoryComplete) while still live (open|merge_blocked), so the
+ * leader must verify the story goal + land it — the "completion bubble-up" the leader owns that is
+ * NOT a leaf task (so not in operatorActionableItems). Reuses the SAME predicate the merge-success
+ * completion event uses (notifyStoryCompletionIfReady). Non-leader / no-story → false. Pure read.
+ */
+export function leaderStoryAwaitsCompletion(row: WorkspaceAgentRow): boolean {
+  if (row.kind !== "leader" || !row.work_id) return false;
+  const story = getStoryRow(row.work_id);
+  if (!story || (story.status !== "open" && story.status !== "merge_blocked")) return false;
+  return isStoryComplete(row.work_id);
 }
 
 /**

@@ -118,9 +118,12 @@ const DEAD_BLOCKED_PHRASE =
 //     was answered).
 //   - WORKSPACE/CTO feed (target:'cto'): `complete` (the leader marked the story done),
 //     `merge-conflict` (the story↔main rebase conflicted — a CTO/human git action in the
-//     story worktree, §11.4; the leader has no worktree and cannot resolve it), and `ask` (a
+//     story worktree, §11.4; the leader has no worktree and cannot resolve it), `ask` (a
 //     leader raised a story-level ask to the CTO; a target:user escalation is DROPPED by every
-//     bridge — the dashboard surfaces it; see consumeStoryAttention).
+//     bridge — the dashboard surfaces it; see consumeStoryAttention), and `leader-idle` (the
+//     story leader went genuinely idle while still owning ≥1 actionable item — the operator
+//     generalization of the build-agent idle→responder signal, bubbled to its higher-up the CTO;
+//     story st-a32c8138).
 // Each carries its own `meta.state` so a recipient can branch on the surface, mirroring
 // STATE_PHRASE/IDLE_PHRASE for the task surfaces.
 const STORY_ATTENTION: Record<
@@ -130,7 +133,8 @@ const STORY_ATTENTION: Record<
   | "merge-conflict"
   | "ask"
   | "ask-answered"
-  | "member-blocked",
+  | "member-blocked"
+  | "leader-idle",
   { phrase: string; state: string }
 > = {
   "completion-review": { phrase: "story ready for completion review", state: "story_completion_review" },
@@ -140,6 +144,7 @@ const STORY_ATTENTION: Record<
   "merge-conflict": { phrase: "story↔main MERGE CONFLICT — resolve in the story worktree", state: "story_merge_conflict" },
   ask: { phrase: "story ask awaiting an answer", state: "story_ask" },
   "ask-answered": { phrase: "story ask answered", state: "story_ask_answered" },
+  "leader-idle": { phrase: "leader IDLE with work awaiting it", state: "story_leader_idle" },
 };
 
 // The human phrase for the GLOBAL connectivity-restored broadcast. Unlike the
@@ -536,7 +541,8 @@ export class AttentionBridge {
       e.reason === "merge-conflict" ||
       e.reason === "ask" ||
       e.reason === "ask-answered" ||
-      e.reason === "member-blocked"
+      e.reason === "member-blocked" ||
+      e.reason === "leader-idle"
         ? e.reason
         : null;
     if (!storyId || !target || !reason) return null;
