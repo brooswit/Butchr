@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **REVAMP-4 Projects front-end — design-first clickable MOCKUP (`public/projects-mockup.html`).**
+  A single self-contained static page (inline CSS + JS, fake in-memory data, ZERO API calls)
+  previewing the whole new **Projects** dashboard section for CTO→CEO visual sign-off BEFORE any
+  real wiring. Reuses the existing dashboard design language verbatim — the shared `.chip` status
+  palette, the light/dark `data-theme` theme tokens + toggle, the `.modal`/`.field`/`.btn` pattern,
+  the `.rollup-bar` progress bars, `.kind-badge` repo chips, `:focus-visible` a11y and
+  `prefers-reduced-motion` — with no page-level horizontal scroll. Covers three screens: (1) a
+  Projects OVERVIEW grid (project cards with anchor workspace, registered-repo chips, an
+  initiative rollup, and a CEO status pill) with a create-project modal and honest empty-state;
+  (2) a project DETAIL view with a CEO card (enable/disable toggle, liveness, and an honest note
+  when the global `BUTCHR_CEO_AGENT` gate is OFF), a repos panel (register/unregister), and an
+  initiatives panel (per-repo child-story status pills + rolled-up done progress); and (3) a
+  launch-initiative modal supporting BOTH single-repo and cross-repo fan-out targets. Fields are
+  shaped to the real endpoints (`GET/PATCH /api/projects/:id`, `.../repos`, `.../initiatives`) but
+  never fetched. Reversible: a later subtask deletes the mockup once the real UI lands.
+
 ## [0.9.204] - 2026-07-06
 
 ### Changed
