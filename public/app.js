@@ -305,7 +305,10 @@ function taskChips(t, { plan = false, kind = false, responder = false } = {}) {
           : "idle state"
       )}">${esc(kindStr)}${awaited ? ": " + esc(awaited) : ""}</span>`
     : "";
-  return kindBadge("leaf") + " "
+  // Key off the AUTHORITATIVE work_kind (not a hardcoded 'leaf') — taskChips renders both
+  // finished TASKS ('leaf') and finished STORIES ('node') via finishedList(), so a literal
+  // would mislabel a finished story '▪ TASK'. kindVisual() has a safe fallback either way.
+  return kindBadge(t.work_kind) + " "
     + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
     + chip(st)
     + kindChip

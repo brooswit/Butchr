@@ -85,3 +85,24 @@ test("kindBadge never throws on empty / null / undefined kinds", () => {
     expect(html.startsWith("<span")).toBe(true);
   }
 });
+
+test("a node routed through kindBadge renders STORY, not TASK", () => {
+  // The taskChips() choke point renders BOTH finished tasks ('leaf') AND finished stories
+  // ('node') via finishedList(), so its badge must follow the item's authoritative kind —
+  // a 'node' must read STORY. (Mirrors what taskChips does: kindBadge(t.work_kind).)
+  const nodeBadge = kindBadge("node");
+  expect(nodeBadge).toContain("kind-node");
+  expect(nodeBadge).toContain("STORY");
+  expect(nodeBadge).not.toContain("TASK");
+});
+
+test("taskChips keys its type badge off the authoritative work_kind (regression guard)", () => {
+  // Regression guard for the finished-story mislabel: taskChips must pass the item's
+  // work_kind into kindBadge, NOT a hardcoded 'leaf' literal (which would badge a finished
+  // STORY as '▪ TASK'). Assert at the source level since taskChips has DOM/helper deps that
+  // make it impractical to eval in isolation.
+  const body = APP.match(/function taskChips\([^]*?\n\}/);
+  if (!body) throw new Error("could not locate taskChips() body");
+  expect(body[0]).toContain("kindBadge(t.work_kind)");
+  expect(body[0]).not.toContain('kindBadge("leaf")');
+});
