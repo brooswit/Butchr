@@ -132,6 +132,25 @@ export function owningRepoOf(id: string): string | null {
 }
 
 /**
+ * The id of the PROJECT node that is this Work's IMMEDIATE parent — `parent_id` iff that parent is
+ * a `work_kind==='project'` container, else null. Deliberately IMMEDIATE (not nearest-ancestor like
+ * owningRepoOf): a `project` parent is exactly the shape whose feedback resolves to the `ceo`
+ * responder (the head of containerLadderChain when the first parent hop lands on a project), so this
+ * is the project analog of the story-NODE parent that `story_id` encodes on a TaskView. Reads one
+ * getTask row. null when the row / its parent is gone.
+ *
+ * ADDITIVE (REVAMP-4 P3b, story st-1a82a2e1): the serialized `project_id` wire field on TaskView is
+ * derived from this so the CEO channel bridge can route a ceo item to its owning project — the
+ * project mirror of `story_id`. DORMANT: no project nodes materialize in prod, so this returns null
+ * for every current shape (reachable only via a test-synthesized project node).
+ */
+export function projectParentOf(id: string): string | null {
+  const parentId = workParentId(id);
+  if (parentId == null) return null;
+  return getTask(parentId)?.work_kind === "project" ? parentId : null;
+}
+
+/**
  * Is this Work TOP-LEVEL — i.e. does its feedback bottom out at the CTO rather than a parent
  * NODE? (REVAMP-4 Phase 1 / S1, story st-1a82a2e1.) THE ONE INVARIANT after the repoint: a
  * top-level Work is one whose parent_id is NULL **or** points at a `work_kind='repo'` node (a

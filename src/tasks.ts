@@ -24,7 +24,7 @@ import type { TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.
 // hoisted `getTask`/`isAwaitingFeedback` function declarations from here, and these are
 // likewise hoisted functions called only at runtime, so the cycle resolves with no
 // load-time TDZ. Gated by unifiedWorkEnabled() (config.unifiedWork, DEFAULT ON).
-import { isTopLevelWork, owningRepoOf, resolveWorkResponder, unifiedWorkEnabled } from "./work.ts";
+import { isTopLevelWork, owningRepoOf, projectParentOf, resolveWorkResponder, unifiedWorkEnabled } from "./work.ts";
 import type { WorkResponder } from "./work.ts";
 import {
   classifyPathType,
@@ -76,7 +76,15 @@ import { existsSync, readFileSync } from "node:fs";
 export type TaskView = Omit<TaskRow, "blocked_by" | "tags" | "allowlist"> & {
   // The owning STORY id, or null for a standalone task. WIRE CONTRACT re-derived from parent_id
   // (B.5b st-78a8b4e7 — the story_id column is dropped; parent_id is the sole membership pointer).
+  // NON-NULL only for a real STORY MEMBER (parent is a story NODE): a repo OR project container
+  // parent re-collapses to null (REVAMP-4 P3b — a project parent is carried by `project_id` below).
   story_id: string | null;
+  // The owning PROJECT id, or null. WIRE CONTRACT (REVAMP-4 P3b, story st-1a82a2e1): the project
+  // mirror of `story_id` — non-null iff the task's IMMEDIATE parent is a `work_kind='project'`
+  // container (the shape whose feedback resolves to the `ceo` responder), so the CEO channel bridge
+  // can route a ceo item to its owning project (see channel.routeOwns). DORMANT: no project nodes
+  // materialize in prod, so this is null for every current shape. See work.projectParentOf.
+  project_id: string | null;
   prompt: string;
   context: string[];
   review_notes: string;
@@ -710,15 +718,21 @@ export function taskView(id: string): TaskView | null {
     }
   }
   const blocked_by = parseBlockedBy(row.blocked_by);
+  // The immediate PROJECT-container parent (REVAMP-4 P3b), or null — the `ceo` responder owner.
+  const projectId = projectParentOf(row.id);
   return {
     ...rowForView(row),
     // WIRE CONTRACT (B.5b st-78a8b4e7): the external `story_id` field is re-derived from
     // parent_id (the SOLE membership pointer now the story_id column is dropped). REVAMP-4 S1:
     // a top-level task's parent_id now points at its REPO node (not NULL), so the projection
     // must re-collapse a repo parent back to NULL — story_id is NON-NULL only for a real STORY
-    // MEMBER (parent is a story node). This keeps channel.ts/routeOwns (story_id==null ⇒
-    // CTO-owned), the CLI, and the dashboard BYTE-FOR-BYTE unchanged.
-    story_id: isTopLevelWork(row.id) ? null : row.parent_id,
+    // MEMBER (parent is a story node). REVAMP-4 P3b: a PROJECT parent (projectId below) likewise
+    // re-collapses to null — that owner is carried by `project_id`, not story_id — so the
+    // "story_id ⇒ story-member-only" invariant holds. This keeps channel.ts/routeOwns
+    // (story_id==null ⇒ CTO-owned), the CLI, and the dashboard BYTE-FOR-BYTE unchanged (no
+    // project nodes materialize in prod, so `projectId` is null for every current shape).
+    story_id: isTopLevelWork(row.id) || projectId ? null : row.parent_id,
+    project_id: projectId,
     prompt,
     context,
     review_notes,
@@ -1022,7 +1036,11 @@ export function attentionList(): AttentionItem[] {
       workspace_id: row.workspace_id,
       // membership by parent_id (B.5b — story_id column dropped); REVAMP-4 S1 re-collapses a REPO
       // parent back to null so a top-level attention item stays CTO-owned (routeOwns story_id==null).
-      story_id: isTopLevelWork(row.id) ? null : row.parent_id,
+      // REVAMP-4 P3b: a PROJECT parent likewise re-collapses to null, SYMMETRICALLY with taskView, so
+      // the "story_id ⇒ story-member-only" invariant holds in the attention path too (byte-identical —
+      // no project nodes in prod). The ceo-item owner is NOT surfaced on AttentionItem yet (deferred
+      // to P3f with the operatorActionableItems CEO branch); today a ceo item is simply un-owned here.
+      story_id: isTopLevelWork(row.id) || projectParentOf(row.id) ? null : row.parent_id,
       workspace_label: getWorkspace(row.workspace_id)?.label ?? null,
       status: row.status,
       kind: row.kind,
@@ -1080,8 +1098,14 @@ export function operatorActionableItems(row: WorkspaceAgentRow): AttentionItem[]
   // REVAMP-4 P3a: a 'ceo' workspace row (SUPERVISOR_KINDS.ceo) falls through to the trailing `[]`
   // — DORMANT. A ceo is never launched in prod (enabled=const false) so operatorActionableItems is
   // never called with a ceo row, and pending_responder can never be 'ceo' (no project nodes), so a
-  // 'ceo' item matches NEITHER branch above. The live project-scoped CEO feed (a `ceo` branch
-  // filtering pending_responder==='ceo' within a project scope) is deferred to P3b.
+  // 'ceo' item matches NEITHER branch above — it is simply un-owned/dropped here today.
+  // TODO(REVAMP-4 P3f — human-at-root + dashboard container-attribution): add the project-scoped
+  // CEO ownership branch (a `row.kind === "ceo"` case filtering pending_responder==='ceo' within a
+  // project scope, mirroring the channel.routeOwns project branch landed in P3b) AND surface
+  // `project_id` on AttentionItem. When that lands, the `cto` branch above ALSO needs a
+  // `&& i.project_id == null` guard (the project analog of its `i.story_id == null` story-member
+  // exclusion) so a FAILED/aborted direct-project-child — story_id now null after the P3b
+  // tightening — cannot leak into the CTO operator feed. Inert until project nodes exist.
   return [];
 }
 

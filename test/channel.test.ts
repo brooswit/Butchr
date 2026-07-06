@@ -550,6 +550,116 @@ describe("channel: routeOwns (structural — responder-redesign §5)", () => {
   });
 });
 
+describe("channel: routeOwns PROJECT scope (REVAMP-4 P3b — the CEO feed)", () => {
+  // A project-scoped (CEO) bridge owns an item whose OWNING PROJECT (project_id) matches its
+  // scope AND that is awaiting the CEO ('ceo') OR failed/aborted/dead-blocked — the exact project
+  // mirror of the story-leader branch. Bridges: pr-1's CEO feed, pr-2's CEO feed, the CTO feed,
+  // and a st-1 leader feed. DORMANT in prod (no BUTCHR_CHANNEL_PROJECT set, no project nodes), so
+  // every EXISTING story/cto case above is untouched; these exercise the reachable-via-test shapes.
+  const projectBridge = (p: string) => new AttentionBridge("dir-1", false, "", p);
+  const ctoBridge = () => new AttentionBridge("dir-1");
+  const leaderBridge = () => new AttentionBridge("dir-1", false, "st-1");
+  const globalBridge = () => new AttentionBridge();
+
+  // A ceo item: a work item whose IMMEDIATE parent is a project → taskView carries project_id (and
+  // NULLs story_id) and pendingResponder resolves to 'ceo'.
+  const ceoItem = {
+    id: "v3-ceo-review",
+    workspace_id: "dir-1",
+    status: "in_review",
+    summary: "project-direct change",
+    project_id: "pr-1",
+    pending_responder: "ceo",
+  };
+
+  test("a 'ceo' item routes to its OWN project bridge, with project_id (not story_id) in meta", () => {
+    const ceo = projectBridge("pr-1").consume(taskUpdated(ceoItem));
+    expect(ceo).not.toBeNull();
+    // project_id is the project mirror of story_id — present, and NO story_id key.
+    expect(ceo!.meta).toEqual({
+      task_id: "v3-ceo-review",
+      workspace: "dir-1",
+      state: "in_review",
+      project_id: "pr-1",
+    });
+  });
+
+  test("a 'ceo' item is NOT owned by ANOTHER project's bridge, the CTO feed, or a leader feed", () => {
+    expect(projectBridge("pr-2").consume(taskUpdated(ceoItem))).toBeNull();
+    expect(ctoBridge().consume(taskUpdated(ceoItem))).toBeNull();
+    expect(leaderBridge().consume(taskUpdated(ceoItem))).toBeNull();
+  });
+
+  test("BYTE-IDENTICAL: with NO project scope, a 'ceo' item is owned by NO bridge (dropped)", () => {
+    // The dormant P3a behavior: no project-scoped bridge exists, so a 'ceo' item falls through
+    // every feed to the webapp/user surface — exactly as before this change.
+    expect(ctoBridge().consume(taskUpdated(ceoItem))).toBeNull();
+    expect(leaderBridge().consume(taskUpdated(ceoItem))).toBeNull();
+    expect(globalBridge().consume(taskUpdated(ceoItem))).toBeNull();
+  });
+
+  test("a FAILED direct-project-child is owned by its project bridge, NOT leaked to the CTO feed", () => {
+    // A terminal failure has no responder — the explicit status check owns it, keyed on project_id
+    // (mirrors a story member's failure keyed on story_id).
+    const failed = {
+      id: "v3-ceo-fail",
+      workspace_id: "dir-1",
+      status: "failed",
+      last_dispatch_error: "spawn failed",
+      project_id: "pr-1",
+    };
+    const owned = projectBridge("pr-1").consume(taskUpdated(failed));
+    expect(owned).not.toBeNull();
+    expect(owned!.meta.state).toBe("failed");
+    expect(owned!.meta.project_id).toBe("pr-1");
+    // The CTO fall-through's `projectId == null` guard keeps a failed project-child off the CTO feed
+    // (story_id is now null on such an item, so without the guard it WOULD have leaked).
+    expect(ctoBridge().consume(taskUpdated(failed))).toBeNull();
+    // ...and another project's bridge does not own it.
+    expect(projectBridge("pr-2").consume(taskUpdated(failed))).toBeNull();
+
+    const aborted = { ...failed, id: "v3-ceo-abort", status: "aborted" };
+    expect(projectBridge("pr-1").consume(taskUpdated(aborted))).not.toBeNull();
+    expect(ctoBridge().consume(taskUpdated(aborted))).toBeNull();
+  });
+
+  test("a DEAD-BLOCKED item in a project's subtree is owned by its project bridge, not the CTO", () => {
+    const dead = {
+      id: "v3-ceo-db",
+      workspace_id: "dir-1",
+      status: "blocked",
+      deadBlockers: ["t-blocker"],
+      project_id: "pr-1",
+      pending_responder: null,
+    };
+    const owned = projectBridge("pr-1").consume(taskUpdated(dead));
+    expect(owned).not.toBeNull();
+    expect(owned!.meta).toEqual({
+      task_id: "v3-ceo-db",
+      workspace: "dir-1",
+      state: "dead_blocked",
+      project_id: "pr-1",
+    });
+    expect(ctoBridge().consume(taskUpdated(dead))).toBeNull();
+  });
+
+  test("BYTE-IDENTICAL: a non-project 'cto' task is still owned by the CTO feed (projectId==null guard)", () => {
+    // The new `projectId == null` guard must not regress the ordinary CTO feed: a standalone task
+    // carries no project_id → the guard is satisfied → still owned, byte-for-byte today's meta.
+    const cto = ctoBridge().consume(
+      taskUpdated({
+        id: "v3-plain-cto",
+        workspace_id: "dir-1",
+        status: "in_review",
+        summary: "standalone change",
+        pending_responder: "cto",
+      }),
+    );
+    expect(cto).not.toBeNull();
+    expect(cto!.meta).toEqual({ task_id: "v3-plain-cto", workspace: "dir-1", state: "in_review" });
+  });
+});
+
 describe("channel: dead-blocked attention (F3 — a `blocked` task stuck on a never-merging dep)", () => {
   // The serialized TaskView a blocked task emits: status `blocked` with a non-empty deadBlockers
   // set (its aborted/failed/rolled_back/gone blockers). A blocked task is not awaiting feedback,

@@ -332,6 +332,15 @@ export class AttentionBridge {
   // (failed/aborted). Unset → the bridge runs in WORKSPACE/CTO mode (the scopeDir feed
   // below). See routeOwns.
   private readonly scopeStory: string;
+  // PER-PROJECT SCOPE (the CEO feed; from BUTCHR_CHANNEL_PROJECT). REVAMP-4 P3b (story
+  // st-1a82a2e1): the project generalization of scopeStory. When set, the bridge runs in PROJECT
+  // mode and emits an attention event for a task IFF the task's OWNING PROJECT (project_id ===
+  // scopeProject) matches AND the item is the CEO's to own — its feedback (resolved responder
+  // 'ceo' — a project-direct child's feedback is terminal at the CEO) OR a failure/dead-blocked
+  // item in the project's subtree. Unset → the bridge runs in STORY or WORKSPACE/CTO mode. DORMANT:
+  // no CEO agent sets this in prod yet (P3c) and no project nodes exist (P3d), so every current
+  // shape leaves this empty and routing is byte-identical. See routeOwns.
+  private readonly scopeProject: string;
   // CONNECTIVITY-ONLY mode. When true (the WORKER bridge), consume() emits ONLY the
   // global `connectivity.restored` broadcast and SUPPRESSES every attention/idle
   // notification — a live build agent must NEVER see another task's review/idle/
@@ -339,10 +348,16 @@ export class AttentionBridge {
   // and gets the full attention feed PLUS connectivity.
   private readonly connectivityOnly: boolean;
 
-  constructor(scopeDir?: string, connectivityOnly = false, scopeStory?: string) {
+  constructor(
+    scopeDir?: string,
+    connectivityOnly = false,
+    scopeStory?: string,
+    scopeProject?: string,
+  ) {
     this.scopeDir = (scopeDir ?? "").trim();
     this.connectivityOnly = connectivityOnly;
     this.scopeStory = (scopeStory ?? "").trim();
+    this.scopeProject = (scopeProject ?? "").trim();
   }
 
   /** Seed the workspace-label cache (best-effort, e.g. from GET /api/workspaces). */
@@ -429,6 +444,11 @@ export class AttentionBridge {
     // null when not awaiting feedback). Reading these fields keeps the bridge a light, DB-free
     // process — it never imports tasks.ts / touches the db.
     const storyId = typeof t.story_id === "string" && t.story_id ? t.story_id : null;
+    // The OWNING PROJECT id (REVAMP-4 P3b) — the project mirror of storyId, read off the serialized
+    // TaskView's `project_id` (work.projectParentOf: non-null iff the task's immediate parent is a
+    // project container, the shape whose responder resolves to 'ceo'). Drives the PROJECT scope in
+    // routeOwns. null for every current shape (no project nodes) → routing byte-identical.
+    const projectId = typeof t.project_id === "string" && t.project_id ? t.project_id : null;
     const responder =
       typeof t.pending_responder === "string" ? t.pending_responder : null;
     const prevResponder = this.lastResponder.get(id) ?? null;
@@ -480,19 +500,25 @@ export class AttentionBridge {
     // OWNERSHIP: does THIS bridge's scope own the item right now (STORY-leader feed vs
     // WORKSPACE/CTO feed)? A non-owning bridge drops it — and we still updated the tracking
     // maps above, so the OTHER bridge's de-dup stays correct.
-    if (!this.routeOwns(storyId, responder, status, dirId, surface === "dead_blocked"))
+    if (
+      !this.routeOwns(storyId, projectId, responder, status, dirId, surface === "dead_blocked")
+    )
       return null;
 
     const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
     // ADD story_id to meta ONLY when the task has one, so a STANDALONE task's meta stays
-    // byte-for-byte { task_id, workspace, state } (the CTO feed must not regress).
+    // byte-for-byte { task_id, workspace, state } (the CTO feed must not regress). project_id is
+    // the project mirror (REVAMP-4 P3b): present ONLY on a CEO-owned (project-direct) item — and
+    // story_id/project_id are mutually exclusive (a project parent nulls story_id in taskView), so
+    // a story item carries story_id, a project item carries project_id, a standalone carries neither.
     const storyMeta = storyId ? { story_id: storyId } : {};
+    const projectMeta = projectId ? { project_id: projectId } : {};
     if (surface === "idle") {
       const ctx = tidy(t.idle_context);
       const content = `[${id}] ${label} — ${IDLE_PHRASE}` + (ctx ? `: ${ctx}` : "");
       return {
         content,
-        meta: { task_id: id, workspace: dirId, state: "idle", ...storyMeta },
+        meta: { task_id: id, workspace: dirId, state: "idle", ...storyMeta, ...projectMeta },
       };
     }
     if (surface === "dead_blocked") {
@@ -501,7 +527,13 @@ export class AttentionBridge {
         (deadBlockers.length ? `: ${deadBlockers.join(", ")}` : "");
       return {
         content,
-        meta: { task_id: id, workspace: dirId, state: "dead_blocked", ...storyMeta },
+        meta: {
+          task_id: id,
+          workspace: dirId,
+          state: "dead_blocked",
+          ...storyMeta,
+          ...projectMeta,
+        },
       };
     }
     const attentionStatus = status as AttentionState;
@@ -510,7 +542,7 @@ export class AttentionBridge {
       `[${id}] ${label} — ${STATE_PHRASE[attentionStatus]}` + (text ? `: ${text}` : "");
     return {
       content,
-      meta: { task_id: id, workspace: dirId, state: status, ...storyMeta },
+      meta: { task_id: id, workspace: dirId, state: status, ...storyMeta, ...projectMeta },
     };
   }
 
@@ -551,8 +583,11 @@ export class AttentionBridge {
     if (target === "story") {
       if (!this.scopeStory || this.scopeStory !== storyId) return null;
     } else {
-      // target === 'cto' → the WORKSPACE/CTO feed only (never a story-leader bridge).
-      if (this.scopeStory) return null;
+      // target === 'cto' → the WORKSPACE/CTO feed only (never a story-leader OR project/CEO bridge).
+      // REVAMP-4 P3b: a project-scoped (CEO) bridge is excluded here too, so it owns NO story.attention
+      // yet — the CEO story-ask target (a `target:'ceo'` rung) is deferred to P3d/P3e; today `target`
+      // parses only to story|cto, so a project bridge simply drops every story.attention event.
+      if (this.scopeStory || this.scopeProject) return null;
       if (this.scopeDir && dirId !== this.scopeDir) return null;
     }
 
@@ -591,12 +626,17 @@ export class AttentionBridge {
    *    FAILED (failed/aborted — a failure has no responder, hence the explicit status check).
    *    A non-story task ESCALATED to the user (responder 'user' from escalated_to_user) is
    *    DROPPED here — the webapp/dashboard surfaces it to the user.
+   *  - PROJECT scope (BUTCHR_CHANNEL_PROJECT — REVAMP-4 P3b): the CEO feed owns an item whose
+   *    OWNING PROJECT (project_id) === this.scopeProject AND that is awaiting the CEO (responder
+   *    'ceo') OR has FAILED / is dead-blocked in the project's subtree. The exact project mirror of
+   *    the STORY-leader branch ('ceo'/scopeProject swapped for 'story'/scopeStory).
    * A DEAD-BLOCKED task (F3) has no responder and is not failed/aborted, so it is owned the same
-   * way a failure is — by the leader for a story member, by the CTO for a non-story task — via the
-   * explicit `deadBlocked` flag.
+   * way a failure is — by the leader for a story member, by the CEO for a project-direct item, by
+   * the CTO for a non-story task — via the explicit `deadBlocked` flag.
    */
   private routeOwns(
     storyId: string | null,
+    projectId: string | null,
     responder: string | null,
     status: string,
     dirId: string,
@@ -611,15 +651,29 @@ export class AttentionBridge {
           deadBlocked)
       );
     }
+    // PROJECT scope (the CEO feed) — the project mirror of the STORY branch above (REVAMP-4 P3b).
+    // DORMANT: no bridge sets scopeProject in prod yet, so this branch is never taken there.
+    if (this.scopeProject) {
+      return (
+        projectId === this.scopeProject &&
+        (responder === "ceo" ||
+          status === "failed" ||
+          status === "aborted" ||
+          deadBlocked)
+      );
+    }
     if (this.scopeDir && dirId !== this.scopeDir) return false;
-    // NON-STORY tasks only — awaiting the CTO ('cto'), a non-story failure, or dead-blocked. A
-    // non-story 'user' escalation falls through to false (dropped → the webapp surfaces it). A
-    // 'ceo' responder (REVAMP-4 P3a) likewise falls through to false here — DORMANT: no project
-    // nodes materialize in prod so pendingResponder never yields 'ceo', and a project-scope
-    // ownership branch is deferred to P3b (which wires the live CEO feed). Until then a 'ceo'
-    // item is dropped to the webapp/user surface, exactly like a non-story 'user' escalation.
+    // NON-STORY, NON-PROJECT tasks only — awaiting the CTO ('cto'), a non-story failure, or
+    // dead-blocked. A 'user' escalation falls through to false (dropped → the webapp surfaces it).
+    // The `projectId == null` guard is the PROJECT analog of the `storyId == null` story-member
+    // exclusion (REVAMP-4 P3b): a project-direct item now nulls story_id (taskView), so WITHOUT this
+    // guard a FAILED/dead-blocked project-child would leak into the CTO feed. Byte-identical in prod
+    // (no project nodes → projectId always null → the guard is always true → CTO decision unchanged).
+    // A 'ceo' responder likewise no longer matches here (responder !== 'cto'), so it is owned by the
+    // project bridge above (when scoped) or dropped to the webapp.
     return (
       storyId == null &&
+      projectId == null &&
       (responder === "cto" || status === "failed" || status === "aborted" || deadBlocked)
     );
   }
@@ -1062,6 +1116,12 @@ export async function main(): Promise<void> {
   // filtering / the workspace label, but STORY scope drives the routing). Unset → the bridge
   // runs in WORKSPACE/CTO mode.
   const scopeStory = (process.env.BUTCHR_CHANNEL_STORY ?? "").trim();
+  // PER-PROJECT SCOPE (the CEO bridge; REVAMP-4 P3b): butchr would launch one bridge per PROJECT
+  // node's CEO and pass that project_id via BUTCHR_CHANNEL_PROJECT, so the bridge pushes only that
+  // project's direct items' feedback + failures (the STORY scope's project analog). DORMANT: no CEO
+  // agent sets this yet (P3c) and no project nodes exist (P3d), so this is empty in prod. Unset → the
+  // bridge runs in STORY (if scopeStory set) or WORKSPACE/CTO mode.
+  const scopeProject = (process.env.BUTCHR_CHANNEL_PROJECT ?? "").trim();
   // CONNECTIVITY-ONLY (the WORKER bridge): deliver ONLY the global connectivity-restored
   // broadcast, suppressing every attention/idle event. Set by the dispatcher on the
   // per-task channel server (BUTCHR_CHANNEL_CONNECTIVITY_ONLY=1) so a build agent hears
@@ -1069,8 +1129,9 @@ export async function main(): Promise<void> {
   const connectivityOnly = /^(1|true|yes|on)$/i.test(
     (process.env.BUTCHR_CHANNEL_CONNECTIVITY_ONLY ?? "").trim(),
   );
-  const bridge = new AttentionBridge(scopeDir, connectivityOnly, scopeStory);
+  const bridge = new AttentionBridge(scopeDir, connectivityOnly, scopeStory, scopeProject);
   if (scopeStory) elog(`scoped to story ${scopeStory}`);
+  else if (scopeProject) elog(`scoped to project ${scopeProject}`);
   else if (scopeDir) elog(`scoped to workspace ${scopeDir}`);
   if (connectivityOnly) elog("connectivity-only mode (worker channel)");
   let stopped = false;

@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **REVAMP-4 Phase 3 / P3b — project-scoped `routeOwns` + the CEO channel feed.** The attention
+  bridge (`src/channel.ts`) gains a third ownership scope alongside the story-leader and
+  workspace/CTO feeds: a PROJECT-scoped bridge (read from `BUTCHR_CHANNEL_PROJECT`) OWNS a work
+  item iff its owning project (`project_id`) matches the scope AND it is awaiting the CEO
+  (responder `ceo`) or has failed / aborted / gone dead-blocked in that project's subtree — the
+  exact project mirror of the story-leader branch. **Wire mechanism:** a new serialized
+  `project_id` field on `TaskView` (`src/tasks.ts`) carries a ceo item's owning project the same
+  way `story_id` carries a story member's leader — derived from the new
+  `work.projectParentOf` accessor (the immediate `work_kind='project'` parent). `story_id` is
+  tightened symmetrically in BOTH `taskView` and `attentionList` to re-collapse a PROJECT parent to
+  null (it was leaking the project id, violating the "story_id ⇒ story-member-only" invariant), and
+  the CTO fall-through in `routeOwns` gains a `projectId == null` guard (the project analog of its
+  `storyId == null` story-member exclusion) so a failed/dead-blocked project-child can never leak
+  into the CTO feed. **Byte-identical / DORMANT:** no CEO agent sets `BUTCHR_CHANNEL_PROJECT` (P3c)
+  and no project nodes materialize in production (P3d), so `projectId` is null for every current
+  shape and every existing story-leader / CTO routing decision — and every emitted notification's
+  meta — is unchanged. The dashboard operator-idle CEO ownership branch (`operatorActionableItems`)
+  and the CEO story-ask target are explicitly deferred (P3f / P3d-e).
+
 ## [0.9.199] - 2026-07-06
 
 ### Changed
