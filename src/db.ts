@@ -458,7 +458,7 @@ ensureColumn("directory", "changelog_path", "TEXT");
 // crash supervision: NULL (the default every existing row backfills to) means "inherit
 // the GLOBAL default" config.ctoAgentEnabled (itself DEFAULT OFF); 1 forces it ON, 0
 // forces it OFF — so a workspace's own setting WINS over the global default. Resolved
-// by cto-agent.isCtoEnabled; settable via PATCH /api/workspaces/:id. (The on-demand
+// by workspaces.isCtoEnabled; settable via PATCH /api/workspaces/:id. (The on-demand
 // /api/workspaces/:id/cto/* endpoints still work regardless, so an operator can start
 // one even when boot-auto-start is off.)
 ensureColumn("directory", "cto_enabled", "INTEGER");
@@ -1514,7 +1514,7 @@ export type WorkspaceRow = {
   changelog_path: string | null;
   // Per-workspace CTO-agent enable (see the cto_enabled ensureColumn above). NULL =
   // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by
-  // cto-agent.isCtoEnabled (per-workspace WINS over the global default).
+  // workspaces.isCtoEnabled (per-workspace WINS over the global default).
   cto_enabled: number | null;
   // Per-workspace VERSIONED-RELEASES MODE (see the release_mode ensureColumn above): 1 =
   // every merge bumps + stamps the changelog with a versioned heading and the changelog

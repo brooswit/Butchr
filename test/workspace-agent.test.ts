@@ -925,7 +925,7 @@ describe("CTO enable/disable/stop authority via the unified workspace table (st-
     // MIRROR INVARIANT: the legacy cto_agent.desired=0 mirror is STILL written.
     expect(dbMod.getCtoAgentRow(DIR)!.desired).toBe(0);
     // Transient: cto_enabled is unchanged (re-enable/boot can bring it back up).
-    expect(ctoMod.isCtoEnabled(DIR)).toBe(true);
+    expect(dirsMod.isCtoEnabled(DIR)).toBe(true);
     // And the supervisor does not relaunch the desired-down row.
     await wa._superviseTickForTest(WS_CTO);
     expect(calls.launch.length).toBe(0);

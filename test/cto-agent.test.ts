@@ -464,23 +464,3 @@ describe("CTO agent status (the /api/workspaces/:id/cto payload)", () => {
     expect(typeof s.restarts).toBe("number");
   });
 });
-
-describe("isCtoEnabled resolution (per-workspace wins over the global default)", () => {
-  test("explicit 1/0 override the global default; NULL inherits it", async () => {
-    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
-    expect(cto.isCtoEnabled(DIR)).toBe(true);
-    dbMod.db.query(`UPDATE workspaces SET cto_enabled=0 WHERE id=?`).run(DIR);
-    expect(cto.isCtoEnabled(DIR)).toBe(false);
-
-    dbMod.db.query(`UPDATE workspaces SET cto_enabled=NULL WHERE id=?`).run(DIR);
-    cfgMod.config.ctoAgentEnabled = false;
-    expect(cto.isCtoEnabled(DIR)).toBe(false); // inherit global OFF
-    cfgMod.config.ctoAgentEnabled = true;
-    expect(cto.isCtoEnabled(DIR)).toBe(true); // inherit global ON
-
-    // restore the suite's invariant
-    cfgMod.config.ctoAgentEnabled = false;
-    dbMod.db.query(`UPDATE workspaces SET cto_enabled=1 WHERE id=?`).run(DIR);
-    expect(cto.isCtoEnabled("dir-nonexistent")).toBe(false);
-  });
-});

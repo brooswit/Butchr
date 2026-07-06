@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { config } from "./config.ts";
-import { isCtoEnabled, stopCtoAgent } from "./cto-agent.ts";
+import { stopCtoAgent } from "./cto-agent.ts";
 import {
   ensureWorkspaceAgentRow,
   isUnifiedWorkspaceEnabled,
@@ -419,13 +419,30 @@ export function updateWorkspaceChangelogPath(id: string, changelogPath: unknown)
 }
 
 /**
+ * Is a workspace's CTO agent ENABLED for boot auto-start + supervision? The
+ * workspace's own `cto_enabled` column WINS (1 → on, 0 → off); NULL inherits the
+ * GLOBAL default config.ctoAgentEnabled (itself default OFF). An unknown workspace →
+ * not enabled. Exported for testing.
+ */
+export function isCtoEnabled(workspaceId: string): boolean {
+  const row = db
+    .query<{ cto_enabled: number | null }, [string]>(
+      `SELECT cto_enabled FROM workspaces WHERE id=?`,
+    )
+    .get(workspaceId);
+  if (!row) return false;
+  if (row.cto_enabled !== null) return row.cto_enabled === 1;
+  return config.ctoAgentEnabled;
+}
+
+/**
  * Set (or clear) a workspace's per-workspace CTO-agent enable and return the refreshed
  * view. `true`/`false` forces the workspace's CTO agent on/off (boot auto-start +
  * supervision); `null`/`undefined` CLEARS the override so it inherits the global
  * default config.ctoAgentEnabled. 404 if the workspace is gone; 400 if the value is
  * neither a boolean nor null. Takes effect on the next boot reconcile / supervision
  * tick (and is reflected immediately in the workspace's CTO status). See
- * cto-agent.isCtoEnabled.
+ * isCtoEnabled (in this module).
  *
  * UNIFIED MIRROR (story st-93384200, Bug 1): after writing directory.cto_enabled, mirror the
  * EFFECTIVE state into the unified `workspace` runtime row (id `ws-cto-<id>`) so the unified

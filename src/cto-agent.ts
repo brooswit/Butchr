@@ -50,7 +50,7 @@ import {
   nowIso,
   saveCtoAgentRow,
 } from "./db.ts";
-import { ensureHerdrWorkspace } from "./workspaces.ts";
+import { ensureHerdrWorkspace, isCtoEnabled } from "./workspaces.ts";
 import { stopWorkspaceAgent } from "./workspace-agent.ts";
 import { publish } from "./events.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
@@ -82,23 +82,6 @@ function workspacePath(workspaceId: string): string | null {
     .query<{ path: string }, [string]>(`SELECT path FROM workspaces WHERE id=?`)
     .get(workspaceId);
   return row?.path ?? null;
-}
-
-/**
- * Is a workspace's CTO agent ENABLED for boot auto-start + supervision? The
- * workspace's own `cto_enabled` column WINS (1 → on, 0 → off); NULL inherits the
- * GLOBAL default config.ctoAgentEnabled (itself default OFF). An unknown workspace →
- * not enabled. Exported for testing.
- */
-export function isCtoEnabled(workspaceId: string): boolean {
-  const row = db
-    .query<{ cto_enabled: number | null }, [string]>(
-      `SELECT cto_enabled FROM workspaces WHERE id=?`,
-    )
-    .get(workspaceId);
-  if (!row) return false;
-  if (row.cto_enabled !== null) return row.cto_enabled === 1;
-  return config.ctoAgentEnabled;
 }
 
 /** The dashboard/API view of a workspace's managed CTO agent state. */

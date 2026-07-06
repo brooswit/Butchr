@@ -17,7 +17,6 @@ import {
   recordTaskEvent,
   storyStatusOf,
 } from "./db.ts";
-import { isCtoEnabled } from "./cto-agent.ts";
 import type { TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.ts";
 // RECURSIVE PARENT-CHAIN RESPONDER (story st-540ba705, step 6a). pendingResponder now
 // delegates the LIVE feedback routing to work.ts's recursive resolver over `parent_id`
@@ -36,6 +35,7 @@ import type { ChainEstimate, EstimateRow, Estimate } from "./estimate.ts";
 import {
   HttpError,
   getWorkspace,
+  isCtoEnabled,
   listWorkspaces,
   workspaceBranchIsolation,
   workspaceChangelogPath,

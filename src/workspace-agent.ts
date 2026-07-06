@@ -55,8 +55,7 @@ import type { AttentionItem } from "./tasks.ts";
 // transitively — its only workspace-agent-importing dependency would be stories.ts, which the
 // dispatcher never imports), so this introduces NO import cycle and no shared module is needed.
 import { isGenuinelyIdle, shouldProbeTick } from "./dispatcher.ts";
-import { ensureHerdrWorkspace } from "./workspaces.ts";
-import { isCtoEnabled } from "./cto-agent.ts";
+import { ensureHerdrWorkspace, isCtoEnabled } from "./workspaces.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import type { SendInput } from "./harness.ts";
