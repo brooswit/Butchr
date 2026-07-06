@@ -61,7 +61,7 @@ const m = await import(process.env.DB_TS);
 // --- STRUCTURE + CONVERGENCE snapshot (no extra rows yet, for idempotence) ---
 const snap = () => ({
   schema: m.db.query("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(),
-  tasks: m.db.query("SELECT id, status, parent_id FROM tasks ORDER BY id").all(),
+  tasks: m.db.query("SELECT id, status, parent_id, work_kind FROM tasks ORDER BY id").all(),
   workspaces: m.db.query("SELECT id FROM workspaces ORDER BY id").all().map((r) => r.id),
 });
 const snapA = snap();
@@ -135,8 +135,18 @@ describe("step 1 — tasks.parent_id (nullable self-FK, sole membership pointer 
     expect(out.taskCols).not.toContain("story_id");
   });
 
-  test("parent_id is NULL on every existing row", () => {
-    for (const t of out.snapA.tasks) expect(t.parent_id).toBeNull();
+  // REVAMP-4 S1 (st-1a82a2e1): migrateReparentTopLevelUnderRepo repoints every TOP-LEVEL leaf
+  // under its owning repo node (parent_id = workspace_id, which IS the repo node's id), while the
+  // repo node itself stays parent_id NULL. So the old "NULL on every row" invariant becomes: a
+  // repo node is NULL; every other (leaf) row points at its repo node.
+  test("top-level leaves are reparented under their repo node; the repo node stays NULL (S1)", () => {
+    for (const t of out.snapA.tasks) {
+      if (t.work_kind === "repo") {
+        expect(t.parent_id).toBeNull();
+      } else {
+        expect(t.parent_id).toBe("dir-1"); // repo node id == workspace_id (dir-1)
+      }
+    }
   });
 
   test("a parent/child link can be written via parent_id", () => {

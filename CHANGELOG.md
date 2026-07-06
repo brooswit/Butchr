@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **REVAMP-4 Phase 1 / S1 — reparent top-level Work under its repo node + a container-aware
+  responder.** Building on S0a's materialized `work_kind='repo'` nodes, a new idempotent, reversible
+  migration (`migrateReparentTopLevelUnderRepo`, `src/db.ts`) repoints every top-level unit of Work
+  (a standalone leaf or a story node, `parent_id` NULL) onto its owning repo node (`parent_id =
+  workspace_id`), so the parent chain becomes `leaf → story-node → repo-node`; repo nodes themselves
+  stay `parent_id` NULL. A single new accessor `isTopLevelWork(id)` (parent is NULL **or** a repo
+  node — `src/work.ts`) is threaded through every routing site so the recursive responder treats a
+  repo ancestor's responder as `{cto}`: `resolveWorkResponder`/`workResponderChain` break at the
+  repo tier, `pendingResponder`/`escalateTask` classify by story-membership (a repo-parented
+  top-level task still routes cto/user and its `escalated_to_user` is honored), the CTO-findings
+  `strandedItems` SQL widens to `(parent_id IS NULL OR parent_id IN <repo nodes>)`, and the
+  `TaskView`/`AttentionItem` `story_id` wire field re-collapses a repo parent back to `null` so
+  `channel.ts`/`routeOwns` and the dashboard stay byte-for-byte unchanged. The write paths
+  (`createTask`, `assignTaskToStory` clear, `deleteStory` detach) now re-parent a newly-top-level
+  task onto its repo node instead of NULL, and the (inert) recursive-merge paths treat a repo parent
+  as the top boundary. Routing/behavior is byte-identical for every existing shape — this phase
+  changes data + internal resolution only, behind no feature flag. The project/CEO tier arrives in
+  Phase 3.
+
 ## [0.9.197] - 2026-07-06
 
 ### Changed

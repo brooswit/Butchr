@@ -1247,6 +1247,38 @@ export function migrateMaterializeRepoNodes(): void {
   );
 }
 
+// REPARENT TOP-LEVEL WORK UNDER ITS REPO NODE (story st-1a82a2e1 REVAMP-4 Phase 1 / S1). The
+// foundation S0a laid down one work_kind='repo' node per directory (id == directory id) sitting
+// parent_id NULL. This step repoints EVERY top-level unit of Work — a standalone leaf OR a story
+// NODE (parent_id NULL, work_kind in ('leaf','node')) — so its parent_id points at its OWNING repo
+// node (its workspace_id, which IS the repo node's id by S0a construction). The parent chain thus
+// becomes leaf → story-node → repo-node; the recursive responder (work.resolveWorkResponder /
+// workResponderChain) treats that repo ancestor's responder as {cto}, so ALL routing stays
+// byte-identical — this migration changes DATA, not observable behavior.
+//
+//   - work_kind='repo' nodes KEEP parent_id NULL (they are the top of the tree until the project
+//     tier arrives in Phase 3). The `work_kind IN ('leaf','node')` filter excludes them.
+//   - workspace_id IN (SELECT id FROM tasks WHERE work_kind='repo') guards the repoint to rows
+//     whose repo node actually exists — a defensive belt (S0a materializes one per directory, so
+//     at real boot none are skipped; a fresh db with no repo nodes repoints nothing).
+//
+// IDEMPOTENT (re-run is a no-op): an already-repointed row has a NON-NULL parent_id, so the
+// `parent_id IS NULL` filter excludes it — the UPDATE touches zero rows on a second pass.
+// REVERSIBLE: the repoint is parent=repo ↔ NULL, fully recoverable — a repo-parented top-level
+// row's owning repo is exactly its workspace_id (owningRepoOf), so `SET parent_id=NULL WHERE
+// parent_id IN (SELECT id FROM tasks WHERE work_kind='repo')` undoes it losslessly.
+// BACKWARD-SAFE ordering: runs AFTER migrateMaterializeRepoNodes (needs the repo nodes present);
+// purely repoints existing `tasks` rows (no DROP/RENAME), and B.2's structural node-exclusion
+// (`work_kind='leaf'` loops) means no live loop's membership changes from a repo parent.
+export function migrateReparentTopLevelUnderRepo(): void {
+  db.exec(
+    `UPDATE tasks SET parent_id = workspace_id
+       WHERE parent_id IS NULL
+         AND work_kind IN ('leaf','node')
+         AND workspace_id IN (SELECT id FROM tasks WHERE work_kind='repo')`,
+  );
+}
+
 // UNIFIED-WORKSPACE ACTIVATION MIGRATION (story st-540ba705, step 6b — BACKWARD-SAFE +
 // IDEMPOTENT). Populate the unified `workspace` table from the two legacy operator-agent
 // tables so the unified supervisor (src/workspace-agent.ts), activated this step, re-adopts
@@ -1579,6 +1611,7 @@ const MIGRATIONS: Array<() => void> = [
   () => migrateWorkspacesView(db),
   migrateDropStoriesMirror,
   migrateMaterializeRepoNodes,
+  migrateReparentTopLevelUnderRepo,
   migrateWidenWorkspaceKindCheck,
 ];
 

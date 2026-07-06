@@ -14,6 +14,7 @@ import * as git from "./git.ts";
 import { generateStoryId } from "./ids.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
+import { owningRepoOf } from "./work.ts";
 // REVAMP-1 Phase C: the story lifecycle hooks live in workspace-agent.ts (moved there in S2
 // alongside teardownLeaderWorkspaceForWork; the legacy story-agent.ts launcher was deleted in S5).
 import {
@@ -633,11 +634,16 @@ export function deleteStory(id: string): void {
   // DELETE below cascade-removes the workspace row, while the by-name pane teardown still
   // completes afterward — so no leader pane is orphaned. No-op when the unified gate is OFF.
   void teardownLeaderWorkspaceForWork(id).catch(() => {});
-  // Detach member tasks (keep the tasks — only the grouping is removed). Clear parent_id — the
-  // SOLE membership pointer as of B.5b (st-78a8b4e7; the legacy story_id column is dropped) — so a
-  // detached member becomes a standalone top-level Work and no longer points at the about-to-be-
-  // removed node, freeing the node from any member self-FK reference.
-  db.query(`UPDATE tasks SET parent_id=NULL WHERE parent_id=?`).run(id);
+  // Detach member tasks (keep the tasks — only the grouping is removed). REVAMP-4 S1: a detached
+  // member becomes TOP-LEVEL Work, so it re-parents onto its OWNING REPO node (its workspace_id's
+  // repo node — the members all share the story's workspace) rather than NULL, preserving the
+  // invariant. The correlated subquery mirrors migrateReparentTopLevelUnderRepo; it yields NULL
+  // (the pre-S1 behavior) if no repo node exists. Either way the member no longer points at the
+  // about-to-be-removed story node, freeing its self-FK reference.
+  db.query(
+    `UPDATE tasks SET parent_id=(SELECT r.id FROM tasks r WHERE r.id=tasks.workspace_id AND r.work_kind='repo')
+       WHERE parent_id=?`,
+  ).run(id);
   // Remove the story's Work node (the `tasks` row whose id IS the story id — the authoritative
   // story record). Members are already detached, so its self-FK has no referrers, and its
   // story_agent row is cascade-removed via the story_agent→tasks(id) FK (B.5b re-pointed it off
@@ -685,10 +691,13 @@ export function assignTaskToStory(taskId: string, storyId: string | null): TaskV
   // UNIFIED-WORK PARENT POINTER: parent_id is the SOLE membership pointer as of B.5b
   // (st-78a8b4e7; the legacy story_id column is dropped). The story's Work node already exists
   // (getStory above 404s otherwise → its node is present), so the parent_id self-FK is satisfied;
-  // ensureStoryWorkNode is a defensive no-op belt. When clearing (storyId === null), parent_id is
-  // cleared → the task becomes standalone top-level Work.
+  // ensureStoryWorkNode is a defensive no-op belt. REVAMP-4 S1: when clearing (storyId === null)
+  // the task becomes TOP-LEVEL Work, so it re-parents onto its OWNING REPO node (owningRepoOf,
+  // which resolves the workspace's repo node — its id == workspace_id) rather than NULL,
+  // preserving the invariant.
   if (storyId !== null) ensureStoryWorkNode(storyId);
-  db.query(`UPDATE tasks SET parent_id=? WHERE id=?`).run(storyId, taskId);
+  const effectiveParent = storyId ?? owningRepoOf(task.workspace_id);
+  db.query(`UPDATE tasks SET parent_id=? WHERE id=?`).run(effectiveParent, taskId);
   const view = taskView(taskId)!;
   publish({ type: "task.updated", task: view });
   return view;

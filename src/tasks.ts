@@ -24,7 +24,7 @@ import type { TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.
 // hoisted `getTask`/`isAwaitingFeedback` function declarations from here, and these are
 // likewise hoisted functions called only at runtime, so the cycle resolves with no
 // load-time TDZ. Gated by unifiedWorkEnabled() (config.unifiedWork, DEFAULT ON).
-import { resolveWorkResponder, unifiedWorkEnabled } from "./work.ts";
+import { isTopLevelWork, owningRepoOf, resolveWorkResponder, unifiedWorkEnabled } from "./work.ts";
 import {
   classifyPathType,
   computeEstimateStats,
@@ -621,14 +621,18 @@ export function pendingResponder(row: TaskRow): PendingResponder | null {
   // top-level task), and takes PRECEDENCE over the escalated_to_user path. It short-circuits
   // the whole parent-chain bubble-up — even a story member's leader is bypassed.
   if (!unifiedWorkEnabled()) {
-    // Legacy 2-level routing (BUTCHR_UNIFIED_WORK=0).
+    // Legacy 2-level routing (BUTCHR_UNIFIED_WORK=0). REVAMP-4 S1: "has a parent node" is now
+    // isTopLevelWork's negation (a repo-parented top-level task is NOT a story member) so a
+    // top-level task still routes cto/user, never `story`.
     if (row.needs_user_input) return "user";
-    if (row.parent_id != null) return "story";
+    if (!isTopLevelWork(row.id)) return "story";
     return row.escalated_to_user ? "user" : "cto";
   }
   const resolved = resolveWorkResponder(row.id, {
+    // The escalated_to_user short-circuit is gated on TOP-LEVEL (not `parent_id == null`) so a
+    // repo-parented top-level task's escalation is still honored, never silently ignored (S1).
     needsUserInput:
-      !!row.needs_user_input || (row.parent_id == null && !!row.escalated_to_user),
+      !!row.needs_user_input || (isTopLevelWork(row.id) && !!row.escalated_to_user),
   });
   // Map the recursive WorkResponder onto the existing PendingResponder vocabulary: any
   // parent NODE → `story` (the depth-1/2 instance), the base case → `cto`, the escalation
@@ -671,10 +675,12 @@ export function taskView(id: string): TaskView | null {
   return {
     ...rowForView(row),
     // WIRE CONTRACT (B.5b st-78a8b4e7): the external `story_id` field is re-derived from
-    // parent_id (the SOLE membership pointer now the story_id column is dropped). parent_id
-    // carried the identical value in lock-step, so the API/SSE shape is byte-for-byte unchanged
-    // — channel.ts, the CLI, and the dashboard keep reading `story_id`.
-    story_id: row.parent_id ?? null,
+    // parent_id (the SOLE membership pointer now the story_id column is dropped). REVAMP-4 S1:
+    // a top-level task's parent_id now points at its REPO node (not NULL), so the projection
+    // must re-collapse a repo parent back to NULL — story_id is NON-NULL only for a real STORY
+    // MEMBER (parent is a story node). This keeps channel.ts/routeOwns (story_id==null ⇒
+    // CTO-owned), the CLI, and the dashboard BYTE-FOR-BYTE unchanged.
+    story_id: isTopLevelWork(row.id) ? null : row.parent_id,
     prompt,
     context,
     review_notes,
@@ -976,7 +982,9 @@ export function attentionList(): AttentionItem[] {
     items.push({
       id: row.id,
       workspace_id: row.workspace_id,
-      story_id: row.parent_id ?? null, // membership by parent_id (B.5b — story_id column dropped)
+      // membership by parent_id (B.5b — story_id column dropped); REVAMP-4 S1 re-collapses a REPO
+      // parent back to null so a top-level attention item stays CTO-owned (routeOwns story_id==null).
+      story_id: isTopLevelWork(row.id) ? null : row.parent_id,
       workspace_label: getWorkspace(row.workspace_id)?.label ?? null,
       status: row.status,
       kind: row.kind,
@@ -1148,6 +1156,10 @@ function emitUpdated(id: string): void {
  */
 function isolatedStoryBranch(row: TaskRow): string | null {
   // Membership by parent_id (B.5b st-78a8b4e7 — the SOLE membership pointer; story_id dropped).
+  // REVAMP-4 S1: deliberately NOT converted to isTopLevelWork(row.id) — this runs on the id-less
+  // SYNTHETIC row createTask builds pre-insert (resolveBase), whose parent_id carries the story
+  // membership pointer, never the repo. It is already a no-op for a repo parent: getStoryRow(repo)
+  // returns undefined (a repo is not a `stories`/`work_kind='node'` row) → null below.
   if (!row.parent_id) return null;
   if (!workspaceBranchIsolation(row.workspace_id)) return null;
   const story = getStoryRow(row.parent_id);
@@ -1168,6 +1180,9 @@ function isolatedStoryBranch(row: TaskRow): string | null {
  */
 function parentStoryStatus(row: TaskRow): string | null {
   // Membership by parent_id (B.5b st-78a8b4e7 — the SOLE membership pointer; story_id dropped).
+  // REVAMP-4 S1: self-correcting for a repo parent — storyStatusOf reads the parent's OWN row
+  // guarded on `work_kind='node'`, so a `work_kind='repo'` parent yields null (a repo is not a
+  // story), exactly as a NULL parent did. Left as-is (parent_id check) for that reason.
   if (!row.parent_id) return null;
   return storyStatusOf(row.parent_id);
 }
@@ -1262,9 +1277,16 @@ export function recursiveIsolationEnabled(): boolean {
 const MAX_NODE_CHAIN_DEPTH = 1000;
 
 /** A row's parent_id, read via the canonical getTask (NOT work.ts — avoids the import cycle).
- * null for top-level Work (parent_id NULL) or a missing row. */
+ * null for top-level Work (parent_id NULL) or a missing row. REVAMP-4 S1: a REPO-node parent is
+ * the TOP boundary of the merge/branch tree (a repo has no branch/worktree and is never a rebase
+ * target), so it is reported as null here — the recursive chain walk (nodeChainIds/ensureNodeChain)
+ * bottoms out AT the top-level story node, exactly as it did when that node's parent_id was NULL.
+ * Kept as a direct getTask work_kind check (mirrors work.isTopLevelWork's rule) to preserve this
+ * hot path's no-work.ts-import discipline. */
 function nodeParentId(workId: string): string | null {
-  return getTask(workId)?.parent_id ?? null;
+  const p = getTask(workId)?.parent_id ?? null;
+  if (p != null && getTask(p)?.work_kind === "repo") return null;
+  return p;
 }
 
 /**
@@ -1322,10 +1344,12 @@ export async function ensureNodeChain(dir: string, workId: string): Promise<stri
 export async function resolveRecursiveBase(row: TaskRow): Promise<string> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
-  if (recursiveIsolationEnabled() && row.parent_id) {
+  // REVAMP-4 S1: recurse only for a real parent NODE — a repo-parented TOP-LEVEL node resolves to
+  // the default branch (a repo node has no branch to rebase onto), byte-identical to a NULL parent.
+  if (recursiveIsolationEnabled() && !isTopLevelWork(row.id)) {
     // Ensure the whole chain (this node + all ancestors) so the parent branch exists.
     await ensureNodeChain(dir.path, row.id);
-    return git.workBranchName(row.parent_id);
+    return git.workBranchName(row.parent_id!);
   }
   return git.defaultBranch(dir.path);
 }
@@ -1343,13 +1367,15 @@ export async function resolveRecursiveBase(row: TaskRow): Promise<string> {
 export async function resolveRecursiveMergeContext(row: TaskRow): Promise<MergeContext> {
   const dir = getWorkspace(row.workspace_id);
   if (!dir) throw new HttpError(404, "workspace not found");
-  if (recursiveIsolationEnabled() && row.parent_id) {
+  // REVAMP-4 S1: recurse only for a real parent NODE — a repo-parented TOP-LEVEL node uses today's
+  // exact { dir.path, default, default } (a repo node is never a merge target), as with a NULL parent.
+  if (recursiveIsolationEnabled() && !isTopLevelWork(row.id)) {
     // Ensure the full chain (creates the parent node's branch + worktree too), then point the
     // merge at the PARENT node's branch + worktree.
     await ensureNodeChain(dir.path, row.id);
-    const parentBranch = git.workBranchName(row.parent_id);
+    const parentBranch = git.workBranchName(row.parent_id!);
     return {
-      ffWorktree: git.workWorktreePath(dir.path, row.parent_id),
+      ffWorktree: git.workWorktreePath(dir.path, row.parent_id!),
       targetBranch: parentBranch,
       base: parentBranch,
     };
@@ -1411,7 +1437,10 @@ export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome>
 
   const workBranch = git.workBranchName(workId);
   const gateCmd = workspaceGateCmd(dir.id);
-  const isTopLevel = !row.parent_id;
+  // REVAMP-4 S1: a repo-node parent is the top boundary, so isTopLevelWork (parent NULL OR repo)
+  // is the correct top-level test — a top-level node's branch is fully merged into the default
+  // branch and removed, exactly as when its parent_id was NULL.
+  const isTopLevel = isTopLevelWork(workId);
 
   return runExclusiveMerge<WorkMergeOutcome>(async () => {
     // 1. Ensure the node's branch chain + worktrees (checked out at each node tip). Idempotent
@@ -1636,8 +1665,10 @@ function setStatus(
   // (`member-blocked`) when the story has settled with a dead member — fixing the asymmetry where a
   // merge fires a check but an abort/fail fired none. Guarded to actual story members; the story-
   // status + settled-state gating lives in notifyStoryReadiness.
-  if (row.status !== to && (to === "failed" || to === "aborted") && row.parent_id) {
-    notifyStoryReadiness(row.parent_id);
+  // REVAMP-4 S1: guard on STORY-MEMBERSHIP (!isTopLevelWork), not mere non-null parent — a
+  // repo-parented TOP-LEVEL task must NOT ping story readiness (byte-identical to a NULL parent).
+  if (row.status !== to && (to === "failed" || to === "aborted") && !isTopLevelWork(row.id)) {
+    notifyStoryReadiness(row.parent_id!);
   }
   return true;
 }
@@ -1858,8 +1889,14 @@ export async function createTask(
   // UNIFIED-WORK PARENT POINTER (B.5b st-78a8b4e7): a story member's parent IS its story (the
   // Work node); parent_id is the SOLE membership pointer now the legacy story_id column is dropped.
   // The story's Work node already exists (createSubtask/assignTaskToStory 404 on a gone story → its
-  // node is present); ensureStoryWorkNode is a defensive no-op belt. NULL for a standalone task.
+  // node is present); ensureStoryWorkNode is a defensive no-op belt.
+  // REVAMP-4 S1: a TOP-LEVEL task (no story) is now parented at its OWNING REPO node (never NULL),
+  // preserving the invariant going forward. owningRepoOf(workspaceId) resolves the repo node (its
+  // id == workspace_id by S0a construction), falling back to NULL when none exists (fresh db).
+  // NOTE: resolveBase above is deliberately fed `parent_id: storyId` (the story membership pointer,
+  // never the repo) so isolatedStoryBranch on the id-less synthetic row still resolves correctly.
   if (storyId != null) ensureStoryWorkNode(storyId);
+  const effectiveParent = storyId ?? owningRepoOf(workspaceId);
   db.query(
     `INSERT INTO tasks (id, workspace_id, status, blocked_by, kind, model, tags, allowlist, priority, plan_preview, version_bump, parent_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1875,7 +1912,7 @@ export async function createTask(
     taskPriority,
     taskPlanPreview ? 1 : 0,
     taskVersionBump,
-    storyId,
+    effectiveParent,
     created,
   );
   recordTaskEvent(
@@ -2654,7 +2691,9 @@ async function recordLanded(
   // delivered (every member merged/rolled_back → completion-review) OR settled-but-stuck (a
   // sibling already failed/aborted → member-blocked). story_id-guarded so STANDALONE tasks
   // never trigger it (no regression).
-  if (row.parent_id) notifyStoryReadiness(row.parent_id);
+  // REVAMP-4 S1: STORY-MEMBERSHIP guard (!isTopLevelWork) — a repo-parented top-level task's
+  // parent_id is its repo node, which is NOT a story, so it must not trigger readiness (unchanged).
+  if (!isTopLevelWork(row.id)) notifyStoryReadiness(row.parent_id!);
   return { task: taskView(id)! };
 }
 
@@ -3147,7 +3186,9 @@ export function escalateTask(id: string): TaskView {
   if (!isAwaitingFeedback(row)) {
     throw new HttpError(409, `task is not awaiting feedback (status=${row.status})`);
   }
-  if (row.parent_id != null) {
+  // REVAMP-4 S1: classify by STORY-MEMBERSHIP (a real parent NODE), not mere non-null parent — a
+  // repo-parented TOP-LEVEL task has a non-null parent_id but is still escalatable to the user.
+  if (!isTopLevelWork(row.id)) {
     throw new HttpError(409, "task is a story member — its feedback is terminal at the leader, nothing to escalate");
   }
   if (row.escalated_to_user) {
@@ -3341,10 +3382,12 @@ function leaderResponderStranded(storyId: string, storyStatus: string): boolean 
 export function strandedItems(directoryId: string): StrandedItem[] {
   const items: StrandedItem[] = [];
 
-  // CTO-owned findings (F1, F2) — only when the directory's CTO responder is stranded. A task
-  // WITH a parent (a story member) is owned by its story LEADER (handled per-story below), so the
-  // CTO findings consider STANDALONE tasks (parent_id IS NULL) only. Membership by parent_id
-  // (B.5b st-78a8b4e7 — the story_id column is dropped; parent_id is the sole membership pointer).
+  // CTO-owned findings (F1, F2) — only when the directory's CTO responder is stranded. A STORY
+  // MEMBER is owned by its story LEADER (handled per-story below), so the CTO findings consider
+  // TOP-LEVEL tasks only. REVAMP-4 S1: "top-level" is now parent_id NULL **or** a repo-node parent
+  // (the repoint pointed standalone leaves at their repo node), so the filter widens to
+  // `(parent_id IS NULL OR parent_id IN <repo nodes>)`. Membership by parent_id (B.5b st-78a8b4e7 —
+  // the story_id column is dropped; parent_id is the sole membership pointer).
   // The `work_kind='leaf'` guard keeps only real tasks — dropping materialized story Work NODES and
   // (REVAMP-4 S0a) the CONTAINER nodes ('repo'/'project') alike (mirrors counts()/listTasks). The
   // `status='idea'`/`status='blocked'` filters already exclude the 'merged'-anchored containers, so
@@ -3354,8 +3397,9 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     // F1 — `idea` tasks (a brief awaiting a spec) whose CTO responder is stranded.
     const ideas = db
       .query<{ id: string }, [string]>(
-        `SELECT id FROM tasks WHERE workspace_id=? AND parent_id IS NULL AND status='idea'
-           AND work_kind='leaf'`,
+        `SELECT id FROM tasks WHERE workspace_id=?
+           AND (parent_id IS NULL OR parent_id IN (SELECT id FROM tasks WHERE work_kind='repo'))
+           AND status='idea' AND work_kind='leaf'`,
       )
       .all(directoryId);
     for (const t of ideas) {
@@ -3367,8 +3411,9 @@ export function strandedItems(directoryId: string): StrandedItem[] {
     // pull-signal for when the responder that would act on it is gone.
     const blocked = db
       .query<{ id: string; blocked_by: string | null }, [string]>(
-        `SELECT id, blocked_by FROM tasks WHERE workspace_id=? AND parent_id IS NULL AND status='blocked'
-           AND work_kind='leaf'`,
+        `SELECT id, blocked_by FROM tasks WHERE workspace_id=?
+           AND (parent_id IS NULL OR parent_id IN (SELECT id FROM tasks WHERE work_kind='repo'))
+           AND status='blocked' AND work_kind='leaf'`,
       )
       .all(directoryId);
     for (const t of blocked) {

@@ -22,6 +22,7 @@ const WS = "b5b-post-drop-ws";
 let dbMod: typeof import("../src/db.ts");
 let storiesMod: typeof import("../src/stories.ts");
 let tasksMod: typeof import("../src/tasks.ts");
+let workMod: typeof import("../src/work.ts");
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-b5b-data-"));
@@ -34,6 +35,7 @@ beforeAll(async () => {
   dbMod = await import("../src/db.ts"); // module-load runs the FULL pass incl. the drop
   storiesMod = await import("../src/stories.ts");
   tasksMod = await import("../src/tasks.ts");
+  workMod = await import("../src/work.ts");
 
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
@@ -124,10 +126,13 @@ describe("B.5b: membership + rollups resolve via parent_id", () => {
     const view = storiesMod.assignTaskToStory("b5b-m-assign", s.id);
     expect(view.story_id).toBe(s.id); // preserved wire field, re-derived from parent_id
     expect(tasksMod.getTask("b5b-m-assign")!.parent_id).toBe(s.id);
-    // clearing membership
+    // clearing membership → the task becomes TOP-LEVEL Work again. REVAMP-4 S1 (st-1a82a2e1): a
+    // top-level task now re-parents onto its OWNING REPO node (owningRepoOf) rather than NULL, and
+    // the wire `story_id` re-collapses that repo parent back to null. (The repo node exists here —
+    // the idempotence test above ran runMigrations, which materializes it for WS.)
     const cleared = storiesMod.assignTaskToStory("b5b-m-assign", null);
     expect(cleared.story_id).toBeNull();
-    expect(tasksMod.getTask("b5b-m-assign")!.parent_id).toBeNull();
+    expect(tasksMod.getTask("b5b-m-assign")!.parent_id).toBe(workMod.owningRepoOf(WS));
   });
 
   test("storyCounts + isStoryComplete + completion detection are correct via parent_id", () => {

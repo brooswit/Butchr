@@ -132,6 +132,23 @@ export function owningRepoOf(id: string): string | null {
 }
 
 /**
+ * Is this Work TOP-LEVEL — i.e. does its feedback bottom out at the CTO rather than a parent
+ * NODE? (REVAMP-4 Phase 1 / S1, story st-1a82a2e1.) THE ONE INVARIANT after the repoint: a
+ * top-level Work is one whose parent_id is NULL **or** points at a `work_kind='repo'` node (a
+ * repo node is the CTO's own container — its supervisor IS the CTO). This is the SINGLE predicate
+ * threaded through every "is this a standalone task vs a story member" site (the resolver, the
+ * pendingResponder map, escalateTask, the strand/attention re-projection, the story-readiness
+ * guards) so no caller open-codes `parent_id == null` and silently misclassifies a repo-parented
+ * task as a story member. A missing row is treated as top-level (parent chain bottoms out → cto),
+ * mirroring resolveWorkResponder.
+ */
+export function isTopLevelWork(id: string): boolean {
+  const parentId = workParentId(id);
+  if (parentId == null) return true;
+  return getTask(parentId)?.work_kind === "repo";
+}
+
+/**
  * Re-export of the PURE feedback predicate (tasks.isAwaitingFeedback) under the Work
  * vocabulary, so "what counts as feedback awaiting a responder" stays single-sourced (a
  * feedback status — idea/spec_review/in_review/needs_info — or a LIVE idle build agent).
@@ -185,9 +202,10 @@ export function resolveWorkResponder(
   opts: WorkResponderOpts = {},
 ): WorkResponder {
   if (opts.needsUserInput) return { kind: "user" };
-  const parentId = workParentId(id);
-  if (parentId != null) return { kind: "work", work_id: parentId };
-  return { kind: "cto" };
+  // A repo-node parent (or NULL) is the base case: the CTO is the repo's supervisor. Only a
+  // real parent NODE (a story) is a `{ work }` tier. isTopLevelWork folds both into one check.
+  if (isTopLevelWork(id)) return { kind: "cto" };
+  return { kind: "work", work_id: workParentId(id)! };
 }
 
 /**
@@ -215,6 +233,11 @@ export function workResponderChain(
   const visited = new Set<string>([id]);
   let parentId = workParentId(id);
   while (parentId != null) {
+    // REPO BOUNDARY (REVAMP-4 S1): a repo node is the CTO's own container — stop BEFORE pushing a
+    // `{ work }` tier for it; the trailing push({cto}) below is exactly the repo's responder. This
+    // keeps chains byte-identical to the pre-repoint tree (standalone leaf → [cto,user]; a story
+    // member → [work(storyNode), cto, user]).
+    if (getTask(parentId)?.work_kind === "repo") break;
     chain.push({ kind: "work", work_id: parentId });
     if (visited.has(parentId)) break; // malformed parent cycle — stop the ancestor walk
     visited.add(parentId);
