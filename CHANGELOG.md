@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.197] - 2026-07-06
+
 ### Changed
 
 - **REVAMP-4 Phase 0 / S0c — supervisor capability table + `'ceo'` workspace kind.** The seven
