@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.187] - 2026-07-06
+
 ### Changed
 - **REVAMP-1 Phase C S1 — `isCtoEnabled` moved to its cycle-free home in `src/workspaces.ts` (story st-bb6cd55b).** Behavior-preserving relocation: the pure per-workspace CTO-enable read (`SELECT cto_enabled FROM workspaces` with a fall-back to the global `config.ctoAgentEnabled`) now lives in and is exported from `src/workspaces.ts` instead of `src/cto-agent.ts`, with its logic and JSDoc unchanged. This is the first step of the extract→retire chain that lets the dead legacy launcher `src/cto-agent.ts` be deleted later. Every live importer is repointed to the new home (`src/tasks.ts`, `src/workspace-agent.ts`, and `src/cto-agent.ts`'s own internal uses), and each already imported from `src/workspaces.ts`, so NO new module edge or import cycle is introduced (the read is a hoisted, runtime-only call — no load-time TDZ). The `cto_enabled` column comments in `src/db.ts` are updated to name the new home. Its unit coverage is relocated from `test/cto-agent.test.ts` into a new `test/workspaces.test.ts` so it survives the later deletion of the cto-agent test file.
 
