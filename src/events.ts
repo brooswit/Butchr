@@ -78,6 +78,17 @@ export type ButchrEvent =
       detail: string | null;
       marker?: string | null;
     }
+  // A CROSS-REPO PROJECT INITIATIVE completed (REVAMP-4 Phase 3 / P3e): EVERY per-repo child
+  // story of the initiative has landed `done`. Published up the PROJECT channel one rung above
+  // story completion (the CEO sees the rolled-up doneness authoritatively via
+  // GET /api/projects/:id/initiatives; this event surfaces it live to the project SSE stream).
+  // Additive + EVENT-ONLY — butchr takes no action; the CEO poll is the source of truth.
+  | {
+      type: "initiative.completed";
+      project_id: string;
+      initiative_id: string;
+      detail: string | null;
+    }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;

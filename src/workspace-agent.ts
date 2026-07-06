@@ -384,12 +384,13 @@ merge count):
 }
 
 /**
- * The per-project CEO directive brief (REVAMP-4 Phase 3 / P3d, story st-1a82a2e1). Replaces the
- * P3c "stand by" placeholder with the CEO's REAL directive surface: register repos under this
- * project and seed project-level initiatives that delegate to a member repo's CTO. The CEO slots
- * ABOVE the per-repo CTOs (human → CEO → CTO → leader → build). HONEST about the SINGLE-project
- * boundary: cross-repo initiatives spanning multiple repos + cross-repo blocked_by are a later
- * release (P3e). Uses the butchr HTTP API at 127.0.0.1:47800 like the CTO brief.
+ * The per-project CEO directive brief (REVAMP-4 Phase 3 / P3d+P3e, story st-1a82a2e1). The CEO's
+ * REAL directive surface: register repos under this project and seed initiatives that delegate to
+ * member repos' CTOs — SINGLE-repo or, as of P3e, CROSS-repo (one initiative fanning stories into
+ * MULTIPLE member repos, with a completion rollup). The CEO slots ABOVE the per-repo CTOs (human →
+ * CEO → CTO → leader → build). HONEST about the remaining boundary: cross-repo SEQUENCING (holding
+ * one repo's work until another's merges — blocked_by across repos) is NOT yet available; a
+ * cross-repo initiative fans out in PARALLEL. Uses the butchr HTTP API at 127.0.0.1:47800.
  */
 function buildCeoBrief(projectId: string): string {
   return `# butchr CEO agent
@@ -435,9 +436,26 @@ CTO/leader turns into work:
   The leader decomposes it into subtasks; the repo's CTO signs off story-level asks and completion.
 - You DELEGATE — you do not run the story. Its asks/sign-offs go to the repo's CTO first; they only
   reach you if the CTO escalates them up to the project tier.
-- **ONE repo per initiative.** An initiative spanning MULTIPLE repos, and cross-repo dependencies
-  (blocked_by across repos), are **NOT available yet** — that is a later release (P3e). For now,
-  break a cross-repo goal into one initiative per repo yourself.
+
+### 3. Fan ONE initiative across MULTIPLE repos (cross-repo)
+
+When a goal spans repos, seed it as ONE cross-repo initiative instead of hand-copying a brief into
+each repo — same endpoint, a \`targets\` array instead of a single \`repo\`/\`brief\`:
+
+- **\`POST /api/projects/${projectId}/initiatives\`** body
+  \`{ "targets": [ { "repo": "<repo A id>", "brief": "<repo A's part>" },
+  { "repo": "<repo B id>", "brief": "<repo B's part>" } ] }\`.
+- Every target repo must be a member (a non-member is refused). butchr lands ONE story per target
+  (each managed by that repo's own leader + CTO, exactly like a single-repo initiative) and groups
+  them under one **initiative id** it returns. Targets may repeat a repo or span repos.
+- Track it: **\`GET /api/projects/${projectId}/initiatives\`** lists each initiative with its
+  per-repo children + a rolled-up \`done\` flag; **\`GET /api/projects/${projectId}/initiatives/<initiative id>\`**
+  is the single-initiative view. The initiative is DONE when EVERY child story has landed — you are
+  notified up the project channel when that happens.
+- **PARALLEL only, for now.** The children all start immediately; you CANNOT yet hold one repo's
+  child until another repo's child merges (cross-repo \`blocked_by\` / sequencing is a later
+  follow-up). If a goal needs strict ordering across repos, seed the earlier stage first and create
+  the next stage once it lands.
 
 ## How work reaches you
 

@@ -2128,8 +2128,14 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     expect(brief).toContain(`POST /api/projects/${proj.id}/initiatives`);
     // No longer inert — the P3c "stand by" placeholder is gone.
     expect(brief).not.toContain("stand by");
-    // Honest about the SINGLE-project boundary: cross-repo spanning is a later release (P3e).
-    expect(brief).toContain("P3e");
+    // P3e: cross-repo initiatives (fan ONE initiative into MULTIPLE member repos) are now
+    // documented — the `targets` array shape + the completion-rollup GET.
+    expect(brief).toContain("cross-repo");
+    expect(brief).toContain("targets");
+    expect(brief).toContain(`GET /api/projects/${proj.id}/initiatives`);
+    // Honest about the REMAINING boundary: cross-repo SEQUENCING (blocked_by across repos) is not
+    // yet available — a cross-repo initiative fans out in PARALLEL.
+    expect(brief).toContain("PARALLEL only");
     // Must NOT instruct a GET /api/work/<project> — a 'project' node 404s there (P3a).
     expect(brief).not.toContain("GET /api/work");
     expect(brief.length).toBeGreaterThan(200); // a real brief, not an 80-byte stub

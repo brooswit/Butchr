@@ -104,3 +104,15 @@ export function generateStoryId(): string {
 export function generateProjectId(): string {
   return `pj-${hex4()}${hex4()}`;
 }
+
+/**
+ * Initiative IDs: a stable short slug carrying the `ini-` prefix (REVAMP-4 Phase 3 / P3e). A
+ * cross-repo project initiative fans one brief into MULTIPLE member-repo child stories, all
+ * grouped by ONE initiative id stamped on each child node's `initiative_id` column. UNLIKE a
+ * story/project id this is a GROUPING KEY, not a `tasks` row id — the distinct prefix keeps it
+ * unmistakable. Caller should verify uniqueness against existing `initiative_id` values.
+ * See stories.createCrossRepoInitiative.
+ */
+export function generateInitiativeId(): string {
+  return `ini-${hex4()}${hex4()}`;
+}

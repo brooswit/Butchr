@@ -636,6 +636,16 @@ ensureColumn("tasks", "gate_recovery_attempts", "INTEGER NOT NULL DEFAULT 0");
 // the dispatcher tick's auto-unblock pass.
 ensureColumn("tasks", "blocked_by", "TEXT");
 
+// `initiative_id` groups the per-repo child STORIES of a CROSS-REPO project initiative
+// (REVAMP-4 Phase 3 / P3e). A CEO's cross-repo initiative fans one brief into MULTIPLE
+// member repos — each landing an ordinary repo-scoped story NODE — and stamps every child
+// node's `initiative_id` with the SAME generated grouping key (an `ini-` id that is NOT
+// itself a row). NULL on every other row: single-repo P3d initiatives, ordinary stories,
+// and all leaves are untouched, so this is inert to every leaf-only loop. The completion
+// ROLLUP (stories.listProjectInitiatives / reportInitiativeCompletionIfDone) reads it to
+// decide the initiative is DONE when every child node has landed `done`.
+ensureColumn("tasks", "initiative_id", "TEXT");
+
 // CI GATE bookkeeping. When a task transitions to `review`, butchr asynchronously
 // runs build + tests in that task's worktree and records the outcome here so the
 // webapp can show a pass/fail badge in the review panel (before the diff):

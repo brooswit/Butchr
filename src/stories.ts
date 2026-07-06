@@ -11,7 +11,7 @@ import { ALL_STATUSES, db, ensureStoryWorkNode, getStoryRow, isTerminal, nowIso 
 import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
-import { generateStoryId } from "./ids.ts";
+import { generateInitiativeId, generateStoryId } from "./ids.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
 import { owningRepoOf } from "./work.ts";
@@ -28,6 +28,7 @@ import type { StoryAgentStatus } from "./workspace-agent.ts";
 import {
   HttpError,
   assertRepoIsProjectMember,
+  getProject,
   getWorkspace,
   listWorkspaces,
   workspaceBranchIsolation,
@@ -175,6 +176,19 @@ export function createProjectInitiative(
   repoId: unknown,
   brief: unknown,
 ): StoryRow {
+  return seedMemberRepoStory(projectId, repoId, brief);
+}
+
+/**
+ * The SHARED per-repo initiative primitive behind both the single-repo (createProjectInitiative)
+ * and CROSS-repo (createCrossRepoInitiative) surfaces: seed ONE story into a MEMBER repo of a
+ * project and reparent it onto its owning repo node so its escalation chain reaches the CEO
+ * (story→repo→project). BYTE-IDENTICAL to the original P3d createProjectInitiative body — the
+ * single-repo path's behavior is unchanged. `assertRepoIsProjectMember` enforces the repo is
+ * registered under THIS project (404/409). Does NOT stamp an initiative_id (single-repo
+ * initiatives are ungrouped); the cross-repo caller stamps the grouping key on the returned node.
+ */
+function seedMemberRepoStory(projectId: string, repoId: unknown, brief: unknown): StoryRow {
   const repo = assertRepoIsProjectMember(projectId, repoId);
   // Reuse the CTO's story machinery verbatim — repo.id is the repo node id == its directory id
   // (S0a), the workspace createStory anchors the node + its leader to.
@@ -184,6 +198,180 @@ export function createProjectInitiative(
   // top-level shape. Immediate responder is unchanged ({cto}); only the chain gains the {ceo} tier.
   db.query(`UPDATE tasks SET parent_id=? WHERE id=? AND work_kind='node'`).run(repo.id, story.id);
   return getStory(story.id)!;
+}
+
+/** One target of a CROSS-repo initiative: a member repo id + the brief its child story carries. */
+export type InitiativeTarget = { repo: unknown; brief: unknown };
+
+/** A created CROSS-repo initiative: the grouping id, its project, and every per-repo child story. */
+export type CrossRepoInitiative = {
+  initiative_id: string;
+  project_id: string;
+  children: StoryRow[];
+};
+
+/** Mint an initiative grouping key not already in use by any node (mirrors uniqueStoryId). */
+function uniqueInitiativeId(): string {
+  for (let i = 0; i < 100; i++) {
+    const id = generateInitiativeId();
+    if (!db.query(`SELECT 1 FROM tasks WHERE initiative_id=?`).get(id)) return id;
+  }
+  return `${generateInitiativeId()}-${generateInitiativeId().slice(4)}`;
+}
+
+/**
+ * CREATE a CROSS-REPO PROJECT INITIATIVE (REVAMP-4 Phase 3 / P3e) — the CEO's cross-repo delegation
+ * surface: fan ONE initiative into MULTIPLE member repos, each landing an ordinary repo-scoped story
+ * managed by that repo's own CTO/leader (reusing seedMemberRepoStory — the exact single-repo P3d
+ * machinery). All children share ONE generated `initiative_id` grouping key so the completion ROLLUP
+ * (listProjectInitiatives / reportInitiativeCompletionIfDone) can decide the initiative is DONE when
+ * every child lands. The fan-out is PARALLEL/UNSEQUENCED in P3e: all children start immediately.
+ * Cross-repo SEQUENCING (holding a repo-B child until a repo-A child merges) is NOT built here — it
+ * needs node-on-node blocked_by, a separate follow-up (see the P3e R5 verification finding).
+ *
+ * `targets` must be a non-empty array of `{repo, brief}`. EVERY target is VALIDATED FIRST (repo is a
+ * member of THIS project via assertRepoIsProjectMember — 404/409; brief non-blank — 400) BEFORE any
+ * story is created, so a bad target rejects the whole initiative atomically (no half-created stories
+ * with their leaders launched). Targets MAY repeat a repo (two stories in one repo, one initiative)
+ * and MAY span repos (the point of P3e); a NON-member repo is refused by the member guard.
+ */
+export function createCrossRepoInitiative(
+  projectId: string,
+  targets: unknown,
+): CrossRepoInitiative {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw new HttpError(400, "targets must be a non-empty array of { repo, brief }");
+  }
+  // VALIDATE-ALL-FIRST: member-guard every target repo + require a non-blank brief BEFORE creating
+  // any story, so an invalid target can't leave a partially-fanned initiative behind (createStory
+  // launches a leader as a side effect). assertRepoIsProjectMember enforces same-project scope.
+  const validated = (targets as InitiativeTarget[]).map((t) => {
+    const repo = assertRepoIsProjectMember(projectId, t?.repo);
+    if (typeof t?.brief !== "string" || !t.brief.trim()) {
+      throw new HttpError(400, "each initiative target requires a non-empty brief");
+    }
+    return { repoId: repo.id, brief: t.brief };
+  });
+  const initiativeId = uniqueInitiativeId();
+  const children: StoryRow[] = [];
+  for (const v of validated) {
+    const story = seedMemberRepoStory(projectId, v.repoId, v.brief);
+    // Stamp the shared grouping key on the child node so the rollup can find its siblings.
+    db.query(`UPDATE tasks SET initiative_id=? WHERE id=? AND work_kind='node'`).run(
+      initiativeId,
+      story.id,
+    );
+    children.push(getStory(story.id)!);
+  }
+  return { initiative_id: initiativeId, project_id: projectId, children };
+}
+
+// --- CROSS-REPO INITIATIVE COMPLETION ROLLUP (REVAMP-4 P3e) -------------------
+//
+// An initiative is DONE when EVERY per-repo child story (grouped by initiative_id) has landed
+// `done`. These reads power GET /api/projects/:id/initiatives (the CEO's authoritative pull view)
+// and the live completion push (reportInitiativeCompletionIfDone), MIRRORING story completion one
+// rung up. Membership is scoped to the project by joining each child node → its owning repo node
+// (parent_id) → the project (repo.parent_id === projectId), the same repo→project link
+// registerRepoUnderProject writes.
+
+/** One per-repo child of an initiative in the rollup view. */
+export type InitiativeChild = {
+  id: string;
+  workspace_id: string;
+  status: StoryStatus;
+  brief: string | null;
+};
+
+/** A cross-repo initiative's rolled-up state: its children (across repos) + whether ALL are done. */
+export type InitiativeView = {
+  initiative_id: string;
+  project_id: string;
+  done: boolean;
+  children: InitiativeChild[];
+};
+
+/** Group a flat, initiative-ordered child list into InitiativeViews (done = every child `done`). */
+function rollupInitiatives(
+  projectId: string,
+  rows: Array<InitiativeChild & { initiative_id: string }>,
+): InitiativeView[] {
+  const byId = new Map<string, InitiativeChild[]>();
+  for (const r of rows) {
+    const list = byId.get(r.initiative_id) ?? [];
+    list.push({ id: r.id, workspace_id: r.workspace_id, status: r.status, brief: r.brief });
+    byId.set(r.initiative_id, list);
+  }
+  return [...byId.entries()].map(([initiative_id, children]) => ({
+    initiative_id,
+    project_id: projectId,
+    done: children.length > 0 && children.every((c) => c.status === "done"),
+    children,
+  }));
+}
+
+/** The cross-repo initiatives under a project (grouped by initiative_id), each with its per-repo
+ *  children + rolled-up doneness. 404 if the project is gone. The CEO's authoritative rollup view
+ *  behind GET /api/projects/:id/initiatives. */
+export function listProjectInitiatives(projectId: string): InitiativeView[] {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  const rows = db
+    .query<InitiativeChild & { initiative_id: string }, [string]>(
+      `SELECT s.id, s.workspace_id, s.status, s.brief, s.initiative_id
+         FROM tasks s JOIN tasks r ON r.id = s.parent_id AND r.work_kind='repo'
+        WHERE s.work_kind='node' AND s.initiative_id IS NOT NULL AND r.parent_id = ?
+        ORDER BY s.initiative_id, s.created_at`,
+    )
+    .all(projectId);
+  return rollupInitiatives(projectId, rows);
+}
+
+/** ONE cross-repo initiative under a project by its grouping id (rolled-up), or null if there is no
+ *  such initiative in this project. 404 if the project is gone. */
+export function getProjectInitiative(
+  projectId: string,
+  initiativeId: string,
+): InitiativeView | null {
+  return listProjectInitiatives(projectId).find((i) => i.initiative_id === initiativeId) ?? null;
+}
+
+/**
+ * COMPLETION PUSH (REVAMP-4 P3e) — called right after a story NODE lands `done` (updateStory's
+ * immediate-done branch + landStory's landed branch). If the story belongs to a CROSS-repo
+ * initiative (initiative_id set) AND every sibling child has now landed `done`, publish
+ * `initiative.completed` up the PROJECT channel — mirroring story completion one rung up. A no-op
+ * for a story with no initiative_id (single-repo P3d initiatives + ordinary stories are untouched,
+ * so this is byte-identical for them) or when siblings are still in flight. Best-effort read-only.
+ */
+export function reportInitiativeCompletionIfDone(storyId: string): void {
+  const iid = db
+    .query<{ initiative_id: string | null }, [string]>(
+      `SELECT initiative_id FROM tasks WHERE id=? AND work_kind='node'`,
+    )
+    .get(storyId)?.initiative_id;
+  if (!iid) return;
+  const siblings = db
+    .query<{ status: string }, [string]>(
+      `SELECT status FROM tasks WHERE initiative_id=? AND work_kind='node'`,
+    )
+    .all(iid);
+  if (siblings.length === 0 || !siblings.every((s) => s.status === "done")) return;
+  // Resolve the owning project (the child's repo's parent) so the push is project-scoped.
+  const projectId = db
+    .query<{ project_id: string | null }, [string]>(
+      `SELECT r.parent_id AS project_id
+         FROM tasks s JOIN tasks r ON r.id = s.parent_id AND r.work_kind='repo'
+        WHERE s.id=?`,
+    )
+    .get(storyId)?.project_id;
+  if (!projectId) return;
+  publish({
+    type: "initiative.completed",
+    project_id: projectId,
+    initiative_id: iid,
+    detail: `initiative ${iid}: all ${siblings.length} member-repo stories landed`,
+  });
 }
 
 /**
@@ -356,6 +544,10 @@ export function updateStory(
       reason: "complete",
       detail: story.brief ?? null,
     });
+    // CROSS-REPO INITIATIVE ROLLUP (P3e): if this story is a member of a cross-repo initiative and
+    // it was the LAST child to land, push `initiative.completed` up the project channel. No-op for a
+    // story with no initiative_id (byte-identical for single-repo / ordinary stories).
+    reportInitiativeCompletionIfDone(id);
   }
   // Drive the STORY-LEADER agent off the REAL status change (Phase 3): `done`/`aborted` stop the
   // leader (desired-down + teardown); `open` (re)launches it. Thin hook into workspace-agent.ts.
@@ -570,6 +762,9 @@ export async function landStory(storyId: string): Promise<StoryRow | null> {
       // Unified-path teardown of the node's leader workspace row (mirrors the updateStory
       // terminal branch) — only a landed-and-green isolated story reaches `done` here.
       void teardownLeaderWorkspaceForWork(storyId).catch(() => {});
+      // CROSS-REPO INITIATIVE ROLLUP (P3e): an isolated initiative child landing on main may be the
+      // last sibling — push `initiative.completed` up the project channel (no-op if ungrouped).
+      reportInitiativeCompletionIfDone(storyId);
     }
     return getStory(storyId);
   }

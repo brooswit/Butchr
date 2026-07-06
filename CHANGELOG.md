@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **REVAMP-4 Phase 3 / P3e — cross-repo project initiatives + completion rollup.** A CEO can now fan
+  ONE initiative into MULTIPLE member repos in a single call: `POST /api/projects/:id/initiatives`
+  accepts `{ targets: [{ repo, brief }, …] }` (alongside the byte-identical single-repo
+  `{ repo, brief }` shape), landing one repo-scoped story per target — each managed by that repo's
+  own CTO/leader, exactly like a single-repo P3d initiative — grouped by a shared `initiative_id`
+  (a new additive, nullable `tasks` column, inert to every leaf-only loop). Targets are
+  member-guarded (a non-member repo is a 409) and validated ALL-FIRST so a bad target rejects the
+  initiative atomically (no half-created stories). New rollup reads `GET /api/projects/:id/initiatives`
+  and `GET /api/projects/:id/initiatives/:iid` report each initiative's per-repo children +
+  rolled-up doneness; the initiative is DONE when EVERY child story lands, at which point a new
+  additive `initiative.completed` event is published up the project channel. The fan-out is PARALLEL
+  (unsequenced): cross-repo SEQUENCING (holding one repo's child until another's merges) is a
+  deliberate follow-up — the R5 verification confirmed leaf-level `blocked_by` resolves GLOBALLY
+  across repos (proven by test), but node-on-node (story-to-story) `blocked_by` is not yet supported
+  (`setWorkBlockedBy` 409s on a node; a story launches its leader immediately with no dependency
+  gate), so it is split into its own focused change. The CEO brief documents the cross-repo surface
+  and is honest about the parallel-only boundary.
+
 ## [0.9.202] - 2026-07-06
 
 ### Added

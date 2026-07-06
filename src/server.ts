@@ -65,9 +65,15 @@ import pkg from "../package.json" with { type: "json" };
 // imports tasks.ts/stories.ts itself — the legacy /api/tasks + /api/stories routes that used
 // the rest were deleted in the step-6e cutover.
 import { assertCreationAllowed, attentionList, getTask, statsRollup, strandedTotals } from "./tasks.ts";
-// REVAMP-4 P3d: the CEO's project-level INITIATIVE surface — seed a story into a member repo,
-// delegating to that repo's CTO/leader (createStory machinery). See stories.createProjectInitiative.
-import { createProjectInitiative } from "./stories.ts";
+// REVAMP-4 P3d/P3e: the CEO's project-level INITIATIVE surface — seed a story into a member repo
+// (createProjectInitiative), or FAN one initiative into MULTIPLE member repos with a completion
+// rollup (createCrossRepoInitiative / listProjectInitiatives / getProjectInitiative). See stories.ts.
+import {
+  createCrossRepoInitiative,
+  createProjectInitiative,
+  getProjectInitiative,
+  listProjectInitiatives,
+} from "./stories.ts";
 import {
   abortWork,
   answerWork,
@@ -797,15 +803,34 @@ route("DELETE", "/api/projects/:id/repos/:repoId", async (_req, p) => {
   return json(unregisterRepoFromProject(p.id!, p.repoId!));
 });
 
-// Create a project-level INITIATIVE — the CEO seeds a STORY into a member repo, delegating to that
-// repo's CTO/leader (the CEO does NOT own the story's lifecycle). Body `{ repo, brief }`. Gated to
-// a repo REGISTERED under this project (409 otherwise); SINGLE repo per initiative (cross-repo is
-// P3e); a CEO cannot create a build leaf directly (authority rule). Maps to createProjectInitiative
-// (createStory into the member repo + reparent so it bubbles to the CEO). Returns the story node.
+// Create a project-level INITIATIVE — the CEO seeds work into its member repos, delegating to their
+// CTOs/leaders (the CEO does NOT own the stories' lifecycle). TWO shapes on one route:
+//   - SINGLE-repo (P3d, byte-identical): body `{ repo, brief }` → one story in that member repo.
+//   - CROSS-repo (P3e): body `{ targets: [{ repo, brief }, …] }` → one story PER target member repo,
+//     all grouped by a shared initiative id, fanned out in PARALLEL (unsequenced). Cross-repo
+//     SEQUENCING (blocked_by across repos) is a later follow-up. Returns { initiative_id, project_id,
+//     children }.
+// Both are member-guarded (409 for a non-member repo) and gated by the CEO→story authority rule.
 route("POST", "/api/projects/:id/initiatives", async (req, p) => {
   const body = await readJson(req);
   assertCreationAllowed("ceo", "story");
+  if (Array.isArray(body.targets)) {
+    return json(createCrossRepoInitiative(p.id!, body.targets), 201);
+  }
   return json(createProjectInitiative(p.id!, body.repo, body.brief), 201);
+});
+// The CROSS-repo initiatives under this project (grouped by initiative id), each with its per-repo
+// children + rolled-up doneness (done ⇔ every child story landed). The CEO's authoritative rollup
+// view. 404 if the project is gone.
+route("GET", "/api/projects/:id/initiatives", async (_req, p) => {
+  return json(listProjectInitiatives(p.id!));
+});
+// ONE cross-repo initiative under this project by its grouping id (rolled-up). 404 if the project is
+// gone; 404 if there is no such initiative in this project.
+route("GET", "/api/projects/:id/initiatives/:iid", async (_req, p) => {
+  const view = getProjectInitiative(p.id!, p.iid!);
+  if (!view) throw new HttpError(404, `initiative not found: ${p.iid}`);
+  return json(view);
 });
 
 // ---- WORK (UNIFIED SURFACE) -----------------------------------------------
