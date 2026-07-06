@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.199] - 2026-07-06
+
 ### Changed
 
 - **REVAMP-4 Phase 3 / P3a — extend the responder to the CEO rung (PROJECT-aware routing).** The
