@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Internal (REVAMP-1 Phase C S2): moved the live story-leader lifecycle hooks
+  (`onStoryCreated`, `onStoryStatusChanged`, `stopStoryAgent`, `storyAgentStatus`,
+  `stopWorkspaceStoryAgents`) plus their shared per-story guard state into
+  `src/workspace-agent.ts` (the unified supervisor — their natural home), repointing
+  `stories.ts`/`workspaces.ts` at it. The retired flag-OFF legacy launch branch of
+  `onStoryCreated` was dropped; the story-agent.ts supervisor is now inert glue awaiting
+  deletion. Behavior-preserving — no observable change to story create/status/merge/teardown.
+
 ## [0.9.188] - 2026-07-06
 
 ### Added

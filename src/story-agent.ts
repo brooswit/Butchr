@@ -41,18 +41,27 @@ import {
   type StoryAgentRow,
   type StoryRow,
   db,
-  ensureStoryWorkNode,
   getStoryAgentRow,
   getStoryRow,
   listStoryAgentRows,
   nowIso,
-  saveStoryAgentRow,
-  saveWorkspaceAgentRow,
 } from "./db.ts";
 import { ensureHerdrWorkspace } from "./workspaces.ts";
-// Runtime-only use inside onStoryCreated (never at module top-level), so the
-// workspaces↔workspace-agent↔story-agent ESM cycle resolves via live bindings.
-import { ensureWorkspaceAgentRow, startWorkspaceAgent } from "./workspace-agent.ts";
+// REVAMP-1 Phase C S2: the LIVE story lifecycle hooks + their shared per-story state now live
+// in workspace-agent.ts (their natural home). This inert-under-the-flag supervisor imports the
+// shared helpers back from there (call-time only, so the ESM cycle resolves via live bindings)
+// and re-exports the moved hooks (see the bottom of this file) so existing importers/tests that
+// reach them via this module keep resolving. workspace-agent.ts never imports THIS module.
+import {
+  type StoryAgentStatus,
+  guardedStory,
+  saveRow,
+  storyAgentName,
+  storyAgentStatus,
+  storyState,
+  stopStoryAgent,
+  _resetStoryLeaderStateForTest,
+} from "./workspace-agent.ts";
 import { buildScriptArgv, modelFlag } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
@@ -72,25 +81,6 @@ function mcpConfigFile(storyId: string): string {
 }
 function logFile(storyId: string): string {
   return join(storyDir(storyId), "agent.log");
-}
-
-/** The herdr agent name for a story's leader: `<prefix>-story-<storyId>`. The `story-`
- *  infix guarantees no collision with a workspace's CTO name (`<prefix>-<workspaceId>`). */
-export function storyAgentName(storyId: string): string {
-  return `${config.ctoAgentName}-story-${storyId}`;
-}
-
-/**
- * Resilient story_agent write: persist the patch ONLY while the story still exists, else
- * no-op. saveStoryAgentRow requires the FK target (the story row) to exist; but deleteStory
- * is SYNCHRONOUS and fires the leader's launch/teardown FIRE-AND-FORGET, so a story (and its
- * cascade-linked story_agent row) can vanish WHILE a launch/supervise/reconcile write is in
- * flight. Routing every story-agent write through here keeps those best-effort paths from
- * FK-crashing on that race. (The CTO mirror needs no such guard — unregisterWorkspace AWAITS
- * stopCtoAgent before the workspace DELETE.)
- */
-function saveRow(storyId: string, patch: Parameters<typeof saveStoryAgentRow>[1]): void {
-  if (getStoryRow(storyId)) saveStoryAgentRow(storyId, patch);
 }
 
 /** The repo-root path the story's leader runs in (its workspace's path), or null if gone. */
@@ -120,42 +110,10 @@ export function isStoryLeaderDesired(story: StoryRow | null): boolean {
   );
 }
 
-/** The view of a story's managed leader-agent state (mirrors CtoStatus). */
-export type StoryAgentStatus = {
-  /** The story this leader belongs to. */
-  storyId: string;
-  /** The leader is DESIRED up (the story is open — supervisor relaunches on death). */
-  desired: boolean;
-  /** A live herdr agent is registered under this story's leader name (async-probed).
-   *  This — NOT a stored pane — is the honest "is it attachable" signal; the attach
-   *  targets the agent BY NAME. */
-  running: boolean;
-  /** The Claude session id butchr resumes on every relaunch. */
-  sessionId: string | null;
-  /** When the current run was (re)launched. */
-  since: string | null;
-  /** Supervised relaunches since the last fresh start. */
-  restarts: number;
-  /** Most recent launch/supervision failure, if any. */
-  lastError: string | null;
-};
-
 // ---- supervision state (in-memory, PER STORY) -----------------------------
-// Mirrors cto-agent's wsStates, keyed by story_id.
-type StoryState = {
-  launchInFlight: Promise<StoryAgentStatus> | null;
-  consecutiveFailures: number;
-  nextRetryAt: number;
-};
-const storyStates = new Map<string, StoryState>();
-function storyState(storyId: string): StoryState {
-  let s = storyStates.get(storyId);
-  if (!s) {
-    s = { launchInFlight: null, consecutiveFailures: 0, nextRetryAt: 0 };
-    storyStates.set(storyId, s);
-  }
-  return s;
-}
+// The per-story launchInFlight/backoff map + its guard now live in workspace-agent.ts (shared
+// with the moved lifecycle hooks so a teardown and a supervised relaunch serialize against the
+// SAME state); imported above as storyState/guardedStory.
 
 let superviseTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -419,17 +377,6 @@ async function adoptStoryAgent(storyId: string): Promise<void> {
   console.log(`[butchr] adopted live story leader for ${storyId}`);
 }
 
-/** Serialize a lifecycle op for a story behind its launchInFlight (single-instance). */
-function guarded(storyId: string, fn: () => Promise<StoryAgentStatus>): Promise<StoryAgentStatus> {
-  const st = storyState(storyId);
-  if (st.launchInFlight) return st.launchInFlight;
-  const p = fn().finally(() => {
-    if (st.launchInFlight === p) st.launchInFlight = null;
-  });
-  st.launchInFlight = p;
-  return p;
-}
-
 /**
  * The 'live agent registered → adopt, else launch' decision, shared by startStoryAgent and
  * reconcileStoryAgent. Mirrors cto-agent.adoptOrLaunch EXACTLY (incl. the reboot-recovery
@@ -467,7 +414,7 @@ function ensureStoryStarted(
   fresh: boolean,
 ): Promise<{ action: "adopted" | "launched"; status: StoryAgentStatus }> {
   let action: "adopted" | "launched" = "launched";
-  const status = guarded(storyId, async () => {
+  const status = guardedStory(storyId, async () => {
     saveRow(storyId, { desired: 1 });
     const st = storyState(storyId);
     st.consecutiveFailures = 0;
@@ -491,36 +438,9 @@ export function launchStoryAgent(storyId: string, opts: { fresh?: boolean } = {}
 }
 
 /**
- * STOP a story's leader: mark it DESIRED-down (survives a restart) and tear down its
- * tab/pane + free its agent name. Idempotent. Best-effort teardown.
- *
- * ROBUST to the story vanishing mid-teardown: unlike the CTO path (where unregisterWorkspace
- * AWAITS stopCtoAgent before the workspace DELETE), deleteStory is SYNCHRONOUS and fires
- * this fire-and-forget, so the story (and its cascade-linked story_agent row) can disappear
- * while teardown is in flight. We therefore only write story_agent while the story still
- * exists — a save against a deleted story would violate the FK. This is the only divergence
- * from cto-agent.stopCtoAgent and is justified by deleteStory's sync signature.
- */
-export function stopStoryAgent(storyId: string): Promise<StoryAgentStatus> {
-  return guarded(storyId, async () => {
-    if (getStoryRow(storyId)) saveRow(storyId, { desired: 0 });
-    const st = storyState(storyId);
-    st.consecutiveFailures = 0;
-    st.nextRetryAt = 0;
-    const name = storyAgentName(storyId);
-    await harness.teardownTask(name).catch(() => {});
-    await harness.agentDeregister(name).catch(() => {});
-    if (getStoryRow(storyId)) {
-      saveRow(storyId, { started_at: null });
-    }
-    console.log(`[butchr] stopped story leader for ${storyId}`);
-    return storyAgentStatus(storyId);
-  });
-}
-
-/**
  * RESTART a story's leader. By default RESUMES the same session (a clean bounce); `fresh`
- * forces a brand-new session (last-resort context hygiene).
+ * forces a brand-new session (last-resort context hygiene). (stopStoryAgent is imported from
+ * workspace-agent.ts — REVAMP-1 Phase C S2.)
  */
 export async function restartStoryAgent(
   storyId: string,
@@ -528,21 +448,6 @@ export async function restartStoryAgent(
 ): Promise<StoryAgentStatus> {
   await stopStoryAgent(storyId);
   return launchStoryAgent(storyId, { fresh: opts.fresh });
-}
-
-/** A story's current managed leader-agent status (probes herdr for live registration). */
-export async function storyAgentStatus(storyId: string): Promise<StoryAgentStatus> {
-  const row = getStoryAgentRow(storyId);
-  const running = await harness.agentExists(storyAgentName(storyId)).catch(() => false);
-  return {
-    storyId,
-    desired: !!(row && row.desired === 1),
-    running,
-    sessionId: row?.session_id ?? null,
-    since: row?.started_at ?? null,
-    restarts: row?.restarts ?? 0,
-    lastError: row?.last_error ?? null,
-  };
 }
 
 /** Reconcile ONE story's leader toward its desired state (see reconcileStoryAgents). */
@@ -633,7 +538,7 @@ async function superviseStory(storyId: string): Promise<void> {
   console.warn(
     `[butchr] story leader for ${storyId} died — relaunching (attempt ${st.consecutiveFailures}/${config.ctoMaxRestarts}, resuming session)`,
   );
-  await guarded(storyId, async () => {
+  await guardedStory(storyId, async () => {
     const before = getStoryAgentRow(storyId)?.restarts ?? 0;
     await performLaunch(storyId, false); // resume the SAME session — never cold-start
     saveRow(storyId, { restarts: before + 1 });
@@ -663,103 +568,27 @@ export function stopStoryAgentSupervisor(): void {
   superviseTimer = null;
 }
 
-// ---- LIFECYCLE HOOKS (called from stories.ts / workspaces.ts) ---------------
-
-/**
- * Hook: a story was CREATED (lands `open`). Mark its leader DESIRED synchronously (so the
- * story_agent row exists immediately) then fire the launch best-effort (fire-and-forget —
- * never fails/blocks story creation; a launch error is recorded on the row).
- */
-export function onStoryCreated(storyId: string): void {
-  saveRow(storyId, { desired: 1 }); // legacy story_agent MIRROR (kept; unified row is authoritative)
-  if (config.unifiedWorkspaceEnabled) {
-    // UNIFIED CREATE-TIME ROW (story st-93384200, Bug 3): materialize this leader's unified
-    // `workspace` row NOW so the unified supervisor — the SOLE launcher when the flag is ON —
-    // launches AND relaunches-on-death it immediately, without waiting for a restart to re-seed
-    // it from the legacy table. We early-RETURN so the legacy DIRECT launch below does NOT also
-    // fire: exactly one launcher → no double-launch / herdr-name collision (the legacy story
-    // superviseTick already self-gates while unified is ON — see reconcileStoryAgents above).
-    const story = getStoryRow(storyId);
-    if (!story) {
-      // A story ALWAYS has a workspace_id; a missing row here is a real error, NOT a
-      // null-directory_id row to insert silently — such a row would be invisible to
-      // unregisterWorkspace's `directory_id=? AND kind IN ('cto','leader')` enumeration (story
-      // st-93384200 Bug 2), reintroducing the leak/race that fix closed. Record + bail.
-      saveRow(storyId, { last_error: `onStoryCreated: story ${storyId} not found — skipped unified ws-leader row` });
-      console.error(`[butchr] story leader create skipped for ${storyId}: story row not found`);
-      return;
-    }
-    // FK ANCHOR: the leader row's work_id references the story's MATERIALIZED Work node in
-    // `tasks` (workspace.work_id FK). A story member materializes it lazily (createTask /
-    // assignTaskToStory), but a story can be created with NO members yet — so materialize it NOW
-    // (idempotent INSERT OR IGNORE) or the ws-leader insert below FK-fails. Mirrors the boot
-    // migrateUnifyStoryParent anchor write (the leader migration assumes the node already exists).
-    ensureStoryWorkNode(storyId);
-    const wsId = `ws-leader-${storyId}`;
-    // directory_id = the story's workspace (NEVER null — guarded above), so the row is visible to
-    // unregister enumeration; work_id binds it to the story node; has_agent 0 on create.
-    ensureWorkspaceAgentRow(wsId, { kind: "leader", work_id: storyId, directory_id: story.workspace_id });
-    saveWorkspaceAgentRow(wsId, { desired: 1 });
-    // Optional low-latency kick: launch NOW instead of waiting for the next supervise tick.
-    // startWorkspaceAgent serializes through the SAME per-id launchInFlight guard the supervisor
-    // uses (workspace-agent.guarded), so a kick racing a concurrent supervise tick JOINS the
-    // in-flight launch rather than double-launching.
-    void startWorkspaceAgent(wsId).catch((e) => {
-      saveRow(storyId, { last_error: (e as Error).message });
-      console.error(`[butchr] story leader launch failed for ${storyId}: ${(e as Error).message}`);
-    });
-    return;
-  }
-  void launchStoryAgent(storyId).catch((e) => {
-    saveRow(storyId, { last_error: (e as Error).message });
-    console.error(`[butchr] story leader launch failed for ${storyId}: ${(e as Error).message}`);
-  });
-}
-
-/**
- * Hook: a story's STATUS changed. `open` → (re)desire + launch the leader; `done`/`aborted`
- * → stop it (desired-down + teardown). `merging`/`merge_blocked` KEEP the leader up (no-op:
- * the leader is mid-completion and must stay alive to re-attempt — CONTRIBUTING §11.7, Phase
- * E; isStoryLeaderDesired keeps it desired so the supervisor relaunches it if it dies).
- * Best-effort; never throws into the CRUD caller.
- */
-export function onStoryStatusChanged(storyId: string, status: string): void {
-  if (status === "open") {
-    onStoryCreated(storyId);
-  } else if (status === "done" || status === "aborted") {
-    void stopStoryAgent(storyId).catch((e) => {
-      console.error(`[butchr] story leader stop failed for ${storyId}: ${(e as Error).message}`);
-    });
-  }
-  // merging / merge_blocked: leave the leader up (no teardown, no relaunch) — it is already
-  // running and stays desired so it can re-attempt the land / fix a RED re-gate.
-}
-
-/**
- * Stop EVERY story leader belonging to a workspace (best-effort), called from
- * unregisterWorkspace BEFORE the workspace DELETE so no leader pane is orphaned. The
- * story_agent rows themselves cascade away with the stories/workspace DELETE. Mirrors how
- * unregisterWorkspace calls stopCtoAgent. Awaitable so the caller can sequence teardown.
- */
-export async function stopWorkspaceStoryAgents(workspaceId: string): Promise<void> {
-  const stories = db
-    .query<{ id: string }, [string]>(`SELECT id FROM tasks WHERE workspace_id=? AND work_kind='node'`)
-    .all(workspaceId);
-  for (const s of stories) {
-    await stopStoryAgent(s.id).catch(() => {});
-  }
-}
+// ---- LIFECYCLE HOOKS (moved to workspace-agent.ts — REVAMP-1 Phase C S2) -----
+// onStoryCreated / onStoryStatusChanged / stopStoryAgent / storyAgentStatus /
+// stopWorkspaceStoryAgents now LIVE in workspace-agent.ts (their natural home — it owns the
+// unified ensureWorkspaceAgentRow/startWorkspaceAgent/stopWorkspaceAgent). They are re-exported
+// below so existing importers/tests that reach them via this module keep resolving; new
+// importers (stories.ts, workspaces.ts) point directly at workspace-agent.ts.
+export {
+  onStoryCreated,
+  onStoryStatusChanged,
+  stopWorkspaceStoryAgents,
+} from "./workspace-agent.ts";
+export { storyAgentStatus, stopStoryAgent, storyAgentName };
+export type { StoryAgentStatus };
 
 /** Test-only: run a single supervision tick (one story) synchronously. */
 export async function _superviseTickForTest(storyId: string): Promise<void> {
   await superviseStory(storyId);
 }
 
-/** Test-only: reset the in-memory backoff state for a story between cases. */
+/** Test-only: reset the in-memory backoff state for a story between cases (delegates to the
+ *  shared story-leader state now hosted in workspace-agent.ts). */
 export function _resetSupervisionStateForTest(storyId?: string): void {
-  if (storyId) {
-    storyStates.delete(storyId);
-  } else {
-    storyStates.clear();
-  }
+  _resetStoryLeaderStateForTest(storyId);
 }

@@ -12,16 +12,18 @@ import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
 import { generateStoryId } from "./ids.ts";
+import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
+import type { TaskView } from "./tasks.ts";
+// REVAMP-1 Phase C S2: the story lifecycle hooks now live in workspace-agent.ts (moved out of
+// story-agent.ts alongside teardownLeaderWorkspaceForWork).
 import {
   onStoryCreated,
   onStoryStatusChanged,
   storyAgentStatus,
   stopStoryAgent,
-} from "./story-agent.ts";
-import type { StoryAgentStatus } from "./story-agent.ts";
-import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
-import type { TaskView } from "./tasks.ts";
-import { teardownLeaderWorkspaceForWork } from "./workspace-agent.ts";
+  teardownLeaderWorkspaceForWork,
+} from "./workspace-agent.ts";
+import type { StoryAgentStatus } from "./workspace-agent.ts";
 import { HttpError, getWorkspace, listWorkspaces, workspaceBranchIsolation } from "./workspaces.ts";
 
 // The three valid story statuses (mirrors the StoryStatus union in db.ts). Used to

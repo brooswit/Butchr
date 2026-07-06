@@ -17,8 +17,8 @@ import {
   isUnifiedWorkspaceEnabled,
   startWorkspaceAgent,
   stopWorkspaceAgent,
+  stopWorkspaceStoryAgents,
 } from "./workspace-agent.ts";
-import { stopWorkspaceStoryAgents } from "./story-agent.ts";
 // RUNTIME-ONLY circular import: tasks.ts statically imports workspaces.ts, and strandedItems is
 // a hoisted function CALLED only at request time (dashboard()), never at module-eval — so the
 // cycle resolves with no load-time TDZ (mirrors tasks.ts's work.ts/cto-agent.ts cycles).
