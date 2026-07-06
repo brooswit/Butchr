@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.204] - 2026-07-06
+
 ### Changed
 
 - **REVAMP-4 Phase 3 / P3f — HUMAN-AT-ROOT: the upward escalation cursor + dashboard
