@@ -556,16 +556,23 @@ export class AttentionBridge {
    *  - `target:'cto'` (`complete` / `merge-conflict` / `ask`) is owned by the WORKSPACE/CTO
    *    bridge: NOT a story bridge, and (when workspace-scoped) the event's workspace must match
    *    scopeDir. A story bridge never sees it.
-   *  - `target:'user'` (a CTO→user ask escalation) is owned by NO bridge — `target` only
-   *    parses to {story, cto}, so a user-escalated ask yields null here (the CTO + leader
-   *    feeds stay silent); the dashboard's SSE consumer surfaces it to the human.
+   *  - `target:'ceo'` (a CTO→CEO ask escalation — REVAMP-4 P3f) is owned ONLY by the PROJECT/CEO
+   *    bridge whose scopeProject === the event's `project_id` (the ask's owning project). The exact
+   *    project mirror of the story branch; a cto/story bridge never sees it.
+   *  - `target:'user'` (an ask escalated ABOVE the root container) is owned by NO bridge — `target`
+   *    parses to {story, cto, ceo}, so a user-escalated ask yields null here (every bridge stays
+   *    silent); the dashboard's SSE consumer surfaces it to the human.
    * Resilient: a missing/unknown field yields null rather than throwing.
    */
   private consumeStoryAttention(e: Record<string, unknown>): ChannelNotification | null {
     const storyId = typeof e.story_id === "string" && e.story_id ? e.story_id : null;
     const dirId = typeof e.workspace_id === "string" ? e.workspace_id : "";
-    // `target` parses to story|cto ONLY — a `user`-escalated ask is intentionally dropped.
-    const target = e.target === "story" || e.target === "cto" ? e.target : null;
+    // The owning PROJECT node of a `ceo`-target ask (REVAMP-4 P3f) — routes to the matching project
+    // bridge. null for story/cto/user targets (byte-identical for the current, project-less tree).
+    const projectId = typeof e.project_id === "string" && e.project_id ? e.project_id : null;
+    // `target` parses to story|cto|ceo — a `user`-escalated ask is intentionally dropped.
+    const target =
+      e.target === "story" || e.target === "cto" || e.target === "ceo" ? e.target : null;
     const reason =
       e.reason === "completion-review" ||
       e.reason === "complete" ||
@@ -582,11 +589,12 @@ export class AttentionBridge {
     // OWNERSHIP — does this bridge's scope own the event?
     if (target === "story") {
       if (!this.scopeStory || this.scopeStory !== storyId) return null;
+    } else if (target === "ceo") {
+      // REVAMP-4 P3f: the CEO/project feed — owned ONLY by the project bridge whose scopeProject
+      // matches the ask's owning project. A story-leader OR workspace/CTO bridge never sees it.
+      if (!this.scopeProject || this.scopeProject !== projectId) return null;
     } else {
       // target === 'cto' → the WORKSPACE/CTO feed only (never a story-leader OR project/CEO bridge).
-      // REVAMP-4 P3b: a project-scoped (CEO) bridge is excluded here too, so it owns NO story.attention
-      // yet — the CEO story-ask target (a `target:'ceo'` rung) is deferred to P3d/P3e; today `target`
-      // parses only to story|cto, so a project bridge simply drops every story.attention event.
       if (this.scopeStory || this.scopeProject) return null;
       if (this.scopeDir && dirId !== this.scopeDir) return null;
     }
@@ -932,6 +940,9 @@ export function leaderStorySurfaces(node: Record<string, unknown>): Array<Record
  *     `ask-answered` is OUT OF SCOPE — its answer text is unrecoverable from REST.
  *   - WORKSPACE/CTO bridge (scopeDir): the outstanding `ask` (a node with pending_ask != null AND
  *     ask_responder == 'cto'). `complete` / `merge-conflict` are transient → OUT OF SCOPE.
+ *   - PROJECT/CEO bridge (scopeProject — REVAMP-4 P3f): the outstanding `ask` escalated to THIS
+ *     project's CEO (a node with pending_ask != null AND ask_responder == 'ceo' AND its
+ *     `ask_project_id` == scopeProject). The project mirror of the CTO ask scan one rung up.
  *
  * DB-free: it reads the SAME REST surface the dashboard does (GET /api/work + GET /api/work/:id),
  * scoped to this bridge's workspace/story (the story-container derivation reuses the already-fetched
@@ -945,6 +956,7 @@ export async function resyncAttention(args: {
   emit: (n: ChannelNotification) => void;
   scopeDir?: string;
   scopeStory?: string;
+  scopeProject?: string;
   fetchImpl?: typeof fetch;
   log?: (msg: string) => void;
 }): Promise<void> {
@@ -953,6 +965,7 @@ export async function resyncAttention(args: {
   const log = args.log ?? (() => {});
   const scopeDir = (args.scopeDir ?? "").trim();
   const scopeStory = (args.scopeStory ?? "").trim();
+  const scopeProject = (args.scopeProject ?? "").trim();
   try {
     // Scope the list to this bridge's workspace when set (mirrors the SSE scoping); a
     // story-leader bridge also has its workspace set, then narrows to its story below.
@@ -1015,6 +1028,33 @@ export async function resyncAttention(args: {
         // LEADER bridge: re-derive THIS story's outstanding target:'story' surfaces from its node.
         const node = nodes.find((n) => n.id === scopeStory);
         if (node) for (const ev of leaderStorySurfaces(node)) feed(ev);
+      } else if (scopeProject) {
+        // PROJECT/CEO bridge (REVAMP-4 P3f): re-derive each outstanding CEO-owned `ask` (a node
+        // still holding a pending_ask escalated to the CEO of THIS project). The ask's owning
+        // project is the node's `ask_project_id` (the {ceo} rung of its container ladder — the
+        // SAME derivation escalateStoryAsk publishes with) — NOT the node's own `project_id`
+        // (a story node's immediate parent is a REPO, so that is null). detail/marker = pending_ask.
+        for (const node of nodes) {
+          const sid = typeof node.id === "string" ? node.id : "";
+          const pendingAsk = typeof node.pending_ask === "string" ? node.pending_ask : null;
+          const askResponder =
+            typeof node.ask_responder === "string" ? node.ask_responder : null;
+          const askProject =
+            typeof node.ask_project_id === "string" ? node.ask_project_id : null;
+          if (!sid || !pendingAsk || askResponder !== "ceo" || askProject !== scopeProject) {
+            continue;
+          }
+          feed({
+            type: "story.attention",
+            story_id: sid,
+            workspace_id: typeof node.workspace_id === "string" ? node.workspace_id : "",
+            target: "ceo",
+            project_id: askProject,
+            reason: "ask",
+            detail: pendingAsk,
+            marker: pendingAsk,
+          });
+        }
       } else {
         // WORKSPACE/CTO bridge: re-derive each outstanding CTO-owned `ask` (a node still holding a
         // pending_ask owned by the CTO). detail/marker = the durable pending_ask text.
@@ -1195,6 +1235,7 @@ export async function main(): Promise<void> {
             bridge,
             scopeDir,
             scopeStory,
+            scopeProject,
             emit: (n) => writeMessage(channelNotificationMessage(n)),
             log: elog,
           }),

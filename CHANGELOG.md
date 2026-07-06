@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **REVAMP-4 Phase 3 / P3f — HUMAN-AT-ROOT: the upward escalation cursor + dashboard
+  container-attribution.** Escalating a story-level ask now WALKS the container ladder
+  (`work.workResponderChain`) one rung at a time instead of a single hardcoded cto→user hop:
+  `escalateStoryAsk` treats `ask_responder` as a cursor — it matches the current rung by kind and
+  advances to the next (`'cto' → 'ceo' → 'user'`, TEXT, no schema change), so a CTO escalating an
+  ask in a repo registered UNDER a project now reaches that project's CEO before the user, and the
+  terminal `{user}` (a human) is reached only ABOVE the root container. The `needs_user_input`
+  human-only short-circuit is UNCHANGED (it still jumps straight to the user from any depth). The
+  channel routes a `ceo`-target ask to its owning project/CEO feed (`consumeStoryAttention` gains the
+  `ceo` target, owned only by the matching `scopeProject` bridge; a `user`-target still surfaces to
+  the dashboard), and the reconnect resync re-derives an outstanding CEO-owned ask to the correct
+  project bridge (a new `ask_project_id` field on the node work view — the `{ceo}` rung of its
+  ladder, the SAME derivation the live escalate publishes with — since a story node's own
+  `project_id` is null). The dashboard attributes a project-direct item to the CEO operator surface:
+  `operatorActionableItems` gains the project-scoped `ceo` ownership branch (the analog of its
+  story/cto branches), `AttentionItem` gains `project_id`, and the `cto` branch excludes a
+  project-direct item (a `project_id == null` guard, the analog of its story-member exclusion).
+  BYTE-IDENTICAL for the current, project-less tree — with no repo under a project the ladder is
+  `[{cto},{user}]`, so an ask still escalates cto→user with a byte-for-byte identical `target:user`
+  event and the CTO dashboard is unchanged (proven by test). Escalating a leaf/top-level task's own
+  feedback across multiple ladder rungs (the boolean `escalated_to_user` → cursor conversion) is a
+  deliberate follow-up, sequenced with the node-on-node `blocked_by` cross-repo sequencing item.
+
 ## [0.9.203] - 2026-07-06
 
 ### Added

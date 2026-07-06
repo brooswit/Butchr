@@ -950,6 +950,12 @@ export type AttentionItem = {
    * way channel.routeOwns does (a leader owns its story's members; the CTO owns non-story tasks).
    * Existing consumers ignore it. */
   story_id: string | null;
+  /** The owning PROJECT (projectParentOf), or null for a non-project item. REVAMP-4 P3f: the
+   * project analog of `story_id` — lets operatorActionableItems partition the feed by project
+   * membership the SAME way it does by story (the CEO owns its project's direct items; a
+   * project-direct item is excluded from the CTO feed). null for every current shape (no project
+   * nodes), so existing consumers are unaffected. */
+  project_id: string | null;
   workspace_label: string | null;
   status: TaskStatus;
   kind: TaskKind;
@@ -1039,8 +1045,10 @@ export function attentionList(): AttentionItem[] {
       // REVAMP-4 P3b: a PROJECT parent likewise re-collapses to null, SYMMETRICALLY with taskView, so
       // the "story_id ⇒ story-member-only" invariant holds in the attention path too (byte-identical —
       // no project nodes in prod). The ceo-item owner is NOT surfaced on AttentionItem yet (deferred
-      // to P3f with the operatorActionableItems CEO branch); today a ceo item is simply un-owned here.
+      // REVAMP-4 P3f: a ceo item's owning project is now surfaced on `project_id` below so the
+      // operatorActionableItems CEO branch can own it (and the CTO branch can exclude it).
       story_id: isTopLevelWork(row.id) || projectParentOf(row.id) ? null : row.parent_id,
+      project_id: projectParentOf(row.id),
       workspace_label: getWorkspace(row.workspace_id)?.label ?? null,
       status: row.status,
       kind: row.kind,
@@ -1089,23 +1097,35 @@ export function operatorActionableItems(row: WorkspaceAgentRow): AttentionItem[]
     return attentionList().filter(
       (i) =>
         i.story_id == null &&
+        // REVAMP-4 P3f: exclude a project-direct item (the project analog of the `story_id == null`
+        // story-member exclusion) — a FAILED/aborted direct-project-child nulls story_id, so WITHOUT
+        // this guard it would leak into the CTO feed. Byte-identical in prod (no project nodes →
+        // project_id always null → the guard is always true → CTO decision unchanged).
+        i.project_id == null &&
         (!dir || i.workspace_id === dir) &&
         (i.pending_responder === "cto" ||
           i.status === "failed" ||
           i.status === "aborted"),
     );
   }
-  // REVAMP-4 P3a: a 'ceo' workspace row (SUPERVISOR_KINDS.ceo) falls through to the trailing `[]`
-  // — DORMANT. A ceo is never launched in prod (enabled=const false) so operatorActionableItems is
-  // never called with a ceo row, and pending_responder can never be 'ceo' (no project nodes), so a
-  // 'ceo' item matches NEITHER branch above — it is simply un-owned/dropped here today.
-  // TODO(REVAMP-4 P3f — human-at-root + dashboard container-attribution): add the project-scoped
-  // CEO ownership branch (a `row.kind === "ceo"` case filtering pending_responder==='ceo' within a
-  // project scope, mirroring the channel.routeOwns project branch landed in P3b) AND surface
-  // `project_id` on AttentionItem. When that lands, the `cto` branch above ALSO needs a
-  // `&& i.project_id == null` guard (the project analog of its `i.story_id == null` story-member
-  // exclusion) so a FAILED/aborted direct-project-child — story_id now null after the P3b
-  // tightening — cannot leak into the CTO operator feed. Inert until project nodes exist.
+  // REVAMP-4 P3f: the PROJECT-scoped CEO ownership branch — the exact project mirror of the LEADER
+  // (story) and CTO branches one rung up. A ceo workspace's `work_id` IS the project NODE it
+  // supervises (SUPERVISOR_KINDS.ceo — mirroring a leader's story work_id). It owns its OWN
+  // project's DIRECT items whose feedback is terminal at the CEO (responder 'ceo') OR that have
+  // FAILED/aborted (a failure has no responder, but the CEO still owns its project-direct failures).
+  // DORMANT in prod: no ceo boots (isCeoEnabled default off) and no project nodes exist, so
+  // pending_responder can never be 'ceo' and project_id is always null — this branch owns nothing.
+  if (row.kind === "ceo") {
+    const project = row.work_id;
+    if (!project) return [];
+    return attentionList().filter(
+      (i) =>
+        i.project_id === project &&
+        (i.pending_responder === "ceo" ||
+          i.status === "failed" ||
+          i.status === "aborted"),
+    );
+  }
   return [];
 }
 

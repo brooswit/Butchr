@@ -14,7 +14,7 @@ import * as git from "./git.ts";
 import { generateInitiativeId, generateStoryId } from "./ids.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import type { TaskView } from "./tasks.ts";
-import { owningRepoOf } from "./work.ts";
+import { owningRepoOf, workResponderChain } from "./work.ts";
 // REVAMP-1 Phase C: the story lifecycle hooks live in workspace-agent.ts (moved there in S2
 // alongside teardownLeaderWorkspaceForWork; the legacy story-agent.ts launcher was deleted in S5).
 import {
@@ -616,36 +616,62 @@ export function openStoryAsk(id: string, question: unknown): StoryRow {
 }
 
 /**
- * ESCALATE the open ask (CTO → user) — the single story-level cto→user boundary. 404 if
- * the story is gone; 409 if there is no open ask OR it is not currently the CTO's
- * (`ask_responder` !== 'cto', so a re-escalation of a user-owned ask is rejected). Sets
- * `ask_responder`='user' and RE-PUBLISHES the ask toward the user
- * (`story.attention { target:user, reason:ask, detail:question }`, §4b). NO channel
- * bridge owns `target:user` (the CTO + leader feeds drop it); the dashboard's SSE
- * consumer surfaces it to the human. Returns the refreshed StoryRow.
+ * ESCALATE the open ask UP one rung of the container ladder (REVAMP-4 P3f, story st-1a82a2e1).
+ * 404 if the story is gone; 409 if there is no open ask OR its cursor is already at the TERMINAL
+ * `user` rung (nothing left to escalate — the generalization of the old `ask_responder !== 'cto'`
+ * reject).
+ *
+ * THE CURSOR (P3f): `ask_responder` holds the story-ask's CURRENT responder KIND — the exact rung
+ * of `workResponderChain(nodeId)` this ask sits on. Escalation ADVANCES it to the NEXT rung: match
+ * the current rung by `.kind`, take `chain[idx+1]`, and persist that rung's kind (`'cto'|'ceo'|
+ * 'user'`, TEXT — no schema change). A repo NOT under a project has the ladder `[{cto},{user}]`, so
+ * `'cto'` advances straight to `'user'` — BYTE-IDENTICAL to the old single cto→user hop. A repo
+ * registered UNDER a project has `[{cto},{ceo,project_id},{user}]`, so `'cto'`→`'ceo'` (carrying the
+ * project id, so consumeStoryAttention can route it to the CEO/project feed) and a second escalate
+ * `'ceo'`→`'user'`. The terminal `{user}` — reached only ABOVE the root container — surfaces to the
+ * dashboard's SSE consumer (no channel bridge owns `target:'user'`); a `'ceo'` rung routes to the
+ * project/CEO feed; `needs_user_input` is a SEPARATE human-only short-circuit and is untouched here.
+ *
+ * FORWARD-NOTE (cursor invariant): kind-matching the current rung assumes each container KIND
+ * appears AT MOST ONCE in the chain — true for today's single project tier (exactly one `{ceo}`
+ * rung). If a nested project tier (an org/portfolio container above projects) is ever added, two
+ * `{ceo}`-kind rungs could coexist and the cursor must key on the responding node/project id, NOT
+ * the bare kind. See work.containerLadderChain.
  */
 export function escalateStoryAsk(id: string): StoryRow {
   const story = getStory(id);
   if (!story) throw new HttpError(404, `story not found: ${id}`);
-  if (story.pending_ask === null || story.ask_responder !== "cto") {
-    throw new HttpError(409, "no open CTO-owned ask to escalate");
+  if (story.pending_ask === null) {
+    throw new HttpError(409, "no open ask to escalate");
   }
-  // TODO (REVAMP-4, deferred to P3f — story st-1a82a2e1): this is a SINGLE-HOP cursor (cto→user).
-  // Once a repo is registered under a PROJECT (P3d), a CTO escalating an ask in that repo SHOULD
-  // advance to the CEO (the project's supervisor) BEFORE the user — i.e. walk the container ladder
-  // (work.workResponderChain) rather than jump straight to `user`. Generalizing this cursor is a
-  // SEPARATE piece; P3d deliberately does NOT touch it, so escalateStoryAsk stays byte-identical
-  // (proven by a non-project-repo cto→user test) and the CEO rung is opt-in via the escalation
-  // CHAIN, not this runtime cursor.
+  // The static escalation PATH for this node's feedback (leaf/node → repo(cto) → project(ceo) →
+  // … → user). The current cursor is the rung whose kind == ask_responder; advance to the next.
+  const chain = workResponderChain(id);
+  const idx = chain.findIndex((r) => r.kind === story.ask_responder);
+  const next = idx >= 0 ? chain[idx + 1] : undefined;
+  if (!next) {
+    // No successor rung: the ask is already at the terminal `user` (or an unknown cursor value) —
+    // nothing left to escalate. Generalizes the old CTO-owned-only guard to the whole ladder.
+    throw new HttpError(409, "no further rung to escalate this ask to");
+  }
   // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
-  db.query(`UPDATE tasks SET ask_responder='user' WHERE id=? AND work_kind='node'`).run(id);
+  db.query(`UPDATE tasks SET ask_responder=? WHERE id=? AND work_kind='node'`).run(next.kind, id);
   publish({
     type: "story.attention",
     story_id: id,
     workspace_id: story.workspace_id,
-    target: "user",
+    target: next.kind,
     reason: "ask",
     detail: story.pending_ask,
+    // A `ceo` rung carries (a) the owning PROJECT node id so the project/CEO bridge can route it
+    // and (b) the DE-DUP MARKER (the durable pending_ask text — the SAME the resync re-derivation
+    // stamps) so a reconnect that re-fires this ask is suppressed once it has been delivered live.
+    // Both use the SAME derivation resyncAttention consumes. The terminal `user` rung is owned by NO
+    // bridge (dropped in consumeStoryAttention before de-dup) and is never re-synced, so it needs
+    // neither — omitting them keeps the user-target event BYTE-IDENTICAL to the pre-P3f single hop.
+    ...(next.kind === "ceo"
+      ? { project_id: next.project_id, marker: story.pending_ask }
+      : {}),
   });
   return getStory(id)!;
 }
@@ -1039,6 +1065,14 @@ export function storyCounts(storyId: string): Record<string, number> {
 export type StoryView = StoryRow & {
   counts: Record<string, number>;
   leader: StoryAgentStatus;
+  /** The PROJECT node this story's ask escalates to — the `{ceo}` rung of its container ladder
+   *  (work.workResponderChain), or null when the story's repo is NOT under a project. REVAMP-4 P3f:
+   *  the SAME derivation escalateStoryAsk uses for a `ceo`-rung publish, exposed on the REST view so
+   *  the reconnect resync (channel.resyncAttention) can route a `ceo`-owned ask to its project/CEO
+   *  bridge — a story NODE's own `project_id` (its immediate parent is a REPO) is null, so this
+   *  ancestor-project field, NOT projectParentOf, is the correct routing key. null for the current
+   *  project-less tree (byte-identical — no consumer needs it there). */
+  ask_project_id: string | null;
 };
 
 export async function storyView(storyId: string): Promise<StoryView | null> {
@@ -1048,7 +1082,21 @@ export async function storyView(storyId: string): Promise<StoryView | null> {
     ...story,
     counts: storyCounts(storyId),
     leader: await storyAgentStatus(storyId),
+    ask_project_id: askOwningProject(storyId),
   };
+}
+
+/**
+ * The PROJECT node a story-ask escalates to — the `{kind:'ceo'}.project_id` rung of this node's
+ * container ladder (work.workResponderChain), or null when there is none (the repo is not under a
+ * project). This is the SINGLE derivation both the live escalate publish (escalateStoryAsk, which
+ * reads it straight off the chain rung it advances to) and the reconnect resync (via the
+ * `ask_project_id` view field) agree on, so a `ceo`-owned ask routes to the SAME project on both
+ * paths. Kind-matching is unambiguous while there is at most one project tier (one `{ceo}` rung).
+ */
+function askOwningProject(nodeId: string): string | null {
+  const ceo = workResponderChain(nodeId).find((r) => r.kind === "ceo");
+  return ceo && ceo.kind === "ceo" ? ceo.project_id : null;
 }
 
 /** A workspace's stories as enriched StoryViews (newest-first; mirrors listStories' order).

@@ -581,14 +581,18 @@ describe("story-level ASK: open / escalate / answer (responder-redesign §4b)", 
 
   test("escalateStoryAsk 409s when there is no open ask", () => {
     const story = storiesMod.createStory(WS_A, "Ask story no-ask-escalate");
-    expect(() => storiesMod.escalateStoryAsk(story.id)).toThrow(/no open CTO-owned ask/);
+    expect(() => storiesMod.escalateStoryAsk(story.id)).toThrow(/no open ask to escalate/);
   });
 
-  test("escalateStoryAsk 409s when the ask is already user-owned (single boundary)", () => {
+  test("escalateStoryAsk 409s once the cursor reaches the terminal user rung (no project)", () => {
+    // REVAMP-4 P3f: a repo NOT under a project has the ladder [{cto},{user}], so 'cto'→'user' is the
+    // last hop — a further escalate finds no successor rung and 409s (generalization of the old
+    // CTO-owned-only guard). Byte-identical to the pre-P3f single cto→user boundary.
     const story = storiesMod.createStory(WS_A, "Ask story re-escalate");
     storiesMod.openStoryAsk(story.id, "q");
     storiesMod.escalateStoryAsk(story.id);
-    expect(() => storiesMod.escalateStoryAsk(story.id)).toThrow(/no open CTO-owned ask/);
+    expect(storiesMod.getStory(story.id)!.ask_responder).toBe("user");
+    expect(() => storiesMod.escalateStoryAsk(story.id)).toThrow(/no further rung to escalate/);
   });
 
   test("answerStoryAsk 409s when there is no open ask, 400s on a blank answer", () => {

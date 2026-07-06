@@ -885,6 +885,102 @@ describe("channel: story-level ASK routing (responder-redesign §4b)", () => {
   });
 });
 
+describe("channel: story-ask CEO escalation routing + resync (REVAMP-4 P3f)", () => {
+  // A story-ask escalated ONE rung above the CTO — to the CEO of the story's owning project.
+  // escalateStoryAsk stamps `target:'ceo'` + the owning `project_id` (+ a de-dup marker) so ONLY the
+  // matching project bridge owns it; a `user`-target (the terminal, one rung higher) is still owned
+  // by no bridge. Bridges: pr-1's CEO feed, pr-2's CEO feed, the CTO feed, a leader feed, global.
+  const projectBridge = (p: string) => new AttentionBridge("dir-1", false, "", p);
+  const ctoBridge = () => new AttentionBridge("dir-1");
+  const leaderBridge = () => new AttentionBridge("dir-1", false, "st-1");
+  const globalBridge = () => new AttentionBridge();
+  const ceoAsk = {
+    type: "story.attention",
+    story_id: "st-1",
+    workspace_id: "dir-1",
+    target: "ceo",
+    project_id: "pr-1",
+    reason: "ask",
+    detail: "Cross-repo scope call?",
+    marker: "Cross-repo scope call?",
+  };
+
+  test("a `ceo` ask routes to its OWN project bridge (state story_ask), not others", () => {
+    const note = projectBridge("pr-1").consume(ceoAsk);
+    expect(note).not.toBeNull();
+    expect(note!.meta).toEqual({ story_id: "st-1", workspace: "dir-1", state: "story_ask" });
+    expect(note!.content).toContain("story ask awaiting an answer");
+    expect(note!.content).toContain("Cross-repo scope call?");
+    // Another project's CEO feed, the CTO feed, a leader feed, and the global feed all DROP it.
+    expect(projectBridge("pr-2").consume(ceoAsk)).toBeNull();
+    expect(ctoBridge().consume(ceoAsk)).toBeNull();
+    expect(leaderBridge().consume(ceoAsk)).toBeNull();
+    expect(globalBridge().consume(ceoAsk)).toBeNull();
+  });
+
+  test("a `ceo` ask with NO project_id is owned by no bridge (can't match a scope)", () => {
+    const { project_id, ...noProj } = ceoAsk;
+    expect(projectBridge("pr-1").consume(noProj)).toBeNull();
+  });
+
+  test("BYTE-IDENTICAL: a `user`-target ask (terminal rung) is still dropped by every bridge", () => {
+    const userAsk = { ...ceoAsk, target: "user", project_id: undefined };
+    expect(projectBridge("pr-1").consume(userAsk)).toBeNull();
+    expect(ctoBridge().consume(userAsk)).toBeNull();
+    expect(leaderBridge().consume(userAsk)).toBeNull();
+    expect(globalBridge().consume(userAsk)).toBeNull();
+  });
+
+  test("resyncAttention re-derives a ceo-owned ask to the CORRECT project bridge after a reconnect", async () => {
+    // A node still holding a pending_ask escalated to the CEO of pr-1. Its owning project is the
+    // node's `ask_project_id` ({ceo} rung of its ladder) — NOT its own project_id (a story node's
+    // immediate parent is a repo). The resync re-derives it into a target:'ceo' event for pr-1.
+    const node = {
+      id: "st-1",
+      work_kind: "node",
+      workspace_id: "dir-1",
+      status: "open",
+      pending_ask: "Cross-repo scope call?",
+      ask_responder: "ceo",
+      ask_project_id: "pr-1",
+      project_id: null,
+    };
+    const { f } = makeFakeFetch([node], {});
+
+    const pr1: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://x",
+      bridge: projectBridge("pr-1"),
+      emit: (n) => pr1.push(n),
+      scopeProject: "pr-1",
+      fetchImpl: f,
+    });
+    expect(pr1).toHaveLength(1);
+    expect(pr1[0]!.meta).toEqual({ story_id: "st-1", workspace: "dir-1", state: "story_ask" });
+
+    // The WRONG project's bridge re-derives nothing (ask_project_id !== scopeProject)...
+    const pr2: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://x",
+      bridge: projectBridge("pr-2"),
+      emit: (n) => pr2.push(n),
+      scopeProject: "pr-2",
+      fetchImpl: makeFakeFetch([node], {}).f,
+    });
+    expect(pr2).toHaveLength(0);
+
+    // ...and a CTO bridge skips a ceo-owned ask entirely (its scan re-derives only ask_responder=cto).
+    const cto: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://x",
+      bridge: ctoBridge(),
+      emit: (n) => cto.push(n),
+      fetchImpl: makeFakeFetch([node], {}).f,
+    });
+    expect(cto).toHaveLength(0);
+  });
+});
+
 describe("channel: one-way capability (no tools)", () => {
   test("initialize advertises claude/channel and NO tools", () => {
     const res = channelInitializeResult("2025-06-18");
