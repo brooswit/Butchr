@@ -1107,11 +1107,6 @@ export function migrateReadyRunningSplit(): void {
 // `story_id IN (SELECT id FROM tasks)` guard. Runs AFTER ensureForwardColumns (parent_id +
 // the defaulted NOT NULL columns must exist) and the status folds.
 export function migrateUnifyStoryParent(): void {
-  // POST-DROP GUARD (REVAMP Phase B.5b, story st-78a8b4e7): once migrateDropStoriesMirror has
-  // removed the `stories` table, its members' parent_id is already fully backfilled and every
-  // story IS its node — so this backfill is dead and would throw on the missing table. Skip it,
-  // keeping the whole boot pass green on a post-drop db.
-  if (!tableExists(db, "stories")) return;
   // (1) Materialize each story as a Work node — id = story id, the FK anchor for members'
   // parent_id. id/workspace_id/created_at plus the story's REAL status (the B.3 dual-write
   // shadow — NOT the old frozen `merged` anchor) and the Phase B.1 node fields (work_kind='node'
@@ -1158,10 +1153,6 @@ export function migrateUnifyStoryParent(): void {
 // source of truth, so re-running re-copies identical values (work_kind='node' + the live status
 // for every id that IS a story). Correlated subqueries mirror migrateUnifyStoryParent's style.
 export function migrateBackfillNodeFold(): void {
-  // POST-DROP GUARD (REVAMP Phase B.5b, story st-78a8b4e7): the node fold is already applied and
-  // there is no `stories` table to re-copy from once migrateDropStoriesMirror has run — skip so
-  // the boot pass stays green on a post-drop db.
-  if (!tableExists(db, "stories")) return;
   db.exec(
     `UPDATE tasks SET
        work_kind='node',
@@ -1175,20 +1166,23 @@ export function migrateBackfillNodeFold(): void {
 }
 
 /**
- * DEFENSIVE NO-OP existence belt for a story's Work NODE (the FK anchor a member's parent_id
- * points at). Kept — with its call sites intact — so the runtime story-membership writers
- * (createTask / assignTaskToStory / onStoryCreated) read the same as before.
- *
- * REVAMP Phase B.5b (story st-78a8b4e7): with the `stories` table DROPPED, the node's own
- * `tasks` row IS the authoritative story record and is materialized DIRECTLY at createStory
- * (stories.createStory), no longer projected lazily from `stories`. Every runtime caller
- * operates on a story that already exists (getStory 404s otherwise → its node is present), so
- * this is a no-op. It NEVER reads `stories` (which is gone) and NEVER throws — exactly the
- * FK-anchor safety it always provided, now that the node is created up front.
+ * Idempotently materialize the Work NODE for a story (the FK anchor a member's parent_id
+ * points at) — the single-story form of migrateUnifyStoryParent's bulk INSERT, used by the
+ * runtime story-membership writers (createTask / assignTaskToStory) so a member created
+ * AFTER the boot migration still gets an FK-valid parent_id. INSERT OR IGNORE → a no-op when
+ * the node already exists or the story is gone. The node materializes carrying the story's REAL
+ * status (the B.3 dual-write shadow — story st-6372812d), NOT the old frozen `merged` anchor: the
+ * stories table stays AUTHORITATIVE for reads, but the node's tasks row is kept lock-step so the
+ * later B.4 read-flip is a no-op. Safe to carry a live-looking status only because B.2 made every
+ * loop exclude nodes STRUCTURALLY via work_kind (not via the incidental terminal `merged`).
  */
-export function ensureStoryWorkNode(_storyId: string): void {
-  // Intentionally empty: the story NODE row is created eagerly by createStory and is the sole
-  // source of truth post-B.5b. See the doc comment above.
+export function ensureStoryWorkNode(storyId: string): void {
+  db.query(
+    `INSERT OR IGNORE INTO tasks
+       (id, workspace_id, status, created_at, work_kind, brief, isolated, pending_ask, ask_responder)
+       SELECT id, workspace_id, status, created_at, 'node', brief, isolated, pending_ask, ask_responder
+         FROM stories WHERE id=?`,
+  ).run(storyId);
 }
 
 // UNIFIED-WORKSPACE ACTIVATION MIGRATION (story st-540ba705, step 6b — BACKWARD-SAFE +
@@ -1235,11 +1229,6 @@ export function ensureStoryWorkNode(_storyId: string): void {
 // live state from the now-FROZEN legacy tables (mirrors migrateUnifyStoryParent's insert-once
 // rule). The final hard removal of cto_agent/story_agent is a LATER post-restart release.
 export function migrateWorkspaceAgentRows(): void {
-  // POST-DROP GUARD (REVAMP Phase B.5b, story st-78a8b4e7): the leader INSERT (2) JOINs the
-  // dropped `stories` table, so once migrateDropStoriesMirror has run this whole step is dead
-  // (the unified `workspace` rows are already materialized + insert-once) and would throw on the
-  // missing table. Skip so the boot pass stays green on a post-drop db.
-  if (!tableExists(db, "stories")) return;
   const now = nowIso();
   // (1) Each CTO agent → a kind='cto' workspace row (no Work binding).
   db.query(
@@ -1264,92 +1253,6 @@ export function migrateWorkspaceAgentRows(): void {
        FROM story_agent sa JOIN stories s ON s.id = sa.story_id
        WHERE sa.story_id IN (SELECT id FROM tasks)`,
   ).run(now);
-}
-
-// STORIES-MIRROR DESTRUCTIVE FLIP (REVAMP Phase B.5b, story st-78a8b4e7). The keystone that
-// finishes the Work-unification fold: the story NODE's own `tasks` row is already the
-// authoritative story record (B.4 flipped every read; B.3 kept the mirror in lock-step), so the
-// legacy `stories` table + `tasks.story_id` column are now pure dead weight. This drops them.
-//
-// story_agent is NOT dropped here (descoped to Phase C — it still has LIVE readers/writers under
-// config.unifiedWorkspaceEnabled: onStoryCreated/stopStoryAgent write it, storyAgentStatus reads
-// it via storyView → GET /api/work). But story_agent.story_id FK-references stories(id) — the
-// ONLY remaining FK to `stories` — so we first REBUILD story_agent to re-point that FK at
-// tasks(id) ON DELETE CASCADE (the story node), preserving its cascade cleanup (deleteStory
-// DELETEs the tasks node → cascades the story_agent row) while unblocking the `stories` drop
-// without touching a single live caller.
-//
-// IDEMPOTENT: guarded on `stories` still existing, so it is a clean no-op once converged and the
-// whole boot pass is GREEN on both a pre-drop and a post-drop db. The three stories-sourcing
-// migrations above (migrateUnifyStoryParent / migrateBackfillNodeFold / migrateWorkspaceAgentRows)
-// carry the same guard, so they no-op post-drop rather than throwing on the missing table.
-//
-// FK DISCIPLINE: SQLite cannot rebuild a table / drop an FK-referenced parent cleanly with
-// foreign_keys ON, so the destructive block runs under `PRAGMA foreign_keys = OFF` — the standard
-// table-rebuild procedure — with a `foreign_key_check` afterward (throwing on any violation)
-// before restoring `PRAGMA foreign_keys = ON`. runMigrations is not wrapped in a transaction, so
-// the pragma toggle takes effect (it is a no-op inside a transaction).
-//
-// COMPAT-VIEW RE-PARSE HAZARD: the `workspaces` back-compat VIEW + its INSTEAD OF triggers
-// (migrateWorkspacesView) reference directory columns as `NEW.label`, `NEW.path`, … Every
-// `ALTER TABLE` in this block (the story_agent RENAME, the tasks.story_id DROP COLUMN) makes
-// SQLite RE-PARSE all dependent schema objects — and on some legacy schemas that re-parse of the
-// unrelated compat trigger throws (`no such column: NEW.label` / `SQL logic error`). So we DROP
-// the view + its triggers for the duration of the table surgery and RECREATE them (idempotently,
-// via migrateWorkspacesView) afterward — nothing reads `workspaces` mid-migration.
-export function migrateDropStoriesMirror(): void {
-  if (!tableExists(db, "stories")) return; // converged already — no-op
-
-  db.exec("PRAGMA foreign_keys = OFF;");
-  // Remove the compat view + triggers so no ALTER below re-parses them (recreated in `finally`).
-  db.exec(`DROP TRIGGER IF EXISTS workspaces_view_insert`);
-  db.exec(`DROP TRIGGER IF EXISTS workspaces_view_update`);
-  db.exec(`DROP TRIGGER IF EXISTS workspaces_view_delete`);
-  db.exec(`DROP VIEW IF EXISTS workspaces`);
-  try {
-    // (1) Rebuild story_agent, re-pointing its FK stories(id) → tasks(id) ON DELETE CASCADE (the
-    // materialized story node). Column set is byte-identical to migrateStoryAgentTable. Copy only
-    // rows whose story_id resolves to a node (FK-safe under the new reference); a story_agent row
-    // exists only for a live story, each of which has a node, so none is legitimately dropped.
-    db.exec(`
-      CREATE TABLE story_agent_new (
-        story_id        TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-        session_id      TEXT,
-        herdr_workspace TEXT,
-        desired         INTEGER NOT NULL DEFAULT 0,
-        started_at      TEXT,
-        restarts        INTEGER NOT NULL DEFAULT 0,
-        last_error      TEXT,
-        updated_at      TEXT
-      );
-    `);
-    db.exec(
-      `INSERT INTO story_agent_new
-         (story_id, session_id, herdr_workspace, desired, started_at, restarts, last_error, updated_at)
-       SELECT story_id, session_id, herdr_workspace, desired, started_at, restarts, last_error, updated_at
-         FROM story_agent WHERE story_id IN (SELECT id FROM tasks)`,
-    );
-    db.exec(`DROP TABLE story_agent`);
-    db.exec(`ALTER TABLE story_agent_new RENAME TO story_agent`);
-
-    // (2) Drop the now-dead legacy membership column (parent_id carries every value in lock-step).
-    dropColumnIfExists("tasks", "story_id");
-
-    // (3) Drop the legacy mirror table — nothing references it any more (story_agent re-pointed).
-    db.exec(`DROP TABLE IF EXISTS stories`);
-
-    // Prove referential integrity survived the rebuild before re-enabling enforcement.
-    const violations = db.query<{ table: string }, []>(`PRAGMA foreign_key_check`).all();
-    if (violations.length > 0) {
-      throw new Error(
-        `migrateDropStoriesMirror: foreign_key_check found ${violations.length} violation(s): ${JSON.stringify(violations)}`,
-      );
-    }
-  } finally {
-    // Recreate the `workspaces` compat view + triggers (idempotent DROP+CREATE) and restore FKs.
-    migrateWorkspacesView(db);
-    db.exec("PRAGMA foreign_keys = ON;");
-  }
 }
 
 // ---- BOOT MIGRATION RUNNER -------------------------------------------------
@@ -1395,12 +1298,6 @@ export function migrateDropStoriesMirror(): void {
 //                                         + INSTEAD OF write triggers — runs LAST so the view
 //                                         mirrors the FULL `directory` column set after step 4;
 //                                         the back-compat surface for the running OLD server.)
-//   9. drop the `stories` mirror          (st-78a8b4e7 REVAMP Phase B.5b — the DESTRUCTIVE FLIP:
-//                                         rebuild story_agent off the stories FK, drop
-//                                         tasks.story_id, DROP TABLE stories. Runs LAST, AFTER the
-//                                         stories-sourcing folds (7b/7c) have applied; those carry
-//                                         a tableExists('stories') guard so the pass stays green
-//                                         once this has converged. STAGED — the live flip is HELD.)
 // Every step is independently idempotent (presence-guarded ALTER/UPDATE/RENAME, IF NOT EXISTS,
 // or DROP-then-CREATE of a data-less view), so the whole pass is a no-op once converged and
 // safe to re-run on every boot.
@@ -1419,7 +1316,6 @@ const MIGRATIONS: Array<() => void> = [
   migrateBackfillNodeFold,
   migrateWorkspaceAgentRows,
   () => migrateWorkspacesView(db),
-  migrateDropStoriesMirror,
 ];
 
 /**
@@ -1944,12 +1840,16 @@ export type TaskRow = {
   // detect a prompt/context edit made while the task was paused (needs_info / in_review),
   // which triggers a re-ground (taskmd.renderRegroundBlock). NULL until first grounded.
   grounding_fp: string | null;
-  // UNIFIED-WORK PARENT POINTER (story st-540ba705): the self-referential `work` model's
-  // parent FK (a leaf = a task, a node-with-children = a story). NULL = top-level /
-  // standalone. As of REVAMP Phase B.5b (story st-78a8b4e7) this is the SOLE membership
-  // pointer — the legacy `story_id` column has been dropped (parent_id carried the same
-  // value in lock-step). The `story_id` field consumers still read is re-derived from
-  // `parent_id` on TaskView (see tasks.taskView) so the wire/API shape is unchanged.
+  // STORY MEMBERSHIP (Phase 1: DATA MODEL ONLY — see the story_id ensureColumn above):
+  // the id of the STORY this task is grouped under, or NULL for an ordinary standalone
+  // task (today's behavior). Assigned only via stories.assignTaskToStory. Surfaced on
+  // TaskView via the `...row` spread so it round-trips. Inert this phase.
+  story_id: string | null;
+  // UNIFIED-WORK PARENT POINTER (story st-540ba705, step 1 — see the parent_id ensureColumn
+  // above): the future self-referential `work` model's parent FK (a leaf = today's task, a
+  // node-with-children = today's story). NULL = top-level / standalone. COEXISTS with
+  // `story_id` this step (NOT a replacement) and is PURELY STORED — nothing reads it yet.
+  // Surfaced on TaskView via the `...row` spread so it round-trips. Inert this phase.
   parent_id: string | null;
   // RESPONDER-REDESIGN (story st-def561dd — see the escalated_to_user ensureColumn above):
   // 1 ONLY on a NON-STORY task whose pending feedback the CTO escalated to the user (the
@@ -2119,6 +2019,11 @@ export function getStoryAgentRow(storyId: string): StoryAgentRow | null {
 /** Every story-leader-agent record (one per story that has ever launched/been desired). */
 export function listStoryAgentRows(): StoryAgentRow[] {
   return db.query<StoryAgentRow, []>(`SELECT * FROM story_agent`).all();
+}
+
+/** Drop a story's leader-agent record (the story/workspace DELETE also cascades this). */
+export function deleteStoryAgentRow(storyId: string): void {
+  db.query(`DELETE FROM story_agent WHERE story_id=?`).run(storyId);
 }
 
 /**

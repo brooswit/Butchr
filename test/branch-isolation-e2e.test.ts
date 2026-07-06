@@ -69,8 +69,7 @@ function initRepo(prefix: string): string {
 }
 
 function storyRow(id: string) {
-  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — the story record IS its Work NODE row.
-  return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=? AND work_kind='node'`).get(id)!;
+  return dbMod.db.query<any, [string]>(`SELECT * FROM stories WHERE id=?`).get(id)!;
 }
 function taskRow(id: string) {
   return dbMod.db.query<any, [string]>(`SELECT * FROM tasks WHERE id=?`).get(id)!;

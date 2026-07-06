@@ -84,23 +84,19 @@ beforeAll(async () => {
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, branch_isolation, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(WS_ISO, REPO_ISO, "iso", 1, dbMod.nowIso());
-  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
-    .query(
-      `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief, isolated) VALUES (?, ?, ?, ?, 'node', ?, ?)`,
-    )
-    .run(STORY_ISO, WS_ISO, "open", dbMod.nowIso(), "isolated story", 1);
+    .query(`INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(STORY_ISO, WS_ISO, "isolated story", "open", 1, dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(STORY_ISO); // materialize the node (as createStory does) for B.4 reads
 
   // NON-isolated workspace (flag OFF = default) + a story captured isolated=0.
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(WS_STD, REPO_STD, "std", dbMod.nowIso());
-  // B.5b (st-78a8b4e7): the `stories` mirror is dropped — seed the story's Work NODE row directly.
   dbMod.db
-    .query(
-      `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief, isolated) VALUES (?, ?, ?, ?, 'node', ?, ?)`,
-    )
-    .run(STORY_NONISO, WS_STD, "open", dbMod.nowIso(), "non-isolated story", 0);
+    .query(`INSERT INTO stories (id, workspace_id, brief, status, isolated, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(STORY_NONISO, WS_STD, "non-isolated story", "open", 0, dbMod.nowIso());
+  dbMod.ensureStoryWorkNode(STORY_NONISO); // materialize the node for B.4 reads
 });
 
 afterEach(() => {

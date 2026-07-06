@@ -248,15 +248,11 @@ describe("new isolation columns default to 0", () => {
     dbMod.db
       .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
       .run(wsId, join(REPO, "col-ws2"), "col2", dbMod.nowIso());
-    // B.5b (st-78a8b4e7): a story IS its Work NODE row (the `stories` mirror is dropped); the
-    // node's `isolated` column defaults to 0 just as the dropped table's did.
     dbMod.db
-      .query(
-        `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief) VALUES (?, ?, 'open', ?, 'node', ?)`,
-      )
-      .run(stId, wsId, dbMod.nowIso(), "a story");
+      .query(`INSERT INTO stories (id, workspace_id, brief, created_at) VALUES (?, ?, ?, ?)`)
+      .run(stId, wsId, "a story", dbMod.nowIso());
     const st = dbMod.db
-      .query<{ isolated: number }, [string]>(`SELECT isolated FROM tasks WHERE id=? AND work_kind='node'`)
+      .query<{ isolated: number }, [string]>(`SELECT isolated FROM stories WHERE id=?`)
       .get(stId);
     expect(st?.isolated).toBe(0);
   });

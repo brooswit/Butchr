@@ -69,15 +69,14 @@ setRunner({ agentExists: async () => false });
 const colsOf = (t) => m.db.query("PRAGMA table_info(" + t + ")").all().map((c) => c.name);
 const pre = { taskCols: colsOf("tasks"), ctoCols: colsOf("cto_agent"), storyAgentCols: colsOf("story_agent") };
 
-// Seed a story NODE + member tasks AFTER migration (the post-drop schema, B.5b: the \`stories\`
-// table + tasks.story_id are GONE — the story is its own \`tasks\` work_kind='node' row, members
-// join via parent_id; has_agent + idle exist; herdr_pane_id/herdr_tab_id do not). Include an
-// in_progress member with has_agent=1 AND idle=1 so storyCounts / the dashboard counts actually
-// execute the \`has_agent=1 AND idle=1\` peel-out subquery (the exact branch the dropped-column
-// query lived next to), not just the GROUP BY.
-m.db.query("INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief) VALUES ('st-1', 'dir-1', 'open', '2026-06-02T00:00:00.000Z', 'node', 'b')").run();
+// Seed a story + member tasks AFTER migration (the post-drop schema: story_id + has_agent +
+// idle exist; herdr_pane_id/herdr_tab_id do not). Include an in_progress member with
+// has_agent=1 AND idle=1 so storyCounts / the dashboard counts actually execute the
+// \`has_agent=1 AND idle=1\` peel-out subquery (the exact branch the dropped-column query lived
+// next to), not just the GROUP BY.
+m.db.query("INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES ('st-1', 'dir-1', 'b', 'open', '2026-06-02T00:00:00.000Z')").run();
 const seed = (id, status, hasAgent, idle) =>
-  m.db.query("INSERT INTO tasks (id, workspace_id, status, parent_id, has_agent, idle, created_at) VALUES (?, 'dir-1', ?, 'st-1', ?, ?, '2026-06-02T00:00:00.000Z')").run(id, status, hasAgent, idle);
+  m.db.query("INSERT INTO tasks (id, workspace_id, status, story_id, has_agent, idle, created_at) VALUES (?, 'dir-1', ?, 'st-1', ?, ?, '2026-06-02T00:00:00.000Z')").run(id, status, hasAgent, idle);
 seed("m-idle", "in_progress", 1, 1);    // LIVE but quiet -> peeled into the \`idle\` bucket
 seed("m-active", "in_progress", 1, 0);  // LIVE + working -> stays in \`in_progress\`
 seed("m-review", "in_review", 0, 0);

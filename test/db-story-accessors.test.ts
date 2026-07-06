@@ -1,10 +1,8 @@
-// Tests for the canonical story READ accessors (REVAMP Phase A — story st-26a5c2e1):
-// db.storyStatusOf + db.getStoryRow. These centralize what were once inline
-// `SELECT ... FROM stories WHERE id=?` reads behind ONE definition each. REVAMP-2 Phase
-// B.5b (st-78a8b4e7) DROPPED the `stories` mirror table, so the node `tasks` row
-// (work_kind='node') is now the SOLE source these accessors read — there is no `stories`
-// table left to compare against. This guard pins the accessors' behavior (correct row /
-// status for a PRESENT id, null for an ABSENT id) directly against the node source.
+// Tests for the canonical `stories`-table READ accessors (REVAMP Phase A — story
+// st-26a5c2e1): db.storyStatusOf + db.getStoryRow. These centralize the previously
+// inline `SELECT ... FROM stories WHERE id=?` reads behind ONE definition each — the
+// seam the Phase B fold (st-6372812d) will later flip in one edit. This guard pins
+// their byte-equivalence to the prior inline SQL for a PRESENT id AND an ABSENT id.
 //
 // Pure / in-process: workspace + story rows are inserted directly via the db singleton
 // (no live herdr/claude). The db/config singletons are SHARED across test files, so we
@@ -46,12 +44,15 @@ afterAll(() => {
 });
 
 describe("db story-read accessors", () => {
-  test("getStoryRow returns the story's node row (the sole source post-B.5b)", () => {
+  test("getStoryRow returns the SAME row as the prior inline `SELECT * FROM stories WHERE id=?`", () => {
     const story = storiesMod.createStory(WS, "Accessor round-trip");
+    // Baseline = the exact inline SQL the accessor replaced.
+    const inline = dbMod.db
+      .query<typeof story, [string]>(`SELECT * FROM stories WHERE id=?`)
+      .get(story.id);
     const viaAccessor = dbMod.getStoryRow(story.id);
     expect(viaAccessor).not.toBeNull();
-    // The node `tasks` row (work_kind='node') IS the story record now.
-    expect(viaAccessor!.id).toBe(story.id);
+    expect(viaAccessor).toEqual(inline!);
     // Spot-check the fields call sites read off the row.
     expect(viaAccessor!.workspace_id).toBe(WS);
     expect(viaAccessor!.brief).toBe("Accessor round-trip");
@@ -59,14 +60,22 @@ describe("db story-read accessors", () => {
   });
 
   test("getStoryRow returns null for an ABSENT id (Phase B guard)", () => {
+    const inline = dbMod.db
+      .query(`SELECT * FROM stories WHERE id=?`)
+      .get(ABSENT);
+    expect(inline ?? null).toBeNull();
     expect(dbMod.getStoryRow(ABSENT)).toBeNull();
   });
 
-  test("storyStatusOf returns the node's status and tracks a change", () => {
+  test("storyStatusOf returns the SAME scalar as the prior inline `SELECT status ...`", () => {
     const story = storiesMod.createStory(WS, "Status read");
+    const inline = dbMod.db
+      .query<{ status: string }, [string]>(`SELECT status FROM stories WHERE id=?`)
+      .get(story.id)?.status;
+    expect(dbMod.storyStatusOf(story.id)).toBe(inline ?? null);
     expect(dbMod.storyStatusOf(story.id)).toBe("open");
 
-    // Tracks a status change on the node row.
+    // Tracks a status change identically.
     storiesMod.updateStory(story.id, { status: "done" });
     expect(dbMod.storyStatusOf(story.id)).toBe("done");
   });

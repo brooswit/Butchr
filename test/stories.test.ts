@@ -148,12 +148,11 @@ describe("deleteStory NULLs out member tasks (does not delete them)", () => {
 
     // The story is gone...
     expect(storiesMod.getStory(story.id)).toBeNull();
-    // ...but the tasks survive, with their parent_id NULLed out (B.5b — parent_id is the sole
-    // membership pointer; the story_id column is dropped).
+    // ...but the tasks survive, with their story_id NULLed out.
     expect(tasksMod.getTask("st-member-1")).not.toBeNull();
     expect(tasksMod.getTask("st-member-2")).not.toBeNull();
-    expect(tasksMod.getTask("st-member-1")!.parent_id).toBeNull();
-    expect(tasksMod.getTask("st-member-2")!.parent_id).toBeNull();
+    expect(tasksMod.getTask("st-member-1")!.story_id).toBeNull();
+    expect(tasksMod.getTask("st-member-2")!.story_id).toBeNull();
   });
 
   test("deleteStory 404s on an unknown story", () => {
@@ -173,8 +172,7 @@ function seedMember(
 ) {
   dbMod.db
     .query(
-      // Membership by parent_id (B.5b st-78a8b4e7 — the story_id column is dropped).
-      `INSERT INTO tasks (id, workspace_id, status, parent_id, has_agent, idle, created_at)
+      `INSERT INTO tasks (id, workspace_id, status, story_id, has_agent, idle, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     // has_agent = a LIVE launched agent (storyCounts' idle gate keys on it).
@@ -269,6 +267,7 @@ describe("Phase 6: all-subtasks-merged completion detection", () => {
     seedMember("st6-d-1", WS_A, story.id, "merged");
     // Flip the story status directly (avoid the leader-teardown side effects of updateStory).
     // Mirror onto the node too — B.4-flipped reads consult the node, kept lock-step in production.
+    dbMod.db.query(`UPDATE stories SET status='done' WHERE id=?`).run(story.id);
     dbMod.db.query(`UPDATE tasks SET status='done' WHERE id=? AND work_kind='node'`).run(story.id);
     expect(tasksMod.notifyStoryCompletionIfReady(story.id)).toBe(false);
   });
@@ -340,6 +339,7 @@ describe("F4: story stuck on a failed/aborted member", () => {
     const story = storiesMod.createStory(WS_A, "Done-but-dead story");
     seedMember("f4-done-1", WS_A, story.id, "merged");
     seedMember("f4-done-2", WS_A, story.id, "aborted");
+    dbMod.db.query(`UPDATE stories SET status='done' WHERE id=?`).run(story.id);
     dbMod.db.query(`UPDATE tasks SET status='done' WHERE id=? AND work_kind='node'`).run(story.id);
     expect(tasksMod.notifyStoryBlockedIfStuck(story.id)).toBe(false);
     expect(tasksMod.notifyStoryReadiness(story.id)).toBe(false);
@@ -626,7 +626,7 @@ describe("abort/delete cascade: a terminal/removed node never STRANDS a live mem
     // The already-MERGED member is PRESERVED (historical record), only detached.
     const merged = tasksMod.getTask("st-del-merged")!;
     expect(merged.status).toBe("merged");
-    expect(merged.parent_id).toBeNull();
+    expect(merged.story_id).toBeNull();
     // The story node itself is gone.
     expect(storiesMod.getStory(story.id)).toBeNull();
   });
@@ -671,6 +671,7 @@ describe("st-a632b2cc F4: assignTaskToStory story-status guard", () => {
 
     // merge_blocked → assignable (merge_blocked is butchr-owned; set it directly)
     const mb = storiesMod.createStory(WS_A, "F4 merge_blocked");
+    dbMod.db.query(`UPDATE stories SET status='merge_blocked' WHERE id=?`).run(mb.id);
     dbMod.db.query(`UPDATE tasks SET status='merge_blocked' WHERE id=? AND work_kind='node'`).run(mb.id);
     seedTask("f4-mb", WS_A);
     expect(storiesMod.assignTaskToStory("f4-mb", mb.id).story_id).toBe(mb.id);
@@ -682,7 +683,7 @@ describe("st-a632b2cc F4: assignTaskToStory story-status guard", () => {
     expect(() => storiesMod.assignTaskToStory("f4-done", done.id)).toThrow(
       /cannot assign a task to a done story/,
     );
-    expect(tasksMod.getTask("f4-done")!.parent_id).toBeNull();
+    expect(tasksMod.getTask("f4-done")!.story_id).toBeNull();
 
     // aborted → rejected
     const aborted = storiesMod.createStory(WS_A, "F4 aborted");
@@ -694,6 +695,7 @@ describe("st-a632b2cc F4: assignTaskToStory story-status guard", () => {
 
     // merging → rejected (transient; set it directly)
     const merging = storiesMod.createStory(WS_A, "F4 merging");
+    dbMod.db.query(`UPDATE stories SET status='merging' WHERE id=?`).run(merging.id);
     dbMod.db.query(`UPDATE tasks SET status='merging' WHERE id=? AND work_kind='node'`).run(merging.id);
     seedTask("f4-merging", WS_A);
     expect(() => storiesMod.assignTaskToStory("f4-merging", merging.id)).toThrow(
@@ -729,7 +731,7 @@ describe("st-a632b2cc F3: cascade-abort/delete orphan-merge window", () => {
     // async abort cascade can complete (no await crossed since deleteStory returned).
     const live = tasksMod.getTask("f3-del-live")!;
     expect(live.aborting).toBe(1);
-    expect(live.parent_id).toBeNull();
+    expect(live.story_id).toBeNull();
     // The already-merged member is preserved and NOT latched (don't mark a historical record).
     const merged = tasksMod.getTask("f3-del-merged")!;
     expect(merged.aborting).toBe(0);
@@ -760,7 +762,7 @@ describe("st-a632b2cc F3: cascade-abort/delete orphan-merge window", () => {
     // has NOT yet flipped the member to `aborted`.)
     const before = tasksMod.getTask("f3-fin")!;
     expect(before.aborting).toBe(1);
-    expect(before.parent_id).toBeNull();
+    expect(before.story_id).toBeNull();
     expect(before.status).toBe("in_review");
 
     // A human approval landing now is REFUSED before the merge lock / any git op (main untouched).

@@ -57,20 +57,41 @@ function setStoryStatus(
     assigns.push(`${col}=?`);
     params.push(val);
   }
-  // REVAMP Phase B.5b (story st-78a8b4e7): the story NODE's own `tasks` row is the SOLE story
-  // record — the `stories` mirror is gone. The CAS writes it DIRECTLY. The `work_kind='node'`
-  // guard means this can ONLY ever touch a NODE row (never clobber a leaf). The `from` race-guard
-  // set + the `res.changes > 0` gating that drives the caller's side-effects are UNCHANGED from
-  // the pre-flip stories-CAS (story st-a632b2cc) — byte-identical transition semantics.
-  let where = "id=? AND work_kind='node'";
+  let where = "id=?";
   params.push(id);
   if (opts.from !== undefined) {
     const froms = Array.isArray(opts.from) ? opts.from : [opts.from];
     where += ` AND status IN (${froms.map(() => "?").join(", ")})`;
     params.push(...froms);
   }
-  const res = db.query(`UPDATE tasks SET ${assigns.join(", ")} WHERE ${where}`).run(...params);
+  const res = db.query(`UPDATE stories SET ${assigns.join(", ")} WHERE ${where}`).run(...params);
+  if (res.changes > 0) {
+    // B.3 DUAL-WRITE (story st-6372812d): a story-status write actually landed — mirror the SAME
+    // status + every `set` column onto the node's own `tasks` row in lock-step. Skipped when the
+    // CAS no-op'd (changes=0) so a lost/illegal transition never touches the shadow.
+    mirrorStoryNode(id, { status: to, ...(opts.set ?? {}) });
+  }
   return res.changes > 0;
+}
+
+/**
+ * DUAL-WRITE the node's own `tasks` row (REVAMP Phase B.3 — story st-6372812d). Every write to a
+ * story's `stories` row mirrors the SAME values onto the id-matched Work NODE's `tasks` row, kept
+ * lock-step so the node row is a faithful shadow ready for the B.4 read-flip. Reads STILL come from
+ * the stories table this phase — this only WRITES the shadow, so behavior is unchanged. The helper:
+ *   1. ensureStoryWorkNode(id) — guarantees the node exists (materializing it carrying the story's
+ *      REAL status — covers a pre-existing childless story whose node was never lazily created);
+ *   2. UPDATE … WHERE id=? AND work_kind='node' — the `node` guard means this can ONLY ever touch a
+ *      NODE row, never clobber a leaf.
+ * `fields` are columns that exist on BOTH tables (status + the node-only brief/pending_ask/
+ * ask_responder, and the merge shas) — the exact values just written to the stories row.
+ */
+function mirrorStoryNode(id: string, fields: Record<string, string | null>): void {
+  ensureStoryWorkNode(id);
+  const assigns = Object.keys(fields).map((c) => `${c}=?`);
+  if (assigns.length === 0) return;
+  const params = [...Object.values(fields), id];
+  db.query(`UPDATE tasks SET ${assigns.join(", ")} WHERE id=? AND work_kind='node'`).run(...params);
 }
 
 /** Look up a story by its id, or null if none matches. Thin wrapper over the canonical
@@ -123,17 +144,14 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
   // flipping the workspace flag never retroactively changes an already-open story. The
   // A story opened while the flag is ON captures isolated=1; while OFF, isolated=0.
   const isolated = workspaceBranchIsolation(workspaceId) ? 1 : 0;
-  // REVAMP Phase B.5b (story st-78a8b4e7): the story is materialized DIRECTLY as its Work NODE —
-  // the `tasks` row whose id IS the story id — which is now the SOLE, authoritative story record
-  // (the `stories` mirror is dropped). work_kind='node' + the node-only brief/isolated columns are
-  // supplied; every other NOT NULL column takes its schema DEFAULT (kind='task',
-  // version_bump='patch', has_agent=0, …) so the projection is valid, exactly as
-  // migrateUnifyStoryParent / the old ensureStoryWorkNode materialized it. pending_ask/
-  // ask_responder default NULL (no open ask on a fresh story).
   db.query(
-    `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief, isolated)
-     VALUES (?, ?, 'open', ?, 'node', ?, ?)`,
-  ).run(id, workspaceId, created, brief.trim(), isolated);
+    `INSERT INTO stories (id, workspace_id, brief, status, created_at, isolated) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, workspaceId, brief.trim(), "open", created, isolated);
+  // B.3 (story st-6372812d): EAGERLY materialize the node's own `tasks` row at creation so the
+  // dual-write shadow exists from birth (carrying the real 'open' status + brief/isolated) — a
+  // node is no longer materialized lazily at first member/leader. INERT vs reads (still the stories
+  // table this phase); makes work_kind authoritative even for a childless story.
+  ensureStoryWorkNode(id);
   // A new `open` story gets a managed STORY-LEADER agent (Phase 3): mark it desired +
   // launch it. Thin hook into story-agent.ts so the CRUD here stays clean; the hook marks
   // desired synchronously and fires the launch best-effort (never fails story creation).
@@ -237,8 +255,8 @@ export function updateStory(
   // status, so it skips the guarded transition entirely.
   if (patch.status === undefined) {
     if (briefUpdate !== null) {
-      // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
-      db.query(`UPDATE tasks SET brief=? WHERE id=? AND work_kind='node'`).run(briefUpdate, id);
+      db.query(`UPDATE stories SET brief=? WHERE id=?`).run(briefUpdate, id);
+      mirrorStoryNode(id, { brief: briefUpdate }); // B.3 dual-write (st-6372812d)
     }
     return getStory(id)!;
   }
@@ -357,8 +375,8 @@ export function openStoryAsk(id: string, question: unknown): StoryRow {
     throw new HttpError(409, "an ask is already open on this story");
   }
   const q = question.trim();
-  // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
-  db.query(`UPDATE tasks SET pending_ask=?, ask_responder='cto' WHERE id=? AND work_kind='node'`).run(q, id);
+  db.query(`UPDATE stories SET pending_ask=?, ask_responder='cto' WHERE id=?`).run(q, id);
+  mirrorStoryNode(id, { pending_ask: q, ask_responder: "cto" }); // B.3 dual-write (st-6372812d)
   publish({
     type: "story.attention",
     story_id: id,
@@ -393,8 +411,8 @@ export function escalateStoryAsk(id: string): StoryRow {
   if (story.pending_ask === null || story.ask_responder !== "cto") {
     throw new HttpError(409, "no open CTO-owned ask to escalate");
   }
-  // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
-  db.query(`UPDATE tasks SET ask_responder='user' WHERE id=? AND work_kind='node'`).run(id);
+  db.query(`UPDATE stories SET ask_responder='user' WHERE id=?`).run(id);
+  mirrorStoryNode(id, { ask_responder: "user" }); // B.3 dual-write (st-6372812d)
   publish({
     type: "story.attention",
     story_id: id,
@@ -423,8 +441,8 @@ export function answerStoryAsk(id: string, answer: unknown): StoryRow {
     throw new HttpError(409, "no open ask to answer on this story");
   }
   const a = answer.trim();
-  // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
-  db.query(`UPDATE tasks SET pending_ask=NULL, ask_responder=NULL WHERE id=? AND work_kind='node'`).run(id);
+  db.query(`UPDATE stories SET pending_ask=NULL, ask_responder=NULL WHERE id=?`).run(id);
+  mirrorStoryNode(id, { pending_ask: null, ask_responder: null }); // B.3 dual-write (st-6372812d)
   publish({
     type: "story.attention",
     story_id: id,
@@ -459,7 +477,7 @@ export function answerStoryAsk(id: string, answer: unknown): StoryRow {
 function mergedMemberCount(storyId: string): number {
   return db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')`,
     )
     .get(storyId)!.n;
 }
@@ -631,16 +649,16 @@ export function deleteStory(id: string): void {
   // DELETE below cascade-removes the workspace row, while the by-name pane teardown still
   // completes afterward — so no leader pane is orphaned. No-op when the unified gate is OFF.
   void teardownLeaderWorkspaceForWork(id).catch(() => {});
-  // Detach member tasks (keep the tasks — only the grouping is removed). Clear parent_id — the
-  // SOLE membership pointer as of B.5b (st-78a8b4e7; the legacy story_id column is dropped) — so a
-  // detached member becomes a standalone top-level Work and no longer points at the about-to-be-
-  // removed node, freeing the node from any member self-FK reference.
-  db.query(`UPDATE tasks SET parent_id=NULL WHERE parent_id=?`).run(id);
-  // Remove the story's Work node (the `tasks` row whose id IS the story id — the authoritative
-  // story record). Members are already detached, so its self-FK has no referrers, and its
-  // story_agent row is cascade-removed via the story_agent→tasks(id) FK (B.5b re-pointed it off
-  // the dropped `stories` table). A no-op when the story was never materialized.
+  // Detach member tasks (keep the tasks — only the grouping is removed). Clear BOTH the
+  // legacy story_id AND the unified parent_id (step 6a — they move in lock-step) so a detached
+  // member becomes a standalone top-level Work and no longer points at the about-to-be-removed
+  // node. Clearing parent_id first also frees the node from any member FK reference.
+  db.query(`UPDATE tasks SET story_id=NULL, parent_id=NULL WHERE story_id=?`).run(id);
+  // Remove the story's materialized Work node (the `tasks` row whose id IS the story id — see
+  // ensureStoryWorkNode). Members are already detached, so its self-FK has no referrers. A
+  // no-op when the story was never materialized (no member was ever created/assigned).
   db.query(`DELETE FROM tasks WHERE id=?`).run(id);
+  db.query(`DELETE FROM stories WHERE id=?`).run(id);
   // F5: after the member cascade settles, tear down the leaked isolated story worktree + branch.
   // The workspace is NOT deleted here, so getWorkspace (inside the helper) still resolves; the
   // story row is gone but we captured `story` up front. Best-effort; a no-op for a non-isolated
@@ -680,13 +698,12 @@ export function assignTaskToStory(taskId: string, storyId: string | null): TaskV
     }
   }
 
-  // UNIFIED-WORK PARENT POINTER: parent_id is the SOLE membership pointer as of B.5b
-  // (st-78a8b4e7; the legacy story_id column is dropped). The story's Work node already exists
-  // (getStory above 404s otherwise → its node is present), so the parent_id self-FK is satisfied;
-  // ensureStoryWorkNode is a defensive no-op belt. When clearing (storyId === null), parent_id is
-  // cleared → the task becomes standalone top-level Work.
+  // UNIFIED-WORK PARENT POINTER (step 6a): story_id and parent_id move in lock-step. When
+  // assigning, materialize the story's Work node FIRST (idempotent — the FK anchor) so the
+  // parent_id self-FK is satisfied; set parent_id == story_id. When clearing (storyId === null),
+  // parent_id is cleared too → the task becomes standalone top-level Work.
   if (storyId !== null) ensureStoryWorkNode(storyId);
-  db.query(`UPDATE tasks SET parent_id=? WHERE id=?`).run(storyId, taskId);
+  db.query(`UPDATE tasks SET story_id=?, parent_id=? WHERE id=?`).run(storyId, storyId, taskId);
   const view = taskView(taskId)!;
   publish({ type: "task.updated", task: view });
   return view;
@@ -752,12 +769,11 @@ export async function createSubtask(
  */
 export function storyCounts(storyId: string): Record<string, number> {
   // `work_kind='leaf'` is explicit (B.2): a story's members are always leaves and the node's own
-  // parent_id is NULL, so the node is never counted here — structural node-exclusion. Membership
-  // is by parent_id (B.5b st-78a8b4e7 — the SOLE membership pointer; story_id column dropped).
-  // Mirrors the same guard on the tasks.ts story-rollup reads.
+  // story_id is NULL, so the node is never counted here — structural node-exclusion, behavior-
+  // identical today. Mirrors the same guard on the tasks.ts story-rollup reads.
   const rows = db
     .query<{ status: string; n: number }, [string]>(
-      `SELECT status, COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf' GROUP BY status`,
+      `SELECT status, COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' GROUP BY status`,
     )
     .all(storyId);
   const out: Record<string, number> = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0]));
@@ -765,7 +781,7 @@ export function storyCounts(storyId: string): Record<string, number> {
   for (const r of rows) out[r.status] = r.n;
   const idle = db
     .query<{ n: number }, [string]>(
-      `SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf' AND status='in_progress' AND has_agent=1 AND idle=1`,
+      `SELECT COUNT(*) AS n FROM tasks WHERE story_id=? AND work_kind='leaf' AND status='in_progress' AND has_agent=1 AND idle=1`,
     )
     .get(storyId)!.n;
   out.idle = idle;
@@ -856,9 +872,7 @@ export async function abortInflightMembers(
 ): Promise<MemberAbortOutcome> {
   const members = db
     .query<{ id: string; status: TaskStatus }, [string]>(
-      // Membership by parent_id (B.5b st-78a8b4e7 — the SOLE membership pointer; story_id dropped).
-      // The story node's parent_id is NULL, so it is never returned here.
-      `SELECT id, status FROM tasks WHERE parent_id=?`,
+      `SELECT id, status FROM tasks WHERE story_id=?`,
     )
     .all(storyId);
 

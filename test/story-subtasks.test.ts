@@ -82,13 +82,12 @@ describe("createSubtask creates a story-owned subtask", () => {
     // ...and is ENQUEUED (ready for the dispatcher — no blockers, not an idea).
     expect(view.status).toBe("inactive");
 
-    // story_id round-trips on the full task view (re-derived wire field); the raw DB row now
-    // carries membership on parent_id (B.5b — the story_id column is dropped).
+    // story_id round-trips on the full task view + the raw DB row.
     expect(tasksMod.taskView(view.id)!.story_id).toBe(story.id);
     const row = dbMod.db
-      .query<{ parent_id: string | null }, [string]>(`SELECT parent_id FROM tasks WHERE id=?`)
+      .query<{ story_id: string | null }, [string]>(`SELECT story_id FROM tasks WHERE id=?`)
       .get(view.id)!;
-    expect(row.parent_id).toBe(story.id);
+    expect(row.story_id).toBe(story.id);
   });
 
   test("409 when the story is not open (done/aborted)", async () => {

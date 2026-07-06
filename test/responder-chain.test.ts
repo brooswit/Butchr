@@ -36,16 +36,13 @@ beforeAll(async () => {
   dbMod.db
     .query(`INSERT INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(DIR, join(REPO_ROOT, DIR), DIR, dbMod.nowIso());
-  // Materialize the story's Work NODE directly (B.5b — the `stories` mirror is dropped; the
-  // node's `tasks` row whose id IS the story id is the sole record). It is the FK anchor a
-  // member's parent_id points at. With unifiedWork ON (default), pendingResponder routes a
-  // member to 'story' via that parent pointer.
   dbMod.db
-    .query(
-      `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief)
-       VALUES (?, ?, 'open', ?, 'node', ?)`,
-    )
-    .run(STORY, DIR, dbMod.nowIso(), "test story");
+    .query(`INSERT INTO stories (id, workspace_id, brief, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run(STORY, DIR, "test story", "open", dbMod.nowIso());
+  // Materialize the story's Work node (story st-540ba705 step 6a): a `tasks` row whose id IS
+  // the story id, the FK anchor a member's parent_id points at. With unifiedWork ON (default),
+  // pendingResponder routes a member to 'story' via that parent pointer.
+  dbMod.ensureStoryWorkNode(STORY);
 });
 
 afterAll(() => {
@@ -68,8 +65,8 @@ function seedTask(
 ) {
   dbMod.db
     .query(
-      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, parent_id, escalated_to_user, plan_preview, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, status, idle, has_agent, story_id, parent_id, escalated_to_user, plan_preview, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -78,8 +75,9 @@ function seedTask(
       opts.idle ?? 0,
       // has_agent = a LIVE launched agent for this task.
       opts.hasAgent ?? 0,
-      // parent_id is the sole membership pointer (B.5b — the story_id column is dropped).
-      // Both escalateTask and pendingResponder route on parent_id.
+      opts.storyId ?? null,
+      // parent_id is the unified-work parent pointer (== story_id for a member). escalateTask
+      // still keys on story_id; pendingResponder routes on parent_id.
       opts.parentId ?? null,
       opts.escalated ?? 0,
       opts.planPreview ?? 0,
