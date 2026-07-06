@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.195] - 2026-07-06
+
 ### Added
 - Introduce CONTAINER node kinds (`repo`/`project`) into the unified `tasks` tree —
   REVAMP-4 Phase 0 / S0a (story st-1a82a2e1), the foundation of the recursive
