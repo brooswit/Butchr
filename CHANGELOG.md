@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-repo gate) STILL escalates on the flat cadence — this is NOT the old zero-actionable
   suppression (it keys on "story has work moving", not "items awaiting the leader").
 
+## [0.9.222] - 2026-07-07
+
 ### Added
 
 - **CEO can CREATE a brand-new repo under a project (not just adopt an existing one).** REVAMP-4
