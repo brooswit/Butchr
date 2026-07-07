@@ -733,10 +733,21 @@ function openPicker(onSelect) {
 function parseHash() {
   const hash = location.hash.replace(/^#/, "") || "/";
   const parts = hash.split("/").filter(Boolean);
-  if (parts.length === 0) return { name: "dashboard" };
+  // LANDING = Projects (Hierarchical Projects IA S2): the default route now shows the
+  // projects overview, not the workspace-card dashboard. renderDashboard() stays defined
+  // (still the fallback for unknown hashes; its register form is retired in S4).
+  if (parts.length === 0) return { name: "projects" };
   if (parts[0] === "metrics") return { name: "metrics" };
-  // `#/projects` is the overview; `#/projects/:id` is a project's detail view.
-  if (parts[0] === "projects") return parts[1] ? { name: "project", id: parts[1] } : { name: "projects" };
+  // `#/projects` is the overview; `#/projects/:id` is a project's detail view; and the
+  // NESTED `#/projects/:projectId/workspaces/:workspaceId` drills into a member repo's
+  // workspace, reusing the SAME renderWorkspace view as the flat `#/workspace/:id` route
+  // (the projectId is threaded through so the view knows its parent — S3 breadcrumbs).
+  if (parts[0] === "projects") {
+    if (parts[1] && parts[2] === "workspaces" && parts[3]) {
+      return { name: "workspace", id: parts[3], projectId: parts[1] };
+    }
+    return parts[1] ? { name: "project", id: parts[1] } : { name: "projects" };
+  }
   if (parts[0] === "workspace") return { name: "workspace", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
   return { name: "dashboard" };
@@ -847,7 +858,7 @@ async function render() {
     else if (route.name === "metrics") await renderMetrics();
     else if (route.name === "projects") await renderProjects();
     else if (route.name === "project") await renderProjectDetail(route.id);
-    else if (route.name === "workspace") await renderWorkspace(route.id);
+    else if (route.name === "workspace") await renderWorkspace(route.id, route.projectId);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
     app.innerHTML = "";
@@ -1104,7 +1115,7 @@ async function ctoMiniBadge(dirId, slot) {
 }
 
 // ---------- workspace view ----------
-async function renderWorkspace(id) {
+async function renderWorkspace(id, projectId) {
   // Pull the workspace from the dashboard rollup (it carries the effective gate
   // command + override state the gate panel needs) alongside its task list.
   const [dash, work] = await Promise.all([
@@ -1129,8 +1140,23 @@ async function renderWorkspace(id) {
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
 
+  // When reached through the nested project route (`#/projects/:pid/workspaces/:wid`), resolve
+  // the parent project's display name for the breadcrumb back-link. Best-effort and DERIVED FROM
+  // THE URL's projectId (not click-set state) so a cold load / paste-the-URL / SSE re-render works
+  // identically; a lookup miss falls back to the id so the crumb never blanks or crashes.
+  let projectName = projectId;
+  if (projectId) {
+    try {
+      const p = await api("GET", "/projects/" + encodeURIComponent(projectId));
+      projectName = projectTitle(p) || projectId;
+    } catch (e) { /* keep the id fallback */ }
+  }
+
   const wrap = el("div");
-  wrap.appendChild(el("div", { class: "crumbs", html: `<a href="#/">Workspaces</a> / ${esc(dir.label || dir.path)}` }));
+  const crumbsHtml = projectId
+    ? `<a href="#/projects">Projects</a> / <a href="#/projects/${esc(projectId)}">${esc(projectName)}</a> / ${esc(dir.label || dir.path)}`
+    : `<a href="#/">Workspaces</a> / ${esc(dir.label || dir.path)}`;
+  wrap.appendChild(el("div", { class: "crumbs", html: crumbsHtml }));
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path" }, dir.path));
 
@@ -3828,10 +3854,14 @@ function syncTopnav(route) {
   const links = document.querySelectorAll(".topnav-link");
   if (!links.length) return;
   const name = route && route.name;
+  // A workspace reached through the nested `#/projects/:pid/workspaces/:wid` route carries a
+  // projectId — it lives UNDER Projects, so keep the Projects nav item highlighted while
+  // drilled in (a flat `#/workspace/:id` has no projectId and stays under Workspaces).
+  const nestedWorkspace = name === "workspace" && !!(route && route.projectId);
   const owningHref =
     name === "metrics" ? "#/metrics" :
-    // both the projects overview and a project's detail view live under Projects
-    (name === "projects" || name === "project") ? "#/projects" :
+    // the projects overview, a project's detail view, and a nested workspace live under Projects
+    (name === "projects" || name === "project" || nestedWorkspace) ? "#/projects" :
     "#/";
   links.forEach((a) => {
     const active = a.getAttribute("href") === owningHref;
@@ -4739,15 +4769,33 @@ function reposPanel(project, repos, wsById) {
 
   for (const repo of repos) {
     const d = repoDisplay(repo, wsById);
-    const row = el("div", { class: "repo-row" });
+    // The repo IS a workspace/directory node (repo.id === workspace id), so the row DRILLS IN
+    // to that workspace's work views via the nested route `#/projects/:pid/workspaces/:wid`
+    // (Hierarchical Projects IA S2). A11y: a real focusable button-row (Enter/Space activate).
+    const row = el("div", { class: "repo-row clickable", role: "button", tabindex: "0" });
     row.innerHTML =
       '<span class="ic" aria-hidden="true">◆</span>' +
       '<span class="nm">' + esc(d.name) + '</span>' +
       '<span class="rp">' + esc(d.dir) + '</span>' +
       '<span class="spacer"></span>' +
       '<button class="icon-btn" title="Unregister repo" aria-label="Unregister ' + esc(d.name) + '">×</button>';
+    const drillIn = () => {
+      location.hash = "#/projects/" + encodeURIComponent(project.id) +
+        "/workspaces/" + encodeURIComponent(repo.id);
+    };
+    // Row click drills in — but NOT when the click landed on the unregister button.
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".icon-btn")) return;
+      drillIn();
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); drillIn(); }
+    });
     const del = row.querySelector(".icon-btn");
-    del.addEventListener("click", () => unregisterRepo(project, repo, row));
+    del.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't let the unregister click bubble to the row's drill-in
+      unregisterRepo(project, repo, row);
+    });
     panel.appendChild(row);
   }
   return panel;

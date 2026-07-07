@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Hierarchical Projects IA — S2: Projects is the landing + Project→Workspace drill-in (story
+  st-6560e4f3).** The default route `#/` now renders the Projects overview instead of the
+  workspace-card dashboard (`parseHash`, `public/app.js`); `renderDashboard()` and the global
+  register form are left intact (retired in S4). Each registered repo row in a project's detail view
+  (`reposPanel`) is now a keyboard-focusable drill-in card that navigates into that workspace via the
+  new nested route `#/projects/:projectId/workspaces/:workspaceId`, which reuses the EXISTING
+  `renderWorkspace` view (List / Pipeline / Board unchanged) reached through its parent project. The
+  parent `projectId` is threaded through and derived from the URL (so cold loads, pasted URLs, and SSE
+  re-renders all render identically) to drive a project-aware breadcrumb back-link — resolving the
+  project's display name best-effort, falling back to its id on a lookup miss. The unregister `×`
+  no longer drills in (`stopPropagation` + `.icon-btn` target guard), and the Projects top-nav item
+  stays highlighted while drilled into a nested workspace.
+
 ## [0.9.213] - 2026-07-07
 
 ### Added
