@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.223] - 2026-07-07
+
 - **The leader-idle → CTO escalation is suppressed while the story has an in-flight child.** An idle
   story leader that is idle merely because it is WAITING FOR ITS OWN SUBTASKS to build no longer pings
   its CTO — that was pure noise, since a moving child re-engages the leader on its own diff. New pure
