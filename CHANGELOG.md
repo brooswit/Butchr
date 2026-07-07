@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Open-CEO-terminal button on the project detail view.** The project CEO card now carries an
+  "Open CEO terminal" button — the CEO analog of the workspace CTO terminal button — that POSTs
+  to `/api/projects/:id/ceo/terminal` and opens a GUI terminal attached to the live CEO pane.
+  It's enabled only when the CEO is live; otherwise it stays visible but disabled with an honest
+  title explaining why (CEO starting, disabled for this project, or the global `BUTCHR_CEO_AGENT`
+  gate is off) — consistent with the card's existing gate note.
+
 ## [0.9.218] - 2026-07-07
 
 ### Added

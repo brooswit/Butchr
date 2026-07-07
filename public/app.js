@@ -3587,12 +3587,30 @@ function ceoNoteHtml(s) {
   }
   return "";
 }
+
+// The "Open CEO terminal" button's enabled state + honest hint, derived only from the RESOLVED
+// {enabled, overridden, globalGate, live} fields. Unlike the CTO button (which HIDES when not
+// running), this stays visible but disables when there's no live pane and explains WHY — using
+// the same honest wording as ceoNoteHtml so the two never contradict. Returns { enabled, title }.
+function ceoTerminalBtnState(s) {
+  if (s.live) return { enabled: true, title: "Attach a terminal to the live CEO agent" };
+  if (s.enabled) return { enabled: false, title: "CEO agent is starting… — no live pane to attach yet" };
+  if (s.overridden) return { enabled: false, title: "CEO is disabled for this project — enable it to attach a terminal" };
+  if (!s.globalGate) {
+    return {
+      enabled: false,
+      title: "The global CEO gate (BUTCHR_CEO_AGENT) is off — enable this project's CEO to attach a terminal",
+    };
+  }
+  return { enabled: false, title: "CEO agent isn't live — no terminal to attach" };
+}
 // </test-extract:projects-ceo-status>
 
 // Build the CEO card DOM from a fetched CeoStatus. Standalone (no closure over the fetch) so the
 // toggle handler can rebuild + replace the card in place after a PATCH + refetch.
 function buildCeoCard(projectId, s) {
   const pill = ceoStatusPill(s);
+  const term = ceoTerminalBtnState(s);
   const lifeCls = s.live ? "alive" : "down";
   const lifeTxt = s.live ? "CEO agent live" : (s.enabled ? "CEO agent starting…" : "CEO agent inactive");
   const card = el("div", { class: "panel ceo-card" });
@@ -3610,6 +3628,7 @@ function buildCeoCard(projectId, s) {
       </label>
       <span class="ceo-life"><span class="ceo-dot ${lifeCls}"></span>${esc(lifeTxt)}</span>
       <span class="spacer"></span>
+      <button class="btn ceo-term"${term.enabled ? "" : " disabled"} title="${esc(term.title)}">⌗ Open CEO terminal</button>
       ${s.overridden ? '<button class="btn ghost xs ceo-reset" title="Clear the per-project override and inherit the global default">Reset to default</button>' : ""}
     </div>
     ${ceoNoteHtml(s)}`;
@@ -3639,6 +3658,25 @@ function buildCeoCard(projectId, s) {
       toast(e.message, true);
     }
   });
+
+  // Open CEO terminal → POST /api/projects/:id/ceo/terminal (the CEO analog of the CTO terminal
+  // route, same attach payload). Enabled only when the CEO is live (ceoTerminalBtnState gates +
+  // titles it honestly). Mirrors the CTO button's disable/try/toast pattern; no render() since
+  // attaching a terminal never navigates.
+  const termBtn = card.querySelector(".ceo-term");
+  if (term.enabled) {
+    termBtn.addEventListener("click", async () => {
+      termBtn.disabled = true;
+      try {
+        const r = await api("POST", "/projects/" + encodeURIComponent(projectId) + "/ceo/terminal");
+        terminalToast(r);
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        termBtn.disabled = false;
+      }
+    });
+  }
 
   // Reset-to-inherit → PATCH { ceo_enabled: null } — only present while an explicit override is set.
   const reset = card.querySelector(".ceo-reset");

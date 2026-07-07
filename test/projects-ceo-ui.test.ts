@@ -22,12 +22,13 @@ function extract(name: string): string {
 }
 
 type CeoStatus = { enabled: boolean; overridden: boolean; globalGate: boolean; live: boolean };
-const { ceoStatusPill, ceoNoteHtml } = new Function(`
+const { ceoStatusPill, ceoNoteHtml, ceoTerminalBtnState } = new Function(`
 ${extract("projects-ceo-status")}
-return { ceoStatusPill, ceoNoteHtml };
+return { ceoStatusPill, ceoNoteHtml, ceoTerminalBtnState };
 `)() as {
   ceoStatusPill: (s: CeoStatus) => { cls: string; label: string; title?: string };
   ceoNoteHtml: (s: CeoStatus) => string;
+  ceoTerminalBtnState: (s: CeoStatus) => { enabled: boolean; title: string };
 };
 
 // --- status pill (live > enabled > default/disabled) -------------------------------------
@@ -85,6 +86,49 @@ test("note: OVERRIDDEN-OFF → explicitly disabled for this project", () => {
 test("note: OVERRIDDEN-ON while gate ON → no note (unambiguous)", () => {
   const html = ceoNoteHtml({ enabled: true, overridden: true, globalGate: true, live: true });
   expect(html).toBe("");
+});
+
+// --- Open-CEO-terminal button gating (mirrors the CTO terminal affordance) ---------------
+// Unlike the CTO button (hidden when not running), this stays visible but disables when there's
+// no live pane, with an honest title reflecting WHY — consistent with ceoNoteHtml's wording.
+test("term: live → enabled", () => {
+  const b = ceoTerminalBtnState({ enabled: true, overridden: true, globalGate: true, live: true });
+  expect(b.enabled).toBe(true);
+  expect(b.title.toLowerCase()).toContain("live");
+});
+
+test("term: enabled-but-not-live → disabled, 'starting' hint", () => {
+  const b = ceoTerminalBtnState({ enabled: true, overridden: true, globalGate: true, live: false });
+  expect(b.enabled).toBe(false);
+  expect(b.title.toLowerCase()).toContain("starting");
+});
+
+test("term: explicitly disabled for the project → disabled, points at enabling it", () => {
+  const b = ceoTerminalBtnState({ enabled: false, overridden: true, globalGate: true, live: false });
+  expect(b.enabled).toBe(false);
+  expect(b.title.toLowerCase()).toContain("disabled for this project");
+});
+
+test("term: inheriting while the global gate is OFF → disabled, names the gate", () => {
+  const b = ceoTerminalBtnState({ enabled: false, overridden: false, globalGate: false, live: false });
+  expect(b.enabled).toBe(false);
+  expect(b.title).toContain("BUTCHR_CEO_AGENT");
+});
+
+// Whole matrix: the button is enabled IF AND ONLY IF the CEO is live, and every disabled state
+// carries a non-empty honest hint.
+test("term: enabled iff live, and never disabled without a hint", () => {
+  for (const enabled of [true, false]) {
+    for (const overridden of [true, false]) {
+      for (const globalGate of [true, false]) {
+        for (const live of [true, false]) {
+          const b = ceoTerminalBtnState({ enabled, overridden, globalGate, live });
+          expect(b.enabled).toBe(live);
+          expect(b.title.length).toBeGreaterThan(0);
+        }
+      }
+    }
+  }
 });
 
 // Global invariant across the ENTIRE matrix: whenever the CEO is actually enabled, the note
