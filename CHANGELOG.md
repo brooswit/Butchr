@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.224] - 2026-07-07
+
 ### Fixed
 
 - **Reconnect notification RESYNC no longer replays the terminal (failed/aborted) task backlog.** The
