@@ -17,7 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.214] - 2026-07-07
+### Changed
+
+- **Hierarchical Projects IA (S3): hierarchical, deep-linkable URLs + breadcrumbs; retire the
+  flat top level.** The three tiers — `#/projects` (landing), `#/projects/:projectId` (a project's
+  workspaces), and `#/projects/:projectId/workspaces/:workspaceId` (a workspace's work) — all cold-load,
+  survive reload, and are shareable; browser back/forward walks up/down the hierarchy. Legacy hashes are
+  canonicalized with **replace** semantics (never a pushed history entry, so Back can't trap): bare `#/`
+  → `#/projects`, and a flat `#/workspace/:wid` → its nested `#/projects/:pid/workspaces/:wid` route,
+  deriving the owning project from the repo membership API (an un-adopted repo with no project home still
+  renders flat, so old bookmarks resolve). Breadcrumb trails (reusing `.crumbs`) on the project and
+  workspace views link each ancestor to its route, with `aria-current="page"` on the trailing crumb,
+  keyboard-focusable links, and a visible focus ring. The standalone **Workspaces** top-nav link is
+  removed — **Projects** is the primary nav (Metrics unchanged). Front-end only.
 
 ### Changed
 - **Hierarchical Projects IA — S2: Projects is the landing + Project→Workspace drill-in (story

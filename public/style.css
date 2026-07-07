@@ -262,6 +262,12 @@ h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em
 h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .crumbs { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
 .crumbs a { color: var(--muted); }
+.crumbs a:hover { color: var(--text); text-decoration: underline; }
+/* Breadcrumb links are real <a href> (keyboard-focusable); give them a visible focus ring
+   consistent with the app's other :focus-visible affordances. */
+.crumbs a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+/* The trailing (current-page) crumb — aria-current="page" — reads as the active location. */
+.crumbs [aria-current="page"] { color: var(--text); font-weight: 500; }
 
 /* cards / grid */
 .grid { display: grid; gap: 14px; }

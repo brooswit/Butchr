@@ -846,9 +846,51 @@ function startActivity() {
   activityTimer = setInterval(pollActivity, 2500);
 }
 
+// Map a flat workspace/repo id to the PROJECT that owns it, for the legacy `#/workspace/:wid`
+// → `#/projects/:pid/workspaces/:wid` redirect (Hierarchical Projects IA S3). The repo IS a work
+// node whose id === the workspace id, registered under a project via parent_id; there is no single
+// "which project owns this repo" endpoint, so we scan the SAME REST surface the Projects overview
+// uses: GET /api/projects, then each project's /repos in parallel. Returns the owning project id,
+// or null when no project claims it (an un-adopted repo → caller renders it FLAT) or on any error
+// (best-effort; never throws, so a hiccup just leaves the flat route in place).
+async function projectIdForWorkspace(wid) {
+  try {
+    const projects = await api("GET", "/projects");
+    const matches = await Promise.all((projects || []).map(async (p) => {
+      try {
+        const repos = await api("GET", "/projects/" + encodeURIComponent(p.id) + "/repos");
+        return Array.isArray(repos) && repos.some((r) => r && r.id === wid) ? p.id : null;
+      } catch (e) { return null; }
+    }));
+    return matches.find(Boolean) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 let current = null;
 async function render() {
   const route = parseHash();
+  // CANONICALIZING REDIRECTS (Hierarchical Projects IA S3) — retire the flat top level by rewriting
+  // legacy hashes to their hierarchical equivalents. REPLACE semantics (location.replace, not a
+  // `location.hash =` push) so Back walks UP the hierarchy instead of landing on the old hash and
+  // bouncing forward into the redirect again (a history trap). parseHash keeps a bare→projects arm
+  // as a harmless belt; this makes the URL bar honest + deep-linkable.
+  const rawHash = location.hash.replace(/^#/, "");
+  if (rawHash === "" || rawHash === "/") {
+    location.replace("#/projects"); // fires hashchange → render() re-runs on the canonical hash
+    return;
+  }
+  // A FLAT `#/workspace/:wid` (no projectId) → the nested route, deriving the owning project from
+  // the API. A repo not yet adopted by any project has no nested home → fall through and render it
+  // flat (graceful; old bookmark still resolves).
+  if (route.name === "workspace" && !route.projectId) {
+    const pid = await projectIdForWorkspace(route.id);
+    if (pid) {
+      location.replace("#/projects/" + encodeURIComponent(pid) + "/workspaces/" + encodeURIComponent(route.id));
+      return;
+    }
+  }
   current = route;
   stopLiveOutput();
   stopActivity();
@@ -1154,8 +1196,8 @@ async function renderWorkspace(id, projectId) {
 
   const wrap = el("div");
   const crumbsHtml = projectId
-    ? `<a href="#/projects">Projects</a> / <a href="#/projects/${esc(projectId)}">${esc(projectName)}</a> / ${esc(dir.label || dir.path)}`
-    : `<a href="#/">Workspaces</a> / ${esc(dir.label || dir.path)}`;
+    ? `<a href="#/projects">Projects</a> / <a href="#/projects/${esc(projectId)}">${esc(projectName)}</a> / <span aria-current="page">${esc(dir.label || dir.path)}</span>`
+    : `<a href="#/projects">Projects</a> / <span aria-current="page">${esc(dir.label || dir.path)}</span>`;
   wrap.appendChild(el("div", { class: "crumbs", html: crumbsHtml }));
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path" }, dir.path));
@@ -2902,7 +2944,7 @@ async function renderTask(id) {
   const wrap = el("div");
   wrap.appendChild(el("div", {
     class: "crumbs",
-    html: `<a href="#/">Workspaces</a> / <a href="#/workspace/${esc(t.workspace_id)}">${esc(dir ? (dir.label || dir.path) : t.workspace_id)}</a> / ${esc(t.id)}`,
+    html: `<a href="#/projects">Projects</a> / <a href="#/workspace/${esc(t.workspace_id)}">${esc(dir ? (dir.label || dir.path) : t.workspace_id)}</a> / <span aria-current="page">${esc(t.id)}</span>`,
   }));
   const headerRight = el("div", { class: "row", style: "gap:10px" });
   if (isLive(t)) {
@@ -3847,22 +3889,16 @@ function wireDiff(box, taskId) {
 }
 
 // ---------- topnav active state ----------
-// Highlight the topbar nav link matching the current route. Each route maps to the
-// nav href it lives under: Metrics → #/metrics, Projects → #/projects, and everything
-// else (dashboard/workspace/task) → #/ (Workspaces).
+// Highlight the topbar nav link matching the current route. With the flat "Workspaces" top level
+// retired (Hierarchical Projects IA S3), only two nav items remain: Metrics → #/metrics and
+// everything else (projects overview / project detail / nested + flat workspace / task / dashboard)
+// → #/projects. A flat `#/workspace/:wid` is transient — it redirects to its nested home — so
+// lighting Projects during that hop keeps the nav stable.
 function syncTopnav(route) {
   const links = document.querySelectorAll(".topnav-link");
   if (!links.length) return;
   const name = route && route.name;
-  // A workspace reached through the nested `#/projects/:pid/workspaces/:wid` route carries a
-  // projectId — it lives UNDER Projects, so keep the Projects nav item highlighted while
-  // drilled in (a flat `#/workspace/:id` has no projectId and stays under Workspaces).
-  const nestedWorkspace = name === "workspace" && !!(route && route.projectId);
-  const owningHref =
-    name === "metrics" ? "#/metrics" :
-    // the projects overview, a project's detail view, and a nested workspace live under Projects
-    (name === "projects" || name === "project" || nestedWorkspace) ? "#/projects" :
-    "#/";
+  const owningHref = name === "metrics" ? "#/metrics" : "#/projects";
   links.forEach((a) => {
     const active = a.getAttribute("href") === owningHref;
     a.classList.toggle("active", active);
@@ -4451,10 +4487,13 @@ async function renderProjectDetail(id) {
 
   const wrap = el("div");
 
-  // header: back-link + title/anchor/brief + a subtle (cosmetic) node-status chip.
-  const back = el("button", { class: "back-link" }, "← All projects");
-  back.addEventListener("click", () => { location.hash = "#/projects"; });
-  wrap.appendChild(back);
+  // header: breadcrumb trail + title/anchor/brief + a subtle (cosmetic) node-status chip. The
+  // Projects crumb links back to the overview; the trailing project name is the current page
+  // (aria-current), mirroring the workspace view's .crumbs (Hierarchical Projects IA S3).
+  wrap.appendChild(el("div", {
+    class: "crumbs",
+    html: `<a href="#/projects">Projects</a> / <span aria-current="page">${esc(projectTitle(project))}</span>`,
+  }));
 
   const head = el("div", { class: "page-head" });
   const text = el("div", { class: "ph-text" });
