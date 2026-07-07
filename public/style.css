@@ -285,6 +285,30 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .pc-head .title { flex: 1; }
 .pc-placeholder { font-size: 12px; margin-top: 10px; }
 .pc-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+/* A card that OPENS a detail view — cursor + hover/focus affordance. Focus-visible mirrors
+   the shared a11y ring so keyboard users see the same emphasis as :hover. */
+.card.clickable { cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.card.clickable:hover { border-color: var(--accent); }
+.card.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* PROJECT DETAIL view (REVAMP-4 tier UI) — back-link, panel header with a right-aligned
+   action, and the repos-membership rows. Additive, tokens only; theme-aware via the vars. */
+.back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 4px 0; margin-bottom: 6px; }
+.back-link:hover { color: var(--text); }
+.back-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.panel-head { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+.panel-head h2 { margin: 0; }
+/* A cosmetic, OUTLINED node-status chip — never asserts a live signal, just labels the row. */
+.chip.subtle { background: transparent; border: 1px solid var(--border); color: var(--muted); text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 10px; }
+/* member-repo rows */
+.repo-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--border); }
+.repo-row:first-child { border-top: none; }
+.repo-row .ic { color: var(--kind-cto); }
+.repo-row .nm { font-weight: 600; }
+.repo-row .rp { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
+.icon-btn { background: none; border: 1px solid transparent; color: var(--muted); cursor: pointer; border-radius: var(--radius-md); width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1; }
+.icon-btn:hover { color: var(--rejected); border-color: var(--rejected); }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* status chips */
 .chip {

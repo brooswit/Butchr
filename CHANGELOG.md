@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Projects: project detail view + repo membership.** Clicking a project card on the
+  Projects overview now opens its detail view (`#/projects/:id`), which loads the
+  project header (brief/anchor/status) and a **Repos** panel listing the project's
+  member repos. Each repo can be unregistered (optimistic removal → idempotent
+  `DELETE /api/projects/:id/repos/:repoId`, restored on error), and an **Add repo**
+  control picks a directory from `GET /api/workspaces` (excluding current members) and
+  registers it via `POST /api/projects/:id/repos`; 409 (already registered under
+  another project) and 404 (not a repo node) surface inline. Front-end only
+  (`public/app.js` + `public/style.css`); reuses the shared chip/panel styling and is
+  theme-aware with focus-visible keyboard affordances. (The CEO card + initiative
+  rollups remain a later subtask.)
+
 ## [0.9.207] - 2026-07-07
 
 ### Added

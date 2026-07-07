@@ -734,7 +734,8 @@ function parseHash() {
   const parts = hash.split("/").filter(Boolean);
   if (parts.length === 0) return { name: "dashboard" };
   if (parts[0] === "metrics") return { name: "metrics" };
-  if (parts[0] === "projects") return { name: "projects" };
+  // `#/projects` is the overview; `#/projects/:id` is a project's detail view.
+  if (parts[0] === "projects") return parts[1] ? { name: "project", id: parts[1] } : { name: "projects" };
   if (parts[0] === "workspace") return { name: "workspace", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
   return { name: "dashboard" };
@@ -844,6 +845,7 @@ async function render() {
     if (route.name === "dashboard") await renderDashboard();
     else if (route.name === "metrics") await renderMetrics();
     else if (route.name === "projects") await renderProjects();
+    else if (route.name === "project") await renderProjectDetail(route.id);
     else if (route.name === "workspace") await renderWorkspace(route.id);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
@@ -3827,7 +3829,8 @@ function syncTopnav(route) {
   const name = route && route.name;
   const owningHref =
     name === "metrics" ? "#/metrics" :
-    name === "projects" ? "#/projects" :
+    // both the projects overview and a project's detail view live under Projects
+    (name === "projects" || name === "project") ? "#/projects" :
     "#/";
   links.forEach((a) => {
     const active = a.getAttribute("href") === owningHref;
@@ -4069,7 +4072,9 @@ async function renderProjects() {
   const grid = el("div", { class: "grid dirs" });
   for (const p of projects) {
     const pill = ceoPill(p);
-    const card = el("div", { class: "card" });
+    // Each card OPENS the project detail view (#/projects/:id). It's a real button for
+    // a11y: role=button + tabindex so it's tab-reachable and Enter/Space activate it.
+    const card = el("div", { class: "card clickable", role: "button", tabindex: "0" });
     card.innerHTML =
       '<div class="pc-head">' +
         '<div class="title">' + esc(projectTitle(p)) + '</div>' +
@@ -4083,6 +4088,11 @@ async function renderProjects() {
           (pill.title ? ' title="' + esc(pill.title) + '"' : "") + '>' +
           esc(pill.label) + '</span>' +
       '</div>';
+    const open = () => { location.hash = "#/projects/" + p.id; };
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
     grid.appendChild(card);
   }
   wrap.appendChild(grid);
@@ -4162,6 +4172,181 @@ async function openNewProjectModal() {
       if (created && created.id) rememberCreatedProject(created.id);
       return created;
     }, { success: "project created", onDone: () => { close(); render(); } });
+  });
+}
+
+// ---------- project DETAIL view (REVAMP-4 tier UI) ----------
+// A single project's page: header (brief/anchor/status) + a Repos panel to register /
+// unregister member repos. Reached by clicking a card on the overview (#/projects/:id).
+// The CEO card + initiative rollups are a LATER subtask (S5) — deliberately NOT here, so
+// this ships the repo-membership surface alone.
+//
+// Repo rows have NO path/label of their own: listProjectRepos returns work_kind='repo'
+// task rows whose id === their directory id (REVAMP-4 S0a). We resolve each id to a
+// human path/label against GET /api/workspaces (fetched alongside the members). The same
+// workspaces list, minus the current members, is the "Add repo" picker's option set.
+
+// <test-extract:projects-repo-display> — pure, DOM-free repo-display resolution,
+// unit-tested in test/projects-detail-ui.test.ts.
+// A member repo's display fields, resolved against the workspaces map. Defensive: a repo
+// whose id isn't in /api/workspaces (stale/filtered directory) still renders honestly
+// from its id/brief rather than blanking the panel or throwing on basename(undefined).
+function repoDisplay(repo, wsById) {
+  const ws = wsById.get(repo.id);
+  if (ws) {
+    return { name: ws.label || basenameOf(ws.path) || repo.id, dir: ws.path || repo.id };
+  }
+  return { name: (repo.brief && String(repo.brief).trim()) || repo.id, dir: repo.id };
+}
+
+// Basename of a path (last non-empty segment), tolerating trailing slashes. "" for a
+// null/empty input so callers can fall back.
+function basenameOf(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "";
+}
+// </test-extract:projects-repo-display>
+
+async function renderProjectDetail(id) {
+  // Load the project row, its member repos, and the workspaces (to resolve repo id→path)
+  // together. A failure (e.g. 404 on a stale hash) falls through to render()'s catch,
+  // which paints an .empty error — matching every other view.
+  const [project, repos, workspaces] = await Promise.all([
+    api("GET", "/projects/" + encodeURIComponent(id)),
+    api("GET", "/projects/" + encodeURIComponent(id) + "/repos"),
+    api("GET", "/workspaces"),
+  ]);
+  const wsById = new Map(workspaces.map((w) => [w.id, w]));
+
+  const wrap = el("div");
+
+  // header: back-link + title/anchor/brief + a subtle (cosmetic) node-status chip.
+  const back = el("button", { class: "back-link" }, "← All projects");
+  back.addEventListener("click", () => { location.hash = "#/projects"; });
+  wrap.appendChild(back);
+
+  const head = el("div", { class: "page-head" });
+  const text = el("div", { class: "ph-text" });
+  text.appendChild(el("h1", {}, projectTitle(project)));
+  if (project.workspace_id) text.appendChild(el("div", { class: "path" }, project.workspace_id));
+  if (project.brief) text.appendChild(el("div", { class: "sub" }, project.brief));
+  head.appendChild(text);
+  if (project.status) {
+    head.appendChild(el("span", {
+      class: "chip subtle",
+      title: "node status (cosmetic)",
+    }, project.status));
+  }
+  wrap.appendChild(head);
+
+  // repos panel
+  wrap.appendChild(reposPanel(project, repos, wsById));
+
+  mount(wrap);
+}
+
+// The Repos panel: a header with a right-aligned "+ Add repo" action, then one row per
+// member repo (name + mono dir + an unregister ×). Empty-state when there are none.
+function reposPanel(project, repos, wsById) {
+  const panel = el("div", { class: "panel" });
+
+  const phead = el("div", { class: "panel-head" });
+  phead.appendChild(el("h2", {}, "Repos"));
+  phead.appendChild(el("span", { class: "spacer" }));
+  const addBtn = el("button", { class: "btn ghost xs" }, "+ Add repo");
+  addBtn.addEventListener("click", () => openAddRepoModal(project, repos, wsById));
+  phead.appendChild(addBtn);
+  panel.appendChild(phead);
+
+  if (!repos.length) {
+    panel.appendChild(el("div", { class: "empty" },
+      "No repos registered — add one to target it with an initiative."));
+    return panel;
+  }
+
+  for (const repo of repos) {
+    const d = repoDisplay(repo, wsById);
+    const row = el("div", { class: "repo-row" });
+    row.innerHTML =
+      '<span class="ic" aria-hidden="true">◆</span>' +
+      '<span class="nm">' + esc(d.name) + '</span>' +
+      '<span class="rp">' + esc(d.dir) + '</span>' +
+      '<span class="spacer"></span>' +
+      '<button class="icon-btn" title="Unregister repo" aria-label="Unregister ' + esc(d.name) + '">×</button>';
+    const del = row.querySelector(".icon-btn");
+    del.addEventListener("click", () => unregisterRepo(project, repo, row));
+    panel.appendChild(row);
+  }
+  return panel;
+}
+
+// Optimistic unregister: drop the row immediately, then DELETE (idempotent). On error,
+// toast + re-render the detail view so the panel reflects the true server state again.
+function unregisterRepo(project, repo, row) {
+  row.remove();
+  action(null, async () => {
+    return api("DELETE",
+      "/projects/" + encodeURIComponent(project.id) +
+      "/repos/" + encodeURIComponent(repo.id));
+  }, {
+    success: "repo unregistered",
+    // re-render regardless so the list re-derives from the server (restores the row on a
+    // failure, confirms the removal on success). action() already toasted the error.
+    onDone: () => render(),
+  });
+}
+
+// ADD-REPO modal — pick a directory from GET /api/workspaces that is NOT already a member,
+// then POST /api/projects/:id/repos { repo }. The server 409s if the directory is already
+// registered under a DIFFERENT project and 404s if it isn't a repo node (or is gone); both
+// surface INLINE in .m-error (not just a transient toast). Disable submit with an honest
+// message when every workspace is already a member.
+function openAddRepoModal(project, repos, wsById) {
+  const memberIds = new Set(repos.map((r) => r.id));
+  const avail = Array.from(wsById.values()).filter((w) => !memberIds.has(w.id));
+
+  const body = el("div", { class: "m-body" });
+  if (!avail.length) {
+    body.innerHTML = '<div class="empty">Every registered workspace is already a member of this project.</div>';
+  } else {
+    body.innerHTML =
+      '<label class="field" style="margin-bottom:6px">' +
+        '<span class="lbl">directory — register a repo the project can target</span>' +
+        '<select id="ar-dir">' + avail.map((w) =>
+          '<option value="' + esc(w.id) + '">' + esc(w.label || w.path) + '</option>').join("") +
+        '</select>' +
+      '</label>' +
+      '<small class="hint muted">The directory must be a registered repo. Registering it here lets the project coordinate initiatives against it.</small>';
+  }
+
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const cancel = el("button", { class: "btn ghost" }, avail.length ? "Cancel" : "Close");
+  const submit = el("button", { class: "btn" }, "Add repo");
+  if (!avail.length) submit.disabled = true;
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(submit);
+
+  const { close } = openModal({ title: "Add repo", body, footer: foot });
+  cancel.addEventListener("click", close);
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
+
+  const sel = body.querySelector("#ar-dir");
+  submit.addEventListener("click", () => {
+    if (!avail.length) return;
+    const repo = sel.value;
+    if (!repo) { showErr("Pick a directory first."); return; }
+    showErr("");
+    action(submit, async () => {
+      try {
+        return await api("POST",
+          "/projects/" + encodeURIComponent(project.id) + "/repos", { repo });
+      } catch (e) {
+        showErr(e.message); // 409 (member elsewhere) / 404 (not a repo node) shown inline
+        throw e; // let action() toast + re-enable the button
+      }
+    }, { success: "repo registered", onDone: () => { close(); render(); } });
   });
 }
 
