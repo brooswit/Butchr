@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.211] - 2026-07-07
+
 ### Added
 - **Delete-project endpoint (REVAMP-4).** New `DELETE /api/projects/:id` (backed by
   `deleteProject` in `src/workspaces.ts`) lets the Projects UI remove a project node, closing the
