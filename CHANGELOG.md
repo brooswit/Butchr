@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.221] - 2026-07-07
+
 ### Added
 
 - **Cross-repo node-on-node `blocked_by` sequencing — a STORY can now be sequenced behind another
