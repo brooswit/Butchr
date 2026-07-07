@@ -4280,20 +4280,23 @@ function reposPanel(project, repos, wsById) {
   return panel;
 }
 
-// Optimistic unregister: drop the row immediately, then DELETE (idempotent). On error,
-// toast + re-render the detail view so the panel reflects the true server state again.
-function unregisterRepo(project, repo, row) {
+// Optimistic unregister: drop the row immediately, then DELETE (idempotent). We can't use
+// action() here — its onDone only runs on SUCCESS (its catch just toasts), so a failed
+// DELETE would leave the already-removed row gone and falsely show the repo as
+// unregistered. Own the async and re-render in a `finally` so the panel re-derives from
+// the server on BOTH outcomes: restores the row on failure, confirms removal on success.
+async function unregisterRepo(project, repo, row) {
   row.remove();
-  action(null, async () => {
-    return api("DELETE",
+  try {
+    await api("DELETE",
       "/projects/" + encodeURIComponent(project.id) +
       "/repos/" + encodeURIComponent(repo.id));
-  }, {
-    success: "repo unregistered",
-    // re-render regardless so the list re-derives from the server (restores the row on a
-    // failure, confirms the removal on success). action() already toasted the error.
-    onDone: () => render(),
-  });
+    toast("repo unregistered");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    render();
+  }
 }
 
 // ADD-REPO modal — pick a directory from GET /api/workspaces that is NOT already a member,
