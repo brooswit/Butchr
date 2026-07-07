@@ -4045,8 +4045,33 @@ function rememberCreatedProject(id) {
   } catch (e) { /* ignore — the server list is authoritative regardless */ }
 }
 
+// The overview card's initiative rollup line. `inits` is the project's InitiativeView[] — or
+// undefined when its fetch failed, in which case we keep the honest muted placeholder rather than
+// assert a count we don't have. Otherwise a compact .swim-prog mini-bar reads "X/Y initiatives
+// done" (done via the server's `done` boolean on each initiative — see projectInitiativeRollup).
+function projectInitiativesLine(inits) {
+  if (!inits) return '<div class="pc-placeholder muted">initiatives —</div>';
+  const roll = projectInitiativeRollup(inits);
+  return '<div class="swim-prog" title="cross-repo initiatives fully done across their repos">' +
+      '<span class="swim-track"><i style="width:' + roll.pct + '%"></i></span>' +
+      '<span class="swim-prog-txt">' + roll.done + '/' + roll.total + ' initiatives done</span>' +
+    '</div>';
+}
+
 async function renderProjects() {
   const projects = await api("GET", "/projects");
+  // Per-project initiative rollup for each card's "X/Y done" line. GET /api/projects carries no
+  // rollup counts, so fetch each project's initiatives in parallel. FAIL-SOFT per card: a project
+  // whose fetch rejects is left OUT of the map, so its card keeps the muted "initiatives —"
+  // placeholder instead of breaking the grid. (Only cross-repo initiatives appear — single-repo
+  // ones are ungrouped — so this counts those, matching the detail panel.)
+  const initsByProject = new Map();
+  await Promise.all(projects.map(async (p) => {
+    try {
+      initsByProject.set(p.id,
+        await api("GET", "/projects/" + encodeURIComponent(p.id) + "/initiatives"));
+    } catch (e) { /* leave unset → placeholder */ }
+  }));
   const wrap = el("div");
 
   // page head: title + subtitle + "New project" action
@@ -4080,9 +4105,9 @@ async function renderProjects() {
         '<div class="title">' + esc(projectTitle(p)) + '</div>' +
       '</div>' +
       '<div class="path">' + esc(p.workspace_id) + '</div>' +
-      // Honest placeholders — repos + initiative rollup are filled by later subtasks.
+      // repos rollup is still a later subtask's concern; the initiative rollup is filled here (S4).
       '<div class="pc-placeholder muted">repos —</div>' +
-      '<div class="pc-placeholder muted">initiatives —</div>' +
+      projectInitiativesLine(initsByProject.get(p.id)) +
       '<div class="pc-foot">' +
         '<span class="chip ' + pill.cls + '"' +
           (pill.title ? ' title="' + esc(pill.title) + '"' : "") + '>' +
@@ -4207,14 +4232,51 @@ function basenameOf(path) {
 }
 // </test-extract:projects-repo-display>
 
+// <test-extract:initiative-rollup> — pure, DOM-free initiative heading + rollup derivation,
+// unit-tested in test/projects-initiatives-ui.test.ts.
+// A cross-repo InitiativeView (GET /api/projects/:id/initiatives) has NO top-level brief — each
+// per-repo child story carries its own — so derive a compact panel heading from the FIRST child's
+// brief (first line, clamped). Falls back to the initiative id when no child has a brief, so the
+// row never renders blank.
+function initiativeHeading(init) {
+  const kids = (init && init.children) || [];
+  const withBrief = kids.find((c) => c && c.brief && String(c.brief).trim());
+  const raw = withBrief ? String(withBrief.brief).trim() : "";
+  if (!raw) return "Initiative " + (String((init && init.initiative_id) || "").trim() || "—");
+  const oneLine = raw.split("\n")[0].trim();
+  return oneLine.length > 80 ? oneLine.slice(0, 77) + "…" : oneLine;
+}
+// The rollup fraction for an initiative's progress bar. LOCKED to the SERVER's done predicate
+// (rollupInitiatives in src/stories.ts): a child counts as done ONLY when status==='done'
+// (strictly — NOT merged/landed), so the bar reaches 100% EXACTLY when the server's
+// initiative.done is true, with no bar/boolean disagreement. Returns { done, total, pct }.
+function initiativeRollup(init) {
+  const kids = (init && init.children) || [];
+  const total = kids.length;
+  const done = kids.filter((c) => c && c.status === "done").length;
+  return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
+}
+// The project-level "X/Y initiatives done" rollup for the overview card — counts DONE
+// initiatives using the server's authoritative `done` boolean on each InitiativeView. Only
+// cross-repo initiatives appear in the list (single-repo ones are ungrouped), so this counts
+// those. Returns { done, total, pct }.
+function projectInitiativeRollup(inits) {
+  const list = Array.isArray(inits) ? inits : [];
+  const total = list.length;
+  const done = list.filter((i) => i && i.done).length;
+  return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
+}
+// </test-extract:initiative-rollup>
+
 async function renderProjectDetail(id) {
   // Load the project row, its member repos, and the workspaces (to resolve repo id→path)
   // together. A failure (e.g. 404 on a stale hash) falls through to render()'s catch,
   // which paints an .empty error — matching every other view.
-  const [project, repos, workspaces] = await Promise.all([
+  const [project, repos, workspaces, initiatives] = await Promise.all([
     api("GET", "/projects/" + encodeURIComponent(id)),
     api("GET", "/projects/" + encodeURIComponent(id) + "/repos"),
     api("GET", "/workspaces"),
+    api("GET", "/projects/" + encodeURIComponent(id) + "/initiatives"),
   ]);
   const wsById = new Map(workspaces.map((w) => [w.id, w]));
 
@@ -4242,7 +4304,206 @@ async function renderProjectDetail(id) {
   // repos panel
   wrap.appendChild(reposPanel(project, repos, wsById));
 
+  // initiatives panel — the cross-repo rollup + launch surface (REVAMP-4 S4)
+  wrap.appendChild(initiativesPanel(project, initiatives, repos, wsById));
+
   mount(wrap);
+}
+
+// The Initiatives panel: header with a right-aligned "Launch initiative" action, then one
+// .init block per CROSS-repo initiative (GET /api/projects/:id/initiatives). Each block shows a
+// derived heading, its per-repo child rows (resolved repo name + shared-palette status chip + the
+// child's brief), and a rolled-up doneness bar. Empty-state when there are none. NOTE: single-repo
+// initiatives are seeded ungrouped and don't appear here (only cross-repo do) — the launch modal
+// says so, and a single-repo launch toast names the repo it was seeded into.
+function initiativesPanel(project, initiatives, repos, wsById) {
+  const panel = el("div", { class: "panel" });
+
+  const phead = el("div", { class: "panel-head" });
+  phead.appendChild(el("h2", {}, "Initiatives"));
+  phead.appendChild(el("span", { class: "spacer" }));
+  const launchBtn = el("button", { class: "btn" }, "Launch initiative");
+  launchBtn.addEventListener("click", () => openLaunchModal(project, repos, wsById));
+  phead.appendChild(launchBtn);
+  panel.appendChild(phead);
+
+  if (!initiatives.length) {
+    panel.appendChild(el("div", { class: "empty" },
+      "No initiatives yet — launch one against a single repo or fan out across several."));
+    return panel;
+  }
+
+  for (const init of initiatives) {
+    panel.appendChild(el("div", { class: "init", html: initiativeMarkup(init, wsById) }));
+  }
+  return panel;
+}
+
+// One initiative's markup: a heading + short id, its per-repo child rows (each = resolved repo
+// name + the shared status .chip + the child brief), and a rolled-up doneness bar. The bar's
+// fraction (initiativeRollup) is LOCKED to the server's status==='done' predicate so it reads
+// 100% exactly when the server's `done` boolean is true. Each child.workspace_id is a repo/
+// directory id, resolved to a friendly name via repoDisplay (id-only, so its fallback is the id —
+// never the story brief).
+function initiativeMarkup(init, wsById) {
+  const roll = initiativeRollup(init);
+  const targets = (init.children || []).map((c) => {
+    const d = repoDisplay({ id: c.workspace_id }, wsById);
+    const brief = c.brief && String(c.brief).trim();
+    return '<div class="init-target">' +
+        '<span class="tr">' + esc(d.name) + '</span>' +
+        chip(c.status) +
+        (brief ? '<span class="ibr">' + esc(brief) + '</span>' : "") +
+      '</div>';
+  }).join("");
+  return (
+    '<div class="init-head">' +
+      '<span class="ib">' + esc(initiativeHeading(init)) + '</span>' +
+      '<span class="init-id" title="initiative grouping id">' + esc(init.initiative_id) + '</span>' +
+    '</div>' +
+    '<div class="init-targets">' + targets + '</div>' +
+    '<div class="rollup-summary">' +
+      '<span class="rollup-frac">' + roll.done + '/' + roll.total + '</span>' +
+      '<span class="muted">' + (init.done ? "done — all stories landed" : "stories done") + '</span>' +
+    '</div>' +
+    '<div class="rollup-bar"><div class="rollup-bar-fill" style="width:' + roll.pct + '%"></div></div>'
+  );
+}
+
+// LAUNCH-INITIATIVE modal — reuses openModal/action/api. A segmented toggle switches between the
+// two backend shapes on POST /api/projects/:id/initiatives:
+//   Single repo      → { repo, brief }         (one member repo + a brief; seeded UNGROUPED)
+//   Cross-repo fan-out → { targets:[{repo,brief}] } (repeatable rows, atomic all-or-nothing)
+// Member repos (the select options) come from the project's repos list, resolved to friendly
+// names via repoDisplay. A 409 (non-member repo) is shown INLINE in .m-error, not just a toast.
+// Submit is disabled with an honest message when the project has no member repos. On a 201 the
+// modal closes and the view re-renders (refreshing the list); a single-repo success toast names
+// the repo it was seeded into, since that story is tracked on the repo's board, not this panel.
+function openLaunchModal(project, repos, wsById) {
+  let mode = "single"; // 'single' | 'fanout'
+  const repoOpts = (repos || []).map((r) => ({ id: r.id, name: repoDisplay(r, wsById).name }));
+
+  const body = el("div", { class: "m-body" });
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  const submit = el("button", { class: "btn" }, "Launch");
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(submit);
+
+  const { close } = openModal({ title: "Launch initiative", body, footer: foot });
+  cancel.addEventListener("click", close);
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
+
+  function repoSelectHtml(id, selected) {
+    return '<select ' + (id ? 'id="' + esc(id) + '" ' : "") + 'class="tgt-repo">' +
+      repoOpts.map((o) =>
+        '<option value="' + esc(o.id) + '"' + (o.id === selected ? " selected" : "") + '>' +
+          esc(o.name) + '</option>').join("") +
+      '</select>';
+  }
+
+  function draw() {
+    if (!repoOpts.length) {
+      body.innerHTML = '<div class="empty">Register at least one repo before launching an initiative.</div>';
+      submit.disabled = true;
+      return;
+    }
+    submit.disabled = false;
+    let inner =
+      '<div class="seg" role="tablist" aria-label="Initiative scope">' +
+        '<button type="button" data-mode="single" class="' + (mode === "single" ? "on" : "") +
+          '" role="tab" aria-selected="' + (mode === "single") + '">Single repo</button>' +
+        '<button type="button" data-mode="fanout" class="' + (mode === "fanout" ? "on" : "") +
+          '" role="tab" aria-selected="' + (mode === "fanout") + '">Cross-repo fan-out</button>' +
+      '</div>';
+    if (mode === "single") {
+      inner +=
+        '<label class="field"><span class="lbl">repo</span>' + repoSelectHtml("li-repo") + '</label>' +
+        '<label class="field" style="margin-bottom:6px"><span class="lbl">brief — what to build in this repo</span>' +
+          '<textarea class="tgt-brief" placeholder="Describe the initiative for this repo…"></textarea></label>' +
+        '<small class="hint muted">A single-repo initiative seeds one story into that repo (managed by its CTO) — ' +
+          'it’s tracked on that repo’s board and won’t appear in this cross-repo list. ' +
+          'Use fan-out to coordinate several repos under one rolled-up initiative.</small>';
+    } else {
+      inner +=
+        '<span class="lbl">targets — one {repo, brief} per repo; add as many as you need</span>' +
+        '<div id="targets"></div>' +
+        '<button type="button" class="btn ghost xs add-target" id="addTgt">+ Add target</button>';
+    }
+    body.innerHTML = inner;
+
+    Array.prototype.forEach.call(body.querySelectorAll("[data-mode]"), (b) => {
+      b.addEventListener("click", () => { mode = b.getAttribute("data-mode"); showErr(""); draw(); });
+    });
+    if (mode === "single") {
+      const t = body.querySelector(".tgt-brief"); if (t) t.focus();
+    } else {
+      const wrap = body.querySelector("#targets");
+      const addRow = (sel) => {
+        const row = el("div", { class: "target-row" });
+        row.innerHTML =
+          repoSelectHtml(null, sel) +
+          '<textarea class="tgt-brief" placeholder="Brief for this repo…"></textarea>' +
+          '<button type="button" class="icon-btn" title="Remove target" aria-label="Remove target">×</button>';
+        row.querySelector(".icon-btn").addEventListener("click", () => {
+          if (wrap.children.length > 1) wrap.removeChild(row);
+          else toast("keep at least one target");
+        });
+        wrap.appendChild(row);
+      };
+      addRow(repoOpts[0].id);
+      addRow((repoOpts[1] || repoOpts[0]).id);
+      body.querySelector("#addTgt").addEventListener("click", () => addRow(repoOpts[0].id));
+    }
+  }
+  draw();
+
+  submit.addEventListener("click", () => {
+    if (!repoOpts.length) return;
+    showErr("");
+    if (mode === "single") {
+      const repo = body.querySelector(".tgt-repo").value;
+      const brief = body.querySelector(".tgt-brief").value.trim();
+      if (!brief) { showErr("Write a brief first."); return; }
+      const repoName = (repoOpts.find((o) => o.id === repo) || {}).name || repo;
+      action(submit, async () => {
+        try {
+          return await api("POST",
+            "/projects/" + encodeURIComponent(project.id) + "/initiatives", { repo, brief });
+        } catch (e) {
+          showErr(e.message); // 409 (non-member repo) shown inline
+          throw e; // let action() toast + re-enable the button
+        }
+      }, {
+        success: "initiative seeded into " + repoName + " — track it on that repo’s board",
+        onDone: () => { close(); render(); },
+      });
+    } else {
+      const rows = Array.prototype.slice.call(body.querySelectorAll(".target-row"));
+      const targets = [];
+      for (const row of rows) {
+        const repo = row.querySelector(".tgt-repo").value;
+        const brief = row.querySelector(".tgt-brief").value.trim();
+        if (brief) targets.push({ repo, brief }); // skip blank-brief rows
+      }
+      if (!targets.length) { showErr("Fill in at least one target brief."); return; }
+      action(submit, async () => {
+        try {
+          return await api("POST",
+            "/projects/" + encodeURIComponent(project.id) + "/initiatives", { targets });
+        } catch (e) {
+          showErr(e.message); // 409 (non-member repo) shown inline
+          throw e;
+        }
+      }, {
+        success: targets.length + " stories fanned out across " + targets.length + " target" +
+          (targets.length === 1 ? "" : "s"),
+        onDone: () => { close(); render(); },
+      });
+    }
+  });
 }
 
 // The Repos panel: a header with a right-aligned "+ Add repo" action, then one row per

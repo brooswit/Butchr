@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Project initiatives in the detail view (REVAMP-4 tier UI).** The project detail
+  page now renders an **Initiatives** panel: each cross-repo initiative
+  (`GET /api/projects/:id/initiatives`) shows its per-repo child stories as
+  shared-palette status chips plus a rolled-up doneness bar (done ⇔ every child
+  story landed `done`, matching the server's rollup predicate exactly). A **Launch
+  initiative** modal supports both backend shapes on
+  `POST /api/projects/:id/initiatives` — a single member repo (`{ repo, brief }`)
+  or a repeatable cross-repo fan-out (`{ targets: [{ repo, brief }, …] }`, atomic
+  all-or-nothing) — with a non-member-repo `409` surfaced inline. The projects
+  overview cards now fill their initiative rollup with a real "X/Y initiatives
+  done" instead of a placeholder. Front-end only (`public/app.js`,
+  `public/style.css`). Single-repo initiatives are seeded ungrouped and are tracked
+  on their repo's board (not this cross-repo list); the launch flow says so and its
+  success toast names the seeded repo.
+
 ## [0.9.208] - 2026-07-07
 
 ### Added
