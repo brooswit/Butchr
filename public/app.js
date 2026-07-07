@@ -734,6 +734,7 @@ function parseHash() {
   const parts = hash.split("/").filter(Boolean);
   if (parts.length === 0) return { name: "dashboard" };
   if (parts[0] === "metrics") return { name: "metrics" };
+  if (parts[0] === "projects") return { name: "projects" };
   if (parts[0] === "workspace") return { name: "workspace", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
   return { name: "dashboard" };
@@ -842,6 +843,7 @@ async function render() {
   try {
     if (route.name === "dashboard") await renderDashboard();
     else if (route.name === "metrics") await renderMetrics();
+    else if (route.name === "projects") await renderProjects();
     else if (route.name === "workspace") await renderWorkspace(route.id);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
@@ -3816,15 +3818,19 @@ function wireDiff(box, taskId) {
 }
 
 // ---------- topnav active state ----------
-// Highlight the topbar nav link matching the current route. Workspace/task pages
-// fall under "Workspaces"; the Metrics page under "Metrics".
+// Highlight the topbar nav link matching the current route. Each route maps to the
+// nav href it lives under: Metrics → #/metrics, Projects → #/projects, and everything
+// else (dashboard/workspace/task) → #/ (Workspaces).
 function syncTopnav(route) {
   const links = document.querySelectorAll(".topnav-link");
   if (!links.length) return;
-  const onMetrics = route && route.name === "metrics";
+  const name = route && route.name;
+  const owningHref =
+    name === "metrics" ? "#/metrics" :
+    name === "projects" ? "#/projects" :
+    "#/";
   links.forEach((a) => {
-    const isMetrics = a.getAttribute("href") === "#/metrics";
-    const active = isMetrics ? onMetrics : !onMetrics;
+    const active = a.getAttribute("href") === owningHref;
     a.classList.toggle("active", active);
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
@@ -3989,6 +3995,174 @@ async function renderMetrics() {
   }
 
   mount(wrap);
+}
+
+// ---------- projects view (REVAMP-4 tier UI) ----------
+// The global PROJECTS overview: a CEO-tier project registers repos and coordinates
+// cross-repo initiatives. This subtask (S2) ships the OVERVIEW + CREATE only; the
+// project-detail view, repos list, initiative rollup, and the full CEO card land in
+// later subtasks (S3–S5) — so cards are STATIC (no detail-click yet) and show honest
+// muted PLACEHOLDERS ("repos —" / "initiatives —") rather than fake counts.
+
+// A compact title derived from the project's brief (a project node has no short-title
+// field). Splits on the first sentence/clause boundary and clamps length. Mirrors the
+// mockup's projectTitle so the real UI reads identically.
+function projectTitle(p) {
+  const t = String((p && p.brief) || "").split(/[—\-:.]/)[0].trim();
+  if (!t) return "Untitled project";
+  return t.length > 60 ? t.slice(0, 57) + "…" : t;
+}
+
+// CEO status pill derived from the LIST row's `ceo_enabled` ALONE — the overview must
+// not assert a resolved on/off it cannot know. Three-way + honest:
+//   1    → "CEO enabled"  (.chip.enabled)  explicit override on
+//   0    → "CEO disabled" (.chip.disabled) explicit override off
+//   null → "CEO default"  (.chip.inactive, neutral) inherits the global gate
+// The fully-resolved state (enabled/globalGate/live) belongs on the S5 detail CEO card
+// via GET /api/projects/:id/ceo — NOT here (no extra fetch on the overview).
+function ceoPill(p) {
+  if (p && p.ceo_enabled === 1) return { cls: "enabled", label: "CEO enabled" };
+  if (p && p.ceo_enabled === 0) return { cls: "disabled", label: "CEO disabled" };
+  return { cls: "inactive", label: "CEO default", title: "Inherits the global CEO gate (BUTCHR_CEO_AGENT)" };
+}
+
+// localStorage key for the defensive fallback set of project ids this browser created
+// (see openNewProjectModal). Purely a belt-and-braces record; the list always renders
+// from the authoritative GET /api/projects.
+const CREATED_PROJECTS_KEY = "butchr-created-projects";
+function rememberCreatedProject(id) {
+  if (!id) return;
+  try {
+    const raw = localStorage.getItem(CREATED_PROJECTS_KEY);
+    const ids = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(ids) && ids.indexOf(id) === -1) {
+      ids.push(id);
+      localStorage.setItem(CREATED_PROJECTS_KEY, JSON.stringify(ids));
+    }
+  } catch (e) { /* ignore — the server list is authoritative regardless */ }
+}
+
+async function renderProjects() {
+  const projects = await api("GET", "/projects");
+  const wrap = el("div");
+
+  // page head: title + subtitle + "New project" action
+  const head = el("div", { class: "page-head" });
+  const text = el("div", { class: "ph-text" });
+  text.appendChild(el("h1", {}, "Projects"));
+  text.appendChild(el("div", { class: "sub" },
+    "Cross-repo initiatives coordinated by a project CEO agent." +
+    (projects.length ? ` ${projects.length} project${projects.length === 1 ? "" : "s"}.` : "")));
+  head.appendChild(text);
+  const newBtn = el("button", { class: "btn" }, "+ New project");
+  newBtn.addEventListener("click", () => openNewProjectModal());
+  head.appendChild(newBtn);
+  wrap.appendChild(head);
+
+  if (!projects.length) {
+    wrap.appendChild(el("div", { class: "empty" },
+      "No projects yet — create one to register repos and launch initiatives."));
+    mount(wrap);
+    return;
+  }
+
+  const grid = el("div", { class: "grid dirs" });
+  for (const p of projects) {
+    const pill = ceoPill(p);
+    const card = el("div", { class: "card" });
+    card.innerHTML =
+      '<div class="pc-head">' +
+        '<div class="title">' + esc(projectTitle(p)) + '</div>' +
+      '</div>' +
+      '<div class="path">' + esc(p.workspace_id) + '</div>' +
+      // Honest placeholders — repos + initiative rollup are filled by later subtasks.
+      '<div class="pc-placeholder muted">repos —</div>' +
+      '<div class="pc-placeholder muted">initiatives —</div>' +
+      '<div class="pc-foot">' +
+        '<span class="chip ' + pill.cls + '"' +
+          (pill.title ? ' title="' + esc(pill.title) + '"' : "") + '>' +
+          esc(pill.label) + '</span>' +
+      '</div>';
+    grid.appendChild(card);
+  }
+  wrap.appendChild(grid);
+  mount(wrap);
+}
+
+// CREATE-PROJECT modal — reuses the openModal/action/api pattern of openNewStoryModal.
+// Anchor-workspace dropdown populated from GET /api/workspaces; brief textarea carries a
+// data-restore-key so an SSE-driven re-render never wipes in-flight text. Submit →
+// POST /api/projects { workspace, brief }; on success add the returned project (server
+// returns the full row) via a re-render, remember its id in localStorage as a fallback,
+// and surface any error (e.g. 404 missing workspace) inline in .m-error (not only a toast).
+async function openNewProjectModal() {
+  const body = el("div", { class: "m-body" });
+  body.innerHTML = `
+    <label class="field">
+      <span class="lbl">anchor workspace — the project's home directory (the CEO agent's launch cwd)</span>
+      <select id="np-anchor"><option value="">loading workspaces…</option></select>
+    </label>
+    <label class="field" style="margin-bottom:6px">
+      <span class="lbl">brief — what this project should deliver across its repos</span>
+      <textarea id="np-brief" data-restore-key="new-project-brief" placeholder="Describe the project in a sentence or two…"></textarea>
+    </label>
+    <small class="hint muted">A project registers repos and coordinates cross-repo initiatives via a CEO agent.</small>`;
+  const anchorEl = body.querySelector("#np-anchor");
+  const briefEl = body.querySelector("#np-brief");
+
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  const submit = el("button", { class: "btn" }, "Create project");
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(submit);
+
+  const { close } = openModal({ title: "New project", body, footer: foot });
+  cancel.addEventListener("click", close);
+
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
+
+  // Populate the anchor dropdown. On failure or an empty registry, disable submit with an
+  // honest message rather than letting the create 404 later.
+  submit.disabled = true;
+  try {
+    const workspaces = await api("GET", "/workspaces");
+    if (!workspaces.length) {
+      anchorEl.innerHTML = '<option value="">no workspaces registered</option>';
+      showErr("Register a workspace first — a project anchors to an existing directory.");
+    } else {
+      anchorEl.innerHTML = workspaces.map((w) =>
+        '<option value="' + esc(w.id) + '">' + esc(w.label || w.path) + '</option>').join("");
+      submit.disabled = false;
+      briefEl.focus();
+    }
+  } catch (e) {
+    anchorEl.innerHTML = '<option value="">could not load workspaces</option>';
+    showErr(e.message);
+  }
+
+  submit.addEventListener("click", () => {
+    const workspace = anchorEl.value;
+    const brief = briefEl.value.trim();
+    if (!workspace) { showErr("Pick an anchor workspace first."); return; }
+    if (!brief) { showErr("Describe the project first."); briefEl.focus(); return; }
+    showErr("");
+    // action() disables the button + toasts on success/failure; we ALSO surface the error
+    // inline so a 404 (missing workspace) isn't lost to a transient toast. On success the
+    // returned row's id is remembered and a re-render lists it from the server.
+    action(submit, async () => {
+      let created;
+      try {
+        created = await api("POST", "/projects", { workspace, brief });
+      } catch (e) {
+        showErr(e.message);
+        throw e; // let action() toast + re-enable the button
+      }
+      if (created && created.id) rememberCreatedProject(created.id);
+      return created;
+    }, { success: "project created", onDone: () => { close(); render(); } });
+  });
 }
 
 // ---------- needs-attention signal ----------

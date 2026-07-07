@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Projects overview + create UI in the dashboard (story st-04869886).** A new front-end-only
+  `Projects` section (nav entry + `#/projects` route) that lists project nodes from
+  `GET /api/projects` and creates them via `POST /api/projects { workspace, brief }`. Renders
+  project cards — derived title, anchor workspace, and an honest three-way CEO status pill from
+  the row's `ceo_enabled` (`1` → "CEO enabled", `0` → "CEO disabled", `null` → neutral
+  "CEO default", inheriting the global gate; the fully-resolved state stays on the per-id CEO
+  card). Empty-state when there are no projects; muted `repos —` / `initiatives —` placeholders
+  (filled by later subtasks). The "New project" modal reuses the shared modal pattern: an
+  anchor-workspace dropdown from `GET /api/workspaces` + a brief textarea (SSE-safe via
+  `data-restore-key`), with inline error surfacing (e.g. a missing-workspace 404) and a
+  localStorage fallback record of created ids. Matches the signed-off `projects-mockup.html`
+  (shared `.chip` palette, tokens-only additive CSS, theme-aware, focus-visible a11y). Cards are
+  static for now — the detail view, repos list, initiative rollup, and full CEO card land in
+  later subtasks.
+
 ## [0.9.206] - 2026-07-06
 
 ### Added

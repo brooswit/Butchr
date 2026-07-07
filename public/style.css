@@ -275,6 +275,17 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .card .title { font-weight: 600; font-size: 15px; }
 .card .path { color: var(--muted); font-family: var(--mono); font-size: 12px; word-break: break-all; margin-top: 2px; }
 
+/* PROJECTS overview layout (REVAMP-4 tier UI) — a small additive layer, tokens only.
+   The page head (title + subtitle + action) and project-card internals. Detail-click,
+   repos, and initiative rollup land in later subtasks; cards show muted placeholders. */
+.page-head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+.page-head .ph-text { flex: 1; min-width: 240px; }
+.page-head .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.pc-head { display: flex; align-items: flex-start; gap: 8px; }
+.pc-head .title { flex: 1; }
+.pc-placeholder { font-size: 12px; margin-top: 10px; }
+.pc-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+
 /* status chips */
 .chip {
   display: inline-flex;
@@ -315,6 +326,11 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .chip.merging { background: var(--in_progress); }
 .chip.merge_blocked { background: var(--blocked); }
 .chip.done { background: var(--merged); }
+/* PROJECT CEO-agent pill (REVAMP-4 tier UI) — reuses existing status vars, no invented
+   colors: enabled ≈ work in flight (blue), disabled ≈ inactive/ready (slate). The neutral
+   `null → CEO default` case uses .chip.inactive above. */
+.chip.enabled { background: var(--in_progress); }
+.chip.disabled { background: var(--inactive); }
 /* Legacy status chips — kept for audit timeline backward-compat */
 .chip.finalizing { background: var(--finalizing); }
 .chip.queued { background: var(--queued); }
