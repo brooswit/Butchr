@@ -841,6 +841,34 @@ function isOnAttentionSurface(item: Record<string, unknown>): boolean {
   );
 }
 
+// The TERMINAL leaf states among ATTENTION_STATES. db.ts (db.isTerminal / ATTENTION_STATES) is the
+// SOURCE OF TRUTH: `failed` and `aborted` are the only two TERMINAL members of the CTO push-feed set.
+// Duplicated as a small LOCAL literal (NOT imported from db.ts) on purpose — this out-of-process
+// bridge is deliberately DB-FREE, and importing db.ts runs its top-level `new Database(...)` at
+// module load. Keep in sync with db.isTerminal should a new terminal attention state ever be added.
+const RESYNC_TERMINAL = new Set(["failed", "aborted"]);
+
+/**
+ * Is a list item a RESYNCABLE attention surface — one the reconnect re-derivation should re-feed
+ * through consume? This is the resync-ONLY narrowing of isOnAttentionSurface: it additionally drops
+ * TERMINAL leaf states (failed/aborted), so a reconnect NEVER replays the terminal task backlog.
+ *
+ * WHY resync must diverge from the LIVE consume path: on a FRESH bridge (a butchr reboot / MCP
+ * re-attach relaunches the agent → a NEW channel.ts process with EMPTY de-dup maps) resyncAttention
+ * runs on the first connect and re-feeds the REST snapshot through consume — where an empty lastStatus
+ * makes `prevStatus === undefined !== 'failed'` read as a fresh transition. WITHOUT this narrowing
+ * every historical failed/aborted leaf re-emits a "task failed" push — a flood of stale terminal
+ * records. A terminal task is a permanent record, not an open loop: it is recoverable via the
+ * dashboard's REVIEW_STATES pull-signal and need not be re-pushed on every reconnect. The LIVE path is
+ * UNTOUCHED — consume() still fires EXACTLY ONCE when a task genuinely transitions into failed/aborted
+ * via a real SSE task.updated event, so a fresh failure is still surfaced. The non-terminal actionable
+ * surfaces (idea, spec_review, in_review, needs_info, idle, dead_blocked) resync exactly as before.
+ */
+function isResyncableAttention(item: Record<string, unknown>): boolean {
+  if (!isOnAttentionSurface(item)) return false;
+  return !(typeof item.status === "string" && RESYNC_TERMINAL.has(item.status));
+}
+
 /** A story's member-count totals, derived from the REST work view's `counts` rollup (the
  * per-status member counts). `idle` (and `needs_user_input`) are PEELED OUT of `in_progress`,
  * NOT separate members, so they are EXCLUDED from the total to avoid double-counting (mirrors the
@@ -924,9 +952,13 @@ export function leaderStorySurfaces(node: Record<string, unknown>): Array<Record
  * seen by a fresh process) emits exactly once. Ownership routing (routeOwns) is likewise
  * inherited unchanged from consume.
  *
- * SCOPE: this recovers ALL LEAF (task) attention surfaces — attention status, idle, AND
- * dead_blocked — including a story-leader bridge's OWN subtasks' feedback/failures, via the
- * scopeStory routing inside consume (the candidate pre-filter mirrors all three).
+ * SCOPE: this recovers the NON-TERMINAL LEAF (task) attention surfaces — attention status (idea /
+ * spec_review / in_review / needs_info), idle, AND dead_blocked — including a story-leader bridge's
+ * OWN subtasks' feedback, via the scopeStory routing inside consume. It DELIBERATELY EXCLUDES the
+ * TERMINAL leaf states (failed / aborted): the candidate pre-filter is isResyncableAttention, NOT the
+ * raw isOnAttentionSurface, so a reconnect NEVER replays the terminal task backlog (a fresh bridge's
+ * empty maps would otherwise re-emit every historical failure). A GENUINE live failure is still
+ * surfaced exactly once by the untouched consume() path off the SSE stream.
  *
  * STORY-CONTAINER notifications (story.attention) ARE now re-synced too (the st-ad96e5c3 follow-up
  * to st-fffc76a8): we re-DERIVE the outstanding story-level surfaces from the durable REST work view
@@ -979,13 +1011,15 @@ export async function resyncAttention(args: {
     const items = await res.json();
     if (!Array.isArray(items)) return;
 
-    // Bound the per-item fetches to LEAF tasks currently on an attention surface (and, for a
-    // story bridge, this story's subtasks) — routeOwns drops the rest, but pre-filtering keeps
-    // the full-view fetches to only outstanding-attention tasks.
+    // Bound the per-item fetches to LEAF tasks currently on a RESYNCABLE attention surface (and, for
+    // a story bridge, this story's subtasks) — routeOwns drops the rest, but pre-filtering keeps the
+    // full-view fetches to only outstanding-attention tasks. isResyncableAttention (NOT the raw
+    // isOnAttentionSurface) EXCLUDES terminal leaf states (failed/aborted) so a reconnect never
+    // replays the terminal task backlog — the live consume path still surfaces a fresh failure.
     const candidates = (items as Array<Record<string, unknown>>).filter((it) => {
       if (it.work_kind !== "leaf") return false;
       if (scopeStory && it.story_id !== scopeStory) return false;
-      return isOnAttentionSurface(it);
+      return isResyncableAttention(it);
     });
 
     for (const item of candidates) {

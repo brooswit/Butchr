@@ -1355,6 +1355,125 @@ describe("channel: re-sync scoped attention on (re)connect", () => {
   });
 });
 
+// A FRESH bridge (a butchr reboot / MCP re-attach spawns a NEW channel.ts process with EMPTY de-dup
+// maps) runs resyncAttention on its first connect. ATTENTION_STATES includes the two TERMINAL states
+// failed + aborted, so WITHOUT a terminal exclusion the resync re-fed every historical failed/aborted
+// leaf back through consume — where an empty lastStatus reads `undefined !== 'aborted'` as a fresh
+// transition — flooding the CTO/leader with the whole terminal backlog. The candidate filter now uses
+// isResyncableAttention (NOT the raw isOnAttentionSurface), which drops terminal leaves. The LIVE
+// consume() path is untouched — a genuine live transition into failed/aborted still fires once.
+describe("channel: reconnect resync excludes the terminal (failed/aborted) backlog", () => {
+  test("FLOOD KILLED + ACTIONABLE PRESERVED: terminal leaves emit nothing; non-terminal actionable leaves each recover once", async () => {
+    const bridge = new AttentionBridge("dir-1");
+    // A busy repo's REST snapshot at a FRESH-bridge reconnect: a backlog of historical TERMINAL
+    // failures alongside the still-outstanding NON-TERMINAL actionable surfaces.
+    const list = [
+      // TERMINAL backlog — must NEVER be re-fed/emitted on reconnect (and never even fetched).
+      { work_kind: "leaf", id: "t-abort-1", workspace_id: "dir-1", status: "aborted" },
+      { work_kind: "leaf", id: "t-abort-2", workspace_id: "dir-1", status: "aborted" },
+      { work_kind: "leaf", id: "t-fail-1", workspace_id: "dir-1", status: "failed" },
+      { work_kind: "leaf", id: "t-fail-2", workspace_id: "dir-1", status: "failed" },
+      // NON-TERMINAL actionable surfaces — each must recover EXACTLY ONCE.
+      { work_kind: "leaf", id: "t-review", workspace_id: "dir-1", status: "in_review" },
+      { work_kind: "leaf", id: "t-ask", workspace_id: "dir-1", status: "needs_info" },
+      { work_kind: "leaf", id: "t-idea", workspace_id: "dir-1", status: "idea" },
+      { work_kind: "leaf", id: "t-spec", workspace_id: "dir-1", status: "spec_review" },
+      { work_kind: "leaf", id: "t-idle", workspace_id: "dir-1", status: "in_progress", idle: 1 },
+      { work_kind: "leaf", id: "t-dead", workspace_id: "dir-1", status: "blocked", deadBlockers: ["t-gone"] },
+    ];
+    const views: Record<string, unknown> = {
+      "t-review": { id: "t-review", workspace_id: "dir-1", status: "in_review", summary: "a diff", pending_responder: "cto" },
+      "t-ask": { id: "t-ask", workspace_id: "dir-1", status: "needs_info", question: "which db?", pending_responder: "cto" },
+      "t-idea": { id: "t-idea", workspace_id: "dir-1", status: "idea", prompt: "add SSO", pending_responder: "cto" },
+      "t-spec": { id: "t-spec", workspace_id: "dir-1", status: "spec_review", summary: "Spec: SSO", pending_responder: "cto" },
+      "t-idle": { id: "t-idle", workspace_id: "dir-1", status: "in_progress", idle: 1, idle_context: "…stuck…", pending_responder: "cto" },
+      "t-dead": { id: "t-dead", workspace_id: "dir-1", status: "blocked", deadBlockers: ["t-gone"], pending_responder: null },
+      // No views for the terminal leaves: the filter must never even REQUEST them.
+    };
+    const { f, urls } = makeFakeFetch(list, views);
+    const emitted: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => emitted.push(n), fetchImpl: f,
+    });
+
+    // FLOOD KILLED: no terminal leaf was fetched or emitted.
+    for (const id of ["t-abort-1", "t-abort-2", "t-fail-1", "t-fail-2"]) {
+      expect(urls.some((u) => u.includes(`/api/work/${id}`))).toBe(false);
+      expect(emitted.some((n) => n.meta.task_id === id)).toBe(false);
+    }
+    // ACTIONABLE PRESERVED: every non-terminal actionable surface recovered EXACTLY once.
+    expect(emitted.map((n) => n.meta.task_id).sort()).toEqual(
+      ["t-ask", "t-dead", "t-idea", "t-idle", "t-review", "t-spec"].sort(),
+    );
+    expect(emitted.find((n) => n.meta.task_id === "t-review")!.meta.state).toBe("in_review");
+    expect(emitted.find((n) => n.meta.task_id === "t-ask")!.meta.state).toBe("needs_info");
+    expect(emitted.find((n) => n.meta.task_id === "t-idea")!.meta.state).toBe("idea");
+    expect(emitted.find((n) => n.meta.task_id === "t-spec")!.meta.state).toBe("spec_review");
+    expect(emitted.find((n) => n.meta.task_id === "t-idle")!.meta.state).toBe("idle");
+    expect(emitted.find((n) => n.meta.task_id === "t-dead")!.meta.state).toBe("dead_blocked");
+  });
+
+  test("LIVE PATH PRESERVED: a genuine live transition into aborted/failed still fires EXACTLY once", () => {
+    // The reconnect narrowing must NOT regress the live push — the CTO must still learn of a fresh
+    // failure to triage. consume() is untouched, so a real task.updated into aborted/failed fires.
+    const bridge = new AttentionBridge("dir-1");
+    expect(
+      bridge.consume(taskUpdated({ id: "live-ab", workspace_id: "dir-1", status: "in_progress", idle: 0 })),
+    ).toBeNull();
+    const ab = bridge.consume(
+      taskUpdated({ id: "live-ab", workspace_id: "dir-1", status: "aborted", revert_reason: "operator aborted" }),
+    );
+    expect(ab).not.toBeNull();
+    expect(ab!.meta.state).toBe("aborted");
+    // A re-render of the ALREADY-aborted task does not re-fire.
+    expect(
+      bridge.consume(taskUpdated({ id: "live-ab", workspace_id: "dir-1", status: "aborted", revert_reason: "operator aborted" })),
+    ).toBeNull();
+
+    // Likewise a genuine transition into failed fires exactly once.
+    expect(
+      bridge.consume(taskUpdated({ id: "live-fl", workspace_id: "dir-1", status: "in_progress", idle: 0 })),
+    ).toBeNull();
+    const fl = bridge.consume(
+      taskUpdated({ id: "live-fl", workspace_id: "dir-1", status: "failed", last_dispatch_error: "spawn failed" }),
+    );
+    expect(fl).not.toBeNull();
+    expect(fl!.meta.state).toBe("failed");
+    expect(
+      bridge.consume(taskUpdated({ id: "live-fl", workspace_id: "dir-1", status: "failed", last_dispatch_error: "spawn failed" })),
+    ).toBeNull();
+  });
+
+  test("IDEMPOTENT: a second resync in the same process does not re-deliver a non-terminal actionable item", async () => {
+    const bridge = new AttentionBridge("dir-1");
+    const list = [
+      { work_kind: "leaf", id: "t-review", workspace_id: "dir-1", status: "in_review" },
+      // A terminal leaf sits in the backlog across both passes and never emits.
+      { work_kind: "leaf", id: "t-fail", workspace_id: "dir-1", status: "failed" },
+    ];
+    const views: Record<string, unknown> = {
+      "t-review": { id: "t-review", workspace_id: "dir-1", status: "in_review", summary: "diff", pending_responder: "cto" },
+    };
+    const { f } = makeFakeFetch(list, views);
+    const first: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => first.push(n), fetchImpl: f,
+    });
+    expect(first.map((n) => n.meta.task_id)).toEqual(["t-review"]);
+
+    // A SECOND reconnect with the maps now populated re-delivers nothing (existing in-memory de-dup).
+    const { f: f2 } = makeFakeFetch(list, views);
+    const second: ChannelNotification[] = [];
+    await resyncAttention({
+      baseUrl: "http://test", bridge, scopeDir: "dir-1",
+      emit: (n) => second.push(n), fetchImpl: f2,
+    });
+    expect(second).toEqual([]);
+  });
+});
+
 // STORY-CONTAINER reconnect-resync (the st-ad96e5c3 follow-up to st-fffc76a8). resyncAttention now
 // re-derives outstanding story.attention surfaces from the REST work view's NODE rows and feeds them
 // through bridge.consume(), inheriting the Part-1 marker de-dup so each is delivered EXACTLY ONCE.

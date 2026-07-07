@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reconnect notification RESYNC no longer replays the terminal (failed/aborted) task backlog.** The
+  out-of-process CTO/CEO notification channel (`src/channel.ts`) re-derives outstanding attention from
+  REST on every (re)connect via `resyncAttention`, and on a FRESH bridge process (a butchr reboot / MCP
+  re-attach relaunches the agent with EMPTY in-memory de-dup maps) that first resync re-feeds the REST
+  snapshot through `consume()`. Because `ATTENTION_STATES` includes the two TERMINAL states `failed`
+  and `aborted`, the candidate filter (`isOnAttentionSurface`) matched every historical failed/aborted
+  leaf, and the empty `lastStatus` map made `consume` read each as a fresh transition — flooding the
+  recipient with a "task failed" push for the entire terminal backlog. The resync candidate filter now
+  uses a narrowed predicate (`isResyncableAttention`) that EXCLUDES terminal leaf states, so a
+  reconnect recovers only NON-TERMINAL actionable surfaces (idea, spec_review, in_review, needs_info,
+  idle, dead_blocked). The LIVE path is untouched: a task GENUINELY transitioning into failed/aborted
+  via a real SSE event still fires exactly once, so a fresh failure is still surfaced to triage.
+
 ## [0.9.223] - 2026-07-07
 
 - **The leader-idle → CTO escalation is suppressed while the story has an in-flight child.** An idle
