@@ -132,6 +132,10 @@ describe("boot migration runner — convergence", () => {
       // anchor — so the sole seeded directory `dir-1` gets a `dir-1` repo node. Additive +
       // invisible to leaf/node loops (see revamp4-repo-nodes.test.ts).
       "dir-1": "merged",
+      // Hierarchical Projects IA S1 (st-6560e4f3): migrateAdoptLooseReposUnderDefaultProject then
+      // nests the sole loose repo (`dir-1`) under a single deterministic `proj-default` project node
+      // (an inert 'merged' tree-top) so there are no loose repos. Additive + invisible to work views.
+      "proj-default": "merged",
     });
   });
 });

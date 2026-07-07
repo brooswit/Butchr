@@ -691,6 +691,25 @@ export function getRepoNode(id: string): TaskRow | null {
 }
 
 /**
+ * MATERIALIZE the work_kind='repo' NODE for a directory (id == directory id, S0a) — the single-dir
+ * runtime mirror of migrateMaterializeRepoNodes (db.ts), which only runs at BOOT. registerWorkspace
+ * inserts the `directory` row but does NOT create its repo node, so a directory registered while the
+ * server is up has no repo node until the next boot; the Hierarchical Projects IA needs the node
+ * NOW to reparent it under a project (registerWorkspaceUnderProject). Same INERT shape the migration
+ * mints: status='merged' (the stable terminal anchor no lifecycle loop acts on) + parent_id NULL
+ * (top of the tree until nested). ADDITIVE + inert: repo nodes are EXCLUDED from GET /api/work
+ * (work-api.ts), so materializing one changes no work list. INSERT OR IGNORE ⇒ idempotent (a re-run
+ * or an already-materialized node is a no-op). Returns the repo node row.
+ */
+export function ensureRepoNode(directoryId: string): TaskRow {
+  db.query(
+    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at, work_kind)
+     VALUES (?, ?, 'merged', ?, 'repo')`,
+  ).run(directoryId, directoryId, nowIso());
+  return getRepoNode(directoryId)!;
+}
+
+/**
  * REGISTER a repo under a project (REVAMP-4 P3d) — reparent the repo node's parent_id → the
  * project node. Guards: the project must exist (404); the target must be a real repo node (404 if
  * it is not `work_kind='repo'` — a project/story/leaf id is refused); the repo must not already be
@@ -1039,6 +1058,42 @@ export async function registerWorkspace(
   const row = getWorkspace(id)!;
   const view: WorkspaceView = { ...row, counts: counts(id) };
   publish({ type: "workspace.created", workspace: view });
+  return view;
+}
+
+/**
+ * REGISTER an EXISTING directory AND nest its repo node under a project ATOMICALLY (story
+ * st-6560e4f3 Hierarchical Projects IA / S1). The Hierarchical Projects IA forbids loose repos, so
+ * the operator/CEO surface for adding a workspace to a project is register-then-parent as ONE unit:
+ *   1. registerWorkspace — REGISTER-EXISTING ONLY (keeps its 400 on a non-git path + 409 on an
+ *      already-registered path; NO git-init / create-new-repo).
+ *   2. ensureRepoNode — materialize the repo node (id == the new directory id), since registerWorkspace
+ *      does not (only the boot migration does).
+ *   3. registerRepoUnderProject — reparent the repo node under the project. This is the AUTHORITATIVE
+ *      project guard (404 if `projectId` is not a project node); a brand-new node is parent_id NULL,
+ *      so the 409-already-under-another-project branch can't fire here.
+ * ATOMICITY: if ANY step after registration throws, the directory is UNREGISTERED (a compensating
+ * unregisterWorkspace, which cascade-removes the directory AND its just-materialized repo node) before
+ * the error propagates — so a failed reparent NEVER leaves a loose repo behind. Returns the workspace
+ * view. (The route pre-guards a non-project id for a side-effect-free 404; this fn's reparent step is
+ * the belt that also triggers the rollback when called directly.)
+ */
+export async function registerWorkspaceUnderProject(
+  projectId: string,
+  rawPath: string,
+  label?: string,
+  gateCmd?: unknown,
+): Promise<WorkspaceView> {
+  const view = await registerWorkspace(rawPath, label, gateCmd);
+  try {
+    ensureRepoNode(view.id);
+    registerRepoUnderProject(projectId, view.id);
+  } catch (e) {
+    // Compensate: tear the just-registered directory back down so a failed reparent never strands a
+    // loose repo (the directory delete cascades away its repo node). Best-effort; rethrow the cause.
+    await unregisterWorkspace(view.id).catch(() => {});
+    throw e;
+  }
   return view;
 }
 

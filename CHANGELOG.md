@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Hierarchical Projects IA — S1 foundation: no loose repos + atomic add-workspace (story
+  st-6560e4f3).** A one-time boot migration (`migrateAdoptLooseReposUnderDefaultProject`, `src/db.ts`)
+  nests every "loose" repo node (`work_kind='repo'`, `parent_id IS NULL`) under a single deterministic
+  default project (`proj-default`, anchored to the lowest loose-repo id) — guarded so it (a) never
+  mints a second default / re-adopts a deliberately unregistered repo, (b) never forces a default onto
+  an install that already organizes repos into project(s), and (c) no-ops when there are no loose
+  repos. Reversible via `unregisterRepoFromProject`; work views stay byte-identical (repo/project nodes
+  are excluded from `GET /api/work`). New `POST /api/projects/:id/workspaces {path,label?,gate_cmd?}`
+  (`src/server.ts`) registers an EXISTING directory and nests its repo node under the project
+  atomically (`registerWorkspaceUnderProject` + `ensureRepoNode`, `src/workspaces.ts`): register →
+  materialize repo node → reparent, rolling the registration back if the reparent fails so no loose
+  repo is ever stranded. Register-existing only (keeps the 400 non-git / 409 already-registered
+  guards); 404 if the id is not a project node. Back-end only.
+
 ## [0.9.212] - 2026-07-07
 
 ### Added

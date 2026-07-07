@@ -1300,6 +1300,67 @@ export function migrateReparentTopLevelUnderRepo(): void {
   );
 }
 
+// ADOPT LOOSE REPOS UNDER A SINGLE DEFAULT PROJECT (story st-6560e4f3 Hierarchical Projects IA / S1).
+// The Hierarchical Projects IA makes PROJECTS the top tier and forbids "loose" repos (a work_kind='repo'
+// node sitting parent_id NULL, i.e. under no project). This ONE-TIME boot adoption seeds a single
+// deterministic default project and reparents EVERY loose repo under it, so an existing single-repo
+// install (0 projects, one loose repo) comes up with its repo already nested — no operator action.
+//
+// DETERMINISTIC + REPRODUCIBLE: the default project has the fixed id `DEFAULT_PROJECT_ID` and is
+// anchored to `MIN(id)` of the loose repos (a repo node's id == its directory id — S0a — so this is a
+// real directory / valid tasks.workspace_id FK, and the choice is stable across re-runs). It is the
+// SAME inert shape createProject (workspaces.ts) mints: status='merged' (the stable terminal anchor no
+// lifecycle loop acts on) + parent_id NULL (a project is the top of the tree).
+//
+// THREE ORDERED GUARDS (idempotent + reversible + non-coercive):
+//   (a) the default project already exists → NO-OP. This is the idempotency + reversibility anchor: a
+//       re-run of the boot pass never mints a SECOND default, and once the default exists a repo that
+//       was deliberately unregistered (parent_id → NULL via unregisterRepoFromProject) is NOT silently
+//       re-adopted on the next boot — the reversible unregister stays reversible.
+//   (b) some repo already sits under SOME project (a user registered repos themselves) → NO-OP. Never
+//       FORCE a default onto an install that already organizes its repos into project(s).
+//   (c) no loose repos at all (incl. a fresh db with no directories) → NO-OP.
+// Otherwise: INSERT the default project (INSERT OR IGNORE — belt for the guarded id) then
+// `UPDATE ... SET parent_id=DEFAULT_PROJECT_ID WHERE work_kind='repo' AND parent_id IS NULL` to adopt
+// every loose repo in one statement.
+//
+// BYTE-IDENTICAL WORK VIEWS: GET /api/work (work-api.listWork) EXCLUDES repo + project nodes, so a repo
+// merely gaining a parent_id changes NO work list — this migration alters DATA (the inert repo-node
+// parent pointer), not observable work/routing behavior. It never touches `directory` / worktrees /
+// agents (all keyed on directory id, left intact). REVERSIBLE via unregisterRepoFromProject (→ NULL).
+// BACKWARD-SAFE ordering: runs AFTER migrateMaterializeRepoNodes / migrateReparentTopLevelUnderRepo
+// (needs the repo nodes present with their loose/parented state settled); purely reparents/inserts
+// `tasks` rows (no DROP/RENAME).
+export const DEFAULT_PROJECT_ID = "proj-default";
+export function migrateAdoptLooseReposUnderDefaultProject(): void {
+  // (a) a default project already exists → never mint a second / never re-adopt an unregistered repo.
+  if (db.query(`SELECT 1 FROM tasks WHERE id=? AND work_kind='project'`).get(DEFAULT_PROJECT_ID)) return;
+  // (b) some repo already sits under some project → the install organizes its own repos; don't coerce.
+  const alreadyOrganized = db
+    .query<{ n: number }, []>(
+      `SELECT COUNT(*) AS n
+         FROM tasks r JOIN tasks p ON p.id = r.parent_id AND p.work_kind='project'
+        WHERE r.work_kind='repo'`,
+    )
+    .get()!.n;
+  if (alreadyOrganized > 0) return;
+  // (c) no loose repos (incl. a fresh db) → nothing to adopt.
+  const anchor = db
+    .query<{ id: string | null }, []>(
+      `SELECT MIN(id) AS id FROM tasks WHERE work_kind='repo' AND parent_id IS NULL`,
+    )
+    .get()!.id;
+  if (anchor == null) return;
+
+  db.query(
+    `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at, work_kind, brief)
+     VALUES (?, ?, 'merged', ?, 'project', 'Default project')`,
+  ).run(DEFAULT_PROJECT_ID, anchor, nowIso());
+  db.query(
+    `UPDATE tasks SET parent_id=? WHERE work_kind='repo' AND parent_id IS NULL`,
+  ).run(DEFAULT_PROJECT_ID);
+}
+
 // UNIFIED-WORKSPACE ACTIVATION MIGRATION (story st-540ba705, step 6b — BACKWARD-SAFE +
 // IDEMPOTENT). Populate the unified `workspace` table from the two legacy operator-agent
 // tables so the unified supervisor (src/workspace-agent.ts), activated this step, re-adopts
@@ -1634,6 +1695,7 @@ const MIGRATIONS: Array<() => void> = [
   migrateMaterializeRepoNodes,
   migrateReparentTopLevelUnderRepo,
   migrateWidenWorkspaceKindCheck,
+  migrateAdoptLooseReposUnderDefaultProject,
 ];
 
 /**

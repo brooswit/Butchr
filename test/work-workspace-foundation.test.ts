@@ -136,13 +136,19 @@ describe("step 1 — tasks.parent_id (nullable self-FK, sole membership pointer 
   });
 
   // REVAMP-4 S1 (st-1a82a2e1): migrateReparentTopLevelUnderRepo repoints every TOP-LEVEL leaf
-  // under its owning repo node (parent_id = workspace_id, which IS the repo node's id), while the
-  // repo node itself stays parent_id NULL. So the old "NULL on every row" invariant becomes: a
-  // repo node is NULL; every other (leaf) row points at its repo node.
-  test("top-level leaves are reparented under their repo node; the repo node stays NULL (S1)", () => {
+  // under its owning repo node (parent_id = workspace_id, which IS the repo node's id). Hierarchical
+  // Projects IA S1 (st-6560e4f3) then closes the tree at the top: migrateAdoptLooseReposUnderDefault
+  // Project nests every LOOSE repo node under a single deterministic `proj-default` project (which
+  // itself is the new tree-top, parent_id NULL). So the converged chain is leaf → repo → project:
+  //   - the `proj-default` PROJECT node is NULL (top of the tree);
+  //   - the `dir-1` REPO node points at `proj-default` (adopted — no loose repos);
+  //   - every LEAF points at its repo node (`dir-1`).
+  test("leaves → repo → default project; the project node is the new tree-top (S1)", () => {
     for (const t of out.snapA.tasks) {
-      if (t.work_kind === "repo") {
-        expect(t.parent_id).toBeNull();
+      if (t.work_kind === "project") {
+        expect(t.parent_id).toBeNull(); // proj-default is the tree-top
+      } else if (t.work_kind === "repo") {
+        expect(t.parent_id).toBe("proj-default"); // adopted — no loose repos
       } else {
         expect(t.parent_id).toBe("dir-1"); // repo node id == workspace_id (dir-1)
       }
@@ -201,6 +207,10 @@ describe("step 1 — existing behavior is UNAFFECTED", () => {
       // terminal anchor — so the sole seeded directory `dir-1` gets a `dir-1` repo node here. This
       // is the additive materialization, invisible to every leaf/node loop (see revamp4-repo-nodes).
       "dir-1": "merged",
+      // Hierarchical Projects IA S1 (st-6560e4f3): migrateAdoptLooseReposUnderDefaultProject nests the
+      // sole loose repo (`dir-1`) under a single deterministic `proj-default` project node, itself an
+      // inert 'merged' tree-top. Additive + invisible to work views (excluded from GET /api/work).
+      "proj-default": "merged",
     });
   });
 

@@ -32,6 +32,7 @@ import {
   listWorkspaces,
   registerRepoUnderProject,
   registerWorkspace,
+  registerWorkspaceUnderProject,
   setWorkspaceBranchIsolation,
   setWorkspaceCeoEnabled,
   setWorkspaceCtoEnabled,
@@ -817,6 +818,21 @@ route("POST", "/api/projects/:id/repos", async (req, p) => {
   const body = await readJson(req);
   assertCreationAllowed("ceo", "repo");
   return json(registerRepoUnderProject(p.id!, body.repo), 201);
+});
+// Register an EXISTING directory AND nest its repo node under this project ATOMICALLY (story
+// st-6560e4f3 Hierarchical Projects IA / S1) — the "add a workspace to a project" surface. Body
+// `{ path, label?, gate_cmd? }`. REGISTER-EXISTING ONLY: registerWorkspace 400s a non-git path +
+// 409s an already-registered path; there is no git-init / create-new-repo. Pre-guards a non-project
+// id for a side-effect-free 404 (mirrors the /repos guard — a wrong id never provisions then tears
+// down a herdr workspace). registerWorkspaceUnderProject registers + materializes the repo node +
+// reparents it, rolling the registration back if the reparent fails so no loose repo is stranded.
+// Returns 201 with the created workspace view.
+route("POST", "/api/projects/:id/workspaces", async (req, p) => {
+  const body = await readJson(req);
+  if (!getProject(p.id!)) throw new HttpError(404, `project not found: ${p.id}`);
+  assertCreationAllowed("ceo", "repo");
+  const view = await registerWorkspaceUnderProject(p.id!, body.path, body.label, body.gate_cmd);
+  return json(view, 201);
 });
 // The repos registered under this project (its members). 404 if the project is gone.
 route("GET", "/api/projects/:id/repos", async (_req, p) => {
