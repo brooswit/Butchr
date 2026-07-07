@@ -3485,6 +3485,30 @@ export function isStoryComplete(storyId: string): boolean {
 }
 
 /**
+ * Does a STORY have >=1 leaf member that is ACTIVE / in-flight — i.e. still MOVING and, on its
+ * own, will re-engage the leader (dispatch-pending, building, a diff awaiting the leader's review,
+ * or mid-merge)? The membership + node-exclusion query mirrors isStoryComplete exactly:
+ * `parent_id=? AND work_kind='leaf'` (parent_id is the sole membership pointer; the guard excludes
+ * the story node whose parent_id is NULL). Pure direct db read.
+ *
+ * Gates the leader-idle → CTO escalation (st-cc15a82c, reconcileOperatorIdle step 3): an idle leader
+ * that is idle merely because it is WAITING FOR ITS OWN SUBTASKS is pure CTO noise — the in-flight
+ * child re-engages the leader on its diff, so it is NOT stuck. Active = the four MOVING statuses
+ * below. Terminal (merged/aborted/failed/rolled_back), 'blocked' (blocked on something the leader
+ * cannot clear), and the awaiting-decision feedback states (idea/spec_review/needs_info) are NOT
+ * active — a leader parked on any of those (or with zero children) STILL escalates.
+ */
+export function storyHasActiveMember(storyId: string): boolean {
+  const active = db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf'
+         AND status IN ('inactive','in_progress','in_review','rolling_back')`,
+    )
+    .get(storyId);
+  return (active?.n ?? 0) > 0;
+}
+
+/**
  * STORY COMPLETION DETECTION. When a story member lands in a terminal MERGED state, check
  * whether the WHOLE story is now complete (isStoryComplete) and, if so, publish a STORY-LEVEL
  * attention event targeted at the LEADER feed ('story <id> ready for completion review') so

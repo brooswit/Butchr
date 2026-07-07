@@ -17,7 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.222] - 2026-07-07
+- **The leader-idle → CTO escalation is suppressed while the story has an in-flight child.** An idle
+  story leader that is idle merely because it is WAITING FOR ITS OWN SUBTASKS to build no longer pings
+  its CTO — that was pure noise, since a moving child re-engages the leader on its own diff. New pure
+  helper `tasks.storyHasActiveMember(storyId)` (true iff a leaf member is `inactive`/`in_progress`/
+  `in_review`/`rolling_back`) gates `reconcileOperatorIdle` step 3: the leader-idle push is skipped
+  while an active child is moving, and — critically — `idle_escalated_at` is NOT stamped, so the
+  instant the last active child settles the next tick escalates immediately. A genuinely-PARKED leader
+  with NO active child (all children terminal, zero children, or children blocked on an unclearable
+  cross-repo gate) STILL escalates on the flat cadence — this is NOT the old zero-actionable
+  suppression (it keys on "story has work moving", not "items awaiting the leader").
 
 ### Added
 

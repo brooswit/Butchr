@@ -51,7 +51,7 @@ import {
   setWorkspaceIdle,
 } from "./db.ts";
 import { publish } from "./events.ts";
-import { operatorActionableItems, leaderStoryAwaitsCompletion, setStoryLeaderHooks, storyLeaderReleasable } from "./tasks.ts";
+import { operatorActionableItems, leaderStoryAwaitsCompletion, setStoryLeaderHooks, storyHasActiveMember, storyLeaderReleasable } from "./tasks.ts";
 import type { AttentionItem } from "./tasks.ts";
 // The mid-session probe reuses the build-agent safety net's pure helpers AS-IS (genuine-idle
 // threshold + throttle gate). dispatcher.ts does NOT import workspace-agent.ts (directly or
@@ -1605,6 +1605,9 @@ export function reconcileOperatorIdle(
   // Active OR retired → nothing to escalate. Both are the "resolved" condition; idle_escalated_at
   // has already been re-armed (NULL) by setWorkspaceIdle's idle→0 clear / the desired→0 teardown.
   if (!idleNow || row.desired !== 1) return;
+
+  // st-cc15a82c: suppress while the story has an in-flight child (dispatch-pending/building/reviewing/rolling-back) that will re-engage the leader on its own — pure CTO noise. Do NOT stamp idle_escalated_at, so the instant the last active child settles the next tick escalates immediately. A parked leader with NO active child (all terminal, zero children, or children blocked on an unclearable gate) STILL escalates.
+  if (row.work_id && storyHasActiveMember(row.work_id)) return;
 
   // 3) Durable repeating cadence: re-fire only when the flat interval has elapsed since the last
   //    escalation (idle_escalated_at). NULL (a fresh/re-armed episode) fires immediately. NO

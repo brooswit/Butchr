@@ -1582,7 +1582,11 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
 
   test("(a) a genuinely-idle leader re-fires on the FLAT cadence, repeatedly, until active", () => {
     const CADENCE = cfgMod.config.idleEscalateEveryMs; // FLAT 15 min (CEO Q1)
-    insertLeaf("m1", { status: "in_review", story_id: "st-push" });
+    // Both members are OWNED + NON-active (failed) so the leader legitimately escalates:
+    // st-cc15a82c's has-active-child gate does NOT suppress (no in-flight child moving), and
+    // operatorActionableItems still counts 2. (m1 was originally `in_review`, but that is now an
+    // ACTIVE child the gate would suppress — see the has-active-child suppression block below.)
+    insertLeaf("m1", { status: "failed", story_id: "st-push" });
     insertLeaf("m2", { status: "failed", story_id: "st-push" });
     seedOperator("ws-leader-st-push", "leader", "st-push");
     const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-push")!;
@@ -1617,7 +1621,9 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
 
   test("(b) escalation STOPS when the agent goes active OR desired=0 (idle_escalated_at cleared atomically)", () => {
     const CADENCE = cfgMod.config.idleEscalateEveryMs;
-    insertLeaf("m1", { status: "in_review", story_id: "st-stop" });
+    // Member is OWNED + NON-active (failed) so the leader escalates (st-cc15a82c gate does not fire).
+    // Originally `in_review` — an ACTIVE child the new gate would now suppress.
+    insertLeaf("m1", { status: "failed", story_id: "st-stop" });
     seedOperator("ws-leader-st-stop", "leader", "st-stop");
     const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-stop")!;
     const { events, unsub } = captureAttention();
@@ -1645,9 +1651,13 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     }
   });
 
-  test("(c) idle + ZERO actionable STILL escalates (the dropped suppression)", () => {
-    // A member NOT awaiting the leader (in_progress) → ZERO actionable, and NO open ask / completion.
-    insertLeaf("m-busy", { status: "in_progress", story_id: "st-zero" });
+  test("(c) idle + ZERO actionable but NO active child STILL escalates (REVAMP-4 anti-regression)", () => {
+    // A parked leader owning NOTHING actionable STILL escalates — the REVAMP-4 anti-regression the
+    // has-active-child gate must PRESERVE. The child is `blocked` (blocked on an unclearable gate):
+    // ZERO actionable (not responder 'story', not failed/aborted) AND NON-active, so st-cc15a82c does
+    // NOT suppress. (Originally `in_progress` — that is now an ACTIVE child the gate suppresses; see
+    // the has-active-child suppression block, case (a).)
+    insertLeaf("m-busy", { status: "blocked", story_id: "st-zero" });
     seedOperator("ws-leader-st-zero", "leader", "st-zero");
     expect(
       tasksMod.operatorActionableItems(dbMod.getWorkspaceAgentRow("ws-leader-st-zero")!).length,
@@ -1715,7 +1725,9 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
   });
 
   test("(f) escalation SURVIVES a butchr restart — a stale idle_escalated_at + still-idle re-fires on cadence", () => {
-    insertLeaf("m1", { status: "in_review", story_id: "st-restart" });
+    // Member is OWNED + NON-active (failed) so the leader escalates (st-cc15a82c gate does not fire).
+    // Originally `in_review` — an ACTIVE child the new gate would now suppress.
+    insertLeaf("m1", { status: "failed", story_id: "st-restart" });
     seedOperator("ws-leader-st-restart", "leader", "st-restart");
     // Simulate the state AFTER a restart: the durable row already carries idle=1 + a STALE stamp
     // (from before the restart), and the in-process SupState is fresh (the old in-process flag is
@@ -1735,6 +1747,110 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     } finally {
       unsub();
     }
+  });
+
+  // ---- st-cc15a82c: has-active-child SUPPRESSION gate on the leader-idle → CTO push -------------
+  // Only ping the CTO when an idle leader has NO active/in-flight child. A child that is still
+  // MOVING (dispatch-pending/building/reviewing/rolling-back) re-engages the leader on its own, so
+  // the escalation would be pure noise. This is NOT the old zero-actionable suppression: it keys on
+  // "story has in-flight work moving", not "items awaiting the leader".
+
+  test("st-cc15a82c (a) idle leader + an in_progress child → NO escalation, and idle_escalated_at NOT stamped", () => {
+    insertLeaf("m-building", { status: "in_progress", story_id: "st-active-child" });
+    seedOperator("ws-leader-active-child", "leader", "st-active-child");
+    const { events, unsub } = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-active-child")!, {
+        idle: () => true,
+        now: () => 42,
+      });
+    } finally {
+      unsub();
+    }
+    expect(idleCount(events)).toBe(0); // suppressed — the build re-engages the leader on its diff
+    const row = dbMod.getWorkspaceAgentRow("ws-leader-active-child")!;
+    expect(row.idle).toBe(1); // the durable projection (step 1) still fires
+    expect(row.idle_escalated_at).toBeNull(); // NOT stamped → next tick escalates the instant it settles
+  });
+
+  test("st-cc15a82c (b) idle leader + all children terminal (merged/aborted) → escalates", () => {
+    insertLeaf("m-done", { status: "merged", story_id: "st-terminal" });
+    insertLeaf("m-gone", { status: "aborted", story_id: "st-terminal" });
+    seedOperator("ws-leader-terminal", "leader", "st-terminal");
+    const { events, unsub } = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-terminal")!, {
+        idle: () => true,
+        now: () => 1,
+      });
+    } finally {
+      unsub();
+    }
+    expect(idleCount(events)).toBe(1); // no MOVING child → still a genuine idle dead-end
+  });
+
+  test("st-cc15a82c (c) idle leader + ZERO children (parked) → escalates", () => {
+    // Materialize the story node with no leaf members so work_id's FK resolves.
+    dbMod.db
+      .query(`INSERT OR REPLACE INTO tasks (id, workspace_id, status, work_kind, created_at) VALUES (?, ?, 'open', 'node', ?)`)
+      .run("st-nochild", DIR, dbMod.nowIso());
+    seedOperator("ws-leader-nochild", "leader", "st-nochild");
+    const { events, unsub } = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-nochild")!, {
+        idle: () => true,
+        now: () => 1,
+      });
+    } finally {
+      unsub();
+    }
+    expect(idleCount(events)).toBe(1);
+  });
+
+  test("st-cc15a82c (d) idle leader + only BLOCKED children (external/cross-repo gate) → escalates", () => {
+    insertLeaf("m-blocked", { status: "blocked", story_id: "st-blocked" });
+    seedOperator("ws-leader-blocked", "leader", "st-blocked");
+    const { events, unsub } = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-blocked")!, {
+        idle: () => true,
+        now: () => 1,
+      });
+    } finally {
+      unsub();
+    }
+    // 'blocked' is blocked on something the leader cannot clear → NOT active → still escalates.
+    expect(idleCount(events)).toBe(1);
+  });
+
+  test("st-cc15a82c storyHasActiveMember: true for the four MOVING statuses, false for terminal/blocked/feedback and zero members", () => {
+    const active: string[] = ["inactive", "in_progress", "in_review", "rolling_back"];
+    const inactive: string[] = [
+      "merged",
+      "aborted",
+      "failed",
+      "rolled_back",
+      "blocked",
+      "idea",
+      "spec_review",
+      "needs_info",
+    ];
+    for (const s of active) {
+      const st = `st-has-${s}`;
+      insertLeaf(`leaf-${s}`, { status: s, story_id: st });
+      expect(tasksMod.storyHasActiveMember(st)).toBe(true);
+    }
+    for (const s of inactive) {
+      const st = `st-has-${s}`;
+      insertLeaf(`leaf-${s}`, { status: s, story_id: st });
+      expect(tasksMod.storyHasActiveMember(st)).toBe(false);
+    }
+    // A mix: one active child among terminals → true.
+    insertLeaf("mix-merged", { status: "merged", story_id: "st-mix" });
+    insertLeaf("mix-building", { status: "in_progress", story_id: "st-mix" });
+    expect(tasksMod.storyHasActiveMember("st-mix")).toBe(true);
+    // Zero members (no leaves for this id) → false.
+    expect(tasksMod.storyHasActiveMember("st-no-members-at-all")).toBe(false);
   });
 
   test("(g) Q2 labels: held-pending-ask vs done-awaiting-retire drive the payload + idle_context", () => {
