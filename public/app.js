@@ -4453,7 +4453,73 @@ async function renderProjectDetail(id) {
   // initiatives panel — the cross-repo rollup + launch surface (REVAMP-4 S4)
   wrap.appendChild(initiativesPanel(project, initiatives, repos, wsById));
 
+  // danger zone — the destructive Delete-project action (mirrors the workspace
+  // danger zone). Deliberately the ONLY delete surface: the overview cards are
+  // whole-card click-to-open with no existing kebab/overflow-menu pattern to
+  // reuse, so a card-corner delete is skipped rather than inventing a menu system.
+  wrap.appendChild(projectDangerZone(project));
+
   mount(wrap);
+}
+
+// The Delete-project danger zone at the foot of the detail view: a subtle separated
+// region whose destructive button opens a confirm modal before deleting.
+function projectDangerZone(project) {
+  const zone = el("div", { class: "pd-danger-zone" });
+  zone.appendChild(el("div", { class: "pd-danger-lbl muted" }, "Danger zone"));
+  const del = el("button", { class: "btn ghost danger-outline" }, "Delete project");
+  del.addEventListener("click", () => confirmDeleteProject(project));
+  zone.appendChild(del);
+  return zone;
+}
+
+// CONFIRM-DELETE modal for a project — reuses openModal (the shared confirm scaffold, so
+// Escape/backdrop-close + focus behavior match every other modal) and the openAddRepoModal
+// inline-error dance. Delete → DELETE /api/projects/:id, branching on status:
+//   200 → close, navigate back to the overview (#/projects), success toast.
+//   409 → the guard message (server serializes guard errors as { error } — e.g.
+//         "project <id> still has N registered repo(s); unregister them first …") is shown
+//         VERBATIM inline in .m-error next to the button; the modal STAYS open, nothing
+//         navigates, and action() re-enables the button.
+//   other non-2xx → thrown so action() takes the generic error-toast path the other
+//         /api/projects calls use.
+// api() collapses the response to a message string, so this reads res.status directly via a
+// small fetch (api() is itself only a fetch wrapper) to tell the guarded 409 apart.
+function confirmDeleteProject(project) {
+  const body = el("div", { class: "m-body" });
+  body.innerHTML =
+    '<p>Delete <strong>' + esc(projectTitle(project)) + '</strong>? This removes the project ' +
+    'node and its CEO agent. Its registered repos and their work are not deleted.</p>';
+
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  const del = el("button", { class: "btn danger" }, "Delete project");
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(del);
+
+  const { close } = openModal({ title: "Delete project", body, footer: foot });
+  cancel.addEventListener("click", close);
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
+
+  del.addEventListener("click", () => {
+    showErr("");
+    action(del, async () => {
+      const res = await fetch("/api/projects/" + encodeURIComponent(project.id), { method: "DELETE" });
+      if (res.ok) return;
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON body */ }
+      const msg = (data && data.error) || res.statusText;
+      if (res.status === 409) {
+        // guarded — show the server's actionable message inline, keep the modal open, and
+        // re-throw so action() re-enables the button (its onDone never runs on a throw).
+        showErr(msg);
+      }
+      throw new Error(msg);
+    }, { success: "project deleted", onDone: () => { close(); location.hash = "#/projects"; } });
+  });
 }
 
 // The Initiatives panel: header with a right-aligned "Launch initiative" action, then one

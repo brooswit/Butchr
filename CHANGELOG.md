@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Delete-project action in the Projects UI (REVAMP-4).** The project detail view now has a
+  "Danger zone" with a destructive **Delete project** button (`public/app.js`) that opens a confirm
+  modal (reusing the shared `openModal` scaffold) and calls `DELETE /api/projects/:id`. A clean
+  delete (200) closes the modal, returns to the projects overview, and toasts success; a guarded
+  delete (409 — the project still has registered repos or active initiatives) keeps the modal open
+  and shows the server's actionable message inline next to the button without navigating. Front-end
+  only, with a small theme-aware `.pd-danger-zone` style in `public/style.css`.
+
 ## [0.9.211] - 2026-07-07
 
 ### Added
