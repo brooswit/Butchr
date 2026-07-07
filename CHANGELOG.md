@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.216] - 2026-07-07
+
 ### Changed
 
 - **Hierarchical Projects IA (S4): contextual workspace creation + no more loose workspaces.**
