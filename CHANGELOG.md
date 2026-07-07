@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.210] - 2026-07-07
+
 ### Added
 - **Project-detail CEO-agent card (REVAMP-4 P3c).** The project detail view now shows a managed
   CEO-agent card (mirroring the CTO card) fed by `GET /api/projects/:id/ceo`: a resolved
