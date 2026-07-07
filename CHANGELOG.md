@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.214] - 2026-07-07
+
 ### Changed
 - **Hierarchical Projects IA — S2: Projects is the landing + Project→Workspace drill-in (story
   st-6560e4f3).** The default route `#/` now renders the Projects overview instead of the
