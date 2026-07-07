@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.207] - 2026-07-07
+
 ### Added
 
 - **Projects overview + create UI in the dashboard (story st-04869886).** A new front-end-only
