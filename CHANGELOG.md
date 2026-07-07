@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.213] - 2026-07-07
+
 ### Added
 - **Hierarchical Projects IA — S1 foundation: no loose repos + atomic add-workspace (story
   st-6560e4f3).** A one-time boot migration (`migrateAdoptLooseReposUnderDefaultProject`, `src/db.ts`)
