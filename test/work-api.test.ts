@@ -6,8 +6,10 @@
 //   (c) the unified WorkView EMBEDS the existing taskView / storyView byte-for-byte (the
 //       facade is a pure superset — it adds work_kind + the informational responder, and
 //       changes nothing about the embedded view), and reads cause no state drift;
-//   (d) leaf verbs (approve/reject/priority/blocked_by) map to the task ops and 409 on a
-//       node; node verbs (ask/escalate/answer) map to the story-ask ops and 409 on a leaf;
+//   (d) leaf verbs (approve/reject/priority) map to the task ops and 409 on a node; blocked_by
+//       maps to the task op for a leaf AND accepts a story node (node-on-node sequencing), still
+//       409ing a repo/project container; node verbs (ask/escalate/answer) map to the story-ask
+//       ops and 409 on a leaf;
 //   (e) the unified answer/escalate verbs route by kind.
 //
 // createSubtask exercises the REAL createTask (worktree + task.md + DB row), so we stand up
@@ -224,12 +226,19 @@ describe("leaf verbs map to task ops and 409 on a node", () => {
     expect(tasksMod.taskView(b.id)!.blocked_by).toEqual([a.id]);
   });
 
-  test("approve / reject / priority / blocked_by 409 on a NODE", async () => {
+  test("approve / reject / priority 409 on a NODE", async () => {
     const node = workApi.createWork(WS, "node-rejects-leaf-verbs");
     expect(await statusOf(() => workApi.approveWork(node.id))).toBe(409);
     expect(await statusOf(() => workApi.rejectWork(node.id, "nope"))).toBe(409);
     expect(syncStatusOf(() => workApi.prioritizeWork(node.id, 1))).toBe(409);
-    expect(await statusOf(() => workApi.setWorkBlockedBy(node.id, []))).toBe(409);
+  });
+
+  test("blocked_by ACCEPTS a story NODE (node-on-node sequencing) — an empty set is a no-op", async () => {
+    // Since the Phase A1 sequencing engine (story st-30a7dccd), a STORY node carries its OWN
+    // dependency set — setWorkBlockedBy no longer 409s a node. An empty set succeeds (no throw).
+    const node = workApi.createWork(WS, "node-accepts-blocked_by");
+    expect(await statusOf(() => workApi.setWorkBlockedBy(node.id, []))).toBeUndefined();
+    expect(tasksMod.taskView(node.id)!.blocked_by).toEqual([]);
   });
 
   test("escalateWork on a fresh leaf routes to escalateTask (409 — not awaiting feedback)", async () => {

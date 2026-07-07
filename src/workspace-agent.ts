@@ -51,7 +51,7 @@ import {
   setWorkspaceIdle,
 } from "./db.ts";
 import { publish } from "./events.ts";
-import { operatorActionableItems, leaderStoryAwaitsCompletion } from "./tasks.ts";
+import { operatorActionableItems, leaderStoryAwaitsCompletion, setStoryLeaderHooks, storyLeaderReleasable } from "./tasks.ts";
 import type { AttentionItem } from "./tasks.ts";
 // The mid-session probe reuses the build-agent safety net's pure helpers AS-IS (genuine-idle
 // threshold + throttle gate). dispatcher.ts does NOT import workspace-agent.ts (directly or
@@ -1856,6 +1856,12 @@ export function guardedStory(
  * launcher (Phase C S4 removed the flag that once toggled it).
  */
 export function onStoryCreated(storyId: string): void {
+  // NODE-ON-NODE SEQUENCING GATE (story st-30a7dccd, RFC Q3): a story that carries an unmerged
+  // blocker on its own `tasks.blocked_by` is NOT launched yet — its leader is released by the
+  // unblock sweep (reevaluateBlockedStoryNodes) once every blocker has merged/died. A story with
+  // an EMPTY blocked_by (the overwhelming default) is trivially releasable → this returns true and
+  // the launch below is BYTE-IDENTICAL to before. Inert until a node is actually given a blocker.
+  if (!storyLeaderReleasable(storyId)) return;
   saveRow(storyId, { desired: 1 }); // legacy story_agent MIRROR (kept; storyAgentStatus reads it)
   // UNIFIED CREATE-TIME ROW (story st-93384200, Bug 3): materialize this leader's unified
   // `workspace` row NOW so the unified supervisor — the SOLE launcher — launches AND
@@ -1887,6 +1893,23 @@ export function onStoryCreated(storyId: string): void {
     console.error(`[butchr] story leader launch failed for ${storyId}: ${(e as Error).message}`);
   });
 }
+
+// Register the story-leader launch/stop hooks with the blocked_by engine in tasks.ts. tasks.ts
+// holds the dependency-set helpers but must NOT import workspace-agent (cycle: workspace-agent
+// already imports tasks). So the leader lifecycle is injected here: the node-on-node sequencing
+// engine (setStoryBlockedBy + reevaluateBlockedStoryNodes) calls `launch` to release a node whose
+// blockers cleared and `stop` to hold one that just gained a pending blocker (kill-on-block).
+//   launch = onStoryCreated — idempotent, re-checks the gate, raises BOTH leader rows desired=1.
+//   stop   = down BOTH leader rows onStoryCreated raised: the UNIFIED ws-leader row (the SOLE
+//            launcher/supervisor reads it — stopWorkspaceAgent writes desired=0 synchronously so
+//            the hold wins over an in-flight launch) AND the legacy story_agent mirror.
+setStoryLeaderHooks({
+  launch: (nodeId) => onStoryCreated(nodeId),
+  stop: (nodeId) => {
+    void stopWorkspaceAgent(`ws-leader-${nodeId}`);
+    void stopStoryAgent(nodeId);
+  },
+});
 
 /**
  * Hook: a story's STATUS changed. `open` → (re)desire + launch the leader; `done`/`aborted`

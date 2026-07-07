@@ -463,6 +463,49 @@ function allBlockersMerged(ids: string[]): boolean {
   return ids.every((id) => blockerState(id) === "merged");
 }
 
+/**
+ * Are NONE of these blockers still PENDING? (Empty set → trivially cleared.) This is the
+ * STORY-NODE sequencing rule — WEAKER than allBlockersMerged: a DEAD (never-merging) blocker
+ * still RELEASES a story-node leader (an aborted upstream story must not strand its dependent's
+ * leader forever), whereas a dead blocker keeps a LEAF `blocked` (leaves require an operator to
+ * edit the set). See setStoryBlockedBy / reevaluateBlockedStoryNodes / storyLeaderReleasable.
+ */
+function storyBlockersCleared(ids: string[]): boolean {
+  return ids.every((id) => blockerState(id) !== "pending");
+}
+
+// --- STORY-NODE leader gating (node-on-node blocked_by sequencing) ------------
+// A story NODE can carry a dependency set on its OWN `tasks.blocked_by` column (the same global,
+// unscoped column leaves use). Its "blocked" state is expressed NOT by a status change (the node
+// stays `open`) but by whether its managed LEADER is launched: while any blocker is still pending,
+// the leader is held down; once every blocker has merged/died, it is released. The leader lifecycle
+// lives in workspace-agent.ts (onStoryCreated / stopStoryAgent), which tasks.ts must NOT import
+// (cycle). So workspace-agent REGISTERS launch/stop hooks here at module load; this engine calls
+// them. Null until registered (workspace-agent is always loaded at boot) → the sweep no-ops safely.
+type StoryLeaderHooks = { launch: (nodeId: string) => void; stop: (nodeId: string) => void };
+// HOISTED `var` (no initializer) — NOT `let`: workspace-agent.ts registers these hooks at its OWN
+// module top-level, and because workspace-agent ↔ tasks form an import cycle that registration can
+// run BEFORE this module finishes evaluating. A `let`/`const` holder would be in its temporal dead
+// zone at that moment (throws); a hoisted `var` with no initializer is already `undefined` from the
+// top of evaluation, so the early assignment lands and is never clobbered back by a later init line.
+// eslint-disable-next-line no-var, vars-on-top
+var storyLeaderHooks: StoryLeaderHooks | undefined;
+export function setStoryLeaderHooks(hooks: StoryLeaderHooks): void {
+  storyLeaderHooks = hooks;
+}
+
+/**
+ * Is this story NODE's leader RELEASABLE right now? True when it is NOT a gated node (a leaf or a
+ * missing/container row → byte-identical, launch as before) OR when none of its blockers is still
+ * pending (empty set included). onStoryCreated gates its launch on this: a node created carrying an
+ * unmerged blocker is NOT launched; the unblock sweep releases it once the blockers clear.
+ */
+export function storyLeaderReleasable(nodeId: string): boolean {
+  const row = getTask(nodeId);
+  if (!row || row.work_kind !== "node") return true;
+  return storyBlockersCleared(parseBlockedBy(row.blocked_by));
+}
+
 /** Blockers (by id) that will never merge — terminal non-merged or gone. */
 function deadBlockerIds(ids: string[]): string[] {
   return ids.filter((id) => blockerState(id) === "dead");
@@ -2208,6 +2251,44 @@ export function reevaluateAllBlocked(): void {
     .query<{ id: string }, []>(`SELECT id FROM tasks WHERE status='blocked' AND work_kind='leaf'`)
     .all();
   for (const r of rows) reevaluateBlockedTask(r.id);
+  // NODE ARM: also release any story-node leader whose blockers just cleared (node-on-node
+  // sequencing). Cheap — only nodes that actually carry a dependency set are considered.
+  reevaluateBlockedStoryNodes();
+}
+
+/**
+ * AUTO-RELEASE the LEADER of any story NODE whose blocker set has CLEARED (every blocker
+ * merged/died) but whose leader is not yet launched. The node-tier counterpart of the leaf
+ * auto-unblock sweep: it does NOT change the node's status (a gated node stays `open`) — it
+ * simply launches the held-back leader via the registered launch hook (onStoryCreated, which
+ * re-checks the gate + is idempotent). Selection is limited to open nodes that carry a non-empty
+ * `blocked_by`, so an ordinary story (empty set) is never touched. Run on every dispatcher tick
+ * and after any merge (reevaluateAllBlocked) — robust to missed events.
+ */
+export function reevaluateBlockedStoryNodes(): void {
+  const rows = db
+    .query<{ id: string }, []>(
+      `SELECT id FROM tasks
+         WHERE work_kind='node' AND status='open'
+           AND blocked_by IS NOT NULL AND blocked_by != '[]'`,
+    )
+    .all();
+  for (const r of rows) {
+    const row = getTask(r.id);
+    if (!row) continue;
+    const ids = parseBlockedBy(row.blocked_by);
+    if (ids.length === 0) continue;
+    // Already launched (leader desired) → nothing to do; don't re-kick every tick.
+    if (getWorkspaceAgentRow(`ws-leader-${r.id}`)?.desired === 1) continue;
+    if (storyBlockersCleared(ids)) {
+      storyLeaderHooks?.launch(r.id);
+    } else {
+      // Still held — surface any dead (never-merging) blocker ONCE (a dead blocker does not hold
+      // a NODE leader down, but a MIX with a still-pending blocker does, and that pending edge
+      // may be the one that never resolves). Mirrors the leaf dead-blocker log.
+      logDeadBlockers(r.id, ids);
+    }
+  }
 }
 
 /**
@@ -2301,6 +2382,55 @@ export async function setBlockedBy(
   });
   logDeadBlockers(id, blockers);
   return taskView(id)!;
+}
+
+/**
+ * Replace a STORY NODE's dependency set (node-on-node blocked_by sequencing). The node's
+ * dependencies live on its OWN `tasks.blocked_by` column — the SAME global, unscoped column and
+ * parse/serialize helpers a leaf uses — so a story in one repo can be sequenced behind a story in
+ * another (cross-repo, global resolution). UNLIKE a leaf, a gated node does NOT take a `blocked`
+ * STATUS: it stays `open`, and its "blocked" state is expressed purely by whether its managed
+ * LEADER is launched. So this reconciles the LEADER, not a status:
+ *  - blockers CLEARED (empty, or all merged/dead) → (re)launch the leader via the launch hook.
+ *  - any blocker still PENDING → hold the leader DOWN via the stop hook (desired-down + teardown),
+ *    exactly the kill-on-block a leaf does; the unblock sweep relaunches it once they clear.
+ *
+ * Rejected once the story is TERMINAL (done/aborted → 409 — its leader is retired, past sequencing).
+ * Every blocker id must exist (404); the set must not create a self/transitive cycle (400). Returns
+ * the node's projected TaskView (carrying the new `blocked_by`).
+ */
+export async function setStoryBlockedBy(nodeId: string, blockedBy: string[]): Promise<TaskView> {
+  const row = getTask(nodeId);
+  if (!row || row.work_kind !== "node") throw new HttpError(404, `story not found: ${nodeId}`);
+  const status = storyStatusOf(nodeId);
+  if (status === "done" || status === "aborted") {
+    throw new HttpError(409, `cannot edit blocked_by on a ${status} story`);
+  }
+
+  const blockers = normalizeBlockedBy(blockedBy);
+  for (const bid of blockers) {
+    if (!getTask(bid)) throw new HttpError(404, `blocker not found: ${bid}`);
+  }
+  if (wouldCreateCycle(nodeId, blockers)) {
+    throw new HttpError(400, "blocked_by would create a dependency cycle");
+  }
+
+  db.query(`UPDATE tasks SET blocked_by=? WHERE id=?`).run(JSON.stringify(blockers), nodeId);
+  // Forget any prior dead-blocker warnings for this node — the set just changed.
+  for (const key of [...loggedDeadBlockers]) {
+    if (key.startsWith(`${nodeId}:`)) loggedDeadBlockers.delete(key);
+  }
+
+  if (storyBlockersCleared(blockers)) {
+    // No outstanding (pending) blocker → the leader may run. Launch it (idempotent + re-gates).
+    storyLeaderHooks?.launch(nodeId);
+  } else {
+    // A blocker is still pending → hold the leader down (kill-on-block; it relaunches when cleared).
+    storyLeaderHooks?.stop(nodeId);
+    logDeadBlockers(nodeId, blockers);
+  }
+  emitUpdated(nodeId);
+  return taskView(nodeId)!;
 }
 
 /** Compute the diff of a task branch vs its resolved base — the STORY branch for an isolated

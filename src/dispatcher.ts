@@ -29,7 +29,7 @@ import { autoConfirmStartupPrompts, classifyStartupScreen } from "./startup-conf
 import type { AutoConfirmResult, ConfirmRule } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
 import { groundingFingerprint, readTaskMd, renderAgentPrompt, renderAnswerPrompt, renderRegroundBlock, renderReworkPrompt } from "./taskmd.ts";
-import { getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedTask, requeueForResume, resolveBase, setIdle, setNeedsUserInput } from "./tasks.ts";
+import { getTask, markDispatchFailure, markInReview, markRunning, maybeAutoMerge, prepareBranchForDispatch, reevaluateBlockedStoryNodes, reevaluateBlockedTask, requeueForResume, resolveBase, setIdle, setNeedsUserInput } from "./tasks.ts";
 
 const promptsDir = join(config.dataDir, "prompts");
 const runsDir = join(config.dataDir, "runs");
@@ -388,6 +388,10 @@ async function tick(): Promise<void> {
       .all()) {
       reevaluateBlockedTask(b.id);
     }
+    // NODE ARM: release any story-node leader whose blockers just cleared (node-on-node
+    // sequencing — a gated node stays `open`, so it is not in the leaf sweep above). Dispatch
+    // SELECTION stays leaf-only (nodes are never dispatched; their leaders are launched here).
+    reevaluateBlockedStoryNodes();
 
     // AUTO-MERGE backstop: re-check every `review` task whose CI settled to 'pass'.
     // The primary trigger is the CI-completion hook (tasks.triggerCi), but this

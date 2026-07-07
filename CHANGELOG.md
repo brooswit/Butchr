@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-repo node-on-node `blocked_by` sequencing — a STORY can now be sequenced behind another
+  story.** `blocked_by` was already a global, unscoped dependency column, but only LEAVES could
+  carry a dependency set: `setWorkBlockedBy` (`PUT|POST /api/work/:id/blocked_by`) 409'd any node,
+  and a story always launched its leader immediately on creation. It now accepts a STORY node as the
+  dependent — the dependency set is stored on the node's OWN `tasks.blocked_by` column (the same
+  parse/serialize helpers leaves use), with the self/transitive-cycle guard preserved (a repo/project
+  CONTAINER is still refused with a 409). A story node expresses "blocked" not with a status change
+  (it stays `open`) but by holding its managed LEADER unlaunched: `onStoryCreated` no longer marks
+  the leader desired while any blocker is still pending, and the unblock sweep — both
+  `reevaluateAllBlocked` (post-merge) and the dispatcher tick — gained a node arm that AUTO-LAUNCHES
+  the leader once every blocker has merged or died. So a story in one repo can be held behind a story
+  in another (global, cross-repo resolution) and released automatically when its upstream lands.
+  Dispatch selection stays leaf-only (nodes are never dispatched; their leaders are launched).
+  BYTE-IDENTICAL until used: an existing story (empty `blocked_by`) launches its leader immediately
+  exactly as before — the primitive is inert until a node is actually given a blocker.
+
 ## [0.9.220] - 2026-07-07
 
 ### Fixed

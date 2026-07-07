@@ -40,6 +40,7 @@ import {
   requeueTask,
   setBlockedBy,
   setPriority,
+  setStoryBlockedBy,
   setVersionBump,
   submitSpec,
   taskChainEstimate,
@@ -342,13 +343,22 @@ export function prioritizeWork(id: string, priority: number | string | null): Ta
 }
 
 /**
- * Replace a unit of Work's dependency set (`PUT|POST /api/work/:id/blocked_by`). LEAF-only
- * this step — `blocked_by` lives on the task row; a node has no dependency set in today's
- * storage (node-on-node blocking activates at the step-6 cutover when nodes become Work
- * rows). Maps to `setBlockedBy`. 409 on a node; 404 if gone.
+ * Replace a unit of Work's dependency set (`PUT|POST /api/work/:id/blocked_by`). Accepts a
+ * LEAF (task) OR a STORY NODE as the dependent — both carry their dependency set on the SAME
+ * global, unscoped `tasks.blocked_by` column. A leaf routes to `setBlockedBy` (status-based
+ * block, byte-identical); a story node routes to `setStoryBlockedBy` (leader-gated sequencing —
+ * the node stays `open`, its leader is held until the blockers clear). A repo/project CONTAINER
+ * has no dependency set of its own (its members do) → 409. 404 if gone.
  */
 export async function setWorkBlockedBy(id: string, blockedBy: string[]): Promise<TaskView> {
-  requireLeaf(id, "blocked_by");
+  // A repo/project container is a real `tasks` row (getTask finds it) but is neither a leaf nor a
+  // story node — reject it explicitly with a 409 (resolveWork would otherwise 404 the id).
+  const row = getTask(id);
+  if (row && (row.work_kind === "repo" || row.work_kind === "project")) {
+    throw new HttpError(409, "cannot set blocked_by on a repo/project container work item");
+  }
+  const resolved = resolveWork(id);
+  if (resolved.kind === "node") return setStoryBlockedBy(id, blockedBy);
   return setBlockedBy(id, blockedBy);
 }
 

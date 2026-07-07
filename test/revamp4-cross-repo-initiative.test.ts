@@ -14,9 +14,11 @@
 //   R5 — Finding A (PROVEN GLOBAL): a LEAF in repo B blocked_by a LEAF in repo A stays `blocked`
 //     until A's blocker merges, then auto-unblocks to `inactive` — cross-REPO, resolved globally by
 //     the dispatcher's auto-unblock sweep (no dir scoping). This is why cross-repo fan-out is safe.
-//   R5 — Finding B (THE DOCUMENTED GAP → why sequencing is split out): node-on-node blocked_by is
-//     NOT supported — setWorkBlockedBy 409s on a NODE, and a story launches its leader IMMEDIATELY
-//     on creation with no dependency gate. Cross-repo SEQUENCING is deferred to a follow-up.
+//   R5 — Finding B (NOW BUILT — Phase A1, story st-30a7dccd RFC Q3): node-on-node blocked_by
+//     SEQUENCING — setWorkBlockedBy accepts a STORY NODE (still 409s a repo/project container), a
+//     node held behind an unmerged blocker keeps its LEADER unlaunched (the node stays `open`), and
+//     the node-arm unblock sweep AUTO-LAUNCHES it once the blocker reaches `done`. An EMPTY
+//     blocked_by launches immediately (byte-identical). The node-tier mirror of Finding A.
 //
 // Pure / in-process (mirrors revamp4-ceo-directive.test.ts): real service fns + the db singleton,
 // BUTCHR_HERDR_BIN=true so best-effort leader launches are harmless no-ops. Dedicated dirs + ids.
@@ -241,27 +243,59 @@ describe("P3e R5 (Finding A) — cross-repo LEAF blocked_by resolves globally", 
   });
 });
 
-// --- R5 — FINDING B: node-on-node blocked_by is the DOCUMENTED GAP ------------
-describe("P3e R5 (Finding B) — node-on-node blocked_by is NOT supported (sequencing split out)", () => {
-  test("setWorkBlockedBy 409s on a NODE (a story has no settable dependency set)", async () => {
-    const story = storiesMod.createStory(DIRA, "a node cannot be blocked_by set");
-    let status = 0;
-    try {
-      await workApiMod.setWorkBlockedBy(story.id, ["anything"]);
-    } catch (e) {
-      status = (e as { status?: number }).status ?? -1;
+// --- R5 — FINDING B (NOW BUILT): node-on-node blocked_by SEQUENCING ------------
+// The Phase A1 sequencing engine (story st-30a7dccd, RFC Q3) discharges the former gap: a STORY
+// NODE may carry a dependency set (setWorkBlockedBy no longer 409s a story node), and a node held
+// behind an unmerged blocker keeps its LEADER unlaunched until the blocker clears — the node-tier
+// mirror of Finding A. Byte-identical until a node is actually given a blocker.
+describe("P3e R5 (Finding B) — node-on-node blocked_by SEQUENCING (Phase A1)", () => {
+  test("setWorkBlockedBy SUCCEEDS on a story NODE, still 409s a repo/project container", async () => {
+    // A story node accepts a dependency set (stored on its OWN tasks.blocked_by).
+    const blocker = storiesMod.createStory(DIRA, "an existing blocker story");
+    const story = storiesMod.createStory(DIRA, "a node CAN now be blocked_by set");
+    await workApiMod.setWorkBlockedBy(story.id, [blocker.id]); // no throw
+    expect(tasksMod.getTask(story.id)!.blocked_by).toContain(blocker.id);
+    // A repo CONTAINER (DIRA repo node) and the PROJECT container still have no dependency set → 409.
+    for (const container of [DIRA, PROJ]) {
+      let status = 0;
+      try {
+        await workApiMod.setWorkBlockedBy(container, [blocker.id]);
+      } catch (e) {
+        status = (e as { status?: number }).status ?? -1;
+      }
+      expect(status).toBe(409);
     }
-    expect(status).toBe(409);
   });
 
-  test("a story launches its leader IMMEDIATELY on creation — no dependency gate", () => {
-    // Even with an unmerged sibling that a CEO might WANT to sequence behind, the new story's
-    // leader is desired + launched at once. This is exactly why cross-repo SEQUENCING needs a
-    // separate node-gating primitive and is deferred to a follow-up.
-    const blocker = storiesMod.createStory(DIRA, "would-be blocker (still open)");
-    expect(storiesMod.getStory(blocker.id)!.status).toBe("open");
-    const dependent = storiesMod.createStory(DIRB, "would-be dependent");
+  test("a story with EMPTY blocked_by launches its leader IMMEDIATELY (byte-identical)", () => {
+    // The overwhelming default: no dependency set → the leader is desired + launched at once,
+    // exactly as before the sequencing engine landed (inert-until-used regression guard).
+    const dependent = storiesMod.createStory(DIRB, "ordinary story, no blockers");
     const leader = dbMod.getWorkspaceAgentRow(`ws-leader-${dependent.id}`);
-    expect(leader?.desired).toBe(1); // launched immediately, ignoring any intended dependency
+    expect(leader?.desired).toBe(1);
+  });
+
+  test("a story blocked_by another story stays leader-UNLAUNCHED until the blocker reaches done", async () => {
+    // Node-tier mirror of Finding A: a story in repo B sequenced behind a story in repo A holds
+    // its leader down while A is unmerged, then AUTO-LAUNCHES once A reaches `done` (global,
+    // cross-repo resolution — no dir scoping in the node-arm unblock sweep).
+    const blockerInA = storiesMod.createStory(DIRA, "upstream story (repo A)");
+    const dependentInB = storiesMod.createStory(DIRB, "downstream story (repo B)");
+    // Both launched their leaders at creation (empty blocked_by).
+    expect(dbMod.getWorkspaceAgentRow(`ws-leader-${dependentInB.id}`)?.desired).toBe(1);
+
+    // Sequence B behind A → B's leader is held DOWN (kill-on-block); the node STAYS `open`.
+    await workApiMod.setWorkBlockedBy(dependentInB.id, [blockerInA.id]);
+    expect(dbMod.getWorkspaceAgentRow(`ws-leader-${dependentInB.id}`)?.desired).toBe(0);
+    expect(storiesMod.getStory(dependentInB.id)!.status).toBe("open");
+
+    // A still unmerged (open) → the sweep does NOT release B.
+    tasksMod.reevaluateAllBlocked();
+    expect(dbMod.getWorkspaceAgentRow(`ws-leader-${dependentInB.id}`)?.desired).toBe(0);
+
+    // A reaches `done` → the node-arm sweep AUTO-LAUNCHES B's leader.
+    dbMod.db.query(`UPDATE tasks SET status='done' WHERE id=?`).run(blockerInA.id);
+    tasksMod.reevaluateAllBlocked();
+    expect(dbMod.getWorkspaceAgentRow(`ws-leader-${dependentInB.id}`)?.desired).toBe(1);
   });
 });
