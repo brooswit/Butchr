@@ -27,6 +27,7 @@ import {
   getProject,
   getWorkspace,
   getWorkspaceByPath,
+  createRepoUnderProject,
   listProjectRepos,
   listProjects,
   listWorkspaces,
@@ -834,6 +835,18 @@ route("POST", "/api/projects/:id/workspaces", async (req, p) => {
   assertCreationAllowed("ceo", "repo");
   const view = await registerWorkspaceUnderProject(p.id!, body.path, body.label, body.gate_cmd);
   return json(view, 201);
+});
+// CREATE a brand-new git repo AND register it under this project (REVAMP-4 CEO-operating-model RFC,
+// Q2 / DECISION 1). Body `{ name, label? }`. butchr `git init`s a fresh repo at
+// `<config.reposRoot>/<name>` (name sanitized to a single traversal-free path segment) then hands it
+// to registerWorkspaceUnderProject. 404 project gone; 400 invalid/traversal name; 409 if the target
+// path already exists and is non-empty. This is the CREATE-NEW primitive — distinct from the
+// register-EXISTING `/workspaces` route above, which is left untouched. Returns 201 with the view.
+route("POST", "/api/projects/:id/repos/create", async (req, p) => {
+  const body = await readJson(req);
+  if (!getProject(p.id!)) throw new HttpError(404, `project not found: ${p.id}`);
+  assertCreationAllowed("ceo", "repo");
+  return json(await createRepoUnderProject(p.id!, body.name, body.label), 201);
 });
 // The repos registered under this project (its members). 404 if the project is gone.
 route("GET", "/api/projects/:id/repos", async (_req, p) => {

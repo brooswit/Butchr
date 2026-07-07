@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CEO can CREATE a brand-new repo under a project (not just adopt an existing one).** REVAMP-4
+  CEO-operating-model RFC Phase A2 (Q2 / DECISION 1) adds the one missing primitive so the CEO's
+  directive surface can MATERIALIZE a repo. New `POST /api/projects/:id/repos/create` `{ name, label? }`
+  (gated by the same `assertCreationAllowed('ceo','repo')` authority as the register routes): butchr
+  `git init`s a fresh repo at `<config.reposRoot>/<name>` and hands it to the EXISTING
+  `registerWorkspaceUnderProject`, so the new dir passes `isGitRepo`, gets its repo node materialized +
+  parented under the project, and mints a herdr workspace — all carrying that path's unregister
+  compensator, so a failed reparent is reversible and strands nothing. New `git.initRepo(path)` (butchr's
+  first WRITE-side git op) does `mkdir -p` + `git init -b main` + durability/`.gitignore` + an initial
+  root commit so branching has a base. New `config.reposRoot` (`BUTCHR_REPOS_ROOT`, default
+  `<dataDir>/repos`) is the root the created repos live under; `name` is sanitized to a single
+  traversal-free path segment (400 on `/`, `\`, `..`, or an absolute path), and a pre-existing NON-empty
+  path is refused (409). Purely additive — the register-EXISTING `/workspaces` and `/repos` routes are
+  untouched. DECISION 2 stands: NO npm/registry-publish primitive (butchr sequences on merge; publishing
+  is ordinary in-repo work).
+
 ## [0.9.221] - 2026-07-07
 
 ### Added
