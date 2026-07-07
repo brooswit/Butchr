@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.209] - 2026-07-07
+
 ### Added
 
 - **Project initiatives in the detail view (REVAMP-4 tier UI).** The project detail
