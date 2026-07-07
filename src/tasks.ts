@@ -3485,24 +3485,31 @@ export function isStoryComplete(storyId: string): boolean {
 }
 
 /**
- * Does a STORY have >=1 leaf member that is ACTIVE / in-flight — i.e. still MOVING and, on its
- * own, will re-engage the leader (dispatch-pending, building, a diff awaiting the leader's review,
- * or mid-merge)? The membership + node-exclusion query mirrors isStoryComplete exactly:
+ * Does a STORY have >=1 leaf member that is ACTIVE / in-flight — i.e. still MOVING ON ITS OWN and
+ * will re-engage the leader without the leader having to act (dispatch-pending, building, or
+ * mid-merge)? The membership + node-exclusion query mirrors isStoryComplete exactly:
  * `parent_id=? AND work_kind='leaf'` (parent_id is the sole membership pointer; the guard excludes
  * the story node whose parent_id is NULL). Pure direct db read.
  *
  * Gates the leader-idle → CTO escalation (st-cc15a82c, reconcileOperatorIdle step 3): an idle leader
- * that is idle merely because it is WAITING FOR ITS OWN SUBTASKS is pure CTO noise — the in-flight
- * child re-engages the leader on its diff, so it is NOT stuck. Active = the four MOVING statuses
- * below. Terminal (merged/aborted/failed/rolled_back), 'blocked' (blocked on something the leader
- * cannot clear), and the awaiting-decision feedback states (idea/spec_review/needs_info) are NOT
- * active — a leader parked on any of those (or with zero children) STILL escalates.
+ * that is idle merely because it is WAITING FOR ITS OWN SUBTASKS to move is pure CTO noise — the
+ * in-flight child re-engages the leader on its own, so it is NOT stuck. Active = the three MOVING
+ * statuses below: 'inactive' (dispatch-pending → will build), 'in_progress' (building → will produce
+ * a diff), 'rolling_back' (mid-merge/rollback).
+ *
+ * 'in_review' is deliberately NOT active: an in_review child is a diff AWAITING THE LEADER's own
+ * review+merge — it does NOT move on its own and does NOT re-engage the leader; the LEADER must act
+ * on it. So an idle leader whose ONLY non-terminal child is in_review ESCALATES — the idle-side
+ * backstop for a missed diff-review event (cf. st-d7c2629f). Terminal (merged/aborted/failed/
+ * rolled_back), 'blocked' (blocked on something the leader cannot clear), and the awaiting-decision
+ * feedback states (idea/spec_review/needs_info) are likewise NOT active — a leader parked on any of
+ * those (or with zero children) STILL escalates.
  */
 export function storyHasActiveMember(storyId: string): boolean {
   const active = db
     .query<{ n: number }, [string]>(
       `SELECT COUNT(*) AS n FROM tasks WHERE parent_id=? AND work_kind='leaf'
-         AND status IN ('inactive','in_progress','in_review','rolling_back')`,
+         AND status IN ('inactive','in_progress','rolling_back')`,
     )
     .get(storyId);
   return (active?.n ?? 0) > 0;

@@ -1622,7 +1622,6 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
   test("(b) escalation STOPS when the agent goes active OR desired=0 (idle_escalated_at cleared atomically)", () => {
     const CADENCE = cfgMod.config.idleEscalateEveryMs;
     // Member is OWNED + NON-active (failed) so the leader escalates (st-cc15a82c gate does not fire).
-    // Originally `in_review` — an ACTIVE child the new gate would now suppress.
     insertLeaf("m1", { status: "failed", story_id: "st-stop" });
     seedOperator("ws-leader-st-stop", "leader", "st-stop");
     const row = () => dbMod.getWorkspaceAgentRow("ws-leader-st-stop")!;
@@ -1726,7 +1725,6 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
 
   test("(f) escalation SURVIVES a butchr restart — a stale idle_escalated_at + still-idle re-fires on cadence", () => {
     // Member is OWNED + NON-active (failed) so the leader escalates (st-cc15a82c gate does not fire).
-    // Originally `in_review` — an ACTIVE child the new gate would now suppress.
     insertLeaf("m1", { status: "failed", story_id: "st-restart" });
     seedOperator("ws-leader-st-restart", "leader", "st-restart");
     // Simulate the state AFTER a restart: the durable row already carries idle=1 + a STALE stamp
@@ -1823,9 +1821,36 @@ describe("operator-idle → higher-up (story st-a32c8138)", () => {
     expect(idleCount(events)).toBe(1);
   });
 
-  test("st-cc15a82c storyHasActiveMember: true for the four MOVING statuses, false for terminal/blocked/feedback and zero members", () => {
-    const active: string[] = ["inactive", "in_progress", "in_review", "rolling_back"];
+  test("st-cc15a82c (e) idle leader + only child in_review (diff awaiting the leader's OWN review+merge) → escalates", () => {
+    // The core of this fix: an in_review child is a finished diff AWAITING THE LEADER's review+merge.
+    // It does NOT move on its own and does NOT re-engage the leader — the LEADER must act on it. So an
+    // idle leader whose only non-terminal child is in_review is genuinely stalled (e.g. it missed the
+    // diff-review event on a reboot bridge-reconnect) and MUST escalate — the idle-side backstop for a
+    // missed diff-review event (cf. st-d7c2629f). Before this fix, in_review was in the active set and
+    // wrongly SILENCED this alert.
+    insertLeaf("m-awaiting-review", { status: "in_review", story_id: "st-in-review-only" });
+    seedOperator("ws-leader-in-review-only", "leader", "st-in-review-only");
+    const { events, unsub } = captureAttention();
+    try {
+      wa.reconcileOperatorIdle(dbMod.getWorkspaceAgentRow("ws-leader-in-review-only")!, {
+        idle: () => true,
+        now: () => 1,
+      });
+    } finally {
+      unsub();
+    }
+    expect(idleCount(events)).toBe(1); // in_review no longer suppresses — the leader must act on the diff
+    const row = dbMod.getWorkspaceAgentRow("ws-leader-in-review-only")!;
+    expect(row.idle).toBe(1);
+    expect(row.idle_escalated_at).toBe(1); // stamped — a genuine dead-end, not a suppressed one
+  });
+
+  test("st-cc15a82c storyHasActiveMember: true for the three MOVING statuses, false for in_review/terminal/blocked/feedback and zero members", () => {
+    const active: string[] = ["inactive", "in_progress", "rolling_back"];
     const inactive: string[] = [
+      // in_review is a diff awaiting the LEADER's own review+merge — it does NOT move on its own,
+      // so an idle leader whose only non-terminal child is in_review must ESCALATE, not be silenced.
+      "in_review",
       "merged",
       "aborted",
       "failed",

@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Idle story-leader with a diff awaiting its own review now escalates.**
+  `storyHasActiveMember` (`src/tasks.ts`) no longer counts an `in_review` child as
+  active. An `in_review` member is a finished diff awaiting the LEADER's own
+  review+merge — it does not move on its own and does not re-engage the leader, so
+  when a leader idled with its sole non-terminal subtask sitting `in_review` (e.g.
+  after missing the diff-review event on a reboot bridge-reconnect), the has-active-child
+  gate wrongly SILENCED the leader-idle → CTO escalation and the work stalled
+  invisibly. The active set is now the three genuinely self-moving statuses
+  (`inactive`, `in_progress`, `rolling_back`); an idle leader whose only non-terminal
+  child is `in_review` now escalates — the idle-side backstop for a missed diff-review
+  event. Suppression is unchanged for a genuinely building/dispatching child, and a
+  fully-parked or externally-blocked leader still escalates.
+
 ## [0.9.224] - 2026-07-07
 
 ### Fixed
