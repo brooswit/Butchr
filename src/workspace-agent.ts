@@ -1140,6 +1140,13 @@ function ceoWsId(projectNodeId: string): string {
   return `ws-ceo-${projectNodeId}`;
 }
 
+/** The herdr agent name for a project node's CEO agent (== the unified workspaceAgentName of the
+ *  `ws-ceo-<id>` row per SUPERVISOR_KINDS.ceo.agentName). Mirrors ctoAgentName; used by the CEO
+ *  terminal-attach route. This is the EXACT name workspaceAgentStatus probes for liveness. */
+export function ceoAgentName(projectNodeId: string): string {
+  return `${config.ctoAgentName}-project-${projectNodeId}`;
+}
+
 /** The dashboard/API view of a project node's managed CEO agent state (REVAMP-4 P3c CEO card). */
 export type CeoStatus = {
   /** Per-project enable (project.ceo_enabled tri-state, or the global default). */

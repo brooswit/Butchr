@@ -49,6 +49,7 @@ import {
 // the CtoStatus response shape + `cto.updated` emission identical. The legacy launcher
 // cto-agent.ts was deleted in Phase C S5.
 import {
+  ceoAgentName,
   ceoAgentStatus,
   ctoAgentName,
   ctoAgentStatus,
@@ -1196,6 +1197,24 @@ route("POST", "/api/workspaces/:id/cto/terminal", async (_req, p) => {
     throw new HttpError(409, "CTO agent has no live pane (not running)");
   }
   return attachAgentTerminal(ctoAgentName(p.id!));
+});
+// Open a GUI terminal attached to a project's managed CEO agent's live pane — the CEO analog of
+// the CTO terminal route above (REVAMP-4 project tier). Reuses the SAME pane-attach machinery.
+// 404 if the id is not a project node; 409 if the CEO agent has no live pane, with an HONEST reason
+// off the same CeoStatus fields the CEO card reads (not enabled / disabled override / enabled but
+// not running).
+route("POST", "/api/projects/:id/ceo/terminal", async (_req, p) => {
+  const s = await ceoAgentStatus(p.id!);
+  if (!s) throw new HttpError(404, `project not found: ${p.id}`);
+  if (!s.live) {
+    const why = !s.enabled
+      ? s.overridden
+        ? "disabled for this project"
+        : "global BUTCHR_CEO_AGENT gate is off"
+      : "enabled but not running (no live pane)";
+    throw new HttpError(409, `CEO agent has no live pane (${why})`);
+  }
+  return attachAgentTerminal(ceoAgentName(p.id!));
 });
 
 /** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. Returns the running server so callers/tests can `.stop()` it. */

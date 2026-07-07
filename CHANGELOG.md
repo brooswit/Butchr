@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Open a CEO terminal for a project.** New `POST /api/projects/:id/ceo/terminal` opens a GUI
+  terminal attached to a project's managed CEO agent pane — the CEO analog of the CTO terminal
+  route, reusing the same pane-attach machinery. Returns 404 if the id is not a project node and
+  409 (with an honest reason: not enabled / disabled for this project / enabled but not running)
+  when the CEO agent has no live pane.
+
 ## [0.9.217] - 2026-07-07
 
 ### Removed
