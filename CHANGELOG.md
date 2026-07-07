@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Project CEO now runs in its OWN directory / herdr workspace — the terminal buttons stop
+  crossing.** A project's managed CEO agent was anchored to its project's member repo directory
+  (`directory_id = project.workspace_id`), so it co-located with that repo's CTO in ONE herdr
+  workspace (both keyed by `directory_id`). `herdr agent attach <name>` then hit the shared
+  workspace's active pane rather than the named agent, so "Open CTO terminal" and "Open CEO
+  terminal" reached the wrong panes. The CEO is a butchr-internal agent, not a repo checkout, so it
+  now gets a dedicated home directory under `<BUTCHR_DATA_DIR>/projects/<projectNodeId>/` with its
+  own minimal `directory` row (`ceo-dir-<projectNodeId>`) and therefore its own herdr workspace —
+  making both terminal buttons unambiguous. A boot migration re-anchors any already-running CEO onto
+  its new home (session preserved for `--resume`; old pane freed by name, the shared workspace and
+  CTO pane left intact); unregistering a project's anchor directory (and `deleteProject`) now also
+  tears down the CEO and drops its home-dir row so no orphan pane or stray directory lingers. The
+  synthetic CEO-home directories are hidden from the workspace list/dashboard.
+
 ## [0.9.219] - 2026-07-07
 
 ### Added

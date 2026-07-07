@@ -1049,6 +1049,48 @@ export async function workspaceAgentStatus(id: string): Promise<WorkspaceAgentSt
 }
 
 /**
+ * RE-ANCHOR a project CEO's workspace-agent row to a NEW directory — its dedicated CEO HOME
+ * (story st-307edc78). A managed CEO used to be anchored to its project's member repo directory
+ * (setWorkspaceCeoEnabled → directory_id = project.workspace_id), which made ensureHerdrWorkspace
+ * key the CEO to the SAME herdr workspace as that repo's CTO (both keyed by directory_id). With one
+ * shared herdr workspace, `herdr agent attach <name>` hit the workspace's ACTIVE pane rather than
+ * the named agent, so the CTO/CEO terminal buttons crossed. Giving the CEO its OWN directory_id
+ * gives it its OWN herdr workspace and disambiguates both buttons.
+ *
+ * This MOVES an already-anchored row: it frees ONLY the CEO's own pane by its (stable,
+ * directory-INDEPENDENT) name — `<prefix>-project-<projectNodeId>` — so the shared herdr workspace
+ * and the CTO pane are left fully INTACT (teardown is agentDeregister + teardownTask BY NAME, never
+ * a workspace destroy). It then repoints directory_id at `ceoDirId` and CLEARS herdr_workspace +
+ * has_agent + started_at so the supervisor relaunches the CEO in the new cwd and ensureHerdrWorkspace
+ * mints a FRESH herdr workspace keyed by the new directory. PRESERVES session_id (so the relaunch
+ * --resumes the same Claude session — no lost context) and desired (an enabled CEO stays enabled).
+ * Idempotent: a no-op when the row is gone, is not a `ceo`, or is already anchored to ceoDirId.
+ * Serialized behind the workspace's launchInFlight guard so a racing supervise tick can't relaunch
+ * into the OLD workspace mid-move.
+ */
+export async function reanchorCeoHome(wsId: string, ceoDirId: string): Promise<void> {
+  const existing = getWorkspaceAgentRow(wsId);
+  if (!existing || existing.kind !== "ceo" || existing.directory_id === ceoDirId) return;
+  await guarded(wsId, async () => {
+    const row = getWorkspaceAgentRow(wsId);
+    if (row && row.kind === "ceo" && row.directory_id !== ceoDirId) {
+      await launcher.teardown(workspaceAgentName(row)); // free ONLY the CEO pane by name
+      saveWorkspaceAgentRow(wsId, {
+        directory_id: ceoDirId,
+        herdr_workspace: null,
+        has_agent: 0,
+        started_at: null,
+      });
+      console.log(
+        `[butchr] re-anchored CEO ${wsId} → directory ${ceoDirId} ` +
+          `(session ${row.session_id ?? "—"} preserved; supervisor relaunches in new home)`,
+      );
+    }
+    return workspaceAgentStatus(wsId);
+  });
+}
+
+/**
  * The single LIVE workspace for a unit of Work (db.liveWorkspaceForWork), exposed here as
  * the unified module's reader for the RFC-Q3 1:N "one live per Work" relationship.
  */

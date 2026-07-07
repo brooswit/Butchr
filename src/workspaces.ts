@@ -13,6 +13,7 @@ import {
 import { config } from "./config.ts";
 import {
   ensureWorkspaceAgentRow,
+  reanchorCeoHome,
   startWorkspaceAgent,
   stopCtoAgent,
   stopWorkspaceAgent,
@@ -28,6 +29,7 @@ import {
   db,
   deleteWorkspaceAgentRow,
   getWorkspaceAgentRow,
+  listWorkspaceAgentRows,
   nowIso,
   REVIEW_STATES,
   saveWorkspaceAgentRow,
@@ -229,8 +231,13 @@ async function healHerdrWorkspace(
 }
 
 export function listWorkspaces(): WorkspaceView[] {
+  // EXCLUDE synthetic CEO-home dirs (`ceo-dir-*`, story st-307edc78) — they are internal agent
+  // homes (a CEO's launch cwd), NOT repos, so they must never surface as workspace cards, be
+  // git-healed, or be temp-pruned. getWorkspace(id) by exact id still resolves them for the launcher.
   const rows = db
-    .query<WorkspaceRow, []>(`SELECT * FROM directory ORDER BY created_at ASC`)
+    .query<WorkspaceRow, []>(
+      `SELECT * FROM directory WHERE id NOT LIKE 'ceo-dir-%' ORDER BY created_at ASC`,
+    )
     .all();
   return rows.map((d) => ({ ...d, counts: counts(d.id) }));
 }
@@ -602,10 +609,12 @@ export async function deleteProject(projectId: string): Promise<TaskRow> {
   }
 
   // Empty → delete cleanly. Tear down the managed CEO runtime, then drop its workspace agent row
-  // (it does NOT cascade — its directory_id anchor survives this project delete).
+  // (it does NOT cascade off the project delete — its directory_id anchor is the CEO home dir,
+  // story st-307edc78) AND drop that home-dir row so no stray directory lingers for a gone project.
   const wsId = `ws-ceo-${projectId}`;
   await stopWorkspaceAgent(wsId);
   if (getWorkspaceAgentRow(wsId)) deleteWorkspaceAgentRow(wsId);
+  deleteCeoHomeDirectory(projectId);
 
   db.query(`DELETE FROM tasks WHERE id=? AND work_kind='project'`).run(projectId);
   return project;
@@ -629,6 +638,51 @@ export function isCeoEnabled(projectNodeId: string): boolean {
   return config.ceoAgentEnabled;
 }
 
+/** The stable, derivable directory-row id for a project CEO's dedicated HOME (story st-307edc78). */
+export function ceoHomeDirectoryId(projectNodeId: string): string {
+  return `ceo-dir-${projectNodeId}`;
+}
+
+/**
+ * PROVISION a project CEO's dedicated HOME directory + its minimal `directory` row, returning the
+ * directory id (story st-307edc78). A managed CEO is a butchr-INTERNAL agent (NOT a repo checkout),
+ * so its launch cwd belongs in the app data area — never inside a member repo. Anchoring the CEO to
+ * a member repo's directory made ensureHerdrWorkspace key the CEO to the SAME herdr workspace as
+ * that repo's CTO (both keyed by directory_id), so the CTO/CEO terminal buttons crossed. Its OWN
+ * directory_id gives it its OWN herdr workspace, disambiguating both buttons.
+ *
+ * Creates `<config.dataDir>/projects/<projectNodeId>/` (mkdir -p) and INSERT-OR-IGNOREs a MINIMAL
+ * `directory` row: a STABLE id `ceo-dir-<projectNodeId>` and path = that dir. Deliberately NOT
+ * registerWorkspace() — that requires a git repo, mints a herdr workspace, and seeds CTO context,
+ * ALL wrong for an internal agent home. herdr_workspace is left NULL; the launcher's
+ * ensureHerdrWorkspace mints it lazily on the CEO's first launch in this cwd. Idempotent: the mkdir
+ * is recursive and the INSERT OR IGNOREs on the stable id/path, so re-runs (and boot re-anchor) are
+ * no-ops. These synthetic rows are EXCLUDED from the repo-workspace surfaces (listWorkspaces /
+ * dashboard) by the `ceo-dir-` prefix, so they never show up as phantom workspace cards.
+ */
+export function ensureCeoHomeDirectory(projectNodeId: string): string {
+  const dirId = ceoHomeDirectoryId(projectNodeId);
+  const path = join(config.dataDir, "projects", projectNodeId);
+  mkdirSync(path, { recursive: true });
+  db.query(
+    `INSERT OR IGNORE INTO directory (id, path, label, herdr_workspace, herdr_pane, created_at)
+     VALUES (?, ?, ?, NULL, NULL, ?)`,
+  ).run(dirId, path, `CEO home ${projectNodeId}`, nowIso());
+  return dirId;
+}
+
+/**
+ * Remove a project CEO's HOME directory ROW — the cleanup counterpart of ensureCeoHomeDirectory
+ * (story st-307edc78). Deleting the row CASCADES away the CEO's `workspace` agent row (its
+ * directory_id FK is ON DELETE CASCADE, db.ts), so callers stop the CEO agent GRACEFULLY by name
+ * FIRST (stopWorkspaceAgent) and then call this to drop the anchor + its row in one step. The
+ * on-disk dir under config.dataDir is deliberately LEFT in place (butchr data area — harmless, and
+ * never clobbers anything the CEO wrote). Idempotent: a no-op when the row is already gone.
+ */
+export function deleteCeoHomeDirectory(projectNodeId: string): void {
+  db.query(`DELETE FROM directory WHERE id=?`).run(ceoHomeDirectoryId(projectNodeId));
+}
+
 /**
  * Set (or clear) a PROJECT's per-project CEO-agent enable and return the refreshed project node
  * (REVAMP-4 P3c). Mirrors setWorkspaceCtoEnabled: `true`/`false` forces the project's CEO agent
@@ -638,11 +692,14 @@ export function isCeoEnabled(projectNodeId: string): boolean {
  *
  * MIRROR-AND-DEFER: after writing tasks.ceo_enabled, materialize/tear the unified `workspace`
  * runtime row (id `ws-ceo-<projectNodeId>`, kind='ceo', work_id = the project node, directory_id =
- * the project's ANCHOR directory so defaultLauncher resolves a real cwd + the channel gets
- * BUTCHR_CHANNEL_WORKSPACE alongside BUTCHR_CHANNEL_PROJECT) — ENABLED → ensure the row + desired=1
+ * the CEO's OWN dedicated HOME directory — ensureCeoHomeDirectory, NOT the project's repo anchor
+ * (story st-307edc78) — so defaultLauncher resolves a real cwd + the channel gets
+ * BUTCHR_CHANNEL_WORKSPACE alongside BUTCHR_CHANNEL_PROJECT, and the CEO gets its OWN herdr
+ * workspace distinct from any repo CTO's) — ENABLED → ensure the row, re-anchor an EXISTING row that
+ * still points at an old repo dir onto the CEO home (reanchorCeoHome, session-preserving), + desired=1
  * (the supervisor launches it on its next tick, exactly like the CTO path); DISABLED →
- * stopWorkspaceAgent (immediate teardown + desired=0). Async because the disable teardown is
- * awaited. See workspace-agent.SUPERVISOR_KINDS.ceo.
+ * stopWorkspaceAgent (immediate teardown + desired=0). Async because the re-anchor/disable teardown
+ * is awaited. See workspace-agent.SUPERVISOR_KINDS.ceo.
  */
 export async function setWorkspaceCeoEnabled(
   projectNodeId: string,
@@ -660,16 +717,45 @@ export async function setWorkspaceCeoEnabled(
   );
   const wsId = `ws-ceo-${projectNodeId}`;
   if (isCeoEnabled(projectNodeId)) {
+    const ceoDir = ensureCeoHomeDirectory(projectNodeId);
     ensureWorkspaceAgentRow(wsId, {
       kind: "ceo",
       work_id: projectNodeId,
-      directory_id: project.workspace_id,
+      directory_id: ceoDir,
     });
+    // ensureWorkspaceAgentRow only sets directory_id on CREATE, so an EXISTING row anchored to the
+    // old repo dir must be MOVED explicitly (no-op when it already points at the CEO home).
+    await reanchorCeoHome(wsId, ceoDir);
     saveWorkspaceAgentRow(wsId, { desired: 1 });
   } else {
     await stopWorkspaceAgent(wsId);
   }
   return getProject(projectNodeId)!;
+}
+
+/**
+ * BOOT MIGRATION (story st-307edc78): move EVERY already-anchored project CEO onto its dedicated
+ * HOME directory. A CEO that was enabled before this change is a live `ws-ceo-*` workspace-agent row
+ * anchored to its project's repo directory (the old setWorkspaceCeoEnabled behavior) and never hits
+ * setWorkspaceCeoEnabled again at boot — so the re-anchor must be driven here. For each ceo row we
+ * (idempotently) provision its home dir and reanchorCeoHome it (session_id + desired preserved; the
+ * old pane freed by name, the shared herdr workspace + CTO pane untouched). Run at boot BEFORE
+ * reconcileWorkspaceAgents so the cleared herdr_workspace/has_agent make reconcile relaunch the CEO
+ * fresh in its NEW home instead of adopting the old co-located pane. Idempotent: a CEO already at
+ * its home is a no-op, so re-running across restarts is safe.
+ */
+export async function reanchorAllCeoHomes(): Promise<void> {
+  for (const row of listWorkspaceAgentRows()) {
+    if (row.kind !== "ceo" || !row.work_id) continue;
+    try {
+      const ceoDir = ensureCeoHomeDirectory(row.work_id);
+      await reanchorCeoHome(row.id, ceoDir);
+    } catch (e) {
+      console.error(
+        `[butchr] CEO home re-anchor failed for ${row.id}: ${(e as Error).message}`,
+      );
+    }
+  }
 }
 
 // ---- REGISTER REPOS UNDER A PROJECT (REVAMP-4 Phase 3 / P3d, story st-1a82a2e1) -----------
@@ -907,8 +993,12 @@ function openStoryCount(workspaceId: string): number {
 }
 
 export function dashboard(): Dashboard {
+  // EXCLUDE synthetic CEO-home dirs (`ceo-dir-*`, story st-307edc78) — internal agent homes, not
+  // repos; they must not inflate workspace totals or render as dashboard cards. See listWorkspaces.
   const rows = db
-    .query<WorkspaceRow, []>(`SELECT * FROM directory ORDER BY created_at ASC`)
+    .query<WorkspaceRow, []>(
+      `SELECT * FROM directory WHERE id NOT LIKE 'ceo-dir-%' ORDER BY created_at ASC`,
+    )
     .all();
   const totals = {
     workspaces: rows.length,
@@ -1121,6 +1211,22 @@ export async function unregisterWorkspace(id: string): Promise<void> {
     .all(id);
   for (const r of unifiedRows) {
     await stopWorkspaceAgent(r.id).catch(() => {});
+  }
+
+  // A PROJECT anchored to this directory (project.workspace_id = id) cascade-deletes on the DELETE
+  // below — so its CEO must go too. Since story st-307edc78 the CEO agent lives in its OWN home dir
+  // (directory_id = ceo-dir-<projectId>), NOT this directory, so it is NOT caught by the
+  // directory_id=id enumeration above. Gracefully stop it BY NAME and drop its home-dir row (which
+  // CASCADES the CEO agent row away) so removing a project's anchor directory leaves no orphan CEO
+  // pane / stray directory row. Best-effort; never block unregister.
+  const anchoredProjects = db
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM tasks WHERE workspace_id=? AND work_kind='project'`,
+    )
+    .all(id);
+  for (const p of anchoredProjects) {
+    await stopWorkspaceAgent(`ws-ceo-${p.id}`).catch(() => {});
+    deleteCeoHomeDirectory(p.id);
   }
 
   // Tear down this workspace's managed CTO agent (close its tab/pane + free its name) so

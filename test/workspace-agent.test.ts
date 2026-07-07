@@ -2040,13 +2040,15 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     const wsId = `ws-ceo-${proj.id}`;
 
     // ENABLE → tasks.ceo_enabled=1 + a desired-up ceo workspace row bound to the project node,
-    // anchored to the project's directory (cwd + channel-workspace scope).
+    // anchored to the CEO's OWN home directory (story st-307edc78) — NOT the project's repo dir —
+    // so the CEO gets its own herdr workspace (cwd + channel-workspace scope live under dataDir).
     await dirsMod.setWorkspaceCeoEnabled(proj.id, true);
     expect(dirsMod.getProject(proj.id)!.ceo_enabled).toBe(1);
     const row = dbMod.getWorkspaceAgentRow(wsId)!;
     expect(row.kind).toBe("ceo");
     expect(row.work_id).toBe(proj.id);
-    expect(row.directory_id).toBe(DIR);
+    expect(row.directory_id).toBe(`ceo-dir-${proj.id}`);
+    expect(row.directory_id).not.toBe(DIR); // NOT the member repo dir (root-cause fix)
     expect(row.desired).toBe(1);
     expect(wa.SUPERVISOR_KINDS.ceo.enabled(row)).toBe(true);
     // The mock agent name matches the ceo derivation.
@@ -2079,10 +2081,17 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
 
     await dirsMod.unregisterWorkspace(ADIR);
 
-    // The anchored CEO agent was GRACEFULLY torn down BY NAME (the directory-teardown enumeration
-    // now includes kind='ceo'), not merely cascade-deleted at the DB row.
+    // Since story st-307edc78 the CEO lives in its OWN home dir (directory_id = ceo-dir-<proj>), NOT
+    // ADIR — but unregistering the project's ANCHOR directory cascade-deletes the project node, so
+    // the CEO must still go. unregisterWorkspace GRACEFULLY stops the CEO BY NAME (via the anchored-
+    // project enumeration) and drops its home-dir row, which cascades the CEO agent row away.
     expect(calls.teardown).toContain(ceoName);
-    // And the row itself is gone (FK cascade), leaving no stranded ceo row for the directory.
+    // No stranded ceo row survives (its home dir was deleted → the agent row cascaded).
+    expect(dbMod.getWorkspaceAgentRow(wsId)).toBeNull();
+    expect(
+      dbMod.db.query(`SELECT COUNT(*) AS n FROM directory WHERE id=?`).get(`ceo-dir-${proj.id}`),
+    ).toMatchObject({ n: 0 });
+    // And no workspace row remains anchored to the removed repo directory either.
     expect(
       dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(ADIR),
     ).toMatchObject({ n: 0 });

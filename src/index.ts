@@ -16,7 +16,7 @@ import { startServer } from "./server.ts";
 import { recoverMergingStories } from "./stories.ts";
 import { recoverMergedTasks, recoverRollingBackTasks, recoverStuckGates } from "./tasks.ts";
 import { isUp } from "./herdr.ts";
-import { listWorkspaces, pruneTempWorkspaces } from "./workspaces.ts";
+import { listWorkspaces, pruneTempWorkspaces, reanchorAllCeoHomes } from "./workspaces.ts";
 
 async function main(): Promise<void> {
   // Install the persistent log sink before anything else so all startup output
@@ -155,6 +155,13 @@ async function main(): Promise<void> {
   // surviving pane, or (re)launch RESUMING its session), then start the supervisor that
   // relaunches them on death. BUILD agents stay DISPATCHER-owned (per-task watcher). (Phase C
   // S4 retired the legacy per-kind cto + story supervisor boot path and its enable flag.)
+  //
+  // CEO HOME RE-ANCHOR (story st-307edc78) — BEFORE the reconcile: move every already-anchored
+  // project CEO off its old shared repo directory onto its dedicated home dir (its own herdr
+  // workspace), clearing herdr_workspace/has_agent + freeing the old pane by name (session_id
+  // preserved). Running first means reconcileWorkspaceAgents relaunches the CEO fresh in its NEW
+  // home rather than adopting the old CTO-co-located pane. Idempotent — a no-op once migrated.
+  await reanchorAllCeoHomes();
   const ws = await reconcileWorkspaceAgents(herdrUp);
   if (ws.adopted > 0 || ws.launched > 0) {
     console.log(`[butchr] workspace agents: ${ws.adopted} adopted, ${ws.launched} launched`);
