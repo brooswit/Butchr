@@ -724,8 +724,8 @@ function openPicker(onSelect) {
     modal.appendChild(foot);
   }
 
-  // Start from the current field value if set, else home.
-  const seed = (document.getElementById("dpath") || {}).value || "";
+  // Start from the add-workspace modal's path field if it's open with a value, else home.
+  const seed = (document.getElementById("aw-path") || {}).value || "";
   load(seed.trim() || null);
 }
 
@@ -881,6 +881,15 @@ async function render() {
     location.replace("#/projects"); // fires hashchange → render() re-runs on the canonical hash
     return;
   }
+  // Any UNKNOWN hash falls to the legacy flat workspace-card dashboard (parseHash's fallback arm).
+  // Retire that surface too (Hierarchical Projects IA S4): everything is reached project→workspace→
+  // work now, so REPLACE-redirect it to the Projects overview (same semantics as the bare-hash arm).
+  // renderDashboard/dirCard stay defined but are now unreachable — their loose-workspace register
+  // form (the only front-end path that created a top-level workspace) was removed in this increment.
+  if (route.name === "dashboard") {
+    location.replace("#/projects");
+    return;
+  }
   // A FLAT `#/workspace/:wid` (no projectId) → the nested route, deriving the owning project from
   // the API. A repo not yet adopted by any project has no nested home → fall through and render it
   // flat (graceful; old bookmark still resolves).
@@ -1033,67 +1042,18 @@ async function renderDashboard() {
   const strandedHtml = strandedMarkup(data);
   if (strandedHtml) wrap.appendChild(el("div", { html: strandedHtml }));
 
-  // add-workspace form
-  const form = el("div", { class: "panel" });
-  form.innerHTML = `
-    <h2 style="margin-top:0">Register a workspace</h2>
-    <div class="row" style="align-items:flex-end; gap:10px">
-      <label class="field" style="flex:2; margin:0">
-        <span class="lbl">path to a git repository</span>
-        <div class="row" style="gap:8px">
-          <input type="text" id="dpath" placeholder="/home/you/code/project" />
-          <button class="btn ghost" id="browse-dir" style="white-space:nowrap">Browse…</button>
-        </div>
-      </label>
-      <label class="field" style="flex:1; margin:0">
-        <span class="lbl">label (optional)</span>
-        <input type="text" id="dlabel" placeholder="defaults to dir name" />
-      </label>
-      <button class="btn" id="add-dir">Register</button>
-    </div>
-    <label class="field" style="margin:10px 0 0">
-      <span class="lbl">build/test gate command (optional) — blank uses the default; runs in CI + post-merge verify</span>
-      <input type="text" id="dgate" placeholder="e.g. npm run build && npm test" />
-    </label>`;
-  wrap.appendChild(form);
-
+  // NOTE (Hierarchical Projects IA S4): the global "Register a workspace" form was REMOVED here.
+  // Loose/top-level workspaces no longer exist — a workspace is created only from inside a project
+  // (renderProjectDetail → "+ Add workspace" → POST /api/projects/:id/workspaces). This view is now a
+  // read-only rollup and, after S4's unknown-hash redirect, is unreachable dead code left in place.
   if (dirs.length === 0) {
-    wrap.appendChild(el("div", { class: "empty" }, "No workspaces yet. Register a git repo above to begin."));
+    wrap.appendChild(el("div", { class: "empty" }, "No workspaces registered yet — add one from inside a project (Projects)."));
   } else {
     const grid = el("div", { class: "grid dirs" });
     for (const d of dirs) grid.appendChild(dirCard(d));
     wrap.appendChild(grid);
   }
   mount(wrap);
-
-  document.getElementById("browse-dir").addEventListener("click", () => {
-    openPicker(async (picked, register) => {
-      document.getElementById("dpath").value = picked;
-      if (register) {
-        try {
-          await api("POST", "/workspaces", { path: picked });
-          toast("workspace registered");
-          render();
-        } catch (e) { toast(e.message, true); }
-      }
-    });
-  });
-
-  document.getElementById("add-dir").addEventListener("click", async () => {
-    const path = document.getElementById("dpath").value.trim();
-    const label = document.getElementById("dlabel").value.trim();
-    // Optional per-workspace gate command — omit when blank so the backend keeps
-    // the default (NULL) rather than disabling the gate with an empty string.
-    const gate = document.getElementById("dgate").value.trim();
-    if (!path) return toast("path is required", true);
-    try {
-      await api("POST", "/workspaces", {
-        path, label: label || undefined, gate_cmd: gate || undefined,
-      });
-      toast("workspace registered");
-      render();
-    } catch (e) { toast(e.message, true); }
-  });
 }
 
 function dirCard(d) {
@@ -4543,7 +4503,7 @@ function projectDangerZone(project) {
 }
 
 // CONFIRM-DELETE modal for a project — reuses openModal (the shared confirm scaffold, so
-// Escape/backdrop-close + focus behavior match every other modal) and the openAddRepoModal
+// Escape/backdrop-close + focus behavior match every other modal) and the openAddWorkspaceModal
 // inline-error dance. Delete → DELETE /api/projects/:id, branching on status:
 //   200 → close, navigate back to the overview (#/projects), success toast.
 //   409 → the guard message (server serializes guard errors as { error } — e.g.
@@ -4795,8 +4755,12 @@ function reposPanel(project, repos, wsById) {
   const phead = el("div", { class: "panel-head" });
   phead.appendChild(el("h2", {}, "Repos"));
   phead.appendChild(el("span", { class: "spacer" }));
-  const addBtn = el("button", { class: "btn ghost xs" }, "+ Add repo");
-  addBtn.addEventListener("click", () => openAddRepoModal(project, repos, wsById));
+  // Contextual create (Hierarchical Projects IA S4): "+ Add workspace" registers an EXISTING git
+  // directory and nests it under THIS project atomically — the primary (and only) add path now that
+  // loose workspaces are gone. It replaces the old "+ Add repo" (add-an-already-materialized-repo)
+  // flow, which is meaningless once every repo lives under a project.
+  const addBtn = el("button", { class: "btn ghost xs" }, "+ Add workspace");
+  addBtn.addEventListener("click", () => openAddWorkspaceModal(project));
   phead.appendChild(addBtn);
   panel.appendChild(phead);
 
@@ -4859,58 +4823,85 @@ async function unregisterRepo(project, repo, row) {
   }
 }
 
-// ADD-REPO modal — pick a directory from GET /api/workspaces that is NOT already a member,
-// then POST /api/projects/:id/repos { repo }. The server 409s if the directory is already
-// registered under a DIFFERENT project and 404s if it isn't a repo node (or is gone); both
-// surface INLINE in .m-error (not just a transient toast). Disable submit with an honest
-// message when every workspace is already a member.
-function openAddRepoModal(project, repos, wsById) {
-  const memberIds = new Set(repos.map((r) => r.id));
-  const avail = Array.from(wsById.values()).filter((w) => !memberIds.has(w.id));
-
+// ADD-WORKSPACE modal (Hierarchical Projects IA S4) — the CONTEXTUAL create. Register an EXISTING
+// git directory AND nest its repo node under THIS project atomically via
+// POST /api/projects/:id/workspaces { path, label, gate_cmd } (server.ts → registerWorkspaceUnderProject).
+// This is now the ONLY way to add a workspace (the loose/top-level register form was removed), so it
+// owns the path/label/gate fields the retired global form used, plus a "Browse…" that reuses
+// openPicker as a FILL-ONLY directory browser — it drops the chosen path into the field; the actual
+// registration always goes through THIS project endpoint, never the loose POST /workspaces. The
+// server's errors surface INLINE in .m-error verbatim (400 "not a git repository: <path>", 404 project
+// gone), not just a transient toast. On success we close + render() so the new workspace appears as a
+// drill-in repo row.
+function openAddWorkspaceModal(project) {
   const body = el("div", { class: "m-body" });
-  if (!avail.length) {
-    body.innerHTML = '<div class="empty">Every registered workspace is already a member of this project.</div>';
-  } else {
-    body.innerHTML =
-      '<label class="field" style="margin-bottom:6px">' +
-        '<span class="lbl">directory — register a repo the project can target</span>' +
-        '<select id="ar-dir">' + avail.map((w) =>
-          '<option value="' + esc(w.id) + '">' + esc(w.label || w.path) + '</option>').join("") +
-        '</select>' +
-      '</label>' +
-      '<small class="hint muted">The directory must be a registered repo. Registering it here lets the project coordinate initiatives against it.</small>';
-  }
+  body.innerHTML =
+    '<label class="field" style="margin-bottom:8px">' +
+      '<span class="lbl">path to a git repository</span>' +
+      '<div class="row" style="gap:8px">' +
+        '<input type="text" id="aw-path" placeholder="/home/you/code/project" style="flex:1" />' +
+        '<button type="button" class="btn ghost" id="aw-browse" style="white-space:nowrap">Browse…</button>' +
+      '</div>' +
+    '</label>' +
+    '<label class="field" style="margin-bottom:8px">' +
+      '<span class="lbl">label (optional)</span>' +
+      '<input type="text" id="aw-label" placeholder="defaults to dir name" />' +
+    '</label>' +
+    '<label class="field" style="margin-bottom:6px">' +
+      '<span class="lbl">build/test gate command (optional) — blank uses the default; runs in CI + post-merge verify</span>' +
+      '<input type="text" id="aw-gate" placeholder="e.g. npm run build && npm test" />' +
+    '</label>' +
+    '<small class="hint muted">Registers an existing git repository and nests it under this project.</small>';
 
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, avail.length ? "Cancel" : "Close");
-  const submit = el("button", { class: "btn" }, "Add repo");
-  if (!avail.length) submit.disabled = true;
+  const cancel = el("button", { class: "btn ghost" }, "Cancel");
+  const submit = el("button", { class: "btn" }, "Add workspace");
   foot.appendChild(errEl);
   foot.appendChild(cancel);
   foot.appendChild(submit);
 
-  const { close } = openModal({ title: "Add repo", body, footer: foot });
+  const { close } = openModal({ title: "Add workspace", body, footer: foot });
   cancel.addEventListener("click", close);
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
-  const sel = body.querySelector("#ar-dir");
-  submit.addEventListener("click", () => {
-    if (!avail.length) return;
-    const repo = sel.value;
-    if (!repo) { showErr("Pick a directory first."); return; }
+  const pathEl = body.querySelector("#aw-path");
+  const labelEl = body.querySelector("#aw-label");
+  const gateEl = body.querySelector("#aw-gate");
+
+  // Browse the filesystem for a git repo — reuse the shared picker FILL-ONLY: whichever way the user
+  // picks (a git-row "Register" button or "Use this path"), we just drop the path into the field and
+  // let them confirm via the modal's submit. Registration goes through THIS project's endpoint.
+  body.querySelector("#aw-browse").addEventListener("click", () => {
+    openPicker((picked) => { pathEl.value = picked; pathEl.focus(); });
+  });
+
+  function doSubmit() {
+    const path = pathEl.value.trim();
+    if (!path) { showErr("Enter (or browse to) a git repository path."); pathEl.focus(); return; }
+    const label = labelEl.value.trim();
+    const gate = gateEl.value.trim();
     showErr("");
     action(submit, async () => {
       try {
+        // Omit blank label/gate so the server keeps its defaults (dir-name label, NULL gate) rather
+        // than storing empty strings.
         return await api("POST",
-          "/projects/" + encodeURIComponent(project.id) + "/repos", { repo });
+          "/projects/" + encodeURIComponent(project.id) + "/workspaces",
+          { path, label: label || undefined, gate_cmd: gate || undefined });
       } catch (e) {
-        showErr(e.message); // 409 (member elsewhere) / 404 (not a repo node) shown inline
+        showErr(e.message); // 400 non-git-repo / 404 project gone — surfaced inline verbatim
         throw e; // let action() toast + re-enable the button
       }
-    }, { success: "repo registered", onDone: () => { close(); render(); } });
-  });
+    }, { success: "workspace registered", onDone: () => { close(); render(); } });
+  }
+
+  submit.addEventListener("click", doSubmit);
+  // Keyboard-submit: Enter in any text field submits (matches the create-project/story modals).
+  for (const inp of [pathEl, labelEl, gateEl]) {
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSubmit(); } });
+  }
+  pathEl.focus();
 }
 
 // ---------- needs-attention signal ----------

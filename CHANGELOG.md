@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Hierarchical Projects IA (S4): contextual workspace creation + no more loose workspaces.**
+  A workspace is now added only from *inside* a project: the project detail page's Repos panel gains a
+  **"+ Add workspace"** action (replacing "+ Add repo") that opens a modal with path / label / gate-command
+  fields and a filesystem **Browse…** picker, submitting to `POST /api/projects/:id/workspaces` so the
+  existing git directory is registered *and* nested under that project atomically. The new workspace appears
+  as a drill-in repo row on success; the endpoint's errors surface verbatim inline (e.g. `not a git
+  repository: <path>`, 404 project gone). The old global **"Register a workspace"** form on the
+  workspace-card dashboard — the only front-end path that created a top-level/loose workspace (`POST
+  /api/workspaces`) — is removed, along with its filesystem-browse and register handlers and the now-dead
+  add-an-already-materialized-repo modal. The unknown-hash fallback that reached the legacy flat dashboard is
+  replace-redirected to `#/projects`, so every surface is reached project → workspace → work.
+  (`POST /api/workspaces` stays server-side; this increment enforces the model in the front end only.)
+
 ## [0.9.215] - 2026-07-07
 
 ### Changed
