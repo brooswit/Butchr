@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.220] - 2026-07-07
+
 ### Fixed
 
 - **Project CEO now runs in its OWN directory / herdr workspace — the terminal buttons stop
