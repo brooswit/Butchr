@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Project-detail CEO-agent card (REVAMP-4 P3c).** The project detail view now shows a managed
+  CEO-agent card (mirroring the CTO card) fed by `GET /api/projects/:id/ceo`: a resolved
+  live/enabled/disabled/inheriting status pill, a life indicator, and an enable/disable toggle that
+  `PATCH`es `/api/projects/:id { ceo_enabled }` optimistically (with a "Reset to default" control that
+  clears the override via `{ ceo_enabled: null }`). The card is honest about the global gate: when a
+  project *inherits* the default and `BUTCHR_CEO_AGENT` is off it explains the CEO stays disabled until
+  toggled on to override, while an explicit per-project override is never mislabeled as inert (it runs
+  regardless of the gate).
+
+### Removed
+- Deleted the obsolete `public/projects-mockup.html` sign-off mockup — the real Projects UI (overview,
+  detail, repos, initiatives, and now the CEO card) fully supersedes it.
+
 ## [0.9.209] - 2026-07-07
 
 ### Added

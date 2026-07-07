@@ -268,6 +268,7 @@ const KIND_VISUAL = {
   node:   { label: "STORY",  glyph: "◈", cls: "node"   }, // ◈ container work-item
   leaf:   { label: "TASK",   glyph: "▪", cls: "leaf"   }, // ▪ leaf work-item
   cto:    { label: "CTO",    glyph: "★", cls: "cto"    }, // ★ per-repo dev/CTO agent
+  ceo:    { label: "CEO",    glyph: "♛", cls: "ceo"    }, // ♛ per-project supervisor agent
   leader: { label: "LEADER", glyph: "◆", cls: "leader" }, // ◆ story-leader agent
   build:  { label: "BUILD",  glyph: "⚙", cls: "build"  }, // ⚙ leaf build agent
 };
@@ -4268,6 +4269,144 @@ function projectInitiativeRollup(inits) {
 }
 // </test-extract:initiative-rollup>
 
+// ---------- managed CEO agent (PER-PROJECT, REVAMP-4 P3c) ----------
+// The tier-above analog of ctoPanel (app.js:530): a project node's managed CEO-agent card on
+// the project-detail view. Fed by GET /api/projects/:id/ceo → { enabled, overridden, globalGate,
+// live }, ALL RESOLVED server-side — `enabled` already folds the per-project override vs the
+// global gate, so the pill/toggle-checked state read straight off it (never ceo_enabled alone,
+// which is the overview's coarser ceoPill). Mirrors ctoPanel: fetched async, mounted in place
+// via a slot replace, fail-soft on a status-probe hiccup.
+
+// <test-extract:projects-ceo-status> — pure, DOM-free CEO status-pill + note derivation,
+// unit-tested in test/projects-ceo-ui.test.ts (the honest-gate matrix that feature #4 hinges on).
+// The status pill, derived from the RESOLVED fields: live wins (green), else enabled (blue),
+// else a disabled project that's merely INHERITING the default reads the neutral "CEO default"
+// (not "CEO disabled" — nothing was explicitly turned off), and an explicit-off reads "CEO
+// disabled". Returns { cls, label, title? }.
+function ceoStatusPill(s) {
+  if (s.live) return { cls: "live", label: "CEO live" };
+  if (s.enabled) return { cls: "enabled", label: "CEO enabled" };
+  if (!s.overridden) {
+    return {
+      cls: "inactive",
+      label: "CEO default",
+      title: "Inherits the global CEO gate (BUTCHR_CEO_AGENT) — currently off",
+    };
+  }
+  return { cls: "disabled", label: "CEO disabled" };
+}
+
+// The honest context note under the CEO card, CONDITIONAL on override-vs-inherit so it never
+// contradicts the runtime (isCeoEnabled: an explicit override WINS over the global gate, so an
+// explicit-ON CEO runs regardless of the gate). Returns an HTML string ("" for the no-note case).
+//   • INHERITING (overridden=false): always note it's inheriting the default; when the global
+//     gate is ALSO off, this is exactly where the gate bites → say so and point at the override.
+//   • OVERRIDDEN-ON while the gate is off: NEVER "inert" — it runs via the override; a neutral note.
+//   • OVERRIDDEN-OFF: explicitly disabled for this project.
+function ceoNoteHtml(s) {
+  if (!s.overridden) {
+    if (!s.globalGate) {
+      return '<div class="ceo-note">The global CEO gate (<code>BUTCHR_CEO_AGENT</code>) is off, ' +
+        "so projects that inherit the default stay disabled. Toggle this project on to override " +
+        "and run its CEO regardless.</div>";
+    }
+    return '<div class="ceo-note inherit">Inheriting the global default (<code>BUTCHR_CEO_AGENT</code> ' +
+      "is on) — toggle to set an explicit per-project override.</div>";
+  }
+  // overridden === true — the per-project value wins; never imply it's inert.
+  if (s.enabled && !s.globalGate) {
+    return '<div class="ceo-note inherit">Running via a per-project override; the global CEO gate ' +
+      "(<code>BUTCHR_CEO_AGENT</code>) is off, but this project's CEO runs regardless.</div>";
+  }
+  if (!s.enabled) {
+    return '<div class="ceo-note inherit">Explicitly disabled for this project.</div>';
+  }
+  return "";
+}
+// </test-extract:projects-ceo-status>
+
+// Build the CEO card DOM from a fetched CeoStatus. Standalone (no closure over the fetch) so the
+// toggle handler can rebuild + replace the card in place after a PATCH + refetch.
+function buildCeoCard(projectId, s) {
+  const pill = ceoStatusPill(s);
+  const lifeCls = s.live ? "alive" : "down";
+  const lifeTxt = s.live ? "CEO agent live" : (s.enabled ? "CEO agent starting…" : "CEO agent inactive");
+  const card = el("div", { class: "panel ceo-card" });
+  card.innerHTML = `
+    <div class="panel-head">
+      <h2>${kindBadge("ceo")} CEO agent</h2>
+      <span class="spacer"></span>
+      <span class="chip ${pill.cls}"${pill.title ? ` title="${esc(pill.title)}"` : ""}>${esc(pill.label)}</span>
+    </div>
+    <div class="ceo-row">
+      <label class="switch">
+        <input type="checkbox" class="ceo-toggle"${s.enabled ? " checked" : ""} />
+        <span class="track"></span>
+        <span class="ceo-toggle-lbl">${s.enabled ? "Enabled" : "Disabled"}</span>
+      </label>
+      <span class="ceo-life"><span class="ceo-dot ${lifeCls}"></span>${esc(lifeTxt)}</span>
+      <span class="spacer"></span>
+      ${s.overridden ? '<button class="btn ghost xs ceo-reset" title="Clear the per-project override and inherit the global default">Reset to default</button>' : ""}
+    </div>
+    ${ceoNoteHtml(s)}`;
+
+  // Rebuild + replace this card from a fresh /ceo read after a write — keeps the pill, life
+  // line and note honest without re-fetching the whole page.
+  const refresh = async () => {
+    const next = await api("GET", "/projects/" + encodeURIComponent(projectId) + "/ceo");
+    card.replaceWith(buildCeoCard(projectId, next));
+  };
+
+  // Optimistic enable/disable toggle → PATCH { ceo_enabled }. Disable the input during the
+  // round-trip; on failure revert the checkbox + label and surface the error inline (toast).
+  const cb = card.querySelector(".ceo-toggle");
+  cb.addEventListener("change", async () => {
+    const want = cb.checked;
+    cb.disabled = true;
+    card.querySelector(".ceo-toggle-lbl").textContent = want ? "Enabled" : "Disabled";
+    try {
+      await api("PATCH", "/projects/" + encodeURIComponent(projectId), { ceo_enabled: want });
+      toast(want ? "CEO enabled" : "CEO disabled");
+      await refresh();
+    } catch (e) {
+      cb.checked = !want;
+      card.querySelector(".ceo-toggle-lbl").textContent = !want ? "Enabled" : "Disabled";
+      cb.disabled = false;
+      toast(e.message, true);
+    }
+  });
+
+  // Reset-to-inherit → PATCH { ceo_enabled: null } — only present while an explicit override is set.
+  const reset = card.querySelector(".ceo-reset");
+  if (reset) {
+    reset.addEventListener("click", async () => {
+      reset.disabled = true;
+      try {
+        await api("PATCH", "/projects/" + encodeURIComponent(projectId), { ceo_enabled: null });
+        toast("CEO reset to the global default");
+        await refresh();
+      } catch (e) {
+        reset.disabled = false;
+        toast(e.message, true);
+      }
+    });
+  }
+  return card;
+}
+
+// Fetch this project's CEO status and resolve to the card node. Fail-soft (mirrors ctoPanel's
+// catch): a probe hiccup yields a muted "status unavailable" card rather than blocking the page.
+async function ceoPanel(projectId) {
+  let s;
+  try {
+    s = await api("GET", "/projects/" + encodeURIComponent(projectId) + "/ceo");
+  } catch {
+    return el("div", { class: "panel ceo-card" },
+      el("small", { class: "muted" }, "CEO agent status unavailable"));
+  }
+  return buildCeoCard(projectId, s);
+}
+
 async function renderProjectDetail(id) {
   // Load the project row, its member repos, and the workspaces (to resolve repo id→path)
   // together. A failure (e.g. 404 on a stale hash) falls through to render()'s catch,
@@ -4300,6 +4439,13 @@ async function renderProjectDetail(id) {
     }, project.status));
   }
   wrap.appendChild(head);
+
+  // CEO-agent card (REVAMP-4 P3c) — the project's managed supervisor agent: resolved
+  // enable/disable + honest global-gate status + a toggle. Rendered async and mounted in
+  // place (mirrors ctoPanel's slot-replace) so a /ceo probe hiccup never blocks the page.
+  const ceoSlot = el("div");
+  wrap.appendChild(ceoSlot);
+  ceoPanel(id).then((panel) => ceoSlot.replaceWith(panel)).catch(() => {});
 
   // repos panel
   wrap.appendChild(reposPanel(project, repos, wsById));

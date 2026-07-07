@@ -52,6 +52,7 @@
   --kind-node: var(--accent);    /* STORY container — blue accent (rarer, more prominent) */
   --kind-leaf: var(--muted);     /* TASK leaf — quiet neutral metadata */
   --kind-cto: #b45309;           /* amber-700 — CTO agent */
+  --kind-ceo: var(--accent);     /* blue accent — CEO (per-project supervisor) agent */
   --kind-leader: var(--blocked); /* violet — story leader agent */
   --kind-build: var(--merged);   /* green — build agent */
   --kind-unknown: var(--muted);  /* fallback for an unmapped kind */
@@ -323,6 +324,39 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .init-target .tr { font-family: var(--mono); color: var(--muted); min-width: 92px; }
 .init-target .ibr { color: var(--muted); }
 
+/* CEO-agent card (REVAMP-4 P3c) — the project's managed supervisor agent on the detail view.
+   Mirrors the .cto-card panel; an accent left-border marks the tier. Additive, tokens only. */
+.panel.ceo-card { border-left: 3px solid var(--kind-ceo); margin-bottom: 18px; }
+.ceo-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ceo-life { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+.ceo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.ceo-dot.alive { background: var(--merged); box-shadow: 0 0 5px var(--merged); animation: pause-pulse 2.4s ease-in-out infinite; }
+.ceo-dot.down { background: var(--muted); }
+.ceo-note {
+  margin-top: 12px; font-size: 12.5px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--spec_review); border-radius: var(--radius-md); padding: 9px 11px;
+}
+/* the neutral (non-warning) variant — inheriting / override-context notes */
+.ceo-note.inherit { border-left-color: var(--border); }
+.ceo-note code { font-family: var(--mono); color: var(--text); }
+
+/* toggle switch (built from tokens) — reused by the CEO enable/disable control */
+.switch { position: relative; display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; font-size: 13px; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .track {
+  width: 40px; height: 22px; border-radius: 999px; background: var(--panel-2);
+  border: 1px solid var(--border); position: relative; transition: background .15s, border-color .15s; flex: none;
+}
+.switch .track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s;
+}
+.switch input:checked + .track { background: color-mix(in srgb, var(--in_progress) 30%, transparent); border-color: var(--in_progress); }
+.switch input:checked + .track::after { transform: translateX(18px); background: var(--in_progress); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch input:disabled + .track { opacity: 0.5; cursor: not-allowed; }
+
 /* LAUNCH-INITIATIVE modal — segmented single/fan-out toggle + repeatable target rows.
    Built from tokens; the seg reuses the panel-2 fill for the active tab. */
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; margin-bottom: 14px; }
@@ -380,6 +414,9 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
    `null → CEO default` case uses .chip.inactive above. */
 .chip.enabled { background: var(--in_progress); }
 .chip.disabled { background: var(--inactive); }
+/* `live` — a per-project CEO agent that's both enabled AND has a running herdr agent (green,
+   the same merged/"done-good" signal as elsewhere). Detail-card only (GET /api/projects/:id/ceo). */
+.chip.live { background: var(--merged); }
 /* Legacy status chips — kept for audit timeline backward-compat */
 .chip.finalizing { background: var(--finalizing); }
 .chip.queued { background: var(--queued); }
@@ -433,6 +470,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 /* STORY is the rarer, more important signal — a touch more prominent (accent border + tint). */
 .kind-badge.kind-node    { color: var(--kind-node); border-color: var(--kind-node); background: color-mix(in srgb, var(--kind-node) 8%, transparent); }
 .kind-badge.kind-cto     { color: var(--kind-cto); border-color: var(--kind-cto); }
+.kind-badge.kind-ceo     { color: var(--kind-ceo); border-color: var(--kind-ceo); }
 .kind-badge.kind-leader  { color: var(--kind-leader); border-color: var(--kind-leader); }
 .kind-badge.kind-build   { color: var(--kind-build); border-color: var(--kind-build); }
 .kind-badge.kind-unknown { color: var(--kind-unknown); border-color: var(--border); }
@@ -1102,6 +1140,8 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 @media (prefers-reduced-motion: reduce) {
   .pulse .pulse-dot { animation: none; }
   .chip.needs_user_input { animation: none; }
+  .ceo-dot.alive { animation: none; }
+  .switch .track, .switch .track::after { transition: none; }
 }
 
 /* forms */

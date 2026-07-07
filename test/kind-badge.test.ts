@@ -38,12 +38,13 @@ const { KIND_VISUAL, kindVisual, kindBadge } = new Function(harness)() as {
   kindBadge: (k: string) => string;
 };
 
-test("KIND_VISUAL maps the five known kinds (2 work-item + 3 agent)", () => {
-  expect(Object.keys(KIND_VISUAL).sort()).toEqual(["build", "cto", "leader", "leaf", "node"]);
-  // node/leaf are the authoritative work_kind values; cto/leader/build the agent kinds.
+test("KIND_VISUAL maps the six known kinds (2 work-item + 4 agent)", () => {
+  expect(Object.keys(KIND_VISUAL).sort()).toEqual(["build", "ceo", "cto", "leader", "leaf", "node"]);
+  // node/leaf are the authoritative work_kind values; cto/ceo/leader/build the agent kinds.
   expect(KIND_VISUAL.node.label).toBe("STORY");
   expect(KIND_VISUAL.leaf.label).toBe("TASK");
   expect(KIND_VISUAL.cto.label).toBe("CTO");
+  expect(KIND_VISUAL.ceo.label).toBe("CEO");
   expect(KIND_VISUAL.leader.label).toBe("LEADER");
   expect(KIND_VISUAL.build.label).toBe("BUILD");
   // Every entry carries the full visual triple.
