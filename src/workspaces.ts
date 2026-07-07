@@ -23,7 +23,16 @@ import {
 // cycle resolves with no load-time TDZ (mirrors tasks.ts's work.ts/workspace-agent.ts cycles).
 import { strandedItems } from "./tasks.ts";
 import type { StrandedItem } from "./tasks.ts";
-import { ALL_STATUSES, db, nowIso, REVIEW_STATES, saveWorkspaceAgentRow, sumStatuses } from "./db.ts";
+import {
+  ALL_STATUSES,
+  db,
+  deleteWorkspaceAgentRow,
+  getWorkspaceAgentRow,
+  nowIso,
+  REVIEW_STATES,
+  saveWorkspaceAgentRow,
+  sumStatuses,
+} from "./db.ts";
 import type { WorkspaceRow, TaskRow } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
@@ -539,6 +548,67 @@ export function createProject(anchorWorkspaceId: string, brief?: unknown): TaskR
      VALUES (?, ?, 'merged', ?, 'project', ?)`,
   ).run(id, anchorWorkspaceId, created, briefText);
   return getProject(id)!;
+}
+
+/**
+ * DELETE a PROJECT NODE (additive teardown surface — the Projects UI can create/register/launch a
+ * project but had no way to remove one). REFUSES to orphan or cascade-delete real work: a project
+ * only deletes once it is EMPTY. Guards, checked initiatives-FIRST (an active initiative always
+ * implies a registered repo, so a repos-first order would make the initiatives 409 unreachable):
+ *   - 404 if `id` is not a project node (getProject).
+ *   - 409 if it still has ACTIVE (non-terminal) INITIATIVES — a work_kind='node' story whose OWNING
+ *     repo (story.parent_id) is registered under THIS project (repo.parent_id = id; the seedMemberRepoStory
+ *     link) and whose status is NOT terminal. StoryStatus is open|merging|merge_blocked|done|aborted
+ *     (db.ts), so non-terminal = anything NOT IN ('done','aborted'). Let them finish / abort them first.
+ *   - 409 if it still has REGISTERED REPOS (listProjectRepos) — unregister them first.
+ * An EMPTY project deletes cleanly: (a) tear down the CEO runtime — stopWorkspaceAgent('ws-ceo-<id>')
+ * then delete that workspace agent row if present (mirrors setWorkspaceCeoEnabled's ws-ceo-<id> row
+ * lifecycle; the row's directory_id anchor OUTLIVES this delete, so it will NOT cascade — we drop it
+ * explicitly); (b) DELETE the work_kind='project' `tasks` row (which also drops its ceo_enabled state,
+ * stored on that row). Returns the deleted project row (captured before the DELETE). Async because
+ * the CEO teardown is awaited.
+ */
+export async function deleteProject(projectId: string): Promise<TaskRow> {
+  const project = getProject(projectId);
+  if (!project) throw new HttpError(404, `project not found: ${projectId}`);
+
+  // Active initiatives FIRST — a story (work_kind='node') under one of this project's member repos
+  // (story.parent_id = repo.id, repo.parent_id = this project) that has not reached a terminal
+  // status. Mirrors the seedMemberRepoStory (story→repo) + registerRepoUnderProject (repo→project)
+  // links (stories.ts).
+  const activeInitiatives =
+    db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n
+           FROM tasks s JOIN tasks r ON r.id = s.parent_id AND r.work_kind='repo'
+          WHERE s.work_kind='node' AND r.parent_id = ? AND s.status NOT IN ('done','aborted')`,
+      )
+      .get(projectId)?.n ?? 0;
+  if (activeInitiatives > 0) {
+    throw new HttpError(
+      409,
+      `project ${projectId} has ${activeInitiatives} active initiative(s); let them finish or abort them first`,
+    );
+  }
+
+  // Registered repos — refuse to strand a member repo (its work would lose its project/CEO tier).
+  const repos = listProjectRepos(projectId);
+  if (repos.length > 0) {
+    throw new HttpError(
+      409,
+      `project ${projectId} still has ${repos.length} registered repo(s); unregister them first ` +
+        `(DELETE /api/projects/${projectId}/repos/:repoId)`,
+    );
+  }
+
+  // Empty → delete cleanly. Tear down the managed CEO runtime, then drop its workspace agent row
+  // (it does NOT cascade — its directory_id anchor survives this project delete).
+  const wsId = `ws-ceo-${projectId}`;
+  await stopWorkspaceAgent(wsId);
+  if (getWorkspaceAgentRow(wsId)) deleteWorkspaceAgentRow(wsId);
+
+  db.query(`DELETE FROM tasks WHERE id=? AND work_kind='project'`).run(projectId);
+  return project;
 }
 
 /**

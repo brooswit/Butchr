@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Delete-project endpoint (REVAMP-4).** New `DELETE /api/projects/:id` (backed by
+  `deleteProject` in `src/workspaces.ts`) lets the Projects UI remove a project node, closing the
+  gap where projects could be created/registered/launched but never deleted. Refuses to orphan or
+  cascade-delete real work: `404` for a non-project id; `409` (checked initiatives-first) if the
+  project still has active (non-terminal) initiatives or registered repos, each with an
+  operator-actionable message. An empty project deletes cleanly — its managed CEO runtime and
+  `ws-ceo-<id>` workspace row are torn down and the `work_kind='project'` `tasks` row (including its
+  `ceo_enabled` state) is dropped. Additive only; no schema change.
+
 ## [0.9.210] - 2026-07-07
 
 ### Added

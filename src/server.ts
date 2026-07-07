@@ -23,6 +23,7 @@ import {
   HttpError,
   createProject,
   dashboard,
+  deleteProject,
   getProject,
   getWorkspace,
   getWorkspaceByPath,
@@ -792,6 +793,14 @@ route("GET", "/api/projects/:id/ceo", async (_req, p) => {
 route("PATCH", "/api/projects/:id", async (req, p) => {
   const body = await readJson(req);
   return json(await setWorkspaceCeoEnabled(p.id!, body.ceo_enabled));
+});
+// DELETE a project node (additive teardown for the Projects UI). Refuses to orphan real work:
+// 404 if the id is not a project node; 409 if it still has ACTIVE initiatives (checked first) or
+// REGISTERED repos (each with an operator-actionable message). An EMPTY project deletes cleanly —
+// its managed CEO runtime + ws-ceo-<id> row are torn down and the project tasks row (incl. its
+// ceo_enabled state) is dropped. Returns the deleted project row.
+route("DELETE", "/api/projects/:id", async (_req, p) => {
+  return json(await deleteProject(p.id!));
 });
 
 // ---- CEO DIRECTIVE SURFACE (REVAMP-4 Phase 3 / P3d) ------------------------
