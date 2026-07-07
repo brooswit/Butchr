@@ -109,11 +109,11 @@ let stateMetaLoaded = false;
 // state) so the test can eval it in isolation.
 // SERVER-CANONICAL DEFAULTS — a hand-kept mirror of src/db.ts (STATE_META / ALL_STATUSES /
 // isTerminal) in the exact shape /api/state-meta serves. Used ONLY as a FALLBACK when that
-// fetch fails: without it the tables would be empty, and an empty ACTIVE_STATUSES makes
-// boardLaneKey map every leaf to null → the board falsely reads "No active work" while the
-// List view keeps everything "active". The served meta is authoritative and replaces these
-// the moment the fetch succeeds (see loadStateMeta), so this drift-prone copy is only ever
-// live during an outage. If db.ts's state model changes, update this mirror to match.
+// fetch fails: without it the status tables (ACTIVE_STATUSES / TERMINAL_STATUSES) would be
+// empty, and the Pipeline view can't tell active work from finished — a finished subtask
+// wouldn't collapse into its lane's done pile. The served meta is authoritative and replaces
+// these the moment the fetch succeeds (see loadStateMeta), so this drift-prone copy is only
+// ever live during an outage. If db.ts's state model changes, update this mirror to match.
 const DEFAULT_STATE_META = {
   stateMeta: {
     idea: { kind: "feedback" },
@@ -307,8 +307,8 @@ function taskChips(t, { plan = false, kind = false, responder = false } = {}) {
       )}">${esc(kindStr)}${awaited ? ": " + esc(awaited) : ""}</span>`
     : "";
   // Key off the AUTHORITATIVE work_kind (not a hardcoded 'leaf') — taskChips renders both
-  // finished TASKS ('leaf') and finished STORIES ('node') via finishedList(), so a literal
-  // would mislabel a finished story '▪ TASK'. kindVisual() has a safe fallback either way.
+  // TASKS ('leaf') and STORIES ('node'), so a literal would mislabel a story '▪ TASK'.
+  // kindVisual() has a safe fallback either way.
   return kindBadge(t.work_kind) + " "
     + (plan && t.plan_preview ? '<span class="chip plan" title="plan-preview gate — proposes a plan and pauses for approval before writing code">plan-preview</span> ' : "")
     + chip(st)
@@ -1122,23 +1122,18 @@ async function renderWorkspace(id, projectId) {
   // command + override state the gate panel needs) alongside its task list.
   const [dash, work] = await Promise.all([
     api("GET", "/dashboard"),
-    // The UNIFIED work list for this workspace (leaf tasks + node stories), carrying the
-    // active full-text search so it survives SSE-driven re-renders (the server filters by
-    // `?q=` — see workListPath / buildFilterBar). Best-effort: a failure leaves both surfaces
-    // empty rather than blanking the page.
+    // The UNIFIED work list for this workspace (leaf tasks + node stories — see workListPath).
+    // Best-effort: a failure leaves both surfaces empty rather than blanking the page.
     api("GET", workListPath(id)).catch(() => []),
   ]);
-  // Split the leaf|node union: leaves are the TASK list the GRAPH and BOARD views render
-  // (those stay leaves-only — they're reworked by sibling subtasks). The LIST view instead
-  // consumes the FULL union (nodes + leaves) so stories render as peer rows alongside tasks,
-  // with their subtasks grouped underneath client-side.
+  // The leaf (task) members of the leaf|node union — used only for the launcher's one-line
+  // queue summary below (queueLine). The Pipeline view consumes the full union directly.
   const tasks = workLeaves(work);
   // Bound the long-lived module caches against this render's live work-id set (nodes + leaves),
-  // dropping entries for work that has left the list so neither grows unbounded over a session.
+  // dropping entries for work that has left the list so neither grows unbounded over a session:
+  // the Pipeline view's expanded-done piles (keyed by story id) and the activity pulse cache.
   const liveWorkIds = new Set((Array.isArray(work) ? work : []).map((w) => w && w.id).filter(Boolean));
-  pruneWorkCaches(liveWorkIds, WORK_TREE_EXPANDED, activityCache);
-  // Same growth-bound for the Pipeline view's expanded-done piles (keyed by story id).
-  for (const id of SWIM_DONE_EXPANDED) if (!liveWorkIds.has(id)) SWIM_DONE_EXPANDED.delete(id);
+  pruneWorkCaches(liveWorkIds, SWIM_DONE_EXPANDED, activityCache);
   const dir = dash.workspaces.find((x) => x.id === id);
   if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
 
@@ -1175,42 +1170,13 @@ async function renderWorkspace(id, projectId) {
   launch.appendChild(newStoryBtn);
   wrap.appendChild(launch);
 
-  // List / Graph / Board view selector — the PRIMARY control of the main view, sitting
-  // directly under the launcher row and above the body. The toggle bar persists while the
-  // body is swapped; the chosen mode lives in dirView (module scope + localStorage) so it
-  // survives SSE re-renders and reloads. The LIST, GRAPH and BOARD views all show ALL work —
-  // stories AND tasks — as peers (the graph draws stories as first-class peer nodes with
-  // their subtasks enclosed in a cluster box; the board renders stories as peer cards), so
-  // all three receive the full work union.
+  // The workspace body is the Pipeline (swimlanes) view — the sole work view. It shows ALL
+  // work (stories as lanes, their subtasks as the pipeline within each lane) and re-renders
+  // wholesale on every SSE event, so it live-updates with no view-mode state to persist.
   const body = el("div", { class: "ws-body" });
-  const paintBody = () => {
-    body.innerHTML = "";
-    if (dirView === "graph") {
-      body.appendChild(el("h2", {}, "Pipeline"));
-      body.appendChild(renderSwimlanes(work));
-    } else if (dirView === "board") {
-      body.appendChild(el("h2", {}, "Merge train"));
-      // The board is a KANBAN board of COLUMNS that folds in ALL work — stories AND
-      // tasks render as peer cards — so it consumes the FULL union (not workLeaves),
-      // same as the List and Graph views.
-      body.appendChild(renderBoard(work));
-    } else {
-      // search + status filter bar. Filter state lives in module-level vars
-      // (taskSearch / statusFilter) so it survives the full re-render the app does
-      // on every SSE event. The full-text search runs SERVER-SIDE (?q=) — typing
-      // re-fetches the list (debounced) and repaints only the results region below
-      // (not the bar itself), so the search input keeps focus while you type. The list
-      // gets the FULL work union (stories + tasks); the split of active vs terminal-state
-      // history (and the story/subtask grouping) happens inside renderResults.
-      const results = el("div", { class: "results" });
-      body.appendChild(buildFilterBar(id, work, results));
-      body.appendChild(results);
-      renderResults(work, results);
-    }
-  };
-  wrap.appendChild(buildViewToggle(paintBody));
+  body.appendChild(el("h2", {}, "Pipeline"));
+  body.appendChild(renderSwimlanes(work));
   wrap.appendChild(body);
-  paintBody();
 
   // This workspace's managed CTO agent (its principal/dev agent, running in the repo
   // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
@@ -1354,21 +1320,15 @@ function openNewStoryModal(workspaceId) {
 }
 
 // ---------- unified work list (stories + tasks) ----------
-// Expand/collapse state for story NODES in the unified list, keyed by node id. Kept at MODULE
-// scope (NOT per-row closure) so it survives the full re-render the app does on every SSE
-// event. A node id is present only while its DETAIL is expanded; the detail (full brief + open
-// ask) defaults COLLAPSED so the list stays scannable. NOTE: a story's child subtask ROWS are
-// always visible (indented) regardless of this set — only the detail block toggles.
-const WORK_TREE_EXPANDED = new Set();
-// Story ids whose collapsed "N done" pile is EXPANDED in the Pipeline (swimlanes) view. Module
-// scope so an expanded pile survives the full re-render on every SSE event, mirroring
-// WORK_TREE_EXPANDED. Pruned against the live work-id set on each workspace render (below) so it
-// can't grow unbounded across a long session.
+// Story ids whose collapsed "N done" pile is EXPANDED in the Pipeline (swimlanes) view. Kept at
+// MODULE scope so an expanded pile survives the full re-render the app does on every SSE event.
+// Pruned against the live work-id set on each workspace render (below) so it can't grow unbounded
+// across a long session.
 const SWIM_DONE_EXPANDED = new Set();
 
 // <test-extract:prune-caches>
 // Bound the two long-lived module caches so they don't grow unbounded across a long session:
-// WORK_TREE_EXPANDED (story ids whose detail is open) and activityCache (task id -> last pulse).
+// SWIM_DONE_EXPANDED (story ids whose done pile is open) and activityCache (task id -> last pulse).
 // Both only ever ADD ids; work that leaves the list (merged/aborted, or you switch workspaces)
 // kept its entry forever. On each workspace render we drop every id no longer in the current
 // work-id set — functionally harmless (a stale id renders nothing) — purely a growth bound.
@@ -1378,36 +1338,10 @@ function pruneWorkCaches(liveIds, expanded, activity) {
 }
 // </test-extract:prune-caches>
 
-// Group the flat /api/work list (nodes + leaves, newest-first) into a tree CLIENT-SIDE — no
-// server help needed. A leaf's parent is its parent_id when populated, else its story_id
-// (parent_id is inert today but PREFERRED for forward-compat). A leaf whose parent id matches
-// a node in the list attaches as that node's child; an orphan leaf (no/unknown parent) renders
-// at top level alongside the nodes. Top level = nodes + orphan leaves, emitted in the API's
-// original newest-first order (a single pass preserves it).
-function groupWork(work) {
-  const list = Array.isArray(work) ? work : [];
-  const nodeIds = new Set(list.filter((w) => w && w.work_kind === "node").map((w) => w.id));
-  const childrenByNode = new Map();
-  const topLevel = [];
-  for (const w of list) {
-    if (!w) continue;
-    if (w.work_kind === "leaf") {
-      const parent = w.parent_id || w.story_id;
-      if (parent && nodeIds.has(parent)) {
-        if (!childrenByNode.has(parent)) childrenByNode.set(parent, []);
-        childrenByNode.get(parent).push(w);
-        continue;
-      }
-    }
-    topLevel.push(w);
-  }
-  return { topLevel, childrenByNode };
-}
-
 // <test-extract:complete-status>
 // A work item counts as COMPLETE once it reaches a SUCCESSFUL terminal status. A LEAF task ends
 // at `merged` (or `rolled_back`); a STORY NODE ends at `done`. This is the ONE source of truth
-// for "is this work finished", reused by workRollup's ✓ count AND the cross-type graph/rollup
+// for "is this work finished", reused by storyProgress's done count AND the cross-type graph/rollup
 // progress bars — those bars mix nodes + leaves in one subtree, so they MUST count node `done`
 // too, else any subtree containing a completed story UNDER-reports (it sits in the total but
 // never in the merged numerator). Failure/abort are terminal but NOT complete (they're the ✗).
@@ -1421,69 +1355,6 @@ function countComplete(ids, byId) {
   return n;
 }
 // </test-extract:complete-status>
-
-// A node's compact subtask ROLLUP string from its server-computed per-status `counts` map.
-// total counts every status EXCEPT the `idle` pseudo-bucket (a flag peeled out of in_progress,
-// not a real status); ✓ = completed (merged | rolled_back | done — see isCompleteStatus),
-// ✗ = failed + aborted (dead). Degrades cleanly: a node with no subtasks (or only idle) reads
-// "0" with no ✓/✗ noise.
-function workRollup(counts) {
-  const c = counts || {};
-  const total = Object.keys(c).reduce((n, k) => (k === "idle" ? n : n + (c[k] || 0)), 0);
-  const done = Object.keys(c).reduce((n, k) => (isCompleteStatus(k) ? n + (c[k] || 0) : n), 0);
-  const dead = (c.failed || 0) + (c.aborted || 0);
-  const parts = [];
-  if (done) parts.push(done + "✓");
-  if (dead) parts.push(dead + "✗");
-  return parts.length ? total + " · " + parts.join(" ") : String(total);
-}
-
-// The expandable STORY DETAIL block — the "wall of text" moved OFF the story row and revealed
-// only when the row's caret is toggled. It carries the node's FULL brief and, when there's an
-// open story-level ask, its answer box (storyAskPanel). It deliberately does NOT contain the
-// story's child subtask rows: those are ALWAYS-visible indented peer rows in the unified table
-// (see workTable), so all work stays visible by default and only this detail toggles.
-function renderStoryDetail(work) {
-  const wrap = el("div", { class: "work-expanded" });
-  wrap.appendChild(el("div", { class: "work-brief-full" }, work.brief || "(no brief)"));
-  if (work.pending_ask != null) wrap.appendChild(storyAskPanel(work));
-  return wrap;
-}
-
-// The open STORY-LEVEL ask on a story row (only when s.pending_ask is non-null — the caller
-// guards): the question text (HTML-escaped), who currently OWNS it (ask_responder), and a
-// freeform answer box that POSTs /api/work/:id/answer. `cto` is MUTED ("awaiting the CTO" —
-// an agent handles it automatically, a human may still act); `user` is EMPHASIZED ("escalated
-// to you" — it needs a human), mirroring the task-level awaiting-who emphasis. action() owns the
-// disable/toast dance and re-renders on success (clearing the now-answered ask).
-function storyAskPanel(s) {
-  const toUser = s.ask_responder === "user";
-  const owner = toUser
-    ? `<span class="sa-owner you" title="this ask was escalated to YOU — answer it below">escalated to you</span>`
-    : `<span class="sa-owner cto" title="this ask is owned by the CTO agent (handled automatically) — you can also answer">awaiting the CTO</span>`;
-  const panel = el("div", { class: "story-ask-panel" + (toUser ? " awaiting-you" : "") });
-  panel.innerHTML = `
-    <div class="sa-head">Story ask ${owner}</div>
-    <div class="sa-question">${esc(s.pending_ask)}</div>
-    <label class="field" style="margin:8px 0 0">
-      <span class="lbl">your answer</span>
-      <textarea class="sa-answer" data-restore-key="story-answer" placeholder="Answer the story-level ask. It goes back to the story leader, which continues from your response."></textarea>
-    </label>
-    <div class="row" style="margin-top:8px">
-      <button class="btn success sa-submit">Submit answer</button>
-      <div class="spacer"></div>
-    </div>`;
-  const submit = panel.querySelector(".sa-submit");
-  submit.addEventListener("click", () => {
-    const answer = panel.querySelector(".sa-answer").value.trim();
-    if (!answer) return toast("an answer is required", true);
-    // POST the answer; action() disables the button, toasts, and re-renders on success
-    // (the answered ask is cleared server-side, so the panel disappears on the re-render).
-    action(submit, () => api("POST", "/work/" + s.id + "/answer", { answer }),
-      { success: "answer sent" });
-  });
-  return panel;
-}
 
 function queueLine(tasks) {
   const idea = tasks.filter((t) => t.status === "idea").length;
@@ -1511,454 +1382,28 @@ function queueLine(tasks) {
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
 
-// ACTIVE_STATUSES (lifecycle statuses still in flight — they stay in the main workspace
-// list) and TERMINAL_STATUSES (the terminal subset that lives in the collapsible
-// "Finished" section) are now BUILT from the server-owned state meta at boot — see
-// applyStateMeta near the top of this file. TERMINAL_STATUSES is the server's isTerminal
-// subset; ACTIVE_STATUSES is its complement, so a needs-attention feedback state can
-// never be hidden under Finished.
-const HISTORY_KEY = "butchr-history-open";
-
-// Workspace page body mode: the unified work "List" (default — stories + tasks as peer rows),
-// the dependency "Graph", or the pipeline "Board". Kept at module scope (and mirrored to
-// localStorage) so it survives the full re-render the app does on every SSE event and across
-// reloads. The old "tree" view was removed: a stored "tree" (the previous default) falls back
-// to "list" so an operator with the stale value doesn't load a view that no longer exists.
-const DIRVIEW_KEY = "butchr-dirview";
-let dirView = (() => {
-  try {
-    const v = localStorage.getItem(DIRVIEW_KEY);
-    return v === "graph" || v === "board" || v === "list" ? v : "list";
-  } catch (e) { return "list"; }
-})();
-function setDirView(v) {
-  dirView = v;
-  try { localStorage.setItem(DIRVIEW_KEY, v); } catch (e) { /* ignore */ }
-}
-
-function historyOpen() {
-  try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch (e) { return false; }
-}
-
-// ---------- task search + status filtering ----------
-// Filter state is kept in memory only, at module scope, so it survives the full
-// re-render render() performs on every SSE event without being torn down. The filter
-// chips iterate FILTER_STATUSES — the server's status list with the synthetic `idle`
-// effStatus spliced in (see applyStateMeta) — so the *effective* statuses (effStatus)
-// `idle` and `in_progress` filter independently, as do all terminal states.
-// taskSearch is the FULL-TEXT query, applied SERVER-SIDE via `?q=` on the task-list
-// endpoint — it matches a task's prompt (which lives in task.md and is NOT shipped
-// to the client), summary, review notes, and id. So the search runs on the server
-// and the workspace list is re-fetched as you type (debounced); the status/tag
-// filters below still run client-side over whatever the server returned.
-let taskSearch = "";          // full-text query (server-side ?q=)
-let statusFilter = new Set(); // selected effStatus values; empty = all
-let tagFilter = new Set();    // selected tags; empty = all (ANY-match when non-empty)
-
-// The `?q=` query-string fragment for the current search (empty when not searching),
-// appended to every workspace task-list fetch so the active search persists across
-// SSE-driven re-renders.
-function searchParam() {
-  const q = taskSearch.trim();
-  return q ? "?q=" + encodeURIComponent(q) : "";
-}
-
 // The unified WORK-LIST URL for one workspace: GET /api/work scoped to this workspace
-// (?workspace=) carrying the active full-text search (&q=). The single replacement for the
-// split /workspaces/:id/tasks + /workspaces/:id/stories fetches — the response is the WorkView
-// leaf|node union, which callers split by `work_kind` (leaves → task list, nodes → stories).
+// (?workspace=). The single replacement for the split /workspaces/:id/tasks +
+// /workspaces/:id/stories fetches — the response is the WorkView leaf|node union, which
+// callers split by `work_kind` (leaves → task list, nodes → stories).
 function workListPath(workspaceId) {
-  const q = taskSearch.trim();
-  return "/work?workspace=" + encodeURIComponent(workspaceId) + (q ? "&q=" + encodeURIComponent(q) : "");
+  return "/work?workspace=" + encodeURIComponent(workspaceId);
 }
-// The LEAF (task) members of a /api/work list — the task list the GRAPH and BOARD views render
-// (those stay leaves-only). The LIST view instead consumes the full union via groupWork(), so
-// there's no node-only splitter here.
+// The LEAF (task) members of a /api/work list — used for the launcher's one-line queue summary.
+// The Pipeline view consumes the full leaf|node union directly, so there's no node-only splitter.
 function workLeaves(work) {
   return (Array.isArray(work) ? work : []).filter((w) => w && w.work_kind === "leaf");
 }
 
-function filterActive() {
-  return taskSearch.trim() !== "" || statusFilter.size > 0 || tagFilter.size > 0;
-}
-// Client-side filter applied ON TOP of the server's full-text `?q=` result: the
-// status chips and tag chips. The text search itself is NOT re-checked here — the
-// server already narrowed the list by prompt/summary/notes/id, which the client
-// can't reproduce (it never receives the prompt bodies). Handles BOTH work kinds: a
-// node (story) filters by its status (effStatus passes node.status through, since a story
-// is never in_progress/idle) and its tags (defaulting to none when a node carries none).
-function taskMatchesFilter(t) {
-  if (statusFilter.size && !statusFilter.has(effStatus(t))) return false;
-  // Tag filter is ANY-match: keep a task if it carries at least one selected tag.
-  if (tagFilter.size) {
-    const tags = Array.isArray(t.tags) ? t.tags : [];
-    if (!tags.some((g) => tagFilter.has(g))) return false;
-  }
-  return true;
-}
-
-// The distinct set of tags across the workspace's tasks, sorted, for the filter bar.
-function allTags(tasks) {
-  const set = new Set();
-  for (const t of tasks) for (const g of (Array.isArray(t.tags) ? t.tags : [])) set.add(g);
-  return [...set].sort();
-}
-
-// The filter bar: a full-text search box plus a row of toggleable status chips
-// (reusing the existing .chip color styling, dimmed when inactive). The search box
-// drives the SERVER-SIDE `?q=` filter — typing re-fetches the workspace's task list
-// (debounced) and repaints ONLY the results region, so the bar (and the focused
-// search input) stay put and live-as-you-type works. The status/tag chip handlers
-// mutate the module-level filter state and re-filter the last-fetched set client-side.
-function buildFilterBar(dirId, work, results) {
-  const bar = el("div", { class: "filter-bar" });
-
-  // The most recently fetched (server-filtered) WORK union (stories + tasks) the chips filter
-  // over. Starts as the list `work` painted with; a search re-fetch replaces it.
-  let currentTasks = work;
-
-  const search = el("input", {
-    type: "text", class: "task-search", placeholder: "Search prompt, summary, notes, id…",
-    "aria-label": "Search tasks by prompt, summary, review notes, or id",
-  });
-  search.value = taskSearch;
-
-  // Debounced server search: the prompt lives in task.md on the server, so matching
-  // it means re-fetching the list with `?q=` rather than filtering in the browser.
-  let searchTimer = null;
-  function runSearch() {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(async () => {
-      try {
-        // Re-fetch the unified work list and keep the FULL union (stories + tasks) — the LIST
-        // renders all work as peer rows, so it must NOT be narrowed to leaves here.
-        currentTasks = await api("GET", workListPath(dirId));
-      } catch (e) {
-        toast(e.message, true);
-        return;
-      }
-      renderResults(currentTasks, results);
-    }, 180);
-  }
-  search.addEventListener("input", () => {
-    taskSearch = search.value;
-    syncClear();
-    runSearch();
-  });
-
-  const chips = el("div", { class: "filter-chips" });
-  for (const s of FILTER_STATUSES) {
-    const c = el("button", {
-      type: "button",
-      class: "filter-chip chip " + s + (statusFilter.has(s) ? " active" : ""),
-      "aria-pressed": statusFilter.has(s) ? "true" : "false",
-    }, statusLabel(s));
-    c.addEventListener("click", () => {
-      if (statusFilter.has(s)) statusFilter.delete(s); else statusFilter.add(s);
-      const on = statusFilter.has(s);
-      c.classList.toggle("active", on);
-      c.setAttribute("aria-pressed", on ? "true" : "false");
-      renderResults(currentTasks, results);
-      syncClear();
-    });
-    chips.appendChild(c);
-  }
-
-  const clear = el("button", { type: "button", class: "filter-clear" }, "Clear filters");
-  clear.addEventListener("click", () => {
-    taskSearch = "";
-    statusFilter.clear();
-    tagFilter.clear();
-    search.value = "";
-    chips.querySelectorAll(".filter-chip").forEach((c) => {
-      c.classList.remove("active");
-      c.setAttribute("aria-pressed", "false");
-    });
-    if (tagRow) tagRow.querySelectorAll(".filter-chip").forEach((c) => {
-      c.classList.remove("active");
-      c.setAttribute("aria-pressed", "false");
-    });
-    // Clearing the text query changes the server filter, so re-fetch the full list.
-    runSearch();
-    syncClear();
-  });
-  function syncClear() { clear.style.display = filterActive() ? "" : "none"; }
-
-  bar.appendChild(search);
-  chips.appendChild(clear);
-  bar.appendChild(chips);
-
-  // Second chip row: one toggleable chip per distinct tag in this workspace (ANY
-  // match). Only shown when the workspace has any tagged tasks. A stale selection
-  // (a tag whose last task left the set) is harmlessly ignored — it just matches
-  // nothing — and is dropped here so the bar reflects the live tag universe.
-  const tags = allTags(work);
-  for (const g of [...tagFilter]) if (!tags.includes(g)) tagFilter.delete(g);
-  let tagRow = null;
-  if (tags.length) {
-    tagRow = el("div", { class: "filter-chips filter-tags" });
-    tagRow.appendChild(el("span", { class: "filter-tags-label muted" }, "tags"));
-    for (const g of tags) {
-      const c = el("button", {
-        type: "button",
-        class: "filter-chip chip tag" + (tagFilter.has(g) ? " active" : ""),
-        "aria-pressed": tagFilter.has(g) ? "true" : "false",
-      }, g);
-      c.addEventListener("click", () => {
-        if (tagFilter.has(g)) tagFilter.delete(g); else tagFilter.add(g);
-        const on = tagFilter.has(g);
-        c.classList.toggle("active", on);
-        c.setAttribute("aria-pressed", on ? "true" : "false");
-        renderResults(currentTasks, results);
-        syncClear();
-      });
-      tagRow.appendChild(c);
-    }
-    bar.appendChild(tagRow);
-  }
-  syncClear();
-  return bar;
-}
-
-// Whether a work item belongs to HISTORY (the collapsed Finished section): a NODE (story) once
-// it reaches a terminal state (done/aborted), a LEAF (task) by the server's terminal status
-// set. Everything else stays in the visible active list — including stories that are
-// open/merging/merge_blocked and any feedback task awaiting the operator.
+// Whether a work item is FINISHED (terminal): a NODE (story) once it reaches done/aborted, a
+// LEAF (task) by the server's terminal status set. In the Pipeline view a finished story is
+// dropped from the lanes and a finished subtask collapses into its lane's "N done" pile;
+// everything else stays active — including stories that are open/merging/merge_blocked and any
+// feedback task awaiting the operator.
 function isHistoryItem(w) {
   if (!w) return false;
   if (w.work_kind === "node") return w.status === "done" || w.status === "aborted";
   return TERMINAL_STATUSES.includes(w.status);
-}
-
-// Render the active unified table (stories + tasks as peer rows) + the Finished section into
-// `container`, applying the current filter. Called on first paint and on every search/chip
-// change, and re-invoked in place when a story's detail caret toggles (the expand Set is
-// module-level, so it survives the rebuild). When a filter is active, the Finished section
-// auto-expands if it has matches and its count shows "matches of total".
-function renderResults(work, container) {
-  container.innerHTML = "";
-  const list = Array.isArray(work) ? work : [];
-  const filtering = filterActive();
-  // A caret toggle just re-renders this region from the same union; the expand state lives in
-  // the module-level WORK_TREE_EXPANDED set, so it carries across the rebuild.
-  const repaint = () => renderResults(work, container);
-  // History holds terminal items (merged/aborted tasks, done/aborted stories); everything
-  // else — including feedback tasks awaiting the operator and live stories — stays visible.
-  const active = list.filter((w) => !isHistoryItem(w));
-  const history = list.filter(isHistoryItem);
-  const activeMatch = active.filter(taskMatchesFilter);
-  const historyMatch = history.filter(taskMatchesFilter);
-
-  container.appendChild(el("h2", {}, "Work"));
-  if (list.length === 0) {
-    container.appendChild(el("div", { class: "empty" }, "No work yet — create a story to start."));
-  } else if (activeMatch.length === 0) {
-    container.appendChild(el("div", { class: "empty" },
-      filtering ? "No active work matches the filter." : "No active work."));
-  } else {
-    container.appendChild(workTable(activeMatch, repaint));
-  }
-
-  if (history.length) {
-    container.appendChild(historySection(historyMatch, filtering, history.length));
-  }
-}
-
-// Collapsible "Finished" section for terminal-state tasks. `tasks` is the already
-// filtered set; `totalCount` is the unfiltered count for the header. Collapsed by
-// default and the open/closed state persists in localStorage across reloads and
-// SSE re-renders (which rebuild this node each time) — EXCEPT while a filter is
-// active, when the section auto-expands if it has matches so they aren't hidden
-// behind the collapse. When filtering, the count reads "<matches> of <total>" to
-// make clear the view is narrowed. The body is a compact one-line-per-task
-// summary (id, final status, completed time), not the full active-task table.
-function historySection(tasks, filtering, totalCount) {
-  const open = filtering ? tasks.length > 0 : historyOpen();
-  const countLabel = filtering ? `${tasks.length} of ${totalCount}` : String(totalCount);
-  const body = el("div", { class: "history-body" });
-  const fill = (node) => {
-    node.innerHTML = "";
-    if (tasks.length) node.appendChild(finishedList(tasks));
-    else node.appendChild(el("div", { class: "empty" }, "No finished tasks match the filter."));
-  };
-
-  const { panel } = collapsible({
-    title: "Finished",
-    titleClass: "history-title",
-    meta: countLabel,
-    metaClass: "history-count",
-    body,
-    open,
-    panelClass: "history",
-    headClass: "history-head",
-    // The Finished section's state class is `open` (present when expanded), the
-    // inverse of the panel default.
-    stateClass: "open",
-    stateMeansOpen: true,
-    // Only persist the collapse preference when not filtering — the filter-driven
-    // auto-expand is transient and shouldn't overwrite the user's saved choice.
-    persistKey: filtering ? undefined : HISTORY_KEY,
-    onToggle: (nowOpen) => { if (nowOpen) fill(body); else body.innerHTML = ""; },
-  });
-  panel.setAttribute("style", "margin-top:24px");
-  if (open) fill(body);
-  return panel;
-}
-
-// The time a terminal-state task wrapped up: merged tasks report merged_at,
-// aborted/rejected report completed_at. Fall back across both, then created_at.
-function finishedTime(t) {
-  return t.merged_at || t.completed_at || t.created_at;
-}
-
-// Compact one-line-per-item list for finished (terminal) WORK: id, final status chip, and when
-// it completed. Most-recent first. A finished TASK links to its detail page; a finished STORY
-// has no detail route, so it renders as a non-link row with its brief in place of the id.
-function finishedList(items) {
-  const sorted = items.slice().sort((a, b) =>
-    new Date(finishedTime(b) || 0).getTime() - new Date(finishedTime(a) || 0).getTime());
-  const list = el("div", { class: "finished-list" });
-  for (const t of sorted) {
-    const isNode = t.work_kind === "node";
-    const label = isNode ? (t.brief || t.id) : t.id;
-    const row = isNode
-      ? el("div", { class: "finished-row is-node" })
-      : el("a", { class: "finished-row", href: "#/task/" + esc(t.id) });
-    row.innerHTML = `
-      <span class="fr-id" title="${esc(label)}">${esc(label)}</span>
-      ${taskChips(t)}${tagChips(t)}
-      <span class="fr-when" title="${esc(finishedTime(t) || "")}">${esc(fmtTime(finishedTime(t)))}</span>`;
-    list.appendChild(row);
-  }
-  return list;
-}
-
-// The unified work table: stories and tasks as PEER rows. Items are grouped via groupWork (a
-// child attaches to its parent node by parent_id||story_id); a top-level orphan task renders at
-// root. A STORY is one row (caret + single-line brief, status chip, rollup/leader meta) whose
-// child subtask rows ALWAYS render indented one level beneath it (visible by default). Clicking
-// a story row toggles only its DETAIL block (full brief + open ask), inserted as a full-width
-// row right under it; the children are never hidden by the toggle. `repaint` re-renders the
-// results region in place so a caret toggle reflects the module-level expand Set with no fetch.
-function workTable(items, repaint) {
-  const { topLevel, childrenByNode } = groupWork(items);
-  const table = el("table", { class: "tasks" });
-  table.innerHTML = `<thead><tr>
-    <th>id</th><th>status</th><th>created</th><th></th>
-  </tr></thead>`;
-  const tb = el("tbody");
-  for (const w of topLevel) {
-    if (w.work_kind === "node") appendStoryRows(tb, w, childrenByNode.get(w.id) || [], repaint);
-    else tb.appendChild(taskRow(w, 0));
-  }
-  table.appendChild(tb);
-  return table;
-}
-
-// One TASK row in the unified table. `depth` > 0 marks it as a story's child (indented via the
-// is-child class). A task links to its detail/review page; the action label reflects the state.
-function taskRow(t, depth) {
-  const tr = el("tr", { class: depth ? "is-child" : "" });
-  const action = t.status === "in_review" ? "review →"
-    : t.status === "spec_review" ? "review spec →"
-    : t.status === "needs_info" ? "answer →" : "open →";
-  const termLink = termLinkMarkup(t);
-  // Feedback states are awaiting the operator — surface the state-kind chip
-  // (e.g. "feedback: diff review") so a row that needs a human reads at a glance,
-  // rather than just sitting in the list looking like in-flight work.
-  const feedback = stateKind(effStatus(t)) === "feedback";
-  tr.innerHTML = `
-    <td class="id">${esc(t.id)}${pulseMarkup(t)}</td>
-    <td>${taskChips(t, { kind: feedback, responder: true })}${tagChips(t)}</td>
-    <td class="when">${esc(fmtTime(t.created_at))}</td>
-    <td>${isLive(t) ? kindBadge("build") + " " : ""}${termLink ? termLink + " · " : ""}<a href="#/task/${esc(t.id)}">${action}</a></td>`;
-  wireTermLink(tr, t.id);
-  return tr;
-}
-
-// Append a STORY row (+ its expanded detail row when toggled + its always-visible child rows)
-// to a table body. The story row carries the caret + single-line brief in the id column, the
-// status chip (+ an ask-attention chip when there's an open story ask) in the status column,
-// and the subtask rollup + leader state in the meta column. A story has NO detail route, so the
-// whole row is clickable to toggle WORK_TREE_EXPANDED (revealing the brief/ask detail row);
-// the child subtask rows render indented regardless of that toggle.
-function appendStoryRows(tb, story, children, repaint) {
-  const expanded = WORK_TREE_EXPANDED.has(story.id);
-  const brief = story.brief || "(no brief)";
-  // status chip (+ open-ask attention): user-owned ask = the red needs_user_input pill;
-  // cto-owned = the muted awaiting-cto note — mirroring the task-level awaiting-who emphasis.
-  let chipsHtml = kindBadge("node") + " " + chip(effStatus(story));
-  if (story.pending_ask != null) {
-    chipsHtml += story.ask_responder === "user"
-      ? ' <span class="chip needs_user_input" title="an open story ask was escalated to YOU — expand to answer">needs your input</span>'
-      : ' <span class="chip awaiting-cto" title="an open story ask owned by the CTO agent (handled automatically) — you can also answer">awaiting CTO</span>';
-  }
-  // Secondary lifecycle chip (working/parked/stalled), quiet, AUGMENTING the status chip — see storyLifecycleChip.
-  chipsHtml += storyLifecycleChip(story);
-  const leader = story.leader || {};
-  const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
-  const meta = workRollup(story.counts) + " · " + leaderState;
-
-  const tr = el("tr", { class: "is-node clickable" + (expanded ? " expanded" : "") });
-  tr.innerHTML = `
-    <td class="id"><span class="work-caret">${expanded ? "▾" : "▸"}</span><span class="story-brief" title="${esc(brief)}">${esc(brief)}</span></td>
-    <td>${chipsHtml}</td>
-    <td class="when" title="${esc(meta)}">${esc(workRollup(story.counts))} · ${kindBadge("leader")} ${esc(leaderState)}</td>
-    <td></td>`;
-  tr.addEventListener("click", () => {
-    if (WORK_TREE_EXPANDED.has(story.id)) WORK_TREE_EXPANDED.delete(story.id);
-    else WORK_TREE_EXPANDED.add(story.id);
-    repaint();
-  });
-  tb.appendChild(tr);
-
-  // Expanded: the detail block (full brief + open ask) as a full-width row directly under the
-  // story, ABOVE its children so it reads as the story's own content then its subtasks.
-  if (expanded) {
-    const dr = el("tr", { class: "story-detail-row" });
-    const td = el("td", { colspan: "4" });
-    td.appendChild(renderStoryDetail(story));
-    dr.appendChild(td);
-    tb.appendChild(dr);
-  }
-
-  // Child subtask rows ALWAYS render (indented one level), regardless of expand state — so all
-  // work stays visible by default; expanding only adds the story's brief/ask detail row above.
-  for (const c of children) tb.appendChild(taskRow(c, 1));
-}
-
-// List / Graph / Board segmented toggle for the workspace body — the PRIMARY view control.
-// Mutates dirView (module scope + localStorage) and calls repaint() to swap the body region —
-// the toggle node itself is left in place so the choice sticks across clicks. The workspace
-// view re-renders wholesale on every SSE event and reads dirView, so the chosen mode also
-// survives live updates without re-wiring anything.
-function buildViewToggle(repaint) {
-  const bar = el("div", { class: "view-toggle", role: "tablist", "aria-label": "Work view" });
-  // The persisted dirView key stays "graph" (internal, in localStorage) but the tab now
-  // reads "Pipeline" — the Graph tab is the pipeline-swimlanes view.
-  const defs = [["list", "List"], ["graph", "Pipeline"], ["board", "Board"]];
-  const btns = {};
-  for (const [v, label] of defs) {
-    const b = el("button", {
-      type: "button",
-      class: "vt-btn" + (dirView === v ? " active" : ""),
-      role: "tab",
-      "aria-selected": dirView === v ? "true" : "false",
-    }, label);
-    b.addEventListener("click", () => {
-      if (dirView === v) return;
-      setDirView(v);
-      for (const [k, node] of Object.entries(btns)) {
-        const on = k === v;
-        node.classList.toggle("active", on);
-        node.setAttribute("aria-selected", on ? "true" : "false");
-      }
-      repaint();
-    });
-    btns[v] = b;
-    bar.appendChild(b);
-  }
-  return bar;
 }
 
 // Reverse the blocked_by edges into a dependents map: blocker id → [ids of tasks
@@ -2036,7 +1481,7 @@ function storyMemberIds(storyId, ids, byId) {
   return out;
 }
 // A story's TRUE subtask total from its server-computed per-status `counts` rollup (idle is a
-// pseudo-bucket, not a real subtask — excluded, mirroring workRollup). Drives the HONEST empty
+// pseudo-bucket, not a real subtask — excluded, mirroring storyProgress). Drives the HONEST empty
 // state: only a story with ZERO subtasks total is "no subtasks yet"; a story whose children are
 // all finished or slider-hidden has counts>0 and is NOT childless.
 function storySubtaskTotal(counts) {
@@ -2073,8 +1518,8 @@ function storyLifecycle(story) {
   if (remaining > 0 && leader.running) return LIFECYCLE.working; // leader up with actionable/idle work
   return LIFECYCLE.parked; // nothing in flight, or work but no leader ever desired
 }
-// The story's OWN-children progress from its `counts` rollup — done (COMPLETE statuses, mirroring
-// workRollup's ✓ via isCompleteStatus) over the TRUE total (storySubtaskTotal, which drops the idle
+// The story's OWN-children progress from its `counts` rollup — done (COMPLETE statuses, via
+// isCompleteStatus) over the TRUE total (storySubtaskTotal, which drops the idle
 // pseudo-bucket). Distinct from the graph's dependency-subtree bar (gatedSubtree). total is 0 for a
 // childless story, so callers gate the "d/t done" render on total > 0.
 function storyProgress(counts) {
@@ -2301,9 +1746,8 @@ function swimLegend() {
     `<span><i class="swim-ldot ${esc(cls)}"></i> ${esc(txt)}</span>`).join("") });
 }
 
-// The Pipeline view entry point (called from the workspace view where dirView === "graph"). Builds
-// into a wrapper it can repaint in place, so a lane's done-toggle re-renders instantly without
-// waiting for the next SSE tick.
+// The Pipeline view entry point (the sole workspace-body work view). Builds into a wrapper it can
+// repaint in place, so a lane's done-toggle re-renders instantly without waiting for the next SSE tick.
 function renderSwimlanes(work) {
   const wrap = el("div", { class: "swim-wrap" });
   const paint = () => { wrap.innerHTML = ""; buildSwimlanes(work, wrap, paint); };
@@ -2338,212 +1782,6 @@ function buildSwimlanes(work, wrap, repaint) {
   for (const s of stories) lanes.appendChild(swimLane(s, byId, allIds, repaint));
   if (ungrouped.length) lanes.appendChild(swimUngroupedLane(ungrouped, byId));
   wrap.appendChild(lanes);
-}
-
-// ---------- pipeline / merge-train board ----------
-// The board view: a KANBAN board of COLUMNS holding the workspace's active (in-flight)
-// WORK — both tasks AND stories render as peer cards. Columns are pipeline stages in
-// pipeline order, LEFT-TO-RIGHT closest-to-landing first, so "what's happening / what's
-// next" reads at a glance. Columns: Spec review · In review (ready to merge) · Needs info ·
-// Rolling back (a mechanical revert merge in flight, only when present) · In progress
-// (running/idle) · Ready (inactive — queued to dispatch) · Blocked (each card shows the
-// blockers it's waiting on and their current status) · Idea.
-// A TASK (leaf) maps to the column matching its status; a STORY (node) maps by story
-// status — open with unmet blockers → Blocked, open → In progress, merging/merge_blocked
-// → In review, done/aborted → omitted (terminal). Terminal-state tasks
-// (merged/failed/rolled_back/aborted) aren't part of the pipeline and are likewise omitted —
-// they live in the List view's Finished section. Re-rendered wholesale on every
-// SSE event by the workspace view, so it live-updates for free.
-// <test-extract:board> — pure, DOM-free board-lane classification (unit-tested in
-// test/state-meta-fallback.test.ts). boardLaneKeyFor takes activeStatuses explicitly so it
-// can be exercised without the module-level ACTIVE_STATUSES table or a DOM.
-const BOARD_LANES = [
-  { key: "spec_review", title: "Spec review", hint: "spec review" },
-  { key: "in_review", title: "In review", hint: "in review" },
-  { key: "needs_info", title: "Needs info", hint: "needs info" },
-  { key: "rolling_back", title: "Rolling back", hint: "rolling back" },
-  { key: "in_progress", title: "In progress", hint: "in progress" },
-  { key: "inactive", title: "Ready", hint: "ready" },
-  { key: "blocked", title: "Blocked", hint: "blocked" },
-  { key: "idea", title: "Idea", hint: "idea" },
-];
-const BOARD_LANE_KEYS = new Set(BOARD_LANES.map((l) => l.key));
-
-// A blocker is SATISFIED only once the blocking work has LANDED — a leaf task that
-// merged, or a story (node) that's done. Anything else (in flight, queued, failed,
-// aborted, or an unknown/unresolved id) is still UNMET, so a story waiting on it
-// belongs in the Blocked column.
-function boardBlockerLanded(w) {
-  if (!w) return false;
-  return w.work_kind === "node" ? w.status === "done" : w.status === "merged";
-}
-function boardHasUnmetBlockers(w, byId) {
-  return (w.blocked_by || []).some((bid) => !boardBlockerLanded(byId.get(bid)));
-}
-
-// Which board COLUMN a work item belongs in, or null to OMIT it (terminal / not in the
-// pipeline). A leaf maps to the column matching its status (the lane keys mirror the task
-// statuses); a node (story) maps by story status — open-with-unmet-blockers → Blocked,
-// open → In progress, merging/merge_blocked → In review, done/aborted → omitted.
-function boardLaneKeyFor(w, byId, activeStatuses) {
-  if (w.work_kind === "node") {
-    if (w.status === "open") return boardHasUnmetBlockers(w, byId) ? "blocked" : "in_progress";
-    if (w.status === "merging" || w.status === "merge_blocked") return "in_review";
-    return null; // done / aborted / anything terminal → omitted
-  }
-  // leaf task: only active (non-terminal) statuses appear, in their own-named column.
-  if (!activeStatuses.includes(w.status)) return null;
-  return BOARD_LANE_KEYS.has(w.status) ? w.status : null;
-}
-function boardLaneKey(w, byId) {
-  return boardLaneKeyFor(w, byId, ACTIVE_STATUSES);
-}
-// </test-extract:board>
-
-function renderBoard(work) {
-  const items = (Array.isArray(work) ? work : []).filter(Boolean);
-  // byId spans BOTH leaves and nodes so cross-type blocked_by resolves — a task blocked
-  // by a story, or a story blocked by a task, both look up correctly.
-  const byId = new Map(items.map((w) => [w.id, w]));
-
-  // Bucket every work item into its column; null-key items (terminal / unmatched) drop out.
-  const buckets = new Map(BOARD_LANES.map((l) => [l.key, []]));
-  for (const w of items) {
-    const key = boardLaneKey(w, byId);
-    if (key && buckets.has(key)) buckets.get(key).push(w);
-  }
-  const total = BOARD_LANES.reduce((n, l) => n + buckets.get(l.key).length, 0);
-  if (total === 0) {
-    return el("div", { class: "empty" }, "No active work in the pipeline.");
-  }
-
-  // Oldest-first within a column: the longest-waiting (review/queued) and the
-  // earliest-started (running) bubble to the top — the next thing to act on.
-  const byCreated = (a, b) =>
-    new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
-
-  // One-line "what's happening" caption from the populated columns.
-  const summary = BOARD_LANES
-    .filter((l) => buckets.get(l.key).length)
-    .map((l) => `${buckets.get(l.key).length} ${l.hint}`);
-
-  const board = el("div", { class: "board" });
-  board.appendChild(el("div", { class: "board-summary muted" },
-    summary.length ? summary.join(" · ") : "Idle."));
-
-  // The horizontal COLUMN track (left-to-right = pipeline order; scrolls if it overflows).
-  const cols = el("div", { class: "board-cols" });
-  for (const lane of BOARD_LANES) {
-    const laneItems = buckets.get(lane.key).sort(byCreated);
-    // Always render the core columns so the pipeline skeleton stays visible;
-    // the rolling_back and spec_review columns only appear when something is present.
-    if ((lane.key === "rolling_back" || lane.key === "spec_review") && laneItems.length === 0) continue;
-    cols.appendChild(boardLane(lane, laneItems, byId));
-  }
-  board.appendChild(cols);
-  return board;
-}
-
-// One COLUMN: a header (title + count) over a vertical stack of work cards, with a
-// status-colored left accent. Empty core columns render a placeholder so the
-// pipeline structure reads even when a stage is clear. Cards are tasks OR stories
-// (peers): a node renders a story card, a leaf a task card.
-function boardLane(lane, items, byId) {
-  const sec = el("div", { class: "board-lane lane-" + lane.key });
-  sec.appendChild(el("div", { class: "board-lane-head" }, [
-    el("span", { class: "bl-title" }, lane.title),
-    el("span", { class: "bl-count" }, String(items.length)),
-  ]));
-  if (items.length === 0) {
-    sec.appendChild(el("div", { class: "board-empty muted" }, "—"));
-    return sec;
-  }
-  const cards = el("div", { class: "board-cards" });
-  for (const w of items) {
-    cards.appendChild(w.work_kind === "node" ? boardStoryCard(w, lane, byId) : boardCard(w, lane, byId));
-  }
-  sec.appendChild(cards);
-  return sec;
-}
-
-// The blocker list shared by task and story cards: in the Blocked column, each blocker id
-// with its current status — resolved from sibling WORK in this workspace (leaf or node) via
-// byId, "unknown" if absent. Aborted blockers will never merge, so they're flagged as stuck.
-function boardAppendBlockers(card, w, byId) {
-  const ids = w.blocked_by || [];
-  if (!ids.length) return;
-  const blk = el("div", { class: "bc-blockers" });
-  blk.appendChild(el("span", { class: "bc-blk-label muted" }, "blocked by"));
-  for (const bid of ids) {
-    const b = byId.get(bid);
-    const st = b ? effStatus(b) : "unknown";
-    const stuck = st === "aborted";
-    const isStory = b && b.work_kind === "node";
-    const title = stuck ? "will never merge — edit blocked_by to proceed" : bid;
-    // A story blocker has NO detail route, so it renders as a non-navigating span (with the
-    // story badge, mirroring boardStoryCard); leaf/unknown blockers keep the #/task link.
-    const row = isStory
-      ? el("span", { class: "bc-blocker is-story" + (stuck ? " stuck" : ""), title })
-      : el("a", {
-          class: "bc-blocker" + (stuck ? " stuck" : ""),
-          href: "#/task/" + esc(bid),
-          title,
-        });
-    row.innerHTML = isStory
-      ? `${kindBadge("node")}<span class="bk-id">${esc(bid)}</span>${chip(st)}`
-      : `<span class="bk-id">${esc(bid)}</span>${chip(st)}`;
-    blk.appendChild(row);
-  }
-  card.appendChild(blk);
-}
-
-// One task card: id (links to the detail page), status chip(s), created time, and
-// a live-terminal link when the agent pane is up. Blocked cards additionally list
-// each blocker with its current status (boardAppendBlockers).
-function boardCard(t, lane, byId) {
-  const card = el("div", { class: "board-card" });
-  const termLink = termLinkMarkup(t);
-  card.innerHTML = `
-    <div class="bc-top">
-      <a class="bc-id" href="#/task/${esc(t.id)}">${esc(t.id)}</a>
-      <span class="bc-chips">${taskChips(t, { plan: true, responder: true })}</span>
-    </div>
-    <div class="bc-meta">
-      <span class="bc-when" title="${esc(t.created_at || "")}">created ${esc(fmtTime(t.created_at))}</span>
-      ${isLive(t) ? kindBadge("build") : ""}
-      ${termLink ? `<span class="bc-term">${termLink}</span>` : ""}
-    </div>
-    ${tagChips(t) ? `<div class="bc-tags">${tagChips(t)}</div>` : ""}
-    ${pulseMarkup(t)}`;
-
-  if (lane.key === "blocked") boardAppendBlockers(card, t, byId);
-
-  wireTermLink(card, t.id);
-  return card;
-}
-
-// One STORY card — a PEER of the task card, same visual language, distinguished only by a
-// subtle "story" badge. A story has NO detail route, so the id is plain text (not a link)
-// and the card does not navigate. Shows: badge + id, status chip, and a meta line of the
-// subtask rollup (workRollup) + leader state. Blocked stories list their blockers exactly
-// like a task card does (boardAppendBlockers).
-function boardStoryCard(s, lane, byId) {
-  const card = el("div", { class: "board-card story-card" });
-  const leader = s.leader || {};
-  const leaderState = leader.running ? "leader up" : leader.desired ? "leader down" : "no leader";
-  const meta = workRollup(s.counts) + " · " + leaderState;
-  card.innerHTML = `
-    <div class="bc-top">
-      <span class="bc-id">${kindBadge("node")}<span class="bc-story-id">${esc(s.id)}</span></span>
-      <span class="bc-chips">${chip(effStatus(s))}${storyLifecycleChip(s)}</span>
-    </div>
-    <div class="bc-meta">
-      <span class="bc-when" title="${esc(meta)}">${esc(workRollup(s.counts))} · ${kindBadge("leader")} ${esc(leaderState)}</span>
-    </div>`;
-
-  if (lane.key === "blocked") boardAppendBlockers(card, s, byId);
-
-  return card;
 }
 
 // CI GATE badge for the review panel. ci_status: 'running' shows a spinner;

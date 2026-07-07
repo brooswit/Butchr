@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Pipeline is now the sole workspace work view — List and Board views removed.** The workspace
+  detail page no longer has a List / Pipeline / Board toggle: its body renders the Pipeline
+  (swimlanes) view unconditionally. The List renderer (unified work table, filter/search bar,
+  status/tag chips, Finished-history section) and the Board renderer (kanban pipeline columns) are
+  deleted along with their now-dead front-end helpers, module state, and CSS — a pure `public/app.js`
+  + `public/style.css` removal (no `src/`/API change). The view-mode state (`dirView` /
+  `butchr-dirview` in localStorage) is gone, so a stale stored `board`/`list` value is simply ignored
+  and the page renders the Pipeline (never a blank/crashed body). Story-level ask answering, which
+  lived only in the List view's expandable story detail, is removed with it (see release notes;
+  candidate for a follow-up to surface on the Pipeline lane). The live activity-pulse subsystem is
+  retained but currently unwired (its only consumers were the deleted rows) — flagged for a separate
+  cleanup.
+
 ## [0.9.216] - 2026-07-07
 
 ### Changed

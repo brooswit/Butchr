@@ -516,7 +516,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 /* Inline cluster of tag chips shown next to a task's status/id across the views. */
 .tag-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 4px; vertical-align: middle; }
-.bc-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
 /* A non-zero dispatch priority — shown only when set (priority 0 is the silent FIFO
    default). Reuse the in_progress hue so it reads as an "acts sooner" signal. */
 .chip.priority { background: var(--in_progress); }
@@ -638,82 +637,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
    in the idle (cyan) tone so it is visually distinct from a dead/disabled (red) responder. */
 .stranded-panel .stranded-kind--idle { color: var(--idle); }
 .stranded-panel .stranded-reason { font-size: 13px; color: var(--muted); }
-
-/* STORY-LEVEL ASK panel — an open story ask (pending_ask) surfaced under its story row:
-   the leader's question, who currently owns it (ask_responder), and a freeform answer box
-   that POSTs /api/stories/:id/answer. Styled like the responder-banner / rollup panels:
-   a tinted strip with a left accent. `awaiting-you` (escalated to the user) gets the
-   attention-grabbing needs_info accent; otherwise it reads as a quiet CTO-owned note.
-   Rendered only when an ask is open (inert when pending_ask is null). */
-.story-ask-panel {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  background: var(--panel-2);
-  font-size: 13px;
-  line-height: 1.45;
-}
-.story-ask-panel.awaiting-you {
-  border-color: var(--needs_info);
-  border-left: 3px solid var(--needs_info);
-}
-.story-ask-panel .sa-head {
-  display: flex; align-items: center; gap: 8px;
-  font-weight: 600; margin-bottom: 6px;
-}
-.story-ask-panel .sa-owner {
-  font-size: 11px; font-weight: 600; letter-spacing: 0;
-  padding: 1px 8px; border-radius: var(--radius-md);
-  border: 1px solid var(--border); color: var(--muted);
-}
-/* escalated-to-you: filled attention pill (mirrors .chip.awaiting-you) */
-.story-ask-panel .sa-owner.you {
-  background: var(--needs_info); border-color: var(--needs_info); color: #fff;
-}
-/* awaiting-the-CTO: muted outlined pill (mirrors .chip.awaiting-cto) */
-.story-ask-panel .sa-owner.cto {
-  background: var(--panel); color: var(--muted);
-}
-.story-ask-panel .sa-question {
-  color: var(--text); white-space: pre-wrap; word-break: break-word;
-}
-.story-ask-panel .sa-answer { min-height: 64px; }
-
-/* ---------- unified work list (stories + tasks) ----------
-   Stories and tasks render as PEER rows in the shared .tasks table. Status colors come ONLY
-   from the shared .chip.<status> system — no parallel palette. A story row is a foldable group
-   header: clicking it toggles its detail block (full brief + open ask) shown as a full-width
-   row beneath it; its subtask rows render indented one level and stay visible regardless. */
-.work-caret {
-  display: inline-block; width: 12px; text-align: center;
-  color: var(--muted); font-size: 11px; user-select: none; margin-right: 4px;
-}
-/* Story (node) row — a subtle tinted fill + left accent + pointer so it reads as a group head. */
-.tasks tr.is-node { cursor: pointer; }
-.tasks tr.is-node td { background: var(--panel-2); }
-.tasks tr.is-node td.id { border-left: 2px solid var(--border); }
-.tasks tr.is-node:hover td { background: var(--panel); }
-/* The single-line truncated brief in the story row's id cell — the wall-of-text fix. */
-.tasks tr.is-node .story-brief {
-  display: inline-block; max-width: 60ch; vertical-align: bottom;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font-family: var(--font); font-weight: 600; color: var(--text);
-}
-/* Child subtask rows indented one level under their parent story. */
-.tasks tr.is-child td.id { padding-left: 30px; }
-/* The expanded story detail spans the full table width directly below its story row. */
-.tasks tr.story-detail-row td { background: var(--panel-2); padding: 0 12px 12px; }
-.tasks tr.story-detail-row:hover td { background: var(--panel-2); }
-.work-expanded { padding: 0; }
-.work-brief-full {
-  white-space: pre-wrap; word-break: break-word;
-  font-size: 13px; line-height: 1.5; color: var(--text);
-  padding: 8px 0 4px;
-}
-/* A finished STORY in the Finished list has no detail route — render it as a plain row. */
-.finished-row.is-node { cursor: default; }
 
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .count-pill {
@@ -877,17 +800,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .tl-time { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .tl-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
-/* tasks table */
-.tasks { width: 100%; border-collapse: collapse; margin-top: 8px; }
-.tasks th {
-  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
-  color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border);
-}
-.tasks td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-.tasks tr:hover td { background: var(--panel-2); }
-.tasks .id { font-family: var(--mono); font-size: 13px; }
-.tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
-
 /* compact herdr pane/tab id readout next to the Open-terminal control */
 .herdr-ids { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .herdr-ids-row { margin-top: 6px; }
@@ -896,70 +808,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   background: var(--panel-2); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap;
 }
-
-/* search + status filter bar (workspace task views) */
-.filter-bar { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 6px; }
-/* full-text search box (server-side ?q=); wide enough for its placeholder hint */
-.task-search { max-width: 420px; width: 100%; }
-.filter-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-/* reuse the filled .chip.<status> colors; dim when the toggle is off */
-.filter-chip {
-  cursor: pointer; border: none; font-family: inherit;
-  opacity: 0.4; transition: opacity 0.12s;
-}
-.filter-chip:hover { opacity: 0.72; }
-.filter-chip.active { opacity: 1; }
-.filter-clear {
-  margin-left: 4px; padding: 2px 4px; font-size: 12px; font-family: inherit;
-  color: var(--muted); background: none; border: none; cursor: pointer;
-  text-decoration: underline;
-}
-.filter-clear:hover { color: var(--text); }
-/* second filter row: toggleable tag chips (ANY-match). The leading label sets them
-   apart from the status row above. */
-.filter-tags-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-right: 2px; }
-
-/* history (collapsed terminal-state tasks) */
-.history-head {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  background: none; border: none; cursor: pointer;
-  padding: 10px 4px; color: var(--text); font-size: 14px; font-weight: 600;
-  text-align: left; border-bottom: 1px solid var(--border);
-}
-.history-head:hover { color: var(--accent); }
-.history-head .caret { color: var(--muted); font-size: 11px; width: 12px; }
-.history-head .history-title { flex: 0 0 auto; }
-.history-head .history-count {
-  font-size: 11px; color: var(--muted); font-weight: 600;
-  border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 1px 7px;
-}
-.history-body { margin-top: 4px; }
-
-/* compact one-line-per-task summaries inside the Finished section */
-.finished-list { display: flex; flex-direction: column; }
-.finished-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 7px 10px; border-bottom: 1px solid var(--border);
-  color: var(--text); font-size: 13px;
-}
-.finished-row:last-child { border-bottom: 0; }
-.finished-row:hover { background: var(--panel-2); text-decoration: none; }
-.finished-row .fr-id { font-family: var(--mono); font-size: 13px; flex: 1; word-break: break-all; }
-.finished-row .fr-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
-
-/* List / Graph view toggle (workspace page) — a small segmented control */
-.view-toggle {
-  display: inline-flex; gap: 0; margin: 16px 0 6px;
-  border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden;
-}
-.vt-btn {
-  background: var(--panel); color: var(--muted); border: 0; cursor: pointer;
-  font: inherit; font-size: 13px; font-weight: 600; padding: 6px 16px;
-}
-.vt-btn + .vt-btn { border-left: 1px solid var(--border); }
-.vt-btn:hover { background: var(--panel-2); color: var(--text); }
-.vt-btn.active { background: var(--accent); color: #fff; }
 
 /* ---------- pipeline swimlanes (the "Pipeline" tab) ----------
    Per-story horizontal lanes replacing the old SVG dependency DAG. Plain HTML/flex; status pills
@@ -1045,88 +893,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .swim-done-pipe { padding-top: 4px; opacity: 0.75; }
 .swim-lane-ungrouped { border-style: dashed; }
 
-/* pipeline / merge-train board (workspace view) — a KANBAN board of COLUMNS holding
-   active WORK (tasks AND stories as peer cards), one column per pipeline stage in
-   pipeline order left-to-right, each with a status-colored left accent. */
-.board { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
-.board-summary { font-size: 13px; margin-bottom: 2px; }
-
-/* the horizontal COLUMN track — scrolls sideways if the columns overflow the viewport. */
-.board-cols {
-  display: flex; align-items: flex-start; gap: 14px;
-  overflow-x: auto; padding-bottom: 6px;
-}
-
-.board-lane {
-  flex: 0 0 288px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-left: 3px solid var(--in_progress); border-radius: 8px;
-  padding: 12px 14px;
-}
-/* Canonical 9-state board lanes */
-.board-lane.lane-spec_review { border-left-color: var(--spec_review); }
-.board-lane.lane-in_review   { border-left-color: var(--in_review); }
-.board-lane.lane-needs_info  { border-left-color: var(--needs_info); }
-.board-lane.lane-rolling_back { border-left-color: var(--rolling_back); }
-.board-lane.lane-in_progress { border-left-color: var(--in_progress); }
-.board-lane.lane-inactive    { border-left-color: var(--inactive); }
-.board-lane.lane-blocked     { border-left-color: var(--blocked); }
-.board-lane.lane-idea        { border-left-color: var(--idea); }
-/* Legacy board lanes */
-.board-lane.lane-finalizing  { border-left-color: var(--finalizing); }
-.board-lane.lane-review      { border-left-color: var(--review); }
-.board-lane.lane-running     { border-left-color: var(--running); }
-.board-lane.lane-queued      { border-left-color: var(--queued); }
-
-.board-lane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.board-lane-head .bl-title { font-weight: 600; font-size: 14px; }
-.board-lane-head .bl-count {
-  font-size: 11px; color: var(--muted); font-weight: 600;
-  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 1px 7px;
-}
-.board-empty { font-size: 13px; padding: 2px 0; }
-
-/* cards stack vertically within their column */
-.board-cards { display: flex; flex-direction: column; gap: 10px; }
-.board-card {
-  display: flex; flex-direction: column; gap: 6px;
-  background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius-md); padding: 10px 12px;
-}
-.board-card .bc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.board-card .bc-id { font-family: var(--mono); font-size: 13px; word-break: break-all; }
-
-/* STORY card — a PEER of the task card (same shape), marked only by a subtle "story"
-   badge; its id is plain (non-navigating) text since a story has no detail route. */
-.board-card.story-card .bc-id {
-  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
-}
-.board-card.story-card .bc-story-id { color: var(--muted); }
-.board-card .bc-chips { display: inline-flex; gap: 4px; flex: 0 0 auto; }
-.board-card .bc-meta {
-  display: flex; align-items: center; gap: 10px;
-  font-size: 11.5px; color: var(--muted);
-}
-.board-card .bc-meta .bc-when { white-space: nowrap; }
-.board-card .bc-term { margin-left: auto; white-space: nowrap; }
-
-.bc-blockers {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  margin-top: 2px; padding-top: 8px; border-top: 1px dashed var(--border);
-}
-.bc-blk-label { font-size: 11px; }
-.bc-blocker {
-  display: inline-flex; align-items: center; gap: 6px;
-  border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 2px 6px; font-size: 12px; color: var(--text);
-}
-.bc-blocker:hover { background: var(--panel-2); text-decoration: none; }
-.bc-blocker .bk-id { font-family: var(--mono); font-size: 11.5px; }
-.bc-blocker.stuck { border-color: var(--rejected); }
-/* A story blocker has no detail route — render it non-interactive (no link). */
-.bc-blocker.is-story { cursor: default; }
-.bc-blocker.is-story:hover { background: transparent; }
-
 /* LIVE ACTIVITY PULSE — a read-only one-line "what the agent is doing right now"
    on running task cards/rows: a soft-pulsing dot, the latest action (clipped to one
    line), and how long the task has been running. Polled from /api/tasks/:id/activity. */
@@ -1147,8 +913,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .pulse .pulse-elapsed { flex: 0 0 auto; white-space: nowrap; }
 @keyframes pulse-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-/* In the list table the pulse sits under the id cell — drop the mono id sizing. */
-.tasks .id .pulse { font-weight: 400; }
 @media (prefers-reduced-motion: reduce) {
   .pulse .pulse-dot { animation: none; }
   .chip.needs_user_input { animation: none; }
