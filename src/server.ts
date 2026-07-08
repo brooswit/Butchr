@@ -39,8 +39,6 @@ import {
   setWorkspaceReleaseMode,
   unregisterRepoFromProject,
   unregisterWorkspace,
-  updateWorkspaceChangelogPath,
-  updateWorkspaceGateCmd,
   updateWorkspaceVersionFile,
   workspaceDetail,
 } from "./workspaces.ts";
@@ -703,54 +701,43 @@ route("POST", "/api/expand-brief", async (req) => {
 
 route("POST", "/api/workspaces", async (req) => {
   const body = await readJson(req);
-  // Optional per-workspace settings, all validated inside registerWorkspace (omit/null
-  // → inherit the global default; "" → disable for this workspace):
-  //  - gate_cmd: the build/test gate command both gates run.
-  //  - version_file: the version file the merge patch-bumps (e.g. package.json).
-  //  - changelog_path: the file the changelog CI gate requires a code change to update.
-  const view = await registerWorkspace(
-    body.path, body.label, body.gate_cmd, body.version_file, body.changelog_path,
-  );
+  // Optional per-workspace `version_file`, validated inside registerWorkspace (omit/null →
+  // inherit the global default; "" → disable the bump for this workspace). The gate is now
+  // the repo's own `./scripts/ci` (butchr carries zero gate config), so there is no
+  // gate_cmd; the changelog rule lives inside that script, so there is no changelog_path.
+  const view = await registerWorkspace(body.path, body.label, body.version_file);
   return json(view, 201);
 });
 
 // Update a workspace's per-workspace settings. Each field is handled by KEY PRESENCE
 // so updating one never clobbers another (a string sets it, "" disables it for this
 // workspace, null CLEARS the override → inherit the global default):
-//  - `gate_cmd`: the build/test gate command both the CI gate and the post-merge
-//    verify gate run for this workspace (default config.verifyCmd).
 //  - `version_file`: the version file butchr patch-bumps at merge (default
 //    config.versionFile — EMPTY/off; version bumping is opt-in per workspace).
-//  - `changelog_path`: the file the changelog CI gate requires a code change to update
-//    (default config.changelogPath — EMPTY/off; the gate is opt-in per workspace).
 //  - `cto_enabled`: the per-workspace CTO-agent enable (boot auto-start + supervision)
 //    — true/false forces it on/off; null CLEARS the override → inherit the global
 //    default config.ctoAgentEnabled.
 //  - `release_mode`: the per-workspace VERSIONED-RELEASES mode (true/false; null = off) —
-//    when on, every merge bumps the version + stamps the changelog with a versioned heading
-//    and the changelog gate is strict. See workspaces.setWorkspaceReleaseMode.
+//    when on, every merge bumps the version + stamps the changelog with a versioned heading.
+//    See workspaces.setWorkspaceReleaseMode.
 //  - `branch_isolation`: the per-workspace 3-LEVEL BRANCH-ISOLATION guard (true/false; null
 //    = off) — when on, stories OPENED afterward are isolated (own branch; subtasks merge into
 //    the story branch; re-gate + merge to the default branch on completion). Already-open
 //    stories keep their captured isolated bit (§11.8). See workspaces.setWorkspaceBranchIsolation.
-// A bare PATCH (no recognized key) clears the gate command, preserving the legacy
-// contract. 404 if the workspace is gone. Publishes `workspace.updated`.
+// The gate is now the repo's own `./scripts/ci` (butchr carries zero gate config), so there
+// is no gate_cmd / changelog_path to set here. A bare PATCH (no recognized key) is a no-op
+// that just returns the current view. 404 if the workspace is gone. Publishes
+// `workspace.updated` for any field that changed.
 route("PATCH", "/api/workspaces/:id", async (req, p) => {
   const body = await readJson(req);
   let view;
   if ("cto_enabled" in body) view = await setWorkspaceCtoEnabled(p.id!, body.cto_enabled);
   if ("version_file" in body) view = updateWorkspaceVersionFile(p.id!, body.version_file);
-  if ("changelog_path" in body) view = updateWorkspaceChangelogPath(p.id!, body.changelog_path);
   if ("release_mode" in body) view = setWorkspaceReleaseMode(p.id!, body.release_mode);
   if ("branch_isolation" in body) view = setWorkspaceBranchIsolation(p.id!, body.branch_isolation);
-  // gate_cmd: set when its key is present, OR when NO other recognized key was sent
-  // (a bare PATCH clears the gate override — the legacy contract).
-  const touchedOther =
-    "cto_enabled" in body || "version_file" in body || "changelog_path" in body ||
-    "release_mode" in body || "branch_isolation" in body;
-  if ("gate_cmd" in body || !touchedOther) {
-    view = updateWorkspaceGateCmd(p.id!, body.gate_cmd ?? null);
-  }
+  // No recognized key → return the current view (a bare PATCH is a harmless no-op now that
+  // the gate carries no config; 404 if the workspace is gone).
+  if (!view) view = workspaceDetail(p.id!);
   return json(view!);
 });
 
@@ -826,7 +813,7 @@ route("POST", "/api/projects/:id/repos", async (req, p) => {
 });
 // Register an EXISTING directory AND nest its repo node under this project ATOMICALLY (story
 // st-6560e4f3 Hierarchical Projects IA / S1) — the "add a workspace to a project" surface. Body
-// `{ path, label?, gate_cmd? }`. REGISTER-EXISTING ONLY: registerWorkspace 400s a non-git path +
+// `{ path, label? }`. REGISTER-EXISTING ONLY: registerWorkspace 400s a non-git path +
 // 409s an already-registered path; there is no git-init / create-new-repo. Pre-guards a non-project
 // id for a side-effect-free 404 (mirrors the /repos guard — a wrong id never provisions then tears
 // down a herdr workspace). registerWorkspaceUnderProject registers + materializes the repo node +
@@ -835,7 +822,7 @@ route("POST", "/api/projects/:id/repos", async (req, p) => {
 route("POST", "/api/projects/:id/workspaces", async (req, p) => {
   const body = await readJson(req);
   if (!getProject(p.id!)) throw new HttpError(404, `project not found: ${p.id}`);
-  const view = await registerWorkspaceUnderProject(p.id!, body.path, body.label, body.gate_cmd);
+  const view = await registerWorkspaceUnderProject(p.id!, body.path, body.label);
   return json(view, 201);
 });
 // The repos registered under this project (its members). 404 if the project is gone.

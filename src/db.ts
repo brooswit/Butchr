@@ -419,21 +419,19 @@ function ensureForwardColumns(): void {
 // physical table name moved.
 
 // PER-WORKSPACE BUILD/TEST GATE COMMAND. The CI gate (pre-merge, in a task's
-// worktree) and the post-merge verify gate (repo root) both need a build/test
-// command to run. butchr manages OTHER projects with no universal build command, so
-// this column lets each registered workspace carry its OWN gate command (e.g. a
-// 'sandbox' repo defines its own build/test), threaded into both gates. Semantics:
-// NULL means "use the default" (`config.verifyCmd`, which is EMPTY by default — i.e.
-// no gate — and is set globally via BUTCHR_VERIFY_CMD); a non-null value (including
-// the empty string, which DISABLES the gate for that workspace) is used verbatim.
-// Resolved by workspaces.workspaceGateCmd and run via `bash -lc` in the relevant
-// cwd. Settable at register time and updatable via PATCH /api/workspaces/:id.
+// INERT (retained, no longer read or written). The gate is now the repo's own
+// executable `./scripts/ci` — butchr carries ZERO gate configuration and execs one
+// known path (see src/gate.ts runScriptsCi), so there is no per-workspace gate command.
+// This column is kept (not dropped) so the directory→workspaces view/trigger passthrough
+// stays byte-identical; a physical DROP is a separate careful cleanup (a DROP COLUMN
+// migration would run during a dev `bun test` against the LIVE dev DB). New registers
+// leave it NULL; nothing reads it.
 ensureColumn("directory", "gate_cmd", "TEXT");
 
 // PER-WORKSPACE OPTIONAL VERSION FILE. butchr no longer ASSUMES every repo carries a
 // version file — auto-patch-bumping at merge is opt-in. This column is the relative
 // path of the version file butchr patch-bumps on a successful merge (e.g.
-// `package.json`). Semantics mirror gate_cmd: NULL means "use the GLOBAL default"
+// `package.json`). Semantics: NULL means "use the GLOBAL default"
 // (`config.versionFile`, itself EMPTY by default — i.e. OFF — settable via
 // BUTCHR_VERSION_FILE); a non-null value (incl. the empty string, which DISABLES the
 // bump for that workspace) is used verbatim. Resolved by workspaces.workspaceVersionFile;
@@ -441,15 +439,14 @@ ensureColumn("directory", "gate_cmd", "TEXT");
 // semver version field). Settable at register time + via PATCH /api/workspaces/:id.
 ensureColumn("directory", "version_file", "TEXT");
 
-// PER-WORKSPACE OPTIONAL CHANGELOG-GATE PATH. butchr no longer WRITES the changelog at
-// merge — the task/agent owns its entry and the CI gate VERIFIES one was added. This
-// column is the relative path of the changelog file that gate checks (e.g.
-// `CHANGELOG.md`). Semantics mirror gate_cmd: NULL means "use the GLOBAL default"
-// (`config.changelogPath`, itself EMPTY by default — i.e. the gate is OFF — settable
-// via BUTCHR_CHANGELOG_PATH); a non-null value (incl. the empty string, which DISABLES
-// the gate for that workspace) is used verbatim. Resolved by
-// workspaces.workspaceChangelogPath; enforced in tasks.triggerCi via
-// changelog.checkChangelogUpdated. Settable at register time + via PATCH /api/workspaces/:id.
+// PER-WORKSPACE OPTIONAL CHANGELOG PATH (READ-ONLY-INERT). The changelog-UPDATE RULE
+// moved into the repo's own `./scripts/ci` gate (butchr carries zero gate config), so
+// this is NO LONGER a gate setting and has NO setter / register param. It survives as a
+// READ ONLY for `release_mode`'s merge-time release stamp: the relative path
+// promoteUnreleased promotes `## [Unreleased]` into a versioned heading in (e.g.
+// `CHANGELOG.md`). NULL means "use the GLOBAL default" (`config.changelogPath`, EMPTY by
+// default, settable via BUTCHR_CHANGELOG_PATH). Resolved by workspaces.workspaceChangelogPath;
+// consumed by git.merge / rebaseOntoDefault. New registers leave it NULL.
 ensureColumn("directory", "changelog_path", "TEXT");
 
 // PER-WORKSPACE CTO-AGENT ENABLE. The managed CTO agent is now ONE PER WORKSPACE (it
@@ -1778,18 +1775,17 @@ export type WorkspaceRow = {
   label: string | null;
   herdr_workspace: string | null;
   herdr_pane: string | null;
-  // Per-workspace build/test gate command (see the ensureColumn above). NULL = use
-  // the default (config.verifyCmd); a non-null value (incl. "" to disable) is used
-  // verbatim by both the CI gate and the post-merge verify gate for this workspace.
+  // INERT (see the gate_cmd ensureColumn above) — the gate is the repo's own
+  // `./scripts/ci`; nothing reads or writes this column. Retained for view/trigger parity.
   gate_cmd: string | null;
   // Per-workspace OPTIONAL version file (see the version_file ensureColumn above). NULL
   // = inherit the global default (config.versionFile, EMPTY/off by default); "" disables
   // the merge-time version bump for this workspace; a path is patch-bumped at merge.
   version_file: string | null;
-  // Per-workspace OPTIONAL changelog-gate path (see the changelog_path ensureColumn
-  // above). NULL = inherit the global default (config.changelogPath, EMPTY/off by
-  // default); "" disables the changelog gate for this workspace; a path is the file the
-  // CI gate requires a code change to update.
+  // Per-workspace OPTIONAL changelog path (see the changelog_path ensureColumn above),
+  // READ-ONLY-INERT: no setter / register param. NULL = inherit the global default
+  // (config.changelogPath, EMPTY/off by default). Read ONLY by release_mode's merge-time
+  // release stamp (promoteUnreleased); resolved by workspaces.workspaceChangelogPath.
   changelog_path: string | null;
   // Per-workspace CTO-agent enable (see the cto_enabled ensureColumn above). NULL =
   // inherit the global default config.ctoAgentEnabled; 1 = on; 0 = off. Resolved by

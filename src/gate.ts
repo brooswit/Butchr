@@ -8,6 +8,8 @@
 // had retries but no timeout, verify had a timeout but no retry). The
 // genuinely-different layers — CI's build-vs-test badge parsing + flaky retry,
 // verify's skip-on-empty + revert decision — sit on top in tasks.ts / verify.ts.
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { run } from "./exec.ts";
@@ -20,6 +22,8 @@ export type GateResult = {
   output: string;
   /** true when the run was killed by its timeout bound (always RED). */
   timedOut: boolean;
+  /** true when the gate was SKIPPED (no `scripts/ci` present) — treated as OK (gate OFF). */
+  skipped?: boolean;
 };
 
 /**
@@ -32,12 +36,42 @@ export type GateResult = {
  */
 export async function runGate(
   cmd: string[],
-  opts: { cwd: string; timeoutMs?: number },
+  opts: { cwd: string; timeoutMs?: number; env?: Record<string, string> },
 ): Promise<GateResult> {
   const timeoutMs = Math.max(1, opts.timeoutMs ?? config.verifyTimeoutMs);
-  const res = await run(cmd, { cwd: opts.cwd, timeoutMs });
+  const res = await run(cmd, { cwd: opts.cwd, timeoutMs, env: opts.env });
   const output = [res.stdout, res.stderr].filter(Boolean).join("\n").trim();
   return { ok: res.ok, output, timedOut: res.timedOut === true };
+}
+
+/**
+ * THE gate: run the repo's own `./scripts/ci` in `cwd` — the SINGLE convention butchr
+ * gates on, with ZERO gate configuration. The repo owns what CI means (build + test +
+ * changelog) inside that one executable script; butchr just execs the known path.
+ *
+ *  - If `<cwd>/scripts/ci` does NOT exist → the gate is OFF: return
+ *    `{ ok:true, output:"", timedOut:false, skipped:true }` (a repo with no CI still
+ *    works — mirrors the historical empty-command = no-gate default). NOT a hard fail.
+ *  - If it exists → run it via the shared bounded gate runner (`runGate`), honoring
+ *    `config.verifyTimeoutMs` (through `runGate`'s default) and any caller `timeoutMs`.
+ *    `opts.env` is threaded to the child (both gates set `BUTCHR_BASE_REF` so scripts/ci's
+ *    changelog diff matches butchr and GitHub). A PRESENT-but-NON-EXECUTABLE script is
+ *    deliberately NOT special-cased: the spawn fails → `ok:false` → RED (a loud misconfig
+ *    signal). The gate-liveness / settle / restart-recovery wrappers are UNCHANGED — they
+ *    wrap the RUN, not the command string.
+ */
+export async function runScriptsCi(
+  cwd: string,
+  opts: { timeoutMs?: number; env?: Record<string, string> } = {},
+): Promise<GateResult> {
+  if (!existsSync(join(cwd, "scripts/ci"))) {
+    return { ok: true, output: "", timedOut: false, skipped: true };
+  }
+  return runGate(["./scripts/ci"], {
+    cwd,
+    timeoutMs: opts.timeoutMs,
+    env: opts.env,
+  });
 }
 
 // === IN-PROCESS GATE LIVENESS ==============================================

@@ -69,7 +69,8 @@ beforeAll(async () => {
     .run(WS_ID, REPO_ROOT, "test", dbMod.nowIso());
   // The net's changelog path is the workspace's configured changelog (finalizeMerge passes
   // workspaceChangelogPath into git.merge unconditionally).
-  wsMod.updateWorkspaceChangelogPath(WS_ID, "CHANGELOG.md");
+  // changelog_path is READ-ONLY-INERT (no setter) but still read by the release stamp — set the column directly.
+  dbMod.db.query(`UPDATE directory SET changelog_path=? WHERE id=?`).run("CHANGELOG.md", WS_ID);
 });
 
 afterEach(() => {

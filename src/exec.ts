@@ -154,6 +154,13 @@ export type ExecOpts = {
    * unbounded. Mainly an override seam for tests; normal callers omit it.
    */
   maxOutputBytes?: number;
+  /**
+   * Optional environment overlay merged ON TOP of the current `process.env` for the
+   * spawned child (e.g. `BUTCHR_BASE_REF` for the scripts/ci gate). Omitted → the
+   * child inherits the parent env unchanged (Bun's default), so existing callers are
+   * byte-for-byte unaffected.
+   */
+  env?: Record<string, string>;
 };
 
 /**
@@ -175,11 +182,25 @@ export async function run(
   cmd: string[],
   opts: ExecOpts = {},
 ): Promise<ExecResult> {
-  const proc = Bun.spawn(cmd, {
-    cwd: opts.cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  // A SPAWN FAILURE (e.g. the binary is missing, or `./scripts/ci` exists but is
+  // NON-EXECUTABLE → EACCES) is reported as a non-zero result rather than thrown, so a
+  // gate treats it as RED (a loud misconfig signal) — fulfilling runGate's documented
+  // "a spawn failure comes back as ok:false" contract. Only the spawn itself is guarded;
+  // once the child is live, the collect/await path below is unchanged.
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(cmd, {
+      cwd: opts.cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      // Overlay the caller's env on top of the inherited process.env (undefined → the
+      // parent env unchanged, Bun's default), so a gate can pass e.g. BUTCHR_BASE_REF.
+      env: opts.env ? { ...process.env, ...opts.env } : undefined,
+    });
+  } catch (e) {
+    const msg = (e as Error).message || String(e);
+    return { code: 127, stdout: "", stderr: `[exec] spawn failed: ${msg}`, ok: false };
+  }
 
   // Optional bound: a positive timeoutMs arms a kill-timer so a hung subprocess
   // can't wait forever. With no timeout the timer is never created, so the

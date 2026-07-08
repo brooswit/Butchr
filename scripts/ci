@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# build + test (byte-exact replica of the retired gate_cmd)
+bun build src/index.ts --target bun --outfile /dev/null
+bun test ./test
+# changelog rule: a CODE change must update CHANGELOG.md (docs-only diffs EXEMPT)
+BASE="${BUTCHR_BASE_REF:-}"
+if [ -z "$BASE" ]; then BASE="origin/main"; fi
+if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then BASE="main"; fi
+FILES="$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)"
+if [ -n "$FILES" ]; then
+  NONDOCS="$(printf '%s\n' "$FILES" | grep -viE '(\.(md|mdx|txt)$|^docs/)' || true)"
+  if [ -n "$NONDOCS" ] && ! printf '%s\n' "$FILES" | grep -qx 'CHANGELOG.md'; then
+    echo "CHANGELOG.md not updated — a code change must add a changelog entry" >&2
+    exit 1
+  fi
+fi

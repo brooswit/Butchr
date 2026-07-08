@@ -132,9 +132,9 @@ describe("maybeAutoMerge stale-green guard", () => {
   test("a green bound to a STALE tip is NOT auto-merged (main is untouched)", async () => {
     configMod.config.autoMergeEnabled = true;
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));
-    // A gate command that's harmless + RED so the guard's re-run can't go on to merge in the
-    // background — keeps the assertion deterministic (the stale green itself must not merge).
-    wsMod.updateWorkspaceGateCmd(WS_ID, "false");
+    // A RED CI runner so the guard's re-run can't go on to merge in the background — keeps
+    // the assertion deterministic (the stale green itself must not merge).
+    tasksMod.setCiRunner(async () => ({ status: "fail", label: "gate failed", detail: "" }));
 
     const { id } = await seedReviewTask("stale.ts");
     // Mark green, but bound to a tip that is NOT the current HEAD.
@@ -148,7 +148,7 @@ describe("maybeAutoMerge stale-green guard", () => {
     expect(merged).toBe(false); // refused — the green is for a different tip
     expect(g(["rev-parse", "HEAD"])).toBe(mainBefore); // main never advanced
     expect(dbRow(id).status).toBe("in_review");
-    wsMod.updateWorkspaceGateCmd(WS_ID, null);
+    tasksMod.setCiRunner();
   });
 });
 

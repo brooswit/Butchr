@@ -17,6 +17,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **SIMPLIFY: `./scripts/ci` is now the SOLE gate — butchr carries ZERO gate configuration.**
+  Both the review-time CI gate (`tasks.triggerCi`, run in the task worktree) and the
+  post-merge verify gate (`verify.verifyDefaultBranch`, run in the repo root) now exec the
+  repo's own executable `./scripts/ci` via the new `gate.runScriptsCi`. The repo owns what
+  CI means (build + test + changelog) inside that one script; butchr execs one known path.
+  A repo with no `./scripts/ci` is un-gated (skipped → pass, mirroring the old empty-command
+  default); a present-but-non-executable script fails the spawn → RED (a loud misconfig signal).
+- The merge base is exposed to `./scripts/ci` via the `BUTCHR_BASE_REF` env var — the resolved
+  merge base (story branch for an isolated member, else the default-branch tip) at the review
+  gate, and `HEAD` at the post-merge re-gate (so its changelog diff is empty → exempt; the
+  changelog was already enforced at review). `ExecOpts`/`runGate` gained an `env` option; a
+  spawn failure in `exec.run` is now reported as `ok:false` (fulfilling `runGate`'s documented
+  contract) rather than thrown.
+- **Removed `gate_cmd` config end-to-end** — `workspaces.workspaceGateCmd` /
+  `updateWorkspaceGateCmd`, `config.verifyCmd` (`BUTCHR_VERIFY_CMD`), the register/PATCH
+  `gate_cmd` handling, the dashboard `gate_cmd`/`effective_gate_cmd` fields, and the webapp
+  gate-command panel/editor are all gone. `config.verifyTimeoutMs` (the shared kill-timer) stays.
+- **Removed butchr's built-in changelog CHECK** — `changelog.checkChangelogUpdated` and the
+  `triggerCi` / `taskReadiness` / `gatesView` / `gatesGreen` changelog gate wiring are deleted;
+  the changelog rule (a code change must update `CHANGELOG.md`; docs-only diffs EXEMPT) now
+  lives inside `./scripts/ci`. `release_mode`'s merge-time version bump + changelog release
+  stamp are UNCHANGED.
+- The `gate_cmd` and `changelog_path` DB columns are kept but INERT (no physical `DROP` — a
+  drop migration would run against the live dev DB during a dev test run). `gate_cmd` is no
+  longer read or written; `changelog_path` is read-only-inert (no setter / register param) —
+  still read ONLY by `release_mode`'s release stamp (`promoteUnreleased`).
+  > **Flagged for review:** the `./scripts/ci` changelog rule is implemented **docs-only-EXEMPT**
+  > per the CEO amendment. This LOOSENS this repo's current `release_mode=strict` rule (today an
+  > entry is required on EVERY non-empty diff, including docs-only). If strict is preferred, drop
+  > the docs-only exemption in `scripts/ci` only.
+
 ## [0.9.239] - 2026-07-08
 
 ### Performance

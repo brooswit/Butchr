@@ -17,7 +17,7 @@
 //      written back onto a task that left `review` while CI was running.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -346,74 +346,43 @@ describe("flaky-CI retry (config.ciRetries, default 1)", () => {
   });
 });
 
-// CHANGELOG-UPDATE GATE: an opt-in gate concern layered ON TOP of the build/test
-// command. When the workspace configures a changelog path, a code (non-docs) change
-// whose diff didn't touch that file FAILS the CI gate — enforcing that the task owns
-// its changelog entry now that butchr no longer writes one. These need REAL git
-// worktrees (the gate reads the task's diff via git.diffStat), so they create tasks
-// through tasksMod.createTask rather than the bare-row `seed` helper above. The
-// build/test runner is faked GREEN so the changelog gate is the only failing signal.
-describe("changelog-update gate (config-driven, opt-in)", () => {
-  /** Create a real task + worktree, commit the given files (path→content), and move
-   * it to in_review so triggerCi runs + writes back. */
-  async function seedRealTask(
-    id_label: string,
-    files: Record<string, string>,
-  ): Promise<string> {
-    const view = await tasksMod.createTask(DIR_ID, `Work ${id_label}`);
+// NOTE: the changelog-update RULE is no longer a butchr gate — it moved INTO the repo's
+// own `./scripts/ci` (the sole gate; butchr carries zero gate config). The former
+// "changelog-update gate" describe block was deleted here; the rule is now covered by the
+// repo's scripts/ci itself, and gate.runScriptsCi is unit-tested in gate-command.test.ts.
+
+// The REAL default CI runner (no setCiRunner stub): it execs the repo's own `./scripts/ci`
+// in the task worktree, resolving the task's merge base ITSELF and threading it as
+// BUTCHR_BASE_REF. This exercises that end-to-end against a real git repo + worktree.
+describe("defaultCiRunner runs ./scripts/ci with BUTCHR_BASE_REF (real gate)", () => {
+  test("resolves the merge base and threads it as BUTCHR_BASE_REF; a green scripts/ci passes", async () => {
+    tasksMod.setCiRunner(); // REAL runner (no stub)
+    const view = await tasksMod.createTask(DIR_ID, "Work base-thread");
     const id = view.id;
     const wt = join(REPO_ROOT, id);
-    const wg = (args: string[]) =>
-      execFileSync("git", ["-C", wt, ...args], { stdio: "ignore" });
-    for (const [rel, content] of Object.entries(files)) {
-      const abs = join(wt, rel);
-      mkdirSync(dirname(abs), { recursive: true });
-      writeFileSync(abs, content);
-    }
-    wg(["add", "-A"]);
-    wg(["commit", "-q", "-m", `work ${id_label}`]);
+    // A scripts/ci that records the base it was handed, then exits green.
+    mkdirSync(join(wt, "scripts"), { recursive: true });
+    const capture = join(wt, "base.txt");
+    writeFileSync(
+      join(wt, "scripts", "ci"),
+      `#!/usr/bin/env bash\nprintf '%s' "$BUTCHR_BASE_REF" > ${capture}\nexit 0\n`,
+    );
+    chmodSync(join(wt, "scripts", "ci"), 0o755);
+    execFileSync("git", ["-C", wt, "add", "-A"], { stdio: "ignore" });
+    execFileSync("git", ["-C", wt, "commit", "-q", "-m", "add scripts/ci"], { stdio: "ignore" });
     dbMod.db.query(`UPDATE tasks SET status='in_review' WHERE id=?`).run(id);
     taskmdMod.updateTaskMdStatus(REPO_ROOT, id, "in_review");
-    return id;
-  }
 
-  beforeAll(() => {
-    // Build/test always green so only the changelog gate can fail.
-    tasksMod.setCiRunner(async () => ({ status: "pass", label: "gate passed", detail: "" }));
-    wsMod.updateWorkspaceChangelogPath(DIR_ID, "CHANGELOG.md");
-  });
-  afterAll(() => {
-    wsMod.updateWorkspaceChangelogPath(DIR_ID, null); // clear the override
-  });
-
-  test("a code change WITHOUT a changelog update FAILS the gate", async () => {
-    const id = await seedRealTask("no-changelog", { "src/feature.ts": "export const a = 1;\n" });
     await tasksMod.triggerCi(id);
-    const r = row(id);
-    expect(r.ci_status).toBe("fail");
-    expect(r.ci_summary.split("\n")[0]).toBe("changelog not updated");
-  });
 
-  test("a code change WITH a changelog update PASSES the gate", async () => {
-    const id = await seedRealTask("with-changelog", {
-      "src/feature.ts": "export const b = 2;\n",
-      "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n- did a thing\n",
-    });
-    await tasksMod.triggerCi(id);
+    // The default branch resolveBase hands to scripts/ci is REPO_ROOT's current branch.
+    const expectedBase = execFileSync(
+      "git",
+      ["-C", REPO_ROOT, "symbolic-ref", "--short", "HEAD"],
+      { encoding: "utf8" },
+    ).trim();
     expect(row(id).ci_status).toBe("pass");
-  });
-
-  test("a docs-only change is exempt (passes without a changelog entry)", async () => {
-    const id = await seedRealTask("docs-only", { "README.md": "# updated docs\n" });
-    await tasksMod.triggerCi(id);
-    expect(row(id).ci_status).toBe("pass");
-  });
-
-  test("with the gate disabled (path cleared), a code-only change passes", async () => {
-    wsMod.updateWorkspaceChangelogPath(DIR_ID, ""); // disable for this workspace
-    const id = await seedRealTask("gate-off", { "src/feature.ts": "export const c = 3;\n" });
-    await tasksMod.triggerCi(id);
-    expect(row(id).ci_status).toBe("pass");
-    wsMod.updateWorkspaceChangelogPath(DIR_ID, "CHANGELOG.md"); // restore
+    expect(readFileSync(capture, "utf8")).toBe(expectedBase);
+    tasksMod.setCiRunner();
   });
 });

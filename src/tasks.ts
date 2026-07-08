@@ -1,6 +1,5 @@
 // Task service: create / list / get / diff / approve / reject. The task.md on
 // disk is authoritative for prompt+metadata; the DB row tracks runtime state.
-import { checkChangelogUpdated } from "./changelog.ts";
 import type { VersionBumpLevel } from "./changelog.ts";
 import { config } from "./config.ts";
 import { conformanceGateInFlight, triggerConformance } from "./conformance.ts";
@@ -40,7 +39,6 @@ import {
   listWorkspaces,
   workspaceBranchIsolation,
   workspaceChangelogPath,
-  workspaceGateCmd,
   workspaceReleaseMode,
   workspaceVersionFile,
 } from "./workspaces.ts";
@@ -49,7 +47,7 @@ import { sleep } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
 import { publish } from "./events.ts";
-import { makeGateLiveness, runGate, settleGate } from "./gate.ts";
+import { makeGateLiveness, runScriptsCi, settleGate } from "./gate.ts";
 import * as git from "./git.ts";
 import * as herdr from "./herdr.ts";
 import { uniqueTaskId } from "./ids.ts";
@@ -175,43 +173,22 @@ export function livenessView(row: TaskRow): Liveness | null {
 /**
  * The structured GATES block on a task view (see TaskView.gates). `ci` / `conformance`
  * mirror the row's stored gate columns (status: 'running'|'pass'|'fail' for CI,
- * 'checking'|'pass'|'concern' for conformance, or null when the gate never ran /
- * is disabled; `tip` is the branch sha the gate ran against). `changelog` reports the
- * gate's CONFIGURATION for this workspace, NOT a per-diff verdict (which needs git):
- *   - `off`    — no changelog path configured for the workspace (gate disabled).
- *   - `on`     — a code change must update the changelog (docs-only diffs exempt).
- *   - `strict` — release_mode: EVERY non-empty diff must update the changelog.
+ * 'checking'|'pass'|'concern' for conformance, or null when the gate never ran / is
+ * disabled; `tip` is the branch sha the gate ran against). The CI gate is now the repo's
+ * own `./scripts/ci` — which owns the changelog rule internally — so there is no separate
+ * butchr changelog gate to report here.
  */
 export type TaskGates = {
   ci: { status: string | null; summary: string | null; tip: string | null };
   conformance: { status: string | null; summary: string | null; tip: string | null };
-  changelog: { status: "off" | "on" | "strict"; detail: string };
 };
 
 /**
- * Build a task's structured GATES block from its already-stored columns + the
- * workspace's gate configuration. PURE — no git/fs I/O — so it is safe to call inside
- * the synchronous, hot taskView / taskListView path. The changelog sub-block is
- * config-derived (off/on/strict) because the actual pass/fail of a changelog gate is
- * folded into the CI gate (tasks.triggerCi) and a per-diff verdict needs the live file
- * list (computed by taskReadiness instead).
+ * Build a task's structured GATES block from its already-stored columns. PURE — no
+ * git/fs I/O — so it is safe to call inside the synchronous, hot taskView /
+ * taskListView path.
  */
 export function gatesView(row: TaskRow): TaskGates {
-  const clogPath = workspaceChangelogPath(row.workspace_id).trim();
-  let changelog: TaskGates["changelog"];
-  if (!clogPath) {
-    changelog = { status: "off", detail: "changelog gate disabled (no path configured)" };
-  } else if (workspaceReleaseMode(row.workspace_id)) {
-    changelog = {
-      status: "strict",
-      detail: `release_mode: every non-empty diff must update ${clogPath} (enforced by the CI gate)`,
-    };
-  } else {
-    changelog = {
-      status: "on",
-      detail: `a code change must update ${clogPath} (enforced by the CI gate; docs-only diffs exempt)`,
-    };
-  }
   return {
     ci: { status: row.ci_status, summary: row.ci_summary, tip: row.ci_tip },
     conformance: {
@@ -219,7 +196,6 @@ export function gatesView(row: TaskRow): TaskGates {
       summary: row.conformance_summary,
       tip: row.conformance_tip,
     },
-    changelog,
   };
 }
 
@@ -1254,15 +1230,15 @@ export function leaderStoryAwaitsCompletion(row: WorkspaceAgentRow): boolean {
  * flight:
  *   - CI:          'pass' or null (disabled / never ran) → green; 'fail' / 'running' → red.
  *   - conformance: 'pass' or null (disabled / never ran) → green; 'concern' / 'checking' → red.
- *   - changelog:   the caller's precomputed checkChangelogUpdated().ok (true when the gate
- *                  is disabled, the diff is exempt, or the changelog was updated).
- * Pure (no I/O) so it is unit-testable against a synthetic row + boolean. The conformance
- * 'concern' verdict is deliberately NOT green — only a clean pass counts.
+ * Pure (no I/O) so it is unit-testable against a synthetic row. The conformance 'concern'
+ * verdict is deliberately NOT green — only a clean pass counts. The changelog rule now
+ * lives INSIDE the repo's `./scripts/ci` (folded into the CI gate), so it no longer needs
+ * a separate signal here.
  */
-export function gatesGreen(row: TaskRow, changelogOk: boolean): boolean {
+export function gatesGreen(row: TaskRow): boolean {
   const ciGreen = row.ci_status === null || row.ci_status === "pass";
   const confGreen = row.conformance_status === null || row.conformance_status === "pass";
-  return ciGreen && confGreen && changelogOk;
+  return ciGreen && confGreen;
 }
 
 /** The mergeability snapshot GET /api/tasks/:id/readiness returns. */
@@ -1284,9 +1260,10 @@ export type TaskReadiness = {
 /**
  * GET /api/tasks/:id/readiness — the merge-readiness snapshot, replacing manual
  * merge-base / rev-list / diff. Computes the branch's position vs the default tip
- * (onTip / behindBy), its changed files, whether every gate is green (running the PURE
- * changelog check against the live diff), and which changed files fall outside the
- * auto-merge allowlist. 404 if the task or its workspace is gone.
+ * (onTip / behindBy), its changed files, whether every gate is green (the stored CI +
+ * conformance columns — the changelog rule is folded into the CI gate's scripts/ci), and
+ * which changed files fall outside the auto-merge allowlist. 404 if the task or its
+ * workspace is gone.
  */
 export async function taskReadiness(id: string): Promise<TaskReadiness> {
   const row = getTask(id);
@@ -1300,18 +1277,11 @@ export async function taskReadiness(id: string): Promise<TaskReadiness> {
   const behindBy = await git.commitsBehind(dir.path, id, base);
   const { files: changedFiles } = await git.diffStat(dir.path, id, base);
 
-  const changelogPath = workspaceChangelogPath(row.workspace_id).trim();
-  const changelogOk = changelogPath
-    ? checkChangelogUpdated(changedFiles, changelogPath, {
-        strict: workspaceReleaseMode(row.workspace_id),
-      }).ok
-    : true;
-
   return {
     onTip: behindBy === 0,
     behindBy,
     changedFiles,
-    gatesGreen: gatesGreen(row, changelogOk),
+    gatesGreen: gatesGreen(row),
     outsideAutoMergeAllowlist: changedFiles.filter(
       (f) => !fileAllowed(f, config.autoMergeAllowlist),
     ),
@@ -1628,7 +1598,6 @@ export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome>
   if (!dir) throw new HttpError(404, "workspace not found");
 
   const workBranch = git.workBranchName(workId);
-  const gateCmd = workspaceGateCmd(dir.id);
   // REVAMP-4 S1: a repo-node parent is the top boundary, so isTopLevelWork (parent NULL OR repo)
   // is the correct top-level test — a top-level node's branch is fully merged into the default
   // branch and removed, exactly as when its parent_id was NULL.
@@ -1642,7 +1611,7 @@ export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome>
     // 2. RE-GATE the assembled node branch IN the node worktree (its tip) via verifyDefaultBranch
     //    — the SAME verify-runner path mergeStoryBranch uses. RED is a HARD BLOCK: the merge does
     //    not run and the parent is never touched.
-    const regate = await verifyDefaultBranch(nodeWt, gateCmd);
+    const regate = await verifyDefaultBranch(nodeWt);
     if (!regate.ok) {
       return { kind: "gateRed", output: regate.output?.trim() || "(no gate output captured)" };
     }
@@ -1665,7 +1634,7 @@ export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome>
 
     // 4. POST-MERGE VERIFY on the parent worktree (the final backstop). RED ⇒ reset the parent to
     //    its captured pre-merge tip so a broken commit never sits on it.
-    const postVerify = await verifyDefaultBranch(mctx.ffWorktree, gateCmd);
+    const postVerify = await verifyDefaultBranch(mctx.ffWorktree);
     if (!postVerify.ok) {
       if (parentPriorTip) {
         await git.resetHard(mctx.ffWorktree, parentPriorTip).catch((e) => {
@@ -3332,15 +3301,14 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
       //     so a silent 3-way auto-resolve of newer base content can't slip a broken build in).
       onRebased: async (rebaseDir) => {
         await invalidateStaleGates(id);
-        return verifyDefaultBranch(rebaseDir, workspaceGateCmd(dir.id));
+        return verifyDefaultBranch(rebaseDir);
       },
     });
     if (!mr.ok) return { mr, behind };
     // Merge stuck (ff'd into the ff-target branch). Gate the new tip in the ff-target
-    // worktree (the story worktree for an isolated member, else the repo root): the
-    // workspace's build/test gate command must be GREEN (its own gate_cmd, or the default
-    // config.verifyCmd).
-    const verify = await verifyDefaultBranch(mctx.ffWorktree, workspaceGateCmd(dir.id));
+    // worktree (the story worktree for an isolated member, else the repo root): the repo's
+    // own `./scripts/ci` must be GREEN (a repo with no scripts/ci is un-gated).
+    const verify = await verifyDefaultBranch(mctx.ffWorktree);
     if (verify.ok) return { mr, verify };
     // RED — undo the ff so a broken commit never sits on the ff-target branch. Reset the
     // ff-target worktree (story worktree for an isolated member, else the repo root) to the
@@ -4017,7 +3985,6 @@ export async function mergeStoryBranch(storyId: string): Promise<StoryMergeOutco
   if (!dir) throw new HttpError(404, "workspace not found");
 
   const storyBranch = git.storyBranchName(storyId);
-  const gateCmd = workspaceGateCmd(dir.id);
 
   return runExclusiveMerge<StoryMergeOutcome>(async () => {
     // 1. Ensure the story branch + worktree (checked out at the story tip). Idempotent +
@@ -4026,7 +3993,7 @@ export async function mergeStoryBranch(storyId: string): Promise<StoryMergeOutco
 
     // 2. RE-GATE the assembled story branch IN the story worktree (its tip). RED is a HARD
     //    BLOCK: the merge does not run and main is never touched (§11.5 refinement #1).
-    const regate = await verifyDefaultBranch(storyWt, gateCmd);
+    const regate = await verifyDefaultBranch(storyWt);
     if (!regate.ok) {
       return { kind: "gateRed", output: regate.output?.trim() || "(no gate output captured)" };
     }
@@ -4047,7 +4014,7 @@ export async function mergeStoryBranch(storyId: string): Promise<StoryMergeOutco
 
     // 4. POST-MERGE VERIFY on main at the repo root (the final backstop). RED ⇒ reset main to
     //    its captured pre-merge tip so a broken commit never sits on main (§11.5).
-    const postVerify = await verifyDefaultBranch(dir.path, gateCmd);
+    const postVerify = await verifyDefaultBranch(dir.path);
     if (!postVerify.ok) {
       if (mainPriorTip) {
         await git.resetHard(dir.path, mainPriorTip).catch((e) => {
@@ -4578,18 +4545,20 @@ export type CiResult = {
 };
 
 /**
- * Signature of the function that actually runs the build/test gate for a task's
- * worktree. `gateCmd` is the workspace's EFFECTIVE gate command (its own `gate_cmd`
- * or the default — resolved by triggerCi via workspaces.workspaceGateCmd).
+ * Signature of the function that actually runs the CI gate for a task's worktree. The
+ * gate is the repo's own `./scripts/ci`. The default runner resolves the merge base
+ * itself (see defaultCiRunner) and exposes it to the script as BUTCHR_BASE_REF; an
+ * injected (test) runner is invoked with no extra args, so it stays triggerCi's FIRST
+ * await (the fire-and-forget trigger path relies on the runner being called synchronously).
  */
-export type CiRunner = (dirPath: string, taskId: string, gateCmd: string) => Promise<CiResult>;
+export type CiRunner = (dirPath: string, taskId: string) => Promise<CiResult>;
 
 // The active CI runner. Overridable in tests (setCiRunner) so they can exercise
 // the persistence + trigger wiring without spawning a real `bun` build/test.
 let ciRunner: CiRunner = defaultCiRunner;
 
 // Liveness for the CI gate: which task ids have a CI gate RUNNING in THIS butchr process
-// right now. The gate runs in-process (triggerCi awaits runGate), so a butchr restart
+// right now. The gate runs in-process (triggerCi awaits runScriptsCi), so a butchr restart
 // kills it AND empties this set — which is exactly what makes a DB ci_status='running'
 // with no entry here PROVABLY stale (its build/test subprocess died with the process).
 // recoverStuckGates keys off this to re-trigger only genuinely-dead gates, never one still
@@ -4617,22 +4586,23 @@ function ciTail(s: string): string {
 }
 
 /**
- * The real CI runner: run the workspace's EFFECTIVE gate command (`gateCmd` — its
- * own `gate_cmd` or the global default `config.verifyCmd`, which is EMPTY unless set
- * via BUTCHR_VERIFY_CMD) as a single `bash -lc` invocation IN THE TASK'S
- * WORKTREE, through the shared gate runner (src/gate.ts) so the CI gate and the
- * post-merge verify gate share one bounded spawn — the CI gate inherits the same
- * `config.verifyTimeoutMs` kill-timer. A non-zero exit (or a timeout) is a FAIL with
- * the output tail; an empty gate command means "no gate configured" → a trivial
- * pass (the workspace opted out, mirroring an empty verify gate). Running the gate
- * as one command (rather than a hardcoded build-then-test split) is what lets each
- * workspace define its own arbitrary build/test command.
+ * The real CI runner: run the repo's own `./scripts/ci` IN THE TASK'S WORKTREE through
+ * the shared gate runner (src/gate.ts) so the CI gate and the post-merge verify gate
+ * share one bounded spawn — the CI gate inherits the same `config.verifyTimeoutMs`
+ * kill-timer. It resolves the task's merge base ITSELF (the STORY branch for an isolated
+ * member, else the default-branch tip — resolveBase) and exposes it as BUTCHR_BASE_REF so
+ * scripts/ci's changelog diff matches butchr + GitHub. Resolving INSIDE the runner (not in
+ * triggerCi) keeps runCiOnce triggerCi's first await, so an injected test runner is still
+ * invoked synchronously. A non-zero exit (or a timeout) is a FAIL with the output tail; NO
+ * scripts/ci present means "no gate configured" → a trivial pass (the repo opted out). The
+ * repo owns what CI means (build + test + changelog) inside that one script — zero config.
  */
-async function defaultCiRunner(dirPath: string, taskId: string, gateCmd: string): Promise<CiResult> {
-  const cmd = gateCmd.trim();
-  if (!cmd) return { status: "pass", label: "no gate configured", detail: "" };
+async function defaultCiRunner(dirPath: string, taskId: string): Promise<CiResult> {
   const wt = git.worktreePath(dirPath, taskId);
-  const gate = await runGate(["bash", "-lc", cmd], { cwd: wt });
+  const row = getTask(taskId);
+  const base = row ? await resolveBase(row) : "HEAD";
+  const gate = await runScriptsCi(wt, { env: { BUTCHR_BASE_REF: base } });
+  if (gate.skipped) return { status: "pass", label: "no gate (scripts/ci absent)", detail: "" };
   if (!gate.ok) {
     return {
       status: "fail",
@@ -4644,9 +4614,9 @@ async function defaultCiRunner(dirPath: string, taskId: string, gateCmd: string)
 }
 
 /** Run the active CI runner once, converting a runner throw into a fail result. */
-async function runCiOnce(dirPath: string, id: string, gateCmd: string): Promise<CiResult> {
+async function runCiOnce(dirPath: string, id: string): Promise<CiResult> {
   try {
-    return await ciRunner(dirPath, id, gateCmd);
+    return await ciRunner(dirPath, id);
   } catch (e) {
     return { status: "fail", label: "CI error", detail: (e as Error).message };
   }
@@ -4684,18 +4654,15 @@ export async function triggerCi(id: string): Promise<void> {
     db.query(`UPDATE tasks SET ci_status='running', ci_summary=NULL WHERE id=?`).run(id);
     emitUpdated(id);
 
-    // Resolve the workspace's effective gate command ONCE for this CI run (own
-    // gate_cmd or the default) and thread it through every (re)run.
-    const gateCmd = workspaceGateCmd(dir.id);
-    // The base the changelog/allowlist GATE diffs measure against (`base...taskId`): the
+    // The base the per-task ALLOWLIST gate diffs measure against (`base...taskId`): the
     // STORY branch for an isolated member, else the default branch (resolveBase →
-    // defaultBranch, so non-isolated is unchanged). Resolved LAZILY + memoized only when a
-    // gate that needs it runs — NEVER before runCiOnce, which must stay the FIRST await so an
-    // injected (test) runner is invoked synchronously. The build/test command itself runs in
-    // the subtask worktree and is base-AGNOSTIC, so runCiOnce is untouched.
+    // defaultBranch, so non-isolated is unchanged). Resolved LAZILY + memoized only when the
+    // allowlist gate that needs it runs — NEVER before runCiOnce, which must stay the FIRST
+    // await so an injected (test) runner is invoked synchronously. The scripts/ci gate runs
+    // in the subtask worktree and resolves its OWN base (defaultCiRunner) for BUTCHR_BASE_REF.
     let gateBase: string | null = null;
     const baseForGate = async (): Promise<string> => (gateBase ??= await resolveBase(row));
-    let result = await runCiOnce(dir.path, id, gateCmd);
+    let result = await runCiOnce(dir.path, id);
     // Retry a FAIL up to `ciRetries` times; a pass on any retry settles 'pass'.
     const retries = Math.max(0, config.ciRetries);
     for (let attempt = 1; attempt <= retries && result.status === "fail"; attempt++) {
@@ -4703,7 +4670,7 @@ export async function triggerCi(id: string): Promise<void> {
         `[butchr] CI gate FAILED for ${id} (${result.label}); ` +
           `retrying (attempt ${attempt}/${retries})`,
       );
-      result = await runCiOnce(dir.path, id, gateCmd);
+      result = await runCiOnce(dir.path, id);
       if (result.status === "pass") {
         console.log(`[butchr] CI gate PASSED for ${id} on retry ${attempt}/${retries}`);
       }
@@ -4715,36 +4682,13 @@ export async function triggerCi(id: string): Promise<void> {
       );
     }
 
-    // CHANGELOG-UPDATE GATE: an additional, opt-in gate concern layered ON TOP of the
-    // build/test command (NOT part of it). When the workspace configures a changelog
-    // path, a code (non-docs) change whose diff didn't touch that file FAILS the gate —
-    // enforcing that the task owns its changelog entry now that butchr stops writing
-    // one. Only checked once the build/test gate is green (a build failure is the
-    // priority signal); a fail here downgrades the badge to red, which also blocks
-    // auto-merge below.
-    if (result.status === "pass") {
-      const changelogPath = workspaceChangelogPath(dir.id);
-      if (changelogPath.trim()) {
-        const { files } = await git.diffStat(dir.path, id, await baseForGate());
-        // In release_mode the gate is STRICT: every non-empty diff (incl. docs-only)
-        // must carry a changelog entry, since every change bumps + stamps a versioned
-        // heading. Outside release_mode the docs-only exemption stands.
-        const check = checkChangelogUpdated(files, changelogPath, {
-          strict: workspaceReleaseMode(dir.id),
-        });
-        if (!check.ok) {
-          result = { status: "fail", label: "changelog not updated", detail: check.reason };
-        }
-      }
-    }
-
-    // PER-TASK ALLOWLIST GATE: another opt-in gate concern layered ON TOP of the
-    // build/test command. When the task declares a file `allowlist`, every changed file
-    // must fall under it (the same fileAllowed membership rule the auto-merge allowlist
-    // uses); any STRAY file FAILS the gate — catching scope creep mechanically instead of
-    // by hand-diffing. Only checked once the prior gates are still green (a build/changelog
-    // failure is the priority signal); a fail here downgrades the badge to red, which also
-    // blocks auto-merge below. An empty allowlist is inert (every file allowed).
+    // PER-TASK ALLOWLIST GATE: an opt-in gate concern layered ON TOP of the scripts/ci gate.
+    // When the task declares a file `allowlist`, every changed file must fall under it (the
+    // same fileAllowed membership rule the auto-merge allowlist uses); any STRAY file FAILS
+    // the gate — catching scope creep mechanically instead of by hand-diffing. Only checked
+    // once the scripts/ci gate is still green (a build failure is the priority signal); a
+    // fail here downgrades the badge to red, which also blocks auto-merge below. An empty
+    // allowlist is inert (every file allowed).
     if (result.status === "pass") {
       const allowlist = parseAllowlist(row.allowlist);
       if (allowlist.length) {

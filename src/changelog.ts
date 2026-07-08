@@ -9,12 +9,11 @@
 //     every repo has one. src/git.ts reads the file, applies the bump, writes it back,
 //     and commits inside the merge lock — see git.bumpVersionFile.
 //
-//  2. CHANGELOG-UPDATE GATE (opt-in, per-workspace) — `checkChangelogUpdated` decides
-//     whether a task's diff satisfies the rule "a code change must update the
-//     changelog." Outside release_mode butchr does NOT WRITE the changelog (it used to
-//     append a fixed `[Unreleased]` bullet, which collided across concurrent tasks);
-//     the task/agent owns its entry and tasks.triggerCi enforces this check as an
-//     advisory CI badge — see config.changelogPath / workspaces.workspaceChangelogPath.
+//  2. CHANGELOG-UPDATE RULE — "a code change must update the changelog" is NO LONGER a
+//     butchr gate. It moved INTO the repo's own executable `./scripts/ci` (the SOLE gate;
+//     butchr carries zero gate config), which diffs against BUTCHR_BASE_REF and fails when
+//     a non-docs change omits a CHANGELOG.md entry. butchr still does NOT WRITE the
+//     changelog — the task/agent owns its entry.
 //
 //  3. RELEASE STAMP (per-workspace release_mode) — `promoteUnreleased` moves the
 //     current `## [Unreleased]` body into a versioned `## [X.Y.Z] - DATE` section and
@@ -146,61 +145,6 @@ export function isDocsPath(path: string): boolean {
 /** True iff every path is a docs path (and there is at least one). */
 export function isDocsOnlyDiff(paths: string[]): boolean {
   return paths.length > 0 && paths.every(isDocsPath);
-}
-
-/** Normalize a repo-relative path for comparison: forward slashes, no leading `./`, trimmed. */
-function normalizeRel(p: string): string {
-  return p.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-/** Verdict from the changelog-update gate (see checkChangelogUpdated). */
-export type ChangelogCheck = {
-  /** true → the diff satisfies the gate (entry present, or exempt). */
-  ok: boolean;
-  /** Human-readable reason, surfaced on the CI badge. */
-  reason: string;
-};
-
-/**
- * The CHANGELOG-UPDATE GATE check: given a task's changed-file paths (relative to the
- * repo root) and the configured changelog `changelogPath`, decide whether the diff
- * satisfies "a code change must update the changelog." PURE — no fs/git — so the rule
- * is pinned independently of where the file list comes from.
- *
- *  - Blank `changelogPath` → the gate is disabled → ok (defensive; callers only invoke
- *    this when a path is configured).
- *  - An EMPTY diff → exempt → ok (nothing landed, so nothing to record).
- *  - A docs-only diff → exempt → ok (a pure prose change, INCLUDING a changelog-only
- *    edit, needs no further entry) — UNLESS `strict` is set (see below).
- *  - Otherwise (a code change) → ok IFF the changelog file is among the changed paths;
- *    a code change that didn't touch it FAILS, so the task adds its own entry.
- *
- * `strict` (release_mode): EVERY non-empty diff must touch the changelog — the
- * docs-only exemption is dropped, because in release_mode every change bumps the
- * version and stamps a versioned changelog entry, so even a docs-only change must
- * author one. (An empty diff stays exempt — there is genuinely nothing to record.)
- */
-export function checkChangelogUpdated(
-  paths: string[],
-  changelogPath: string,
-  opts: { strict?: boolean } = {},
-): ChangelogCheck {
-  const target = normalizeRel(changelogPath);
-  if (!target) {
-    return { ok: true, reason: "changelog gate disabled (no path configured)" };
-  }
-  if (paths.length === 0) {
-    return { ok: true, reason: "empty diff — no changelog entry required" };
-  }
-  if (!opts.strict && isDocsOnlyDiff(paths)) {
-    return { ok: true, reason: "docs-only diff — no changelog entry required" };
-  }
-  const updated = paths.some((p) => normalizeRel(p) === target);
-  if (updated) return { ok: true, reason: `${target} was updated` };
-  return {
-    ok: false,
-    reason: `${target} was not updated — a code change must add a changelog entry`,
-  };
 }
 
 // === ADDITIVE-CONFLICT UNION (merge-lock safety net) =======================

@@ -240,33 +240,18 @@ export const config = {
   }),
 
   /**
-   * POST-MERGE VERIFY GATE (and the in-worktree CI gate share this command). After a
-   * task's branch fast-forwards into the default branch (see tasks.approveTask →
-   * git.merge), butchr runs this command in the repo ROOT (the default-branch
-   * worktree) to confirm the NEW tip still builds and its tests pass. If it exits
-   * NON-ZERO, the merge is auto-reverted (the default branch is reset back to its
-   * pre-merge tip — see git.resetHard) and the task is flagged so a broken commit
-   * never sits on main. Runs INSIDE the global merge queue, so a verify+revert can
-   * never interleave with another merge.
-   *
-   * butchr is a GENERAL tool that manages OTHER people's repos, so there is no
-   * universal build/test command — this global default is therefore EMPTY (the gate
-   * is OFF until configured), and a managed repo opts in to a gate by setting its
-   * build/test command. Configure it PER-WORKSPACE via the workspace's `gate_cmd`
-   * (set at register time or via `PUT /api/workspaces/:id`), or set a global default
-   * for every workspace with BUTCHR_VERIFY_CMD. An empty effective command DISABLES
-   * the gate for that workspace (every merge is accepted — no verify, no revert).
-   *
-   * Run via `bash -lc` with the repo root as cwd. If your command runs a test
-   * discoverer, SCOPE it to your repo's own tests (e.g. `bun test ./test`, not a bare
-   * `bun test`): butchr lays out each task's git worktree as a SUBDIRECTORY of the
-   * repo (`<dir>/<taskId>` — see git.worktreePath), so an unscoped discoverer run from
-   * the repo root would glob the ENTIRE tree and pick up the test files inside sibling
-   * task worktrees — an in-flight worktree's failing test could then auto-revert an
-   * unrelated, already-green merge.
+   * Max wall-clock (ms) the gate may run before it's killed + treated as RED. Bounds BOTH
+   * the in-worktree CI gate (tasks.triggerCi) and the post-merge verify gate
+   * (verify.verifyDefaultBranch), which now both run the repo's own `./scripts/ci`. There
+   * is no gate COMMAND config: butchr carries ZERO gate configuration and execs the known
+   * `./scripts/ci` path (a repo with no such script is un-gated). If your scripts/ci runs a
+   * test discoverer, SCOPE it to your repo's own tests (e.g. `bun test ./test`, not a bare
+   * `bun test`): butchr lays out each task's git worktree as a SUBDIRECTORY of the repo
+   * (`<dir>/<taskId>` — see git.worktreePath), so an unscoped discoverer run from the repo
+   * root would glob the ENTIRE tree and pick up the test files inside sibling task
+   * worktrees — an in-flight worktree's failing test could then auto-revert an unrelated,
+   * already-green merge.
    */
-  verifyCmd: env("BUTCHR_VERIFY_CMD", ""),
-  /** Max wall-clock (ms) the verify gate may run before it's killed + treated as RED. */
   verifyTimeoutMs: envInt("BUTCHR_VERIFY_TIMEOUT_MS", 1000 * 60 * 10),
 
   /**
@@ -286,18 +271,14 @@ export const config = {
   versionFile: env("BUTCHR_VERSION_FILE", ""),
 
   /**
-   * OPTIONAL CHANGELOG-UPDATE GATE (opt-in; DEFAULT OFF). butchr no longer WRITES the
-   * changelog at merge — the task/agent owns its changelog entry, and this gate
-   * VERIFIES one was added. This is the GLOBAL DEFAULT path (relative to the repo
-   * root) of the changelog file the CI gate checks (e.g. `CHANGELOG.md`):
-   *  - EMPTY (the default) → the changelog gate is OFF for every workspace.
-   *  - A path → a task whose diff makes a CODE (non-docs) change but does NOT touch
-   *    that file FAILS the CI gate (an additional gate concern layered ON TOP of the
-   *    build/test command, not part of it). A docs-only/empty diff is exempt.
-   * Override globally with BUTCHR_CHANGELOG_PATH, or PER-WORKSPACE via the workspace's
-   * `changelog_path` column (NULL inherits this default; "" disables it). Resolved by
-   * workspaces.workspaceChangelogPath; enforced in tasks.triggerCi via
-   * changelog.checkChangelogUpdated.
+   * OPTIONAL CHANGELOG PATH for the MERGE-TIME RELEASE STAMP (opt-in; DEFAULT OFF). The
+   * changelog-UPDATE RULE now lives inside the repo's own `./scripts/ci` gate (butchr
+   * carries zero gate config), so this is NOT a gate setting — it is only the path
+   * `release_mode`'s release stamp promotes `## [Unreleased]` into a versioned heading in
+   * (e.g. `CHANGELOG.md`), relative to the repo root. EMPTY (the default) disables the
+   * stamp. Override globally with BUTCHR_CHANGELOG_PATH, or PER-WORKSPACE via the
+   * (read-only-inert) `changelog_path` column. Resolved by workspaces.workspaceChangelogPath;
+   * consumed by git.merge / rebaseOntoDefault (promoteUnreleased).
    */
   changelogPath: env("BUTCHR_CHANGELOG_PATH", ""),
 
@@ -486,8 +467,8 @@ export const config = {
    * AUTO-MERGE green, low-risk tasks (opt-in; DEFAULT OFF). When enabled, a task
    * in `review` whose CI gate settled to `pass` and which qualifies as LOW-RISK is
    * approved + merged AUTOMATICALLY — running the SAME approve path a human would,
-   * so the post-merge verify gate (config.verifyCmd) still guards main. A task that
-   * does NOT qualify waits for human review exactly as before. See
+   * so the post-merge verify gate (the repo's `./scripts/ci`) still guards main. A task
+   * that does NOT qualify waits for human review exactly as before. See
    * tasks.maybeAutoMerge / isLowRiskChange.
    *
    * LOW-RISK = all three:

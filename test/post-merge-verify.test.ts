@@ -1,5 +1,6 @@
-// Tests for the POST-MERGE VERIFY GATE + AUTO-REVERT (see config.verifyCmd,
-// src/verify.ts, git.headSha/resetHard, and tasks.approveTask's post-merge path).
+// Tests for the POST-MERGE VERIFY GATE + AUTO-REVERT (see src/verify.ts — which runs the
+// repo's own `./scripts/ci` — git.headSha/resetHard, and tasks.approveTask's post-merge
+// path).
 //
 // The verify RUNNER is mocked via verify.setVerifyRunner so we exercise the
 // revert-on-red DECISION deterministically without spawning a real
@@ -174,11 +175,11 @@ describe("post-merge verify gate", () => {
   });
 });
 
-describe("verify runner default (disabled when verifyCmd is empty)", () => {
-  test("an empty gate command is treated as skipped/GREEN", async () => {
-    // The default runner short-circuits to ok when verifyCmd is blank. We can't
-    // easily blank the cached config here, so assert the runner contract directly
-    // via a stub that mirrors the skip behavior, then confirm approveTask merges.
+describe("verify runner default (disabled when no scripts/ci is present)", () => {
+  test("an absent scripts/ci is treated as skipped/GREEN", async () => {
+    // The default runner short-circuits to ok when the repo has no `./scripts/ci`
+    // (runScriptsCi → skipped). We assert the runner contract directly via a stub that
+    // mirrors the skip behavior, then confirm approveTask merges.
     verifyMod.setVerifyRunner(async () => ({ ok: true, output: "", skipped: true }));
     const id = await seedReviewTaskWithWork("skip.txt", "skip\n");
     const out = await tasksMod.approveTask(id); // in_review → mechanical merge → merged

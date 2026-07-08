@@ -1,13 +1,13 @@
-// Unit tests for the PURE living-docs helpers (src/changelog.ts) behind butchr's
-// merge/review gates: the version-bump transform applied at merge
-// (git.bumpVersionFile), the release-mode changelog STAMP (promoteUnreleased), and the
-// changelog-update gate evaluated at review (tasks.triggerCi). No fs / git — just values
-// in, verdict/text out — so the rules are pinned independently of the merge/CI wiring
-// (see test/finalize-changelog.test.ts + test/ci-gate.test.ts).
+// Unit tests for the PURE living-docs helpers (src/changelog.ts) behind butchr's merge
+// gates: the version-bump transform applied at merge (git.bumpVersionFile), the
+// release-mode changelog STAMP (promoteUnreleased), the docs-only classifier
+// (isDocsOnlyDiff, used by the version bump), and the additive-conflict union. No fs / git
+// — just values in, text out — so the rules are pinned independently of the merge wiring
+// (see test/finalize-changelog.test.ts). NOTE: the changelog-update RULE is no longer a
+// butchr function — it moved into the repo's own `./scripts/ci` gate.
 import { describe, expect, test } from "bun:test";
 import {
   bumpVersion,
-  checkChangelogUpdated,
   isDocsOnlyDiff,
   promoteUnreleased,
   unionAdditiveChangelogConflict,
@@ -153,69 +153,6 @@ describe("isDocsOnlyDiff", () => {
   });
 });
 
-describe("checkChangelogUpdated (the opt-in changelog gate)", () => {
-  test("a code change that touched the changelog passes", () => {
-    const v = checkChangelogUpdated(["src/app.ts", "CHANGELOG.md"], "CHANGELOG.md");
-    expect(v.ok).toBe(true);
-    expect(v.reason).toContain("CHANGELOG.md");
-  });
-
-  test("a code change that did NOT touch the changelog fails", () => {
-    const v = checkChangelogUpdated(["src/app.ts"], "CHANGELOG.md");
-    expect(v.ok).toBe(false);
-    expect(v.reason).toContain("must add a changelog entry");
-  });
-
-  test("a docs-only diff is exempt (no changelog entry required)", () => {
-    expect(checkChangelogUpdated(["README.md", "docs/x.png"], "CHANGELOG.md").ok).toBe(true);
-    // A changelog-only edit is itself docs-only → exempt (no infinite requirement).
-    expect(checkChangelogUpdated(["CHANGELOG.md"], "CHANGELOG.md").ok).toBe(true);
-  });
-
-  test("an empty diff is exempt", () => {
-    expect(checkChangelogUpdated([], "CHANGELOG.md").ok).toBe(true);
-  });
-
-  test("a blank configured path disables the gate (always ok)", () => {
-    expect(checkChangelogUpdated(["src/app.ts"], "").ok).toBe(true);
-    expect(checkChangelogUpdated(["src/app.ts"], "   ").ok).toBe(true);
-  });
-
-  test("honors a non-default changelog location and normalizes paths", () => {
-    // A configured nested path: a code change must touch THAT file.
-    expect(checkChangelogUpdated(["src/app.ts"], "docs/CHANGES.md").ok).toBe(false);
-    expect(checkChangelogUpdated(["src/app.ts", "docs/CHANGES.md"], "docs/CHANGES.md").ok).toBe(true);
-    // A leading "./" on the configured path still matches a bare diff path.
-    expect(checkChangelogUpdated(["src/app.ts", "CHANGELOG.md"], "./CHANGELOG.md").ok).toBe(true);
-  });
-
-  describe("strict mode (release_mode)", () => {
-    test("drops the docs-only exemption — a docs-only diff that didn't touch the changelog FAILS", () => {
-      const v = checkChangelogUpdated(["README.md"], "CHANGELOG.md", { strict: true });
-      expect(v.ok).toBe(false);
-      expect(v.reason).toContain("must add a changelog entry");
-    });
-
-    test("a docs-only diff that DID touch the changelog still passes", () => {
-      expect(
-        checkChangelogUpdated(["README.md", "CHANGELOG.md"], "CHANGELOG.md", { strict: true }).ok,
-      ).toBe(true);
-      // A changelog-only edit satisfies strict too (it touched the file).
-      expect(checkChangelogUpdated(["CHANGELOG.md"], "CHANGELOG.md", { strict: true }).ok).toBe(true);
-    });
-
-    test("an empty diff stays exempt even in strict mode (nothing to record)", () => {
-      expect(checkChangelogUpdated([], "CHANGELOG.md", { strict: true }).ok).toBe(true);
-    });
-
-    test("a code change still requires the changelog (same as non-strict)", () => {
-      expect(checkChangelogUpdated(["src/app.ts"], "CHANGELOG.md", { strict: true }).ok).toBe(false);
-      expect(
-        checkChangelogUpdated(["src/app.ts", "CHANGELOG.md"], "CHANGELOG.md", { strict: true }).ok,
-      ).toBe(true);
-    });
-  });
-});
 
 describe("unionAdditiveChangelogConflict (the additive merge-net resolver)", () => {
   test("empty ancestor: both sides each ADDED a bullet → union (ours then theirs)", () => {

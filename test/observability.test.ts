@@ -134,22 +134,18 @@ function row(fields: Record<string, unknown>) {
 // ---------------------------------------------------------------------------
 describe("gatesGreen (pure all-gates-green predicate)", () => {
   test("ci 'pass'/null is green; 'fail'/'running' is red", () => {
-    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: null }), true)).toBe(true);
-    expect(tasksMod.gatesGreen(row({ ci_status: null, conformance_status: null }), true)).toBe(true);
-    expect(tasksMod.gatesGreen(row({ ci_status: "fail", conformance_status: null }), true)).toBe(false);
-    expect(tasksMod.gatesGreen(row({ ci_status: "running", conformance_status: null }), true)).toBe(false);
+    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: null }))).toBe(true);
+    expect(tasksMod.gatesGreen(row({ ci_status: null, conformance_status: null }))).toBe(true);
+    expect(tasksMod.gatesGreen(row({ ci_status: "fail", conformance_status: null }))).toBe(false);
+    expect(tasksMod.gatesGreen(row({ ci_status: "running", conformance_status: null }))).toBe(false);
   });
 
   test("conformance 'concern' and 'checking' are NOT green; only 'pass'/null is", () => {
-    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "pass" }), true)).toBe(true);
-    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: null }), true)).toBe(true);
+    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "pass" }))).toBe(true);
+    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: null }))).toBe(true);
     // The clarity note: a conformance 'concern' must read false.
-    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "concern" }), true)).toBe(false);
-    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "checking" }), true)).toBe(false);
-  });
-
-  test("a failing changelog check sinks an otherwise-green task", () => {
-    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "pass" }), false)).toBe(false);
+    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "concern" }))).toBe(false);
+    expect(tasksMod.gatesGreen(row({ ci_status: "pass", conformance_status: "checking" }))).toBe(false);
   });
 });
 
@@ -194,18 +190,16 @@ describe("fileAllowed (auto-merge allowlist membership)", () => {
 });
 
 // ---------------------------------------------------------------------------
-describe("gatesView (structured gates block, config-derived changelog)", () => {
-  test("changelog status reflects the workspace gate configuration", () => {
+describe("gatesView (structured gates block)", () => {
+  test("ci / conformance mirror the row columns (no changelog sub-block anymore)", () => {
     const ci = { ci_status: "pass", ci_summary: "ok", ci_tip: "abc" };
     const conf = { conformance_status: "pass", conformance_summary: "", conformance_tip: "abc" };
-    const off = tasksMod.gatesView(row({ workspace_id: WS_PLAIN, ...ci, ...conf }));
-    expect(off.changelog.status).toBe("off");
-    // ci/conformance mirror the row columns.
-    expect(off.ci.status).toBe("pass");
-    expect(off.conformance.status).toBe("pass");
-
-    expect(tasksMod.gatesView(row({ workspace_id: WS_CLOG, ...ci, ...conf })).changelog.status).toBe("on");
-    expect(tasksMod.gatesView(row({ workspace_id: WS_REL, ...ci, ...conf })).changelog.status).toBe("strict");
+    const v = tasksMod.gatesView(row({ workspace_id: WS_PLAIN, ...ci, ...conf }));
+    expect(v.ci.status).toBe("pass");
+    expect(v.conformance.status).toBe("pass");
+    // The changelog rule now lives inside the repo's ./scripts/ci gate — gatesView no
+    // longer reports a config-derived changelog sub-block.
+    expect((v as any).changelog).toBeUndefined();
   });
 });
 

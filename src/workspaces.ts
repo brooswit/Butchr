@@ -290,26 +290,13 @@ export async function pruneTempWorkspaces(): Promise<number> {
   return pruned;
 }
 
-/**
- * The EFFECTIVE build/test gate command for a workspace: its own `gate_cmd` if it
- * set one (a non-null value, including the empty string which DISABLES the gate),
- * else the global default `config.verifyCmd` (EMPTY by default — no gate — unless
- * set via BUTCHR_VERIFY_CMD). This is the single resolution point for BOTH gates —
- * the in-worktree CI gate (tasks.triggerCi) and the post-merge verify gate
- * (verify.verifyDefaultBranch) — so a workspace's command can never diverge between
- * them. An unknown id falls back to the default. Pure read of the workspace row + config.
- */
-export function workspaceGateCmd(id: string): string {
-  return effectiveOverride(id, "gate_cmd", config.verifyCmd);
-}
-
-// The shared resolution for every per-workspace optional-string override (gate_cmd /
-// version_file / changelog_path): the workspace's own column value if it set one (a
-// non-null value, incl. "" = disabled), else the global `fallback`. Unknown id →
-// fallback. Pure read of the workspace row.
+// The shared resolution for every per-workspace optional-string override (version_file /
+// changelog_path): the workspace's own column value if it set one (a non-null value, incl.
+// "" = disabled), else the global `fallback`. Unknown id → fallback. Pure read of the
+// workspace row.
 function effectiveOverride(
   id: string,
-  column: "gate_cmd" | "version_file" | "changelog_path",
+  column: "version_file" | "changelog_path",
   fallback: string,
 ): string {
   const value = getWorkspace(id)?.[column] ?? null;
@@ -328,11 +315,13 @@ export function workspaceVersionFile(id: string): string {
 }
 
 /**
- * The EFFECTIVE changelog-gate path for a workspace: its own `changelog_path` if it
- * set one (a non-null value, including "" which DISABLES the gate), else the global
- * default `config.changelogPath` (EMPTY by default — gate off — unless set via
- * BUTCHR_CHANGELOG_PATH). An EMPTY result means "no changelog gate for this
- * workspace" (the opt-in default). Pure read; unknown id → default.
+ * The EFFECTIVE changelog path for a workspace's MERGE-TIME RELEASE STAMP (release_mode
+ * promoteUnreleased — git.merge / rebaseOntoDefault): its own `changelog_path` if it set
+ * one (a non-null value, incl. "" which disables the stamp), else the global default
+ * `config.changelogPath` (EMPTY by default, unless set via BUTCHR_CHANGELOG_PATH). The
+ * `changelog_path` column is now READ-ONLY-INERT — there is no setter and register does
+ * not write it (the changelog RULE moved into the repo's `./scripts/ci` gate); this read
+ * survives only to feed the release stamp. Pure read; unknown id → default.
  */
 export function workspaceChangelogPath(id: string): string {
   return effectiveOverride(id, "changelog_path", config.changelogPath);
@@ -366,8 +355,8 @@ export function workspaceBranchIsolation(id: string): boolean {
  * Normalize an incoming optional-string override for storage. `undefined`/`null`
  * clears the override (→ NULL → falls back to the global default); a string is
  * stored verbatim (the empty string is a deliberate "disable for this workspace"
- * setting). Anything else is a 400. Shared by the gate_cmd / version_file /
- * changelog_path setters (all three carry identical NULL=default / ""=off semantics).
+ * setting). Anything else is a 400. Used by the `version_file` setter + register
+ * (NULL=default / ""=off semantics).
  */
 function normalizeOverride(field: string, value: unknown): string | null {
   if (value === undefined || value === null) return null;
@@ -386,9 +375,7 @@ function normalizeOverride(field: string, value: unknown): string | null {
 function updateWorkspaceColumn(
   id: string,
   column:
-    | "gate_cmd"
     | "version_file"
-    | "changelog_path"
     | "cto_enabled"
     | "release_mode"
     | "branch_isolation",
@@ -402,17 +389,6 @@ function updateWorkspaceColumn(
 }
 
 /**
- * Update (or clear) a workspace's per-workspace build/test gate command and return
- * the refreshed view. Pass `null`/`undefined` to clear the override (revert to the
- * default `config.verifyCmd`); a string (incl. "") sets it. 404 if the workspace is
- * gone. Takes effect on the NEXT gate run for that workspace (the next task entering
- * review, and the next merge's post-merge verify) — nothing in flight is disturbed.
- */
-export function updateWorkspaceGateCmd(id: string, gateCmd: unknown): WorkspaceView {
-  return updateWorkspaceColumn(id, "gate_cmd", normalizeOverride("gate_cmd", gateCmd));
-}
-
-/**
  * Update (or clear) a workspace's optional MERGE-TIME VERSION FILE and return the
  * refreshed view. Pass `null`/`undefined` to clear the override (inherit
  * `config.versionFile`); a string (incl. "" to disable the bump) sets it; a path
@@ -421,19 +397,6 @@ export function updateWorkspaceGateCmd(id: string, gateCmd: unknown): WorkspaceV
  */
 export function updateWorkspaceVersionFile(id: string, versionFile: unknown): WorkspaceView {
   return updateWorkspaceColumn(id, "version_file", normalizeOverride("version_file", versionFile));
-}
-
-/**
- * Update (or clear) a workspace's optional CHANGELOG-GATE PATH and return the
- * refreshed view. Pass `null`/`undefined` to clear the override (inherit
- * `config.changelogPath`); a string (incl. "" to disable the gate) sets it; a path
- * (e.g. "CHANGELOG.md") opts the workspace into the changelog-update CI gate. 404 if
- * the workspace is gone. Takes effect on the next task entering review.
- */
-export function updateWorkspaceChangelogPath(id: string, changelogPath: unknown): WorkspaceView {
-  return updateWorkspaceColumn(
-    id, "changelog_path", normalizeOverride("changelog_path", changelogPath),
-  );
 }
 
 /**
@@ -954,9 +917,6 @@ export type DashboardWorkspace = {
   id: string;
   path: string;
   label: string | null;
-  gate_cmd: string | null;
-  /** The effective gate command (own gate_cmd or the default) — what actually runs. */
-  effective_gate_cmd: string;
   counts: Record<string, number>;
   active: number;
   review: number;
@@ -1041,8 +1001,6 @@ export function dashboard(): Dashboard {
       id: d.id,
       path: d.path,
       label: d.label,
-      gate_cmd: d.gate_cmd,
-      effective_gate_cmd: workspaceGateCmd(d.id),
       counts: c,
       active,
       review,
@@ -1085,9 +1043,7 @@ export function ensureCtoWorkspaceRow(directoryId: string): void {
 export async function registerWorkspace(
   rawPath: string,
   label?: string,
-  gateCmd?: unknown,
   versionFile?: unknown,
-  changelogPath?: unknown,
 ): Promise<WorkspaceView> {
   const path = resolve(rawPath);
 
@@ -1099,13 +1055,11 @@ export async function registerWorkspace(
   }
 
   const finalLabel = label?.trim() || basename(path);
-  // Optional per-workspace build/test gate command, set at register time (NULL =
-  // use the default config.verifyCmd; "" = disable the gate for this workspace).
-  const finalGateCmd = normalizeOverride("gate_cmd", gateCmd);
-  // Optional per-workspace version-bump file + changelog-gate path (NULL = inherit
-  // the global default; "" = off; a path opts in). See the columns in db.ts.
+  // Optional per-workspace version-bump file (NULL = inherit the global default; "" =
+  // off; a path opts in). See the column in db.ts. The gate is now the repo's own
+  // `./scripts/ci` (butchr carries zero gate config), and `changelog_path` is
+  // read-only-inert (no register param) — both columns just stay NULL on new registers.
   const finalVersionFile = normalizeOverride("version_file", versionFile);
-  const finalChangelogPath = normalizeOverride("changelog_path", changelogPath);
 
   // Provision the herdr workspace (best effort — workspace still usable if the
   // herdr server is briefly down; dispatch will retry).
@@ -1137,11 +1091,10 @@ export async function registerWorkspace(
   const id = generateWorkspaceId();
   const created = nowIso();
   db.query(
-    `INSERT INTO directory (id, path, label, herdr_workspace, herdr_pane, gate_cmd, version_file, changelog_path, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO directory (id, path, label, herdr_workspace, herdr_pane, version_file, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    id, path, finalLabel, workspaceId, paneId,
-    finalGateCmd, finalVersionFile, finalChangelogPath, created,
+    id, path, finalLabel, workspaceId, paneId, finalVersionFile, created,
   );
 
   // UNIFIED CREATE-TIME ROW (story st-93384200, Bug 3): materialize this directory's unified
@@ -1176,9 +1129,8 @@ export async function registerWorkspaceUnderProject(
   projectId: string,
   rawPath: string,
   label?: string,
-  gateCmd?: unknown,
 ): Promise<WorkspaceView> {
-  const view = await registerWorkspace(rawPath, label, gateCmd);
+  const view = await registerWorkspace(rawPath, label);
   try {
     ensureRepoNode(view.id);
     registerRepoUnderProject(projectId, view.id);

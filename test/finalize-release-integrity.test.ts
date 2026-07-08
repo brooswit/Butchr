@@ -75,7 +75,8 @@ beforeAll(async () => {
     .run(WS_ID, REPO_ROOT, "test", dbMod.nowIso());
   // Versioned-releases ON — so a (non-)release is observable via released_version + the changelog.
   wsMod.updateWorkspaceVersionFile(WS_ID, "package.json");
-  wsMod.updateWorkspaceChangelogPath(WS_ID, "CHANGELOG.md");
+  // changelog_path is READ-ONLY-INERT (no setter) but still read by the release stamp — set the column directly.
+  dbMod.db.query(`UPDATE directory SET changelog_path=? WHERE id=?`).run("CHANGELOG.md", WS_ID);
   wsMod.setWorkspaceReleaseMode(WS_ID, true);
   // Verify gate stubbed GREEN for the whole suite (restored in afterAll).
   verifyMod.setVerifyRunner(async () => ({ ok: true, output: "" }));

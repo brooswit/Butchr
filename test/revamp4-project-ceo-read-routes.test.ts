@@ -105,7 +105,7 @@ beforeAll(async () => {
   }
 
   // Register the anchor directory ONCE (a path registers exactly once); projects anchor to it.
-  const ws = await apiSend("POST", "/api/workspaces", { path: REPO_ROOT, gate_cmd: "" });
+  const ws = await apiSend("POST", "/api/workspaces", { path: REPO_ROOT });
   WS = ws.id;
 }, 30000);
 

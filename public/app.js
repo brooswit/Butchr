@@ -1191,11 +1191,8 @@ async function renderWorkspace(id, projectId) {
   wrap.appendChild(ctoSlot);
   ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
 
-  // build/test gate command panel — the command both the CI gate (in-worktree) and
-  // the post-merge verify gate run for this workspace. Shows the effective command +
-  // whether it's a per-workspace override or the default, with an inline editor.
-  wrap.appendChild(gatePanel(dir));
-
+  // (The gate is now the repo's own `./scripts/ci` — butchr carries zero gate config — so
+  // there is no per-workspace gate-command panel here anymore.)
   // (Responder routing is now STRUCTURAL — per-task pending_responder, not per-workspace
   // config — so there is no step-responder config panel here anymore.)
 
@@ -1216,65 +1213,6 @@ async function renderWorkspace(id, projectId) {
   mount(wrap);
   // Begin polling the live activity pulse for any running task cards now in the DOM.
   startActivity();
-}
-
-// ---------- per-workspace build/test gate panel ----------
-// `dir` is a dashboard workspace entry (has gate_cmd + effective_gate_cmd). Renders
-// the effective command, flags whether it's a per-workspace override or the default,
-// and offers an Edit button that opens the gate editor modal.
-function gatePanel(dir) {
-  const overridden = dir.gate_cmd !== null;
-  const disabled = dir.gate_cmd === "";
-  const panel = el("div", { class: "panel", style: "margin-top:28px" });
-  const head = el("div", { class: "row between", style: "align-items:center" });
-  head.appendChild(el("h2", { style: "margin:0" }, "Build / test gate"));
-  const edit = el("button", { class: "btn ghost" }, "Edit");
-  edit.addEventListener("click", () => openGateModal(dir));
-  head.appendChild(edit);
-  panel.appendChild(head);
-  panel.appendChild(el("small", { class: "muted", style: "display:block;margin:6px 0 10px" },
-    "Run in CI (the task worktree, on review) and by the post-merge verify gate (the repo root, after a merge — RED auto-reverts)."));
-  const cmdText = disabled ? "(gate disabled for this workspace)" : (dir.effective_gate_cmd || "(none)");
-  panel.appendChild(el("pre", { class: "gate-cmd" + (disabled ? " disabled" : "") }, cmdText));
-  panel.appendChild(el("small", { class: "muted" },
-    overridden
-      ? (disabled ? "Per-workspace override: the gate is disabled." : "Per-workspace override.")
-      : "Using the default gate (no per-workspace override)."));
-  return panel;
-}
-
-// Editor for a workspace's gate command. A textarea (prefilled with the effective
-// command) plus three actions: Save the typed command (an empty save DISABLES the
-// gate), or "Use default" to clear the override (revert to config.verifyCmd). Maps
-// to PATCH /api/workspaces/:id.
-function openGateModal(dir) {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML = `
-    <label class="field" style="margin-bottom:6px">
-      <span class="lbl">build/test gate command — run via <code>bash -lc</code> in the repo</span>
-      <textarea id="gate-cmd" class="gate-textarea" placeholder="e.g. npm run build && npm test"></textarea>
-    </label>
-    <small class="hint muted">Save an empty command to DISABLE the gate for this workspace. "Use default" reverts to the global default command.</small>`;
-  const ta = body.querySelector("#gate-cmd");
-  ta.value = dir.gate_cmd !== null ? dir.gate_cmd : (dir.effective_gate_cmd || "");
-
-  const foot = el("div", { class: "m-foot" });
-  const useDefault = el("button", { class: "btn ghost" }, "Use default");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const save = el("button", { class: "btn" }, "Save command");
-  foot.appendChild(useDefault);
-  foot.appendChild(cancel);
-  foot.appendChild(save);
-
-  const { close } = openModal({ title: "Build / test gate", body, footer: foot });
-  cancel.addEventListener("click", close);
-  ta.focus();
-
-  const patch = (btn, gate_cmd, msg) =>
-    action(btn, () => api("PATCH", "/workspaces/" + dir.id, { gate_cmd }),
-      { success: msg, onDone: () => { close(); render(); } });
-  save.addEventListener("click", () => patch(save, ta.value, "gate command updated"));
-  useDefault.addEventListener("click", () => patch(useDefault, null, "reverted to the default gate"));
 }
 
 // ---------- stories panel + new-story modal (AUTHORITY FLIP, Phase 7) ----------
@@ -4129,11 +4067,7 @@ function openAddWorkspaceModal(project) {
       '<span class="lbl">label (optional)</span>' +
       '<input type="text" id="aw-label" placeholder="defaults to dir name" />' +
     '</label>' +
-    '<label class="field" style="margin-bottom:6px">' +
-      '<span class="lbl">build/test gate command (optional) — blank uses the default; runs in CI + post-merge verify</span>' +
-      '<input type="text" id="aw-gate" placeholder="e.g. npm run build && npm test" />' +
-    '</label>' +
-    '<small class="hint muted">Registers an existing git repository and nests it under this project.</small>';
+    '<small class="hint muted">Registers an existing git repository and nests it under this project. The gate is the repo\'s own <code>./scripts/ci</code>.</small>';
 
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
@@ -4149,7 +4083,6 @@ function openAddWorkspaceModal(project) {
 
   const pathEl = body.querySelector("#aw-path");
   const labelEl = body.querySelector("#aw-label");
-  const gateEl = body.querySelector("#aw-gate");
 
   // Browse the filesystem for a git repo — reuse the shared picker FILL-ONLY: whichever way the user
   // picks (a git-row "Register" button or "Use this path"), we just drop the path into the field and
@@ -4162,15 +4095,13 @@ function openAddWorkspaceModal(project) {
     const path = pathEl.value.trim();
     if (!path) { showErr("Enter (or browse to) a git repository path."); pathEl.focus(); return; }
     const label = labelEl.value.trim();
-    const gate = gateEl.value.trim();
     showErr("");
     action(submit, async () => {
       try {
-        // Omit blank label/gate so the server keeps its defaults (dir-name label, NULL gate) rather
-        // than storing empty strings.
+        // Omit a blank label so the server keeps its default (dir-name label).
         return await api("POST",
           "/projects/" + encodeURIComponent(project.id) + "/workspaces",
-          { path, label: label || undefined, gate_cmd: gate || undefined });
+          { path, label: label || undefined });
       } catch (e) {
         showErr(e.message); // 400 non-git-repo / 404 project gone — surfaced inline verbatim
         throw e; // let action() toast + re-enable the button

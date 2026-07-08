@@ -1,14 +1,16 @@
-// Tests for the PER-WORKSPACE BUILD/TEST GATE COMMAND and the CROSS-PROJECT
-// DASHBOARD aggregation (see db.ts `workspaces.gate_cmd`, workspaces.{
-// workspaceGateCmd, updateWorkspaceGateCmd, dashboard}, and how triggerCi threads
-// the resolved command into the CI runner).
+// Tests for the SOLE GATE — the repo's own executable `./scripts/ci` (butchr carries
+// ZERO gate configuration) — via gate.runScriptsCi, how tasks.triggerCi threads the
+// resolved merge base into the CI runner as BUTCHR_BASE_REF, and the CROSS-PROJECT
+// DASHBOARD aggregation.
 //
 // Pure / in-process: no real claude/herdr/bun is spawned. BUTCHR_HERDR_BIN points at
-// `true` so herdr probes are no-ops, and the CI runner is faked (setCiRunner) so we
-// capture the gate command threaded in without shelling out. Workspace + task rows
-// are inserted directly (no registerWorkspace, which would need a live herdr).
+// `true` so herdr probes are no-ops, and the CI runner is faked (setCiRunner) for the
+// threading test so we capture the base ref without shelling out. runScriptsCi tests
+// DO spawn a trivial `scripts/ci` script in a temp dir (that is the unit under test).
+// Workspace + task rows are inserted directly (no registerWorkspace, which would need a
+// live herdr).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +22,7 @@ const DIR_B = "gate-dir-b";
 
 let dirsMod: typeof import("../src/workspaces.ts");
 let tasksMod: typeof import("../src/tasks.ts");
+let gateMod: typeof import("../src/gate.ts");
 let dbMod: typeof import("../src/db.ts");
 let configMod: typeof import("../src/config.ts");
 
@@ -36,6 +39,7 @@ beforeAll(async () => {
   configMod = await import("../src/config.ts");
   dirsMod = await import("../src/workspaces.ts");
   tasksMod = await import("../src/tasks.ts");
+  gateMod = await import("../src/gate.ts");
 
   const ins = (id: string) =>
     dbMod.db
@@ -46,6 +50,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  tasksMod.setCiRunner();
   rmSync(DATA_DIR, { recursive: true, force: true });
   rmSync(REPO_ROOT, { recursive: true, force: true });
 });
@@ -59,80 +64,99 @@ function seedTask(id: string, dir: string, status: string, idle = 0, hasAgent = 
     .run(id, dir, status, idle, hasAgent, dbMod.nowIso());
 }
 
-describe("workspaceGateCmd resolution", () => {
-  test("falls back to the default (config.verifyCmd) when gate_cmd is NULL", () => {
-    // No override set on DIR_A → the global default command.
-    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe(configMod.config.verifyCmd);
+/** Create a fresh temp dir; if `script` is given, write it as an (optionally executable) `scripts/ci`. */
+function mkCwd(opts: { script?: string; exec?: boolean } = {}): string {
+  const cwd = mkdtempSync(join(tmpdir(), "butchr-ci-cwd-"));
+  if (opts.script !== undefined) {
+    mkdirSync(join(cwd, "scripts"), { recursive: true });
+    const p = join(cwd, "scripts", "ci");
+    writeFileSync(p, opts.script);
+    if (opts.exec !== false) chmodSync(p, 0o755);
+  }
+  return cwd;
+}
+
+describe("runScriptsCi (the sole gate)", () => {
+  test("ABSENT scripts/ci → gate OFF (skipped → ok, no output)", async () => {
+    const cwd = mkCwd(); // no scripts/ci
+    const r = await gateMod.runScriptsCi(cwd);
+    expect(r.skipped).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("");
+    expect(r.timedOut).toBe(false);
+    rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("an unknown workspace id falls back to the default", () => {
-    expect(dirsMod.workspaceGateCmd("does-not-exist")).toBe(configMod.config.verifyCmd);
+  test("present + exit 0 → GREEN (ok, not skipped)", async () => {
+    const cwd = mkCwd({ script: "#!/usr/bin/env bash\nexit 0\n" });
+    const r = await gateMod.runScriptsCi(cwd);
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("returns the workspace's own command once set", () => {
-    dirsMod.updateWorkspaceGateCmd(DIR_A, "make build && make test");
-    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe("make build && make test");
-    // Persisted on the row.
-    const row = dbMod.db
-      .query<{ gate_cmd: string | null }, [string]>(`SELECT gate_cmd FROM workspaces WHERE id=?`)
-      .get(DIR_A)!;
-    expect(row.gate_cmd).toBe("make build && make test");
+  test("present + non-zero exit → RED (not ok, not skipped)", async () => {
+    const cwd = mkCwd({ script: "#!/usr/bin/env bash\necho boom >&2\nexit 1\n" });
+    const r = await gateMod.runScriptsCi(cwd);
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.output).toContain("boom");
+    rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("an empty-string override DISABLES the gate (used verbatim, not defaulted)", () => {
-    dirsMod.updateWorkspaceGateCmd(DIR_A, "");
-    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe("");
+  test("present but NON-EXECUTABLE → RED (spawn fails, no special-case)", async () => {
+    const cwd = mkCwd({ script: "#!/usr/bin/env bash\nexit 0\n", exec: false });
+    const r = await gateMod.runScriptsCi(cwd);
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("clearing the override (null) reverts to the default", () => {
-    dirsMod.updateWorkspaceGateCmd(DIR_A, "x");
-    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe("x");
-    dirsMod.updateWorkspaceGateCmd(DIR_A, null);
-    expect(dirsMod.workspaceGateCmd(DIR_A)).toBe(configMod.config.verifyCmd);
-    const row = dbMod.db
-      .query<{ gate_cmd: string | null }, [string]>(`SELECT gate_cmd FROM workspaces WHERE id=?`)
-      .get(DIR_A)!;
-    expect(row.gate_cmd).toBeNull();
-  });
-
-  test("updateWorkspaceGateCmd 404s on an unknown workspace", () => {
-    expect(() => dirsMod.updateWorkspaceGateCmd("nope", "cmd")).toThrow(/workspace not found/);
-  });
-
-  test("a non-string gate_cmd is rejected (400)", () => {
-    expect(() => dirsMod.updateWorkspaceGateCmd(DIR_A, 42)).toThrow(/must be a string/);
+  test("honors the env option — BUTCHR_BASE_REF is present in the child env", async () => {
+    const cwd = mkCwd({
+      script: '#!/usr/bin/env bash\necho "base=$BUTCHR_BASE_REF"\nexit 0\n',
+    });
+    const r = await gateMod.runScriptsCi(cwd, { env: { BUTCHR_BASE_REF: "some-ref-42" } });
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("base=some-ref-42");
+    rmSync(cwd, { recursive: true, force: true });
   });
 });
 
-describe("triggerCi threads the resolved gate command into the runner", () => {
-  test("passes the workspace's own gate command to the CI runner", async () => {
-    dirsMod.updateWorkspaceGateCmd(DIR_B, "npm run ci");
-    const id = "gate-ci-own";
+describe("gate_cmd config is GONE end-to-end", () => {
+  test("workspaceGateCmd / updateWorkspaceGateCmd no longer exist", () => {
+    expect((dirsMod as any).workspaceGateCmd).toBeUndefined();
+    expect((dirsMod as any).updateWorkspaceGateCmd).toBeUndefined();
+  });
+
+  test("the dashboard view no longer exposes gate_cmd / effective_gate_cmd", () => {
+    const c = dirsMod.dashboard().workspaces.find((x) => x.id === DIR_A)!;
+    expect(c).toBeTruthy();
+    expect((c as any).gate_cmd).toBeUndefined();
+    expect((c as any).effective_gate_cmd).toBeUndefined();
+  });
+
+  test("config.verifyCmd is removed (only verifyTimeoutMs remains)", () => {
+    expect((configMod.config as any).verifyCmd).toBeUndefined();
+    expect(typeof configMod.config.verifyTimeoutMs).toBe("number");
+  });
+});
+
+describe("triggerCi drives the CI runner (base threading is exercised end-to-end in ci-gate.test.ts)", () => {
+  test("invokes the active runner for a review task with a worktree", async () => {
+    const id = "gate-ci-invoked";
     seedTask(id, DIR_B, "in_review");
     mkdirSync(join(REPO_ROOT, DIR_B, id), { recursive: true }); // worktree so CI runs
 
-    let seen: string | undefined;
-    tasksMod.setCiRunner(async (_dir, _taskId, gateCmd) => {
-      seen = gateCmd;
+    let called = 0;
+    tasksMod.setCiRunner(async () => {
+      called++;
       return { status: "pass", label: "gate passed", detail: "" };
     });
     await tasksMod.triggerCi(id);
-    expect(seen).toBe("npm run ci");
-  });
-
-  test("with no override, passes the default command to the CI runner", async () => {
-    dirsMod.updateWorkspaceGateCmd(DIR_B, null); // clear → default
-    const id = "gate-ci-default";
-    seedTask(id, DIR_B, "in_review");
-    mkdirSync(join(REPO_ROOT, DIR_B, id), { recursive: true });
-
-    let seen: string | undefined;
-    tasksMod.setCiRunner(async (_dir, _taskId, gateCmd) => {
-      seen = gateCmd;
-      return { status: "pass", label: "gate passed", detail: "" };
-    });
-    await tasksMod.triggerCi(id);
-    expect(seen).toBe(configMod.config.verifyCmd);
+    expect(called).toBe(1);
+    expect(dbMod.db.query<{ ci_status: string }, [string]>(`SELECT ci_status FROM tasks WHERE id=?`).get(id)!.ci_status).toBe("pass");
+    tasksMod.setCiRunner();
   });
 });
 
@@ -170,9 +194,6 @@ describe("dashboard aggregation", () => {
     expect(c.counts.merged).toBe(1);
     expect(c.counts.aborted).toBe(1);
     expect(c.counts.failed).toBe(1);
-    // The effective gate command is surfaced for the dashboard's gate display.
-    expect(c.effective_gate_cmd).toBe(configMod.config.verifyCmd);
-    expect(c.gate_cmd).toBeNull();
   });
 
   test("totals roll up across every registered workspace", () => {

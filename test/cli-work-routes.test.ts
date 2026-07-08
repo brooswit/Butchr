@@ -113,7 +113,7 @@ beforeAll(async () => {
 
   // Seed fixtures over the REAL API (using the CLI's own HTTP helper):
   // 1) register the workspace (gate_cmd="" so no gate could ever run).
-  const ws = await cli.api("POST", "/api/workspaces", { path: REPO_ROOT, gate_cmd: "" });
+  const ws = await cli.api("POST", "/api/workspaces", { path: REPO_ROOT });
   WS = ws.id;
   // 2) a story NODE (top-level non-rollback create) — must be filtered out of `ls`.
   const node = await cli.api("POST", `/api/workspaces/${encodeURIComponent(WS)}/work`, {
