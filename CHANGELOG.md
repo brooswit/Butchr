@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.237] - 2026-07-08
+
 ### Performance
 
 - Make the WORK LIST query (`listTasks`, behind `taskListView` / `allTasksView` → `GET /api/work`)
