@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Stop the WORK LIST build (`listWork` → `allStoryViews` → `storyView` → `storyAgentStatus`) from
+  spawning a herdr `agent get` subprocess PER story on every `GET /api/work`. `storyAgentStatus`
+  probed live leader registration (`harness.agentExists`) unconditionally, so a dashboard with ~60
+  stories — nearly all of them long-gone DONE/aborted leaders — spawned ~60 subprocesses per
+  request. It now short-circuits to `running: false` WITHOUT probing whenever the leader is not
+  desired (`!row || row.desired !== 1` — every torn-down / terminal / never-launched story); a
+  non-desired leader is by definition not running, so the returned `StoryAgentStatus` shape is
+  byte-identical. Only a genuinely DESIRED leader (typically the 0–1 open stories) still probes
+  herdr, dropping ~60 spawns/request to ~0–1. This is a COMPLEMENTARY improvement (~130 ms plus the
+  removal of ~60 subprocess spawns/request) that stacks on top of the dominant list-latency fix —
+  the covering `parent_id` index that eliminates the `storyCounts` full table scans (released in
+  0.9.238) — not a replacement for it.
+
 ## [0.9.238] - 2026-07-08
 
 ### Performance

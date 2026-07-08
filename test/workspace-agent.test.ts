@@ -67,6 +67,21 @@ function insertTask(id: string): void {
     .run(id, DIR, dbMod.nowIso());
 }
 
+/**
+ * Insert a STORY NODE (`work_kind='node'`) row DIRECTLY — bypassing createStory's `onStoryCreated`
+ * hook, which would mark the leader desired=1 and fire a best-effort launch. That control is what
+ * lets the storyAgentStatus PERF tests seed an exact story_agent state (absent / desired=0 /
+ * desired=1) with no async launch race. FK target for a subsequent saveStoryAgentRow write.
+ */
+function insertStoryNode(id: string): void {
+  dbMod.db
+    .query(
+      `INSERT OR IGNORE INTO tasks (id, workspace_id, status, created_at, work_kind, brief, isolated)
+       VALUES (?, ?, 'open', ?, 'node', ?, 0)`,
+    )
+    .run(id, DIR, dbMod.nowIso(), `node ${id}`);
+}
+
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-wsagent-data-"));
   process.env.BUTCHR_DATA_DIR = DATA_DIR;
@@ -2319,5 +2334,113 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     // drill-down above is a LEAF id, which is valid; only the project-node read is forbidden.
     expect(brief).not.toContain(`GET /api/work/${proj.id}`);
     expect(brief.length).toBeGreaterThan(200); // a real brief, not an 80-byte stub
+  });
+});
+
+// PERF regression (story st-31340d12): storyAgentStatus is called once PER story by the WORK
+// LIST build (listWork → allStoryViews → storyView). The herdr `agent get` liveness probe
+// (harness.agentExists) is a SUBPROCESS spawn, so probing every one of the ~60 stories — incl.
+// the ~59 long-gone DONE/aborted leaders — was the fixed ~2–7 s cost of GET /api/work. The fix
+// short-circuits to `running: false` WITHOUT probing whenever the leader is NOT desired
+// (`!row || row.desired !== 1`), and probes ONLY a genuinely-desired leader.
+describe("storyAgentStatus PERF short-circuit — no herdr probe for non-desired leaders", () => {
+  /** Install a runner that COUNTS agentExists calls and treats `liveNames` as registered. */
+  function installProbeCounter(liveNames: Set<string>) {
+    let calls = 0;
+    const runner: AgentRunner = {
+      async isUp() { return true; },
+      async workspaceCreate() { return { workspaceId: "ws", rootPaneId: "rp" }; },
+      async workspaceExists() { return true; },
+      async workspaceClose() {},
+      async tabCreate() { return { tabId: "tab", rootPaneId: "rp" }; },
+      async tabClose() {},
+      async agentTabId() { return undefined; },
+      async agentStart(): Promise<StartedAgent> { return { paneId: "p", terminalId: "t" }; },
+      async agentExists(name) { calls++; return liveNames.has(name); },
+      async agentPaneId() { return undefined; },
+      async agentTerminalId() { return "t"; },
+      async paneTerminalId() { return "t"; },
+      async paneList(): Promise<PaneInfo[]> { return []; },
+      async resolveAgentPane() { return "p"; },
+      isAgentNameTaken() { return false; },
+      async agentRead() { return ""; },
+      async send() {},
+      async paneClose() {},
+      async teardownTask() {},
+      async agentDeregister() {},
+      async runHeadless() { return { ok: true, code: 0, stdout: "", stderr: "", timedOut: false }; },
+    };
+    harnessMod.setRunner(runner);
+    return () => calls;
+  }
+
+  test("an ABSENT story_agent row (never-launched leader) yields running:false WITHOUT probing herdr", async () => {
+    const id = "st-perf-absent-leader";
+    insertStoryNode(id); // node exists, but NO story_agent row was ever written
+    const probeCount = installProbeCounter(new Set());
+    try {
+      const st = await wa.storyAgentStatus(id);
+      expect(probeCount()).toBe(0);
+      expect(st.running).toBe(false);
+      expect(st.desired).toBe(false);
+      // Shape stays byte-identical to the full path (nulls/zeros from the missing row).
+      expect(st.sessionId).toBeNull();
+      expect(st.since).toBeNull();
+      expect(st.restarts).toBe(0);
+      expect(st.lastError).toBeNull();
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+
+  test("a NON-DESIRED (desired=0) leader — every done/aborted story — yields running:false WITHOUT probing", async () => {
+    const id = "st-perf-torndown-leader";
+    insertStoryNode(id);
+    // A leader that was launched then torn down: the mirror row survives with desired=0.
+    dbMod.saveStoryAgentRow(id, { desired: 0, session_id: "sess-x", restarts: 2 });
+    const probeCount = installProbeCounter(new Set());
+    try {
+      const st = await wa.storyAgentStatus(id);
+      expect(probeCount()).toBe(0);
+      expect(st.running).toBe(false);
+      expect(st.desired).toBe(false);
+      // The retained row's fields still flow through unchanged.
+      expect(st.sessionId).toBe("sess-x");
+      expect(st.restarts).toBe(2);
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+
+  test("a DESIRED (desired=1) OPEN leader STILL probes herdr and reflects live registration", async () => {
+    const id = "st-perf-desired-live";
+    insertStoryNode(id);
+    dbMod.saveStoryAgentRow(id, { desired: 1, session_id: "sess-live", started_at: dbMod.nowIso() });
+    const live = new Set<string>([wa.storyAgentName(id)]); // the leader IS registered
+    const probeCount = installProbeCounter(live);
+    try {
+      const st = await wa.storyAgentStatus(id);
+      expect(probeCount()).toBe(1); // desired leader is the ONLY case that spawns the probe
+      expect(st.desired).toBe(true);
+      expect(st.running).toBe(true); // reflected from the live set
+      expect(st.sessionId).toBe("sess-live");
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+
+  test("a DESIRED leader that is NOT registered probes and reports running:false", async () => {
+    const id = "st-perf-desired-dead";
+    insertStoryNode(id);
+    dbMod.saveStoryAgentRow(id, { desired: 1 });
+    const probeCount = installProbeCounter(new Set()); // NOT live
+    try {
+      const st = await wa.storyAgentStatus(id);
+      expect(probeCount()).toBe(1); // still probes — it is desired
+      expect(st.desired).toBe(true);
+      expect(st.running).toBe(false);
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
   });
 });

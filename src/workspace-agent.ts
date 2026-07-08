@@ -2036,11 +2036,25 @@ export function stopStoryAgent(storyId: string): Promise<StoryAgentStatus> {
   });
 }
 
-/** A story's current managed leader-agent status (probes herdr for live registration). Reads
- *  the LEGACY story_agent row — the story view's `leader` field is projected from this. */
+/** A story's current managed leader-agent status. Reads the LEGACY story_agent row — the story
+ *  view's `leader` field is projected from this.
+ *
+ *  PERF (story st-31340d12): the herdr `agent get` probe is a SUBPROCESS spawn, and the WORK LIST
+ *  build (listWork → allStoryViews → storyView) called this once PER story — ~60 spawns/request,
+ *  incl. ~59 long-gone DONE/aborted leaders. So short-circuit when the leader is NOT desired
+ *  (`!row || row.desired !== 1` — torn-down / terminal / never-launched, i.e. every done/aborted
+ *  story): such a leader is by definition not running, so `running: false` without the probe is
+ *  correct (byte-identical shape), not a behavior change. Only a genuinely DESIRED leader
+ *  (`desired === 1`, typically the 0–1 open stories) still probes herdr for live registration. This
+ *  is a COMPLEMENTARY optimization (~130 ms + avoids ~60 subprocess spawns/request); the DOMINANT
+ *  list-latency cost is the storyCounts full-table scan, fixed separately by the `parent_id`
+ *  covering index (0.9.238). */
 export async function storyAgentStatus(storyId: string): Promise<StoryAgentStatus> {
   const row = getStoryAgentRow(storyId);
-  const running = await harness.agentExists(storyAgentName(storyId)).catch(() => false);
+  const running =
+    row && row.desired === 1
+      ? await harness.agentExists(storyAgentName(storyId)).catch(() => false)
+      : false;
   return {
     storyId,
     desired: !!(row && row.desired === 1),
