@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Uniform UPDATE-instruction+NOTIFY verb — DIRECTIVE tier (story st-7a7b0654, S3).**
+  Extends the `POST /api/work/:id/update` verb to a **CEO DIRECTIVE**: `CEO UPDATES a
+  directive → the repo's CTO is re-notified with the new instruction`. A directive is a
+  repo-parented LEAF (`status='directive'`, a feedback state that never runs an agent), so it
+  already flows through the shared `updateWork`/`updateTask` leaf path — but createDirective
+  stores the brief in BOTH the task.md `## Prompt` AND the `summary` column (the raw attention
+  feed / CTO hook reads `summary`), and the core amend rewrote only the prompt. `updateTask`
+  now MIRRORS the amended brief into the `summary` column for a directive too, keeping the two
+  in lockstep so the re-surface carries the new text, not a stale hook. The amend still appends
+  the `### Amendment` audit note; the directive re-surfaces to the repo's CTO via the existing
+  `task.instruction_updated` attention surface (routed by the same structural responder, no
+  fork); an `accepted` directive (the CTO already decomposed it) is terminal → 409 (a
+  correction is a fresh directive). `src/tasks.ts`, `src/work-api.ts`;
+  `test/update-verb-directive.test.ts`.
+
 ## [0.9.232] - 2026-07-08
 
 ### Added

@@ -2257,6 +2257,17 @@ export async function updateTask(id: string, brief: unknown): Promise<TaskView> 
   editTask(id, { prompt: brief });
   appendAmendment(dir.path, id, brief, nowIso());
 
+  // A CEO DIRECTIVE (RFC Q1 directive machinery — story st-7a7b0654 S3) stores its brief in BOTH
+  // the task.md `## Prompt` AND the `summary` column: createDirective writes both, and the raw
+  // attention feed / CTO hook (attentionDetail → row.summary for `directive-triage`) reads
+  // `summary`. editTask above rewrote only the task.md prompt, so mirror the amended brief into
+  // `summary` too — keeping the two in lockstep with the SAME sanitized value editTask wrote — so
+  // the re-surfaced directive carries the new text, not a stale hook. A directive never runs an
+  // agent (a `feedback` state), so it always takes the parked re-surface path below.
+  if (row.status === "directive") {
+    db.query(`UPDATE tasks SET summary=? WHERE id=?`).run(validatePrompt(brief), id);
+  }
+
   // NOTIFY split — deliver the amendment based on where the worker is.
   if (row.status === "in_progress" && row.has_agent === 1) {
     // LIVE agent — STEER the running pane (never restart / requeue a live agent), with the same

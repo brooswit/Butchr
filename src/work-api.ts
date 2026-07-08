@@ -293,16 +293,22 @@ export function patchWork(
  * UPDATE a unit of Work's in-flight instruction and NOTIFY its worker (`POST /api/work/:id/update`,
  * body `{brief}`) — the uniform UPDATE-instruction+NOTIFY verb (story st-7a7b0654). AMENDS the
  * persisted brief + rewrites the instruction, then delivers the change to wherever the worker is
- * (steer a live pane / re-surface a parked item / amend-only when not live). Routed by kind: THIS
- * tier implements the LEAF path fully (`updateTask`); the story-node and directive tiers land in
- * S2/S3 (a clean 409 seam here until then). 404 if gone; 409 on a terminal/rolling_back item.
+ * (steer a live pane / re-surface a parked item / amend-only when not live). Routed by kind: the
+ * LEAF path (`updateTask`) covers subtasks AND a CEO DIRECTIVE — a directive IS a repo-parented leaf
+ * (`status='directive'`), so it flows through here, always taking the amend + re-surface path (it
+ * never runs an agent) and additionally mirroring its brief into the `summary` column so the CTO
+ * re-surface carries the new text (updateTask; story st-7a7b0654 S3). The story-NODE tier lands in
+ * S2 (a clean 409 seam here until then). 404 if gone; 409 on a terminal/rolling_back item — an
+ * `accepted` directive is terminal, so a correction is a fresh directive, not an amendment.
  */
 export async function updateWork(id: string, brief: unknown): Promise<TaskView> {
   const resolved = resolveWork(id);
   if (resolved.kind !== "leaf") {
+    // The story-NODE tier is not wired yet (S2). A directive is a LEAF, so it never reaches here —
+    // it flows through updateTask below like any other leaf.
     throw new HttpError(
       409,
-      "updating a story/directive instruction is not yet supported (lands in S2/S3)",
+      "updating a story-node instruction is not yet supported (lands in S2)",
     );
   }
   return updateTask(id, brief);
