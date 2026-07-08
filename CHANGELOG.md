@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.226] - 2026-07-08
+
 ### Added
 
 - **CEO directive machinery (RFC Q1, Phase A3) — additive + inert.** The corrected
