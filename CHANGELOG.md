@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Workspace view: the "New story" launch row now renders UNDER the CTO agent panel.**
+  FE-only reorder in `renderWorkspace` (`public/app.js`) — the launch row (New-work-is-a-
+  STORY caption + "New story" button) previously appended ABOVE the CTO card; it now appends
+  after the CTO panel slot, so the final order is crumbs/title/path → CTO panel → New-story
+  launch row → Pipeline. Pure reorder of existing `appendChild` calls; the launch row and CTO
+  panel construction (async `replaceWith` load included) are otherwise unchanged.
+
 ## [0.9.242] - 2026-07-08
 
 ## [0.9.241] - 2026-07-08

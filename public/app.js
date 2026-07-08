@@ -1162,19 +1162,6 @@ async function renderWorkspace(id, projectId) {
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path" }, dir.path));
 
-  // create-work launcher (AUTHORITY FLIP, Phase 7) — the operator's entry point for new
-  // work is now a STORY, not a standalone task. A single "New story" button opens the
-  // brief modal (POST /api/workspaces/:id/work); a story leader then decomposes it into
-  // subtasks. Standalone task + idea creation are gone (the server rejects them) — the only
-  // task creatable directly is a rollback, via the per-task "Roll back" button.
-  const launch = el("div", { class: "row between", style: "margin-top:18px" });
-  launch.appendChild(el("small", { class: "muted" },
-    `New work is a STORY — a leader decomposes it into subtasks. ${queueLine(tasks)}`));
-  const newStoryBtn = el("button", { class: "btn", id: "new-story" }, "New story");
-  newStoryBtn.addEventListener("click", () => openNewStoryModal(id));
-  launch.appendChild(newStoryBtn);
-  wrap.appendChild(launch);
-
   // This workspace's managed CTO agent (its principal/dev agent, running in the repo
   // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
   // workspace. Rendered at the TOP of the workspace view (above the Pipeline) so the
@@ -1184,6 +1171,20 @@ async function renderWorkspace(id, projectId) {
   const ctoSlot = el("div");
   wrap.appendChild(ctoSlot);
   ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
+
+  // create-work launcher (AUTHORITY FLIP, Phase 7) — the operator's entry point for new
+  // work is now a STORY, not a standalone task. A single "New story" button opens the
+  // brief modal (POST /api/workspaces/:id/work); a story leader then decomposes it into
+  // subtasks. Standalone task + idea creation are gone (the server rejects them) — the only
+  // task creatable directly is a rollback, via the per-task "Roll back" button.
+  // Rendered UNDER the CTO panel (above the Pipeline) so the CTO controls stay at the top.
+  const launch = el("div", { class: "row between", style: "margin-top:18px" });
+  launch.appendChild(el("small", { class: "muted" },
+    `New work is a STORY — a leader decomposes it into subtasks. ${queueLine(tasks)}`));
+  const newStoryBtn = el("button", { class: "btn", id: "new-story" }, "New story");
+  newStoryBtn.addEventListener("click", () => openNewStoryModal(id));
+  launch.appendChild(newStoryBtn);
+  wrap.appendChild(launch);
 
   // The workspace body is the Pipeline (swimlanes) view — the sole work view. It shows ALL
   // work (stories as lanes, their subtasks as the pipeline within each lane) and re-renders
