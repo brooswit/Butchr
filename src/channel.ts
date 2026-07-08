@@ -150,6 +150,14 @@ const STORY_ATTENTION: Record<
   "leader-idle": { phrase: "leader IDLE with work awaiting it", state: "story_leader_idle" },
 };
 
+// The phrase for an operator INSTRUCTION-UPDATE re-surface (the `update` verb — story
+// st-7a7b0654). A one-shot signal, NOT a status: an operator amended a work item's brief
+// while it sits PARKED in a feedback state, so its owner (a subtask's story leader, a
+// non-story task's CTO, …) must re-read the revised task.md and re-review. It rides the
+// task-attention routing (routeOwns + pending_responder), so it carries its own phrase +
+// `meta.state="instruction_updated"` like IDLE_PHRASE/DEAD_BLOCKED_PHRASE.
+const INSTRUCTION_UPDATED_PHRASE = "instruction UPDATED — re-read task.md + re-review";
+
 // The human phrase for the GLOBAL connectivity-restored broadcast. Unlike the
 // attention/idle notifications this is NOT tied to a task or workspace — the network
 // the AGENTS need is back, so every connected session (CTO + each live worker) should
@@ -422,6 +430,15 @@ export class AttentionBridge {
       return this.consumeInitiativeCompleted(e);
     }
 
+    // OPERATOR INSTRUCTION-UPDATE re-surface (the `update` verb — story st-7a7b0654). A one-shot
+    // live push that a PARKED-in-feedback work item's brief was amended, so its owner must re-read
+    // + re-review. Routed to the SAME owner as the item's feedback (routeOwns + pending_responder),
+    // but forced (a same-status task.updated would not re-notify). Stateless — it does NOT touch the
+    // status/idle/responder diff maps and is never reconnect-resynced.
+    if (e.type === "task.instruction_updated") {
+      return this.consumeInstructionUpdated(e);
+    }
+
     // Keep the workspace-label cache fresh off the same stream.
     if (e.type === "workspace.created" || e.type === "workspace.updated") {
       const dir = e.workspace as Record<string, unknown> | undefined;
@@ -657,6 +674,53 @@ export class AttentionBridge {
     return {
       content,
       meta: { initiative_id: iid, project_id: projectId, state: "initiative_review" },
+    };
+  }
+
+  /**
+   * Translate a `task.instruction_updated` event (the `update` verb — story st-7a7b0654) into an
+   * INSTRUCTION-UPDATED re-surface notification, or null when THIS bridge's scope does not own the
+   * item. An operator amended a PARKED-in-feedback work item's brief; a same-status `task.updated`
+   * would not re-notify (the diff path only fires on an entered surface / responder change), so this
+   * one-shot event forces the re-surface. It reads the SAME routing fields off the carried TaskView
+   * as consumeTaskAttention (story_id / project_id / pending_responder / status / workspace_id) and
+   * REUSES routeOwns, so a subtask routes to its story leader, a non-story task to the CTO, exactly
+   * like the item's ordinary feedback. Stateless: it does NOT update the status/idle/responder diff
+   * maps (so it can never desync the ordinary path) and — being markerless + never resynced — it is
+   * a live push only. Resilient: a missing/unknown field yields null rather than throwing.
+   */
+  private consumeInstructionUpdated(e: Record<string, unknown>): ChannelNotification | null {
+    const task = e.task;
+    if (!task || typeof task !== "object") return null;
+    const t = task as Record<string, unknown>;
+    const id = t.id;
+    const status = t.status;
+    if (typeof id !== "string" || !id || typeof status !== "string") return null;
+
+    const dirId = typeof t.workspace_id === "string" ? t.workspace_id : "";
+    const storyId = typeof t.story_id === "string" && t.story_id ? t.story_id : null;
+    const projectId = typeof t.project_id === "string" && t.project_id ? t.project_id : null;
+    const responder =
+      typeof t.pending_responder === "string" ? t.pending_responder : null;
+
+    // OWNERSHIP — reuse the exact task-attention routing (NOT a fork). Not dead-blocked.
+    if (!this.routeOwns(storyId, projectId, responder, status, dirId, false)) return null;
+
+    const label = this.dirLabels.get(dirId) || dirId || "(unknown workspace)";
+    const detail = tidy(e.detail);
+    const content =
+      `[${id}] ${label} — ${INSTRUCTION_UPDATED_PHRASE}` + (detail ? `: ${detail}` : "");
+    const storyMeta = storyId ? { story_id: storyId } : {};
+    const projectMeta = projectId ? { project_id: projectId } : {};
+    return {
+      content,
+      meta: {
+        task_id: id,
+        workspace: dirId,
+        state: "instruction_updated",
+        ...storyMeta,
+        ...projectMeta,
+      },
     };
   }
 

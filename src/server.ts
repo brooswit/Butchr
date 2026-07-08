@@ -112,6 +112,7 @@ import {
   resetWork,
   setWorkBlockedBy,
   specWork,
+  updateWork,
   versionBumpWork,
   workView,
 } from "./work-api.ts";
@@ -1158,6 +1159,15 @@ route("POST", "/api/work/:id/abort", async (_req, p) => json(await abortWork(p.i
 route("POST", "/api/work/:id/nudge", async (req, p) => {
   const body = await readJson(req);
   return json(await nudgeWork(p.id!, body.text));
+});
+
+// UPDATE a LEAF's in-flight instruction + NOTIFY its worker (body {brief}) — the uniform
+// update-instruction verb (story st-7a7b0654): AMEND the brief, then steer a live agent /
+// re-surface a parked item / amend-only. 409 on a node (S2/S3) or terminal work; 400 on a
+// blank brief. See work-api.updateWork.
+route("POST", "/api/work/:id/update", async (req, p) => {
+  const body = await readJson(req);
+  return json(await updateWork(p.id!, body.brief));
 });
 
 // REQUEUE a LEAF that gave up dispatching. 409 on a node. Mirrors POST /api/tasks/:id/requeue.

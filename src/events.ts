@@ -100,6 +100,16 @@ export type ButchrEvent =
       initiative_id: string;
       detail: string | null;
     }
+  // An operator AMENDED an in-flight instruction after the fact (the `update` verb —
+  // POST /api/work/:id/update; story st-7a7b0654). A one-shot LIVE re-surface signal: a
+  // PARKED-in-feedback work item (in_review/needs_info/idea/spec_review) whose brief just
+  // changed will NOT re-notify off a same-status `task.updated` (the AttentionBridge only
+  // emits on an ENTERED surface or a responder change), so this dedicated event forces the
+  // re-surface. It carries the refreshed TaskView (routed to the current owner via the SAME
+  // routeOwns + pending_responder the bridge already uses — a subtask's owner is its story
+  // leader) and `detail` = the new brief. DELIBERATELY EVENT-ONLY + never reconnect-resynced
+  // (see channel.ts): replaying an amendment on reconnect would be a spurious re-notify.
+  | { type: "task.instruction_updated"; task: unknown; detail: string | null }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;

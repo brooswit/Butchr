@@ -48,6 +48,7 @@ import {
   taskEstimate,
   taskReadiness,
   taskView,
+  updateTask,
 } from "./tasks.ts";
 import type { ApproveOutcome, TaskListView, TaskReadiness, TaskView } from "./tasks.ts";
 import {
@@ -286,6 +287,25 @@ export function patchWork(
     return editTask(id, edits);
   }
   return updateStory(id, { brief: body.brief, status: body.status });
+}
+
+/**
+ * UPDATE a unit of Work's in-flight instruction and NOTIFY its worker (`POST /api/work/:id/update`,
+ * body `{brief}`) — the uniform UPDATE-instruction+NOTIFY verb (story st-7a7b0654). AMENDS the
+ * persisted brief + rewrites the instruction, then delivers the change to wherever the worker is
+ * (steer a live pane / re-surface a parked item / amend-only when not live). Routed by kind: THIS
+ * tier implements the LEAF path fully (`updateTask`); the story-node and directive tiers land in
+ * S2/S3 (a clean 409 seam here until then). 404 if gone; 409 on a terminal/rolling_back item.
+ */
+export async function updateWork(id: string, brief: unknown): Promise<TaskView> {
+  const resolved = resolveWork(id);
+  if (resolved.kind !== "leaf") {
+    throw new HttpError(
+      409,
+      "updating a story/directive instruction is not yet supported (lands in S2/S3)",
+    );
+  }
+  return updateTask(id, brief);
 }
 
 /**

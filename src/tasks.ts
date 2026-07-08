@@ -56,6 +56,7 @@ import { uniqueTaskId } from "./ids.ts";
 import { findTranscript, readSessionUsage } from "./usage.ts";
 import { verifyDefaultBranch } from "./verify.ts";
 import {
+  appendAmendment,
   appendAnswer,
   appendRejection,
   readTaskMd,
@@ -2202,6 +2203,94 @@ export function editTask(
   }
 
   emitUpdated(id);
+  return taskView(id)!;
+}
+
+/**
+ * UPDATE a LEAF's in-flight instruction and NOTIFY its worker (the `update` verb —
+ * POST /api/work/:id/update; story st-7a7b0654). This FUSES the two halves that already
+ * existed but were never wired together: editTask rewrote task.md in place but only emitted
+ * a passive `task.updated` (the worker was never told); nudgeTask steered a live pane but
+ * never changed the instruction. updateTask AMENDS the brief AND delivers it based on WHERE
+ * the worker is.
+ *
+ * GUARDS (mirroring editTask): 404 if gone; 409 if terminal OR `rolling_back` — a correction
+ * of terminal work is a fresh directive/story (which already exists), not an amendment of the
+ * done one; 400 if `brief` is blank/missing. Every non-terminal state accepts.
+ *
+ * AMEND (ONE path): reuse editTask({prompt}) so the sanitize/length-cap (validatePrompt) +
+ * in-place `## Prompt` rewrite + `task.updated` all run exactly once, then append a cheap
+ * `### Amendment` audit entry (appendAmendment) AFTER the rewrite.
+ *
+ * NOTIFY split on liveness:
+ *  - LIVE build agent (in_progress + owned agent): STEER the running pane the way nudgeTask
+ *    does — with the SAME dead-shell guard (claudeAlive else requeueForResume). The steer line
+ *    states the instruction was UPDATED, carries the new brief, and tells the agent to RE-READ
+ *    its task.md `## Prompt` and fold the change into its current work WITHOUT restarting. No
+ *    status change, no requeue of a live agent, session preserved; a within-state audit event.
+ *  - PARKED in a feedback state (in_review/needs_info/idea/spec_review): RE-SURFACE the item on
+ *    its owner's channel via a one-shot `task.instruction_updated` event (a same-status
+ *    task.updated would not re-notify). Routed to the owner by the bridge's existing
+ *    routeOwns/pending_responder — for a subtask that owner is the story LEADER.
+ *  - READY-but-not-live (inactive/blocked): amend-only — editTask already emitted `task.updated`,
+ *    and the agent reads the fresh task.md when it dispatches. No steer, no re-surface.
+ */
+export async function updateTask(id: string, brief: unknown): Promise<TaskView> {
+  const row = getTask(id);
+  if (!row) throw new HttpError(404, `task not found: ${id}`);
+  if (isTerminal(row.status) || row.status === "rolling_back") {
+    throw new HttpError(
+      409,
+      `cannot update the instruction on a ${row.status} task — a correction of terminal ` +
+        `work is a fresh directive/story, which already exists`,
+    );
+  }
+  if (typeof brief !== "string" || !brief.trim()) {
+    throw new HttpError(400, "provide a non-empty brief to update the instruction");
+  }
+
+  const dir = getWorkspace(row.workspace_id);
+  if (!dir) throw new HttpError(404, "workspace not found");
+
+  // AMEND via the single editTask path (sanitize + in-place ## Prompt rewrite + task.updated),
+  // then append the audit trail AFTER the rewrite so the in-place swap never clobbers it.
+  editTask(id, { prompt: brief });
+  appendAmendment(dir.path, id, brief, nowIso());
+
+  // NOTIFY split — deliver the amendment based on where the worker is.
+  if (row.status === "in_progress" && row.has_agent === 1) {
+    // LIVE agent — STEER the running pane (never restart / requeue a live agent), with the same
+    // dead-shell liveness guard nudgeTask applies: a dead login shell is RECOVERED, never poked.
+    if (!claudeAlive(row.session_id)) {
+      await requeueForResume(
+        id,
+        "instruction updated but the agent process is not alive (dead shell, herdr/host " +
+          "restart suspected); auto-resuming so it re-grounds on the revised task.md",
+      );
+      return taskView(id)!;
+    }
+    const steer =
+      `Your instruction was UPDATED. The revised brief is:\n\n${brief.trim()}\n\n` +
+      `RE-READ your task.md \`## Prompt\` (it now holds this brief) and fold the change into ` +
+      `your current work — keep going, do NOT restart.`;
+    await harness.send(id, { text: steer, enter: true });
+    const note = `[butchr] instruction updated; live agent steered to re-read task.md and fold it in`;
+    recordTaskEvent(id, "in_progress", "in_progress", note);
+    console.log(`[butchr] task ${id} ${note}`);
+    emitUpdated(id);
+    return taskView(id)!;
+  }
+
+  if (isAwaitingFeedback(row)) {
+    // PARKED in a feedback state — force a re-surface to the item's owner (a same-status
+    // task.updated will not re-notify). The bridge routes this by routeOwns/pending_responder.
+    const v = taskView(id);
+    if (v) publish({ type: "task.instruction_updated", task: v, detail: brief.trim() });
+    return v ?? taskView(id)!;
+  }
+
+  // READY-but-not-live (inactive/blocked) — amend-only; editTask already emitted task.updated
+  // and the agent reads the fresh task.md when it dispatches.
   return taskView(id)!;
 }
 

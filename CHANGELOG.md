@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Uniform UPDATE-instruction+NOTIFY verb — shared core + LEAF tier (story st-7a7b0654, S1).**
+  A new `POST /api/work/:id/update` verb (`{brief}`) lets an operator AMEND an in-flight
+  instruction after the fact AND have the worker NOTIFIED — fusing the two halves that
+  existed but were never wired together (`editTask` rewrote task.md but only emitted a passive
+  `task.updated`; `nudgeTask` steered a live pane but never changed the instruction). The
+  kind-agnostic `updateWork` facade (`src/work-api.ts`) routes by kind — this ships the LEAF
+  path fully via `tasks.updateTask`; the story-node and directive tiers are a clean 409 seam
+  for S2/S3. `updateTask` guards like `editTask` (404 gone; 409 terminal/`rolling_back` — a
+  correction of terminal work is a fresh directive/story; 400 blank brief), AMENDS through the
+  single `editTask({prompt})` path (sanitize + in-place `## Prompt` rewrite) plus a new
+  `taskmd.appendAmendment` `### Amendment` audit entry, then NOTIFIES on liveness: a LIVE build
+  agent is STEERED (`harness.send` with the same dead-shell `claudeAlive`/`requeueForResume`
+  guard as `nudgeTask` — re-read task.md + fold the change in, no restart/requeue, session
+  preserved); a PARKED-in-feedback item (`in_review`/`needs_info`/`idea`/`spec_review`)
+  RE-SURFACES to its owner via a one-shot `task.instruction_updated` event the AttentionBridge
+  translates (routed by the SAME `routeOwns`/`pending_responder` — a subtask's owner is its
+  story leader; never reconnect-resynced); a READY-but-not-live item (`inactive`/`blocked`) is
+  amend-only (it re-grounds on the fresh task.md when it dispatches).
+
 ## [0.9.231] - 2026-07-08
 
 ### Added

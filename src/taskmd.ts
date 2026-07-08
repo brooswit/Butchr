@@ -233,6 +233,32 @@ export function appendRejection(
   writeFileSync(p, text.trimEnd() + "\n" + entry, "utf8");
 }
 
+const AMENDMENTS_SECTION = "## Amendments";
+
+/**
+ * Append an operator AMENDMENT to task.md's Amendments section — the durable audit trail of
+ * the `update` verb (an operator amended an in-flight instruction after the fact via
+ * `updateTask`). The `## Prompt` body itself is rewritten in place (updateTaskMdPrompt) so a
+ * resumed/dispatched agent re-grounds on the CURRENT brief; this section is the cheap,
+ * append-only record of WHAT changed and WHEN, mirroring how appendRejection logs review
+ * notes and appendAnswer logs the raise handshake. Appended AFTER the Prompt rewrite so the
+ * in-place body swap never clobbers the trail.
+ */
+export function appendAmendment(
+  workspaceRoot: string,
+  taskId: string,
+  brief: string,
+  whenIso: string,
+): void {
+  const p = taskMdPath(workspaceRoot, taskId);
+  let text = existsSync(p) ? readFileSync(p, "utf8") : "";
+  if (!text.includes(AMENDMENTS_SECTION)) {
+    text += `\n\n${AMENDMENTS_SECTION}\n`;
+  }
+  const entry = `\n### Amendment — ${whenIso}\n${brief.trim()}\n`;
+  writeFileSync(p, text.trimEnd() + "\n" + entry, "utf8");
+}
+
 const CLARIFY_SECTION = "## Clarifications";
 
 /**
