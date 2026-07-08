@@ -539,10 +539,10 @@ async function ctoPanel(dirId) {
   try {
     s = await api("GET", base);
   } catch {
-    return el("div", { class: "panel cto-card", style: "margin-top:28px" },
+    return el("div", { class: "panel cto-card", style: "margin-top:18px" },
       el("small", { class: "muted" }, "CTO agent status unavailable"));
   }
-  const card = el("div", { class: "panel cto-card", style: "margin-top:28px" });
+  const card = el("div", { class: "panel cto-card", style: "margin-top:18px" });
   const { state, cls: stateCls } = ctoState(s);
   const bits = [];
   if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
@@ -1175,6 +1175,16 @@ async function renderWorkspace(id, projectId) {
   launch.appendChild(newStoryBtn);
   wrap.appendChild(launch);
 
+  // This workspace's managed CTO agent (its principal/dev agent, running in the repo
+  // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
+  // workspace. Rendered at the TOP of the workspace view (above the Pipeline) so the
+  // operator reaches the CTO controls without scrolling past the swimlanes. Best-effort:
+  // rendered async so a status-probe hiccup never blocks the page — the placeholder slot
+  // appends synchronously and the panel swaps in once it resolves.
+  const ctoSlot = el("div");
+  wrap.appendChild(ctoSlot);
+  ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
+
   // The workspace body is the Pipeline (swimlanes) view — the sole work view. It shows ALL
   // work (stories as lanes, their subtasks as the pipeline within each lane) and re-renders
   // wholesale on every SSE event, so it live-updates with no view-mode state to persist.
@@ -1182,14 +1192,6 @@ async function renderWorkspace(id, projectId) {
   body.appendChild(el("h2", {}, "Pipeline"));
   body.appendChild(renderSwimlanes(work));
   wrap.appendChild(body);
-
-  // This workspace's managed CTO agent (its principal/dev agent, running in the repo
-  // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
-  // workspace. Best-effort: rendered async so a status-probe hiccup never blocks the
-  // page. Mounted in place once it resolves.
-  const ctoSlot = el("div");
-  wrap.appendChild(ctoSlot);
-  ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
 
   // (The gate is now the repo's own `./scripts/ci` — butchr carries zero gate config — so
   // there is no per-workspace gate-command panel here anymore.)

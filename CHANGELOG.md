@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Workspace view: the CTO agent panel now renders ABOVE the Pipeline (swimlanes).**
+  FE-only reorder in `renderWorkspace` — the CTO card (status + Open-CTO-terminal +
+  Start/Stop/Restart) sits at the top of the workspace view, so the operator reaches the
+  CTO controls without scrolling past the swimlanes. The panel still loads async (the
+  placeholder slot appends synchronously; the panel swaps in once its status probe
+  resolves) so a probe hiccup never blocks page render. The card's top margin was trimmed
+  (`28px` → `18px`) to sit cleanly at the top now that nothing precedes it but the launcher.
+
 ## [0.9.240] - 2026-07-08
 
 ### Changed
