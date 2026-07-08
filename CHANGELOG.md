@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.227] - 2026-07-08
+
 ### Changed
 
 - **CEO initiatives now delegate via DIRECTIVES, not forged stories (RFC Q1/Q6,
