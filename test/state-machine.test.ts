@@ -101,24 +101,33 @@ describe("1. state metadata (kind + agentType per state)", () => {
     expect(M.merged).toEqual({ kind: "idle" });
     expect(M.failed).toEqual({ kind: "idle" });
     expect(M.aborted).toEqual({ kind: "idle" });
-    // Exactly the twelve canonical states, no more (finalizing was removed).
-    expect(dbMod.ALL_STATUSES.length).toBe(12);
+    // RFC Q1 directive machinery: a CEO directive awaits its repo's CTO (feedback); a CTO-accepted
+    // directive is terminal + idle.
+    expect(M.directive).toEqual({ kind: "feedback" });
+    expect(M.accepted).toEqual({ kind: "idle" });
+    // Exactly the fourteen canonical states, no more (finalizing was removed; directive + accepted
+    // added by the RFC Q1 directive machinery).
+    expect(dbMod.ALL_STATUSES.length).toBe(14);
     expect(M.finalizing).toBeUndefined();
     expect(Object.keys(M).sort()).toEqual([...dbMod.ALL_STATUSES].sort());
   });
 
-  test("isTerminal identifies exactly the four terminal states", () => {
+  test("isTerminal identifies exactly the five terminal states", () => {
     expect(dbMod.isTerminal("merged")).toBe(true);
     expect(dbMod.isTerminal("failed")).toBe(true);
     expect(dbMod.isTerminal("rolled_back")).toBe(true);
     expect(dbMod.isTerminal("aborted")).toBe(true);
+    // A CTO-accepted CEO directive is terminal (its work now lives in the stories it spawned).
+    expect(dbMod.isTerminal("accepted")).toBe(true);
     expect(dbMod.isTerminal("rolling_back")).toBe(false);
     expect(dbMod.isTerminal("inactive")).toBe(false);
     expect(dbMod.isTerminal("in_progress")).toBe(false);
+    // A directive itself is a live feedback state, NOT terminal.
+    expect(dbMod.isTerminal("directive")).toBe(false);
     // ALL_STATUSES.filter(isTerminal) is the single source the reaper derives its
-    // terminal SQL/Set from — assert it equals the canonical four.
+    // terminal SQL/Set from — assert it equals the canonical five.
     expect(dbMod.ALL_STATUSES.filter(dbMod.isTerminal).sort()).toEqual(
-      ["aborted", "failed", "merged", "rolled_back"].sort(),
+      ["aborted", "accepted", "failed", "merged", "rolled_back"].sort(),
     );
   });
 
@@ -130,9 +139,10 @@ describe("1. state metadata (kind + agentType per state)", () => {
     // REVIEW_STATES ⊆ ATTENTION_STATES.
     const attention = new Set(dbMod.ATTENTION_STATES);
     for (const s of dbMod.REVIEW_STATES) expect(attention.has(s)).toBe(true);
-    // ATTENTION_STATES === REVIEW_STATES ∪ {idea, aborted}.
+    // ATTENTION_STATES === REVIEW_STATES ∪ {idea, aborted, directive} (directive added by the RFC
+    // Q1 directive machinery — a CEO directive surfaces on its repo's CTO push-feed).
     expect([...dbMod.ATTENTION_STATES].sort()).toEqual(
-      [...new Set([...dbMod.REVIEW_STATES, "idea", "aborted"])].sort(),
+      [...new Set([...dbMod.REVIEW_STATES, "idea", "aborted", "directive"])].sort(),
     );
     // The operator pull-signal set, exactly.
     expect([...dbMod.REVIEW_STATES].sort()).toEqual(

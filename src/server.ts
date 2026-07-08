@@ -82,6 +82,7 @@ import {
 } from "./stories.ts";
 import {
   abortWork,
+  acceptWorkDirective,
   answerWork,
   approveWork,
   askWork,
@@ -979,6 +980,16 @@ route("POST", "/api/work/:id/work", async (req, p) => {
     allowlist: body.allowlist ?? [],
   });
   return json(view, 201);
+});
+
+// ACCEPT & DECOMPOSE a CEO directive into stories (RFC Q1 directive machinery) — a repo CTO turns a
+// `directive`-status leaf into 1+ real stories under its repo (each stamped the directive's
+// initiative_id) and marks the directive `accepted`. Body {targets:[{brief},…]}. 404 if the directive
+// is gone; 409 if the work item is not an open directive; 400 on a blank/empty target set. The other
+// CTO verb — push-back — is POST /api/work/:id/escalate.
+route("POST", "/api/work/:id/stories", async (req, p) => {
+  const body = await readJson(req);
+  return json(acceptWorkDirective(p.id!, body.targets), 201);
 });
 
 // APPROVE a unit of Work (LEAF-only) — mirrors POST /api/tasks/:id/approve's flag-shaped

@@ -18,9 +18,9 @@ import { recoverStuckGates, requeueForResume } from "./tasks.ts";
 
 const git = config.gitBin;
 
-// A task in a TERMINAL state (merged/failed/rolled_back/aborted — see db.isTerminal) is
+// A task in a TERMINAL state (merged/failed/rolled_back/aborted/accepted — see db.isTerminal) is
 // DONE: its worktree/branch/herdr pane are safe to reap. Everything else (idea/spec_review/
-// blocked/needs_info/inactive/in_progress/in_review/rolling_back) is still live and must be
+// blocked/needs_info/directive/inactive/in_progress/in_review/rolling_back) is still live and must be
 // left alone. In particular `blocked` and `inactive` are pre-dispatch WAITING states, not
 // terminal: their worktree (and the session they will resume into) must survive until they
 // run. The terminal membership is sourced ONCE from db (isTerminal / ALL_STATUSES) — no

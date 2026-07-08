@@ -67,6 +67,9 @@ const STATUS_LABELS = {
   rolled_back: "rolled back",
   idea: "idea",
   blocked: "blocked",
+  // CEO directive (RFC Q1) — a directive awaiting a repo's CTO, and its terminal accepted state.
+  directive: "CEO directive",
+  accepted: "accepted",
   merged: "merged",
   failed: "failed",
   aborted: "aborted",
@@ -120,6 +123,7 @@ const DEFAULT_STATE_META = {
     spec_review: { kind: "feedback" },
     blocked: { kind: "idle" },
     needs_info: { kind: "feedback" },
+    directive: { kind: "feedback" },
     inactive: { kind: "agent", agentType: "workspace-agent" },
     in_progress: { kind: "agent", agentType: "workspace-agent" },
     in_review: { kind: "feedback" },
@@ -128,12 +132,13 @@ const DEFAULT_STATE_META = {
     rolled_back: { kind: "idle" },
     failed: { kind: "idle" },
     aborted: { kind: "idle" },
+    accepted: { kind: "idle" },
   },
   allStatuses: [
-    "idea", "spec_review", "blocked", "needs_info", "inactive", "in_progress",
-    "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted",
+    "idea", "spec_review", "blocked", "needs_info", "directive", "inactive", "in_progress",
+    "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted", "accepted",
   ],
-  terminalStatuses: ["merged", "aborted", "failed", "rolled_back"],
+  terminalStatuses: ["merged", "aborted", "failed", "rolled_back", "accepted"],
 };
 
 // Build the six status tables from the served meta — or, when `meta` is missing/empty (a

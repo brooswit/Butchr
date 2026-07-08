@@ -675,7 +675,11 @@ export function isAwaitingFeedback(row: TaskRow): boolean {
     row.status === "idea" ||
     row.status === "spec_review" ||
     row.status === "in_review" ||
-    row.status === "needs_info"
+    row.status === "needs_info" ||
+    // A CEO directive awaits its repo's CTO — a feedback state that bubbles up the structural
+    // responder chain (repo → cto) exactly like the others, and is escalatable via escalateTask
+    // (RFC Q1 directive machinery).
+    row.status === "directive"
   );
 }
 
@@ -983,7 +987,10 @@ export type AttentionReason =
   | "major-confirm"
   | "idle-handling"
   | "needs-user-input"
-  | "failed";
+  | "failed"
+  // A CEO directive awaiting its repo's CTO to accept&decompose (create stories) or escalate it
+  // back up the ladder (RFC Q1 directive machinery).
+  | "directive-triage";
 
 export type AttentionItem = {
   id: string;
@@ -1031,6 +1038,8 @@ export function attentionReason(row: TaskRow, releaseMode: boolean): AttentionRe
       return row.plan_preview ? "plan-approval" : "answer-question";
     case "in_review":
       return releaseMode && row.version_bump === "major" ? "major-confirm" : "diff-review";
+    case "directive":
+      return "directive-triage";
     case "in_progress":
       // needs_user_input WINS over idle — it is the more specific, human-only signal (a wedged
       // dialog vs a generic stall), so when both flags are set it is the reason surfaced.
@@ -1070,7 +1079,7 @@ export function attentionList(): AttentionItem[] {
     .query<TaskRow, []>(
       `SELECT * FROM tasks
         WHERE work_kind='leaf' AND (
-              status IN ('spec_review','in_review','needs_info','failed')
+              status IN ('spec_review','in_review','needs_info','failed','directive')
            OR (status='in_progress' AND has_agent=1 AND idle=1)
            OR (status='in_progress' AND has_agent=1 AND needs_user_input=1))
         ORDER BY created_at ASC`,

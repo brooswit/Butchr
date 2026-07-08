@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CEO directive machinery (RFC Q1, Phase A3) — additive + inert.** The corrected
+  cross-repo delegation model where the CEO DIRECTS a repo's CTO rather than creating
+  the story itself. A CEO directive is a leaf `tasks` row parented UNDER the target
+  repo node in a new `directive` attention status (`src/db.ts`): parenting under the
+  repo means the existing structural responder (`work.resolveWorkResponder`) routes it
+  to that repo's CTO with zero new routing, and the new `directive` state surfaces on
+  the CTO push-feed (added to `ATTENTION_STATES` + `channel.STATE_PHRASE.directive =
+  "CEO directive"` + `isAwaitingFeedback`, with a `directive-triage` attention reason).
+  `createDirective(repoId, brief, initiativeId?)` (`src/stories.ts`) creates the row
+  (brief in task.md + the `summary` column, no worktree, carrying the shared
+  `initiative_id`). The CTO has two verbs: ACCEPT & DECOMPOSE via `acceptDirective`
+  (`POST /api/work/:directiveId/stories`) — creates 1+ stories under the repo, each
+  stamped the directive's `initiative_id`, then transitions the directive to a new
+  terminal `accepted` status (validate-all-first + atomic CAS-claim, so a concurrent
+  double-accept can never double-create) — OR PUSH-BACK via the existing escalate verb
+  (`escalateTask`, since a directive is `isAwaitingFeedback`). Nothing calls
+  `createDirective` yet — Phase B1 flips `createProjectInitiative` /
+  `createCrossRepoInitiative` onto it and retires `seedMemberRepoStory`.
+
 ## [0.9.225] - 2026-07-07
 
 ### Fixed

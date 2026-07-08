@@ -11,8 +11,9 @@ import { ALL_STATUSES, db, ensureStoryWorkNode, getStoryRow, isTerminal, nowIso 
 import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
-import { generateInitiativeId, generateStoryId } from "./ids.ts";
+import { generateInitiativeId, generateStoryId, uniqueTaskId } from "./ids.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
+import { writeTaskMd } from "./taskmd.ts";
 import type { TaskView } from "./tasks.ts";
 import { owningRepoOf, workResponderChain } from "./work.ts";
 // REVAMP-1 Phase C: the story lifecycle hooks live in workspace-agent.ts (moved there in S2
@@ -198,6 +199,151 @@ function seedMemberRepoStory(projectId: string, repoId: unknown, brief: unknown)
   // top-level shape. Immediate responder is unchanged ({cto}); only the chain gains the {ceo} tier.
   db.query(`UPDATE tasks SET parent_id=? WHERE id=? AND work_kind='node'`).run(repo.id, story.id);
   return getStory(story.id)!;
+}
+
+// --- CEO DIRECTIVE MACHINERY (RFC Q1 — Phase A3) ------------------------------
+//
+// The CORRECTED delegation model (kills the createProjectInitiative → seedMemberRepoStory "cheat"
+// where the CEO surface creates the story DIRECTLY): a CEO DIRECTIVE is a structured item that lands
+// in the target repo's CTO channel, and THAT CTO creates the story(ies). A directive is a LEAF
+// `tasks` row parented UNDER the repo node in the new `directive` attention status:
+//   - Parenting under the repo means the EXISTING structural responder (work.resolveWorkResponder)
+//     routes it to that repo's CTO with ZERO new routing (a leaf under a repo bubbles repo → {cto}).
+//   - `directive` is a FEEDBACK state (db.STATE_META): no agent runs it, and it surfaces on the CTO
+//     push-feed (db.ATTENTION_STATES + channel.STATE_PHRASE.directive).
+// The CTO has two verbs: ACCEPT&DECOMPOSE (acceptDirective → 1+ stories, directive → `accepted`) or
+// PUSH-BACK (the EXISTING escalate verb — escalateTask, since a directive is `isAwaitingFeedback`).
+//
+// ADDITIVE + INERT this phase: nothing calls createDirective yet. Phase B1 flips
+// createProjectInitiative / createCrossRepoInitiative onto it and retires seedMemberRepoStory.
+
+/**
+ * CREATE a CEO DIRECTIVE under a repo node (RFC Q1). The `brief` is stored BOTH in the directive's
+ * task.md (the prompt the CTO channel surfaces via attentionText) AND its `summary` column (what the
+ * /api/attention pull feed reads off the raw row). NO worktree is created — a directive never runs an
+ * agent. `initiativeId` is the SHARED cross-repo grouping key stamped on the directive so every story
+ * it spawns (acceptDirective) inherits it and the completion rollup can find its siblings; null for an
+ * ungrouped single-repo directive.
+ *
+ * 400 if `repoId`/`brief` is blank; 404 if the repo node (or its workspace) is gone; 409 if `repoId`
+ * is not a `work_kind='repo'` node. Returns the new directive row.
+ */
+export function createDirective(
+  repoId: unknown,
+  brief: unknown,
+  initiativeId: string | null = null,
+): TaskRow {
+  if (typeof repoId !== "string" || !repoId) {
+    throw new HttpError(400, "repo id is required");
+  }
+  const repo = getTask(repoId);
+  if (!repo) throw new HttpError(404, `repo not found: ${repoId}`);
+  if (repo.work_kind !== "repo") {
+    throw new HttpError(409, "a directive can only be created under a repo node");
+  }
+  if (typeof brief !== "string" || !brief.trim()) {
+    throw new HttpError(400, "brief is required");
+  }
+  // The repo node's workspace_id IS its own directory id (S0a) — the root task.md lives under.
+  const dir = getWorkspace(repo.workspace_id);
+  if (!dir) throw new HttpError(404, `workspace not found: ${repo.workspace_id}`);
+  const cleanBrief = brief.trim();
+  const id = uniqueTaskId((cand) => getTask(cand) !== null);
+  const created = nowIso();
+  // task.md carries the brief as the prompt (no worktree — a directive never runs an agent), written
+  // under the workspace root's .butchr/tasks/<id>/ exactly like any task.md.
+  writeTaskMd(dir.path, { id, created, status: "directive", context: [], kind: "task" }, cleanBrief);
+  // Direct LEAF insert parented at the repo node. status='directive'; summary mirrors the brief for
+  // the raw-row attention feed; initiative_id is the shared grouping key. Every other NOT NULL column
+  // takes its schema default (kind='task', version_bump='patch', has_agent=0, …).
+  db.query(
+    `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, parent_id, summary, initiative_id)
+     VALUES (?, ?, 'directive', ?, 'leaf', ?, ?, ?)`,
+  ).run(id, repo.workspace_id, created, repo.id, cleanBrief, initiativeId);
+  const view = taskView(id)!;
+  publish({ type: "task.updated", task: view });
+  return getTask(id)!;
+}
+
+/** One story a CTO creates when ACCEPTING a directive: the brief its child story carries. */
+export type DirectiveStory = { brief: unknown };
+
+/** The result of ACCEPTING a directive: the directive id, its inherited grouping key, and every
+ *  story created under the repo. */
+export type AcceptedDirective = {
+  directive_id: string;
+  initiative_id: string | null;
+  stories: StoryRow[];
+};
+
+/**
+ * ACCEPT & DECOMPOSE a CEO directive (RFC Q1 — POST /api/work/:directiveId/stories) — a repo CTO's
+ * response: turn the directive into 1+ real stories under the SAME repo and mark the directive DONE
+ * (`accepted`, a terminal state). Each story lands via the seedMemberRepoStory shape (createStory +
+ * reparent onto the repo node) so it gets its managed leader + bubbles repo → {cto} → … like any
+ * CTO-created story, and INHERITS the directive's `initiative_id` so the cross-repo completion rollup
+ * can find its siblings.
+ *
+ * RACE-SAFE: every target brief is VALIDATED first, THEN the directive is atomically CAS-claimed
+ * `directive → accepted` (UPDATE … WHERE status='directive'); only the winner creates the stories, so
+ * a concurrent double-accept can never double-decompose. 404 if the directive is gone; 409 if it is not
+ * an open directive-status leaf (already accepted / wrong kind / lost the race); 400 on a blank/empty
+ * target set. The OTHER CTO response — push-back — reuses the EXISTING escalate verb (escalateTask).
+ */
+export function acceptDirective(directiveId: string, targets: unknown): AcceptedDirective {
+  const directive = getTask(directiveId);
+  if (!directive) throw new HttpError(404, `directive not found: ${directiveId}`);
+  if (directive.work_kind !== "leaf" || directive.status !== "directive") {
+    throw new HttpError(409, "work item is not an open directive");
+  }
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw new HttpError(400, "targets must be a non-empty array of { brief }");
+  }
+  // VALIDATE-ALL-FIRST: require a non-blank brief on EVERY target BEFORE claiming the directive or
+  // creating any story, so an invalid target can't half-decompose a directive (createStory launches a
+  // leader as a side effect).
+  const briefs = (targets as DirectiveStory[]).map((t) => {
+    if (typeof t?.brief !== "string" || !t.brief.trim()) {
+      throw new HttpError(400, "each story target requires a non-empty brief");
+    }
+    return t.brief;
+  });
+  // The directive lives UNDER its repo — that same repo is where the stories land. parent_id is the
+  // repo node id (createDirective set it), and its own workspace_id equals that id (S0a); fall back to
+  // workspace_id defensively.
+  const repoId = directive.parent_id ?? directive.workspace_id;
+  // ATOMIC CLAIM: flip directive → accepted, gated on it still being `directive`. A lost race (a
+  // concurrent accept already flipped it) changes 0 rows → 409, so EXACTLY ONE caller decomposes it.
+  const claimed = db
+    .query(`UPDATE tasks SET status='accepted' WHERE id=? AND work_kind='leaf' AND status='directive'`)
+    .run(directiveId);
+  if (claimed.changes === 0) {
+    throw new HttpError(409, "directive was already accepted");
+  }
+  const initiativeId = directive.initiative_id ?? null;
+  const stories: StoryRow[] = [];
+  for (const brief of briefs) {
+    // Reuse the CTO's story machinery verbatim — createStory anchors the node + its leader to the repo
+    // workspace, then reparent onto the repo node (story → repo) so it bubbles to the repo's CTO/CEO,
+    // stamping the inherited grouping key so the rollup finds its siblings. Byte-identical to
+    // seedMemberRepoStory minus the project-member guard (the directive already lives under the repo).
+    const story = createStory(repoId, brief);
+    if (initiativeId != null) {
+      db.query(`UPDATE tasks SET parent_id=?, initiative_id=? WHERE id=? AND work_kind='node'`).run(
+        repoId,
+        initiativeId,
+        story.id,
+      );
+    } else {
+      db.query(`UPDATE tasks SET parent_id=? WHERE id=? AND work_kind='node'`).run(repoId, story.id);
+    }
+    stories.push(getStory(story.id)!);
+  }
+  // Surface the directive's transition off the attention feed (accepted is terminal/idle — no channel
+  // notification, but the SSE task.updated lets a live bridge drop it).
+  const view = taskView(directiveId);
+  if (view) publish({ type: "task.updated", task: view });
+  return { directive_id: directiveId, initiative_id: initiativeId, stories };
 }
 
 /** One target of a CROSS-repo initiative: a member repo id + the brief its child story carries. */

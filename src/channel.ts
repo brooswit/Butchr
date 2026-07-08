@@ -88,6 +88,9 @@ const STATE_PHRASE: Record<AttentionState, string> = {
   needs_info: "agent question awaiting an answer",
   failed: "task failed",
   aborted: "task failed",
+  // A CEO directive landed under this repo — the CTO accepts&decomposes it into stories or escalates
+  // it back up the ladder (RFC Q1 directive machinery).
+  directive: "CEO directive",
 };
 
 // The IDLE condition is orthogonal to status (a flag on a LIVE in_progress build agent,
@@ -226,6 +229,10 @@ function attentionText(task: Record<string, unknown>, state: AttentionState): st
     case "spec_review":
       // The generated spec lives in the task's prompt (task.md); summary is a fallback.
       return firstText(task.summary, task.prompt);
+    case "directive":
+      // The directive brief (what the CTO must turn into stories) lives in the task's prompt
+      // (task.md); summary is a fallback.
+      return firstText(task.prompt, task.summary);
     case "failed":
     case "aborted":
       // Both terminal failure states surface the execution/dispatch error the same way.

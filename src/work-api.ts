@@ -51,6 +51,7 @@ import {
 } from "./tasks.ts";
 import type { ApproveOutcome, TaskListView, TaskReadiness, TaskView } from "./tasks.ts";
 import {
+  acceptDirective,
   allStoryViews,
   answerStoryAsk,
   assignTaskToStory,
@@ -64,7 +65,7 @@ import {
   storyView,
   updateStory,
 } from "./stories.ts";
-import type { StoryResetResult, StoryView } from "./stories.ts";
+import type { AcceptedDirective, StoryResetResult, StoryView } from "./stories.ts";
 import { resolveWorkResponder, workResponderChain } from "./work.ts";
 import type { WorkResponder } from "./work.ts";
 import { listTaskEvents } from "./db.ts";
@@ -252,6 +253,18 @@ export async function createWorkChild(
     throw new HttpError(409, "cannot add a child to a leaf work item (only a node can decompose)");
   }
   return createSubtask(parentId, args);
+}
+
+/**
+ * ACCEPT & DECOMPOSE a CEO directive into stories (`POST /api/work/:directiveId/stories`) — a repo
+ * CTO's response to a directive (RFC Q1 directive machinery). Creates 1+ stories under the directive's
+ * repo, each stamped the directive's `initiative_id`, and transitions the directive `directive →
+ * accepted`. DIRECTIVE-only: `acceptDirective` 409s a work item that is not an open directive-status
+ * leaf. The `targets` body is a non-empty array of `{ brief }`. 404 if the directive is gone. The
+ * OTHER CTO verb — push-back — is the existing `POST /api/work/:id/escalate` (escalateWork).
+ */
+export function acceptWorkDirective(id: string, targets: unknown): AcceptedDirective {
+  return acceptDirective(id, targets);
 }
 
 // --- WORK MUTATIONS (dispatch by kind) ---------------------------------------

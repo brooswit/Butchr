@@ -169,9 +169,11 @@ describe("channel: attention transitions → notifications", () => {
     }
   });
 
-  test("ATTENTION_STATES are exactly the six CTO attention states", () => {
+  test("ATTENTION_STATES are exactly the seven CTO attention states", () => {
     expect([...ATTENTION_STATES].sort()).toEqual(
-      ["aborted", "failed", "idea", "in_review", "needs_info", "spec_review"].sort(),
+      // `directive` added by the RFC Q1 directive machinery — a CEO directive surfaces on its repo's
+      // CTO push-feed exactly like the front-of-pipeline `idea`.
+      ["aborted", "directive", "failed", "idea", "in_review", "needs_info", "spec_review"].sort(),
     );
   });
 

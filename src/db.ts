@@ -1968,6 +1968,11 @@ export type TaskStatus =
   | "spec_review"
   | "blocked"
   | "needs_info"
+  // A CEO DIRECTIVE (RFC Q1 directive machinery) — a leaf parented under a REPO node awaiting
+  // that repo's CTO to ACCEPT&DECOMPOSE it into stories (acceptDirective → `accepted`) or push it
+  // back up the ladder (escalate). A FEEDBACK state: no agent runs, it surfaces on the CTO channel
+  // (ATTENTION_STATES) and resolves to the repo's CTO via the existing structural responder.
+  | "directive"
   | "inactive"
   | "in_progress"
   | "in_review"
@@ -1975,7 +1980,11 @@ export type TaskStatus =
   | "rolling_back"
   | "rolled_back"
   | "failed"
-  | "aborted";
+  | "aborted"
+  // A directive the CTO has ACCEPTED — its stories were created (acceptDirective), so the
+  // directive itself is DONE. A TERMINAL, idle state (like merged/rolled_back): no agent, no
+  // attention, nothing to review.
+  | "accepted";
 
 /** The three kinds of state. */
 export type StateKind = "idle" | "agent" | "feedback";
@@ -1996,6 +2005,8 @@ export const STATE_META: Record<TaskStatus, StateMeta> = {
   spec_review: { kind: "feedback" },
   blocked: { kind: "idle" },
   needs_info: { kind: "feedback" },
+  // A CEO directive awaits its repo's CTO — a feedback state, no agent (RFC Q1 directive machinery).
+  directive: { kind: "feedback" },
   inactive: { kind: "agent", agentType: "workspace-agent" },
   in_progress: { kind: "agent", agentType: "workspace-agent" },
   in_review: { kind: "feedback" },
@@ -2004,6 +2015,8 @@ export const STATE_META: Record<TaskStatus, StateMeta> = {
   rolled_back: { kind: "idle" },
   failed: { kind: "idle" },
   aborted: { kind: "idle" },
+  // A CTO-accepted directive is terminal + idle — its work now lives in the stories it spawned.
+  accepted: { kind: "idle" },
 };
 
 /** Every canonical status (stable order: roughly the happy-path order). */
@@ -2012,6 +2025,7 @@ export const ALL_STATUSES: TaskStatus[] = [
   "spec_review",
   "blocked",
   "needs_info",
+  "directive",
   "inactive",
   "in_progress",
   "in_review",
@@ -2020,15 +2034,18 @@ export const ALL_STATUSES: TaskStatus[] = [
   "rolled_back",
   "failed",
   "aborted",
+  "accepted",
 ];
 
-/** The four terminal states. */
+/** The terminal states — a task at rest (merged/aborted/failed/rolled_back), plus a CTO-`accepted`
+ *  CEO directive (its work now lives in the stories it spawned, so the directive itself is DONE). */
 export function isTerminal(status: TaskStatus): boolean {
   return (
     status === "merged" ||
     status === "aborted" ||
     status === "failed" ||
-    status === "rolled_back"
+    status === "rolled_back" ||
+    status === "accepted"
   );
 }
 
@@ -2057,8 +2074,9 @@ export const REVIEW_STATES = [
 /**
  * ATTENTION_STATES — the CTO push-feed (channel) set: every state whose ENTRY the CTO
  * notification channel surfaces. It is REVIEW_STATES plus `idea` (the front of the
- * pipeline — a brief awaiting a spec) and `aborted` (a terminal abort to inspect). See
- * src/channel.ts.
+ * pipeline — a brief awaiting a spec), `aborted` (a terminal abort to inspect), and
+ * `directive` (a CEO directive awaiting the repo's CTO to accept&decompose or escalate —
+ * RFC Q1 directive machinery). See src/channel.ts.
  */
 export const ATTENTION_STATES = [
   "idea",
@@ -2067,6 +2085,7 @@ export const ATTENTION_STATES = [
   "needs_info",
   "failed",
   "aborted",
+  "directive",
 ] as const satisfies readonly TaskStatus[];
 
 /** Sum the per-status counts for the given membership set (missing keys count as 0). */
