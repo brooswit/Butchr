@@ -571,6 +571,36 @@ export function wouldCreateCycle(taskId: string, newBlockers: string[]): boolean
   return false;
 }
 
+// PERF (story st-718bd185): the three DETAIL-ONLY blob columns the LIST query must NEVER
+// read off disk. Unlike LIST_VIEW_OMIT (which strips them POST-load, so SQLite still
+// materializes every ~2 MB output_snapshot on each /api/work call — the real 2.7 s cost),
+// these names are excluded from the SELECT column list itself so the blobs are never read.
+// Mirrors LIST_VIEW_OMIT exactly (kept in sync: same three columns).
+const LIST_QUERY_OMIT = new Set(["output_snapshot", "last_dispatch_error", "revert_reason"]);
+
+// The cached, PRAGMA-derived LIGHT column list for the LIST query: every `tasks` column
+// EXCEPT the LIST_QUERY_OMIT blobs, quoted + comma-joined for a `SELECT <cols> FROM tasks`.
+// Derived at runtime from `PRAGMA table_info(tasks)` (not a hardcoded list) so it stays
+// correct as new columns land via later db.ensureColumn migrations — a hardcoded list would
+// silently drop any column added after this one. The schema is fixed once migrations run at
+// import, so this is computed ONCE (lazily) and cached for the process lifetime.
+let lightTaskColumnsCache: string | null = null;
+function lightTaskColumns(): string {
+  if (lightTaskColumnsCache === null) {
+    const cols = db
+      .query<{ name: string }, []>(`PRAGMA table_info(tasks)`)
+      .all()
+      .map((c) => c.name)
+      .filter((name) => !LIST_QUERY_OMIT.has(name));
+    // Defensive: a schema with NO light columns would produce an invalid `SELECT  FROM`.
+    // That can't happen (tasks always has id/status/... beyond the three omitted), but guard
+    // so a future schema change fails loudly here rather than emitting broken SQL.
+    if (cols.length === 0) throw new Error("lightTaskColumns: no columns after omit");
+    lightTaskColumnsCache = cols.map((name) => `"${name}"`).join(", ");
+  }
+  return lightTaskColumnsCache;
+}
+
 export function listTasks(workspaceId: string): TaskRow[] {
   // EXCLUDE materialized story Work NODES (story st-540ba705 step 6a): each story is now also
   // a `tasks` row (the parent_id FK anchor — db.ensureStoryWorkNode), but it is NOT a real
@@ -582,9 +612,15 @@ export function listTasks(workspaceId: string): TaskRow[] {
   // REVAMP-4 S0a: was `work_kind != 'node'`; narrowed to `= 'leaf'` (a pure identity when only
   // leaf/node exist) so the new CONTAINER nodes ('repo'/'project') are ALSO excluded — a repo
   // node (id == its directory id) must never surface in the task list, the same as a story node.
+  // PERF (story st-718bd185): SELECT a LIGHT column list (every column EXCEPT the three
+  // detail-only blobs — see lightTaskColumns / LIST_QUERY_OMIT) so SQLite never reads or
+  // materializes the ~2 MB output_snapshot per task. The DETAIL path (getTask, SELECT *)
+  // still carries the blobs. The omitted columns come back `undefined` on these rows — the
+  // list projection (listRowForView) never reads them, and its `delete` of the same names is
+  // now a harmless no-op (defense-in-depth).
   return db
     .query<TaskRow, [string]>(
-      `SELECT * FROM tasks
+      `SELECT ${lightTaskColumns()} FROM tasks
         WHERE workspace_id=? AND work_kind='leaf'
         ORDER BY created_at DESC`,
     )

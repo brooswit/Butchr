@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Make the WORK LIST query (`listTasks`, behind `taskListView` / `allTasksView` → `GET /api/work`)
+  select a LIGHT column projection that omits the three detail-only blob columns
+  (`output_snapshot`, `last_dispatch_error`, `revert_reason`), so SQLite never reads or
+  materializes the ~2 MB-per-task `output_snapshot` (the ~71 MB that dominated the DB) off disk on
+  every call — the prior release only stripped them POST-load, which shrank the wire payload but
+  left the disk read intact (the real ~2.7 s cost). The column list is derived at runtime from
+  `PRAGMA table_info(tasks)` (not hardcoded) so it stays correct as new columns land via
+  `ensureColumn` migrations, and is cached per process. The per-task DETAIL path (`getTask`,
+  `GET /api/work/:id`) still runs `SELECT *` and carries all three fields, which is where the
+  webapp reads them. Measured: the list read drops from seconds to well under 100 ms.
+
 ## [0.9.236] - 2026-07-08
 
 ### Performance

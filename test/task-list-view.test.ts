@@ -140,6 +140,45 @@ test("is the LIGHT projection: no task.md bodies or estimate, but keeps row fiel
   expect(v.ci_status).toBe("pass");
 });
 
+test("LIST query never MATERIALIZES the detail-only blobs (perf: light projection)", () => {
+  // Seed a task carrying all three DETAIL-ONLY blob columns.
+  const bigSnapshot = "x".repeat(4096);
+  dbMod.db
+    .query(
+      `INSERT INTO tasks (id, workspace_id, status, output_snapshot,
+         last_dispatch_error, revert_reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "lv-blob",
+      DIR_ID,
+      "merged",
+      bigSnapshot,
+      "boom",
+      "reverted for cause",
+      "2026-01-03T12:00:00.000Z",
+    );
+
+  // The LIST row must NOT carry them at all — the columns are excluded from the SELECT,
+  // so SQLite never reads the blobs off disk. `undefined` (absent), not merely null.
+  const listRow = tasksMod.taskListView(DIR_ID).find((t) => t.id === "lv-blob")!;
+  expect("output_snapshot" in listRow).toBe(false);
+  expect(listRow.output_snapshot).toBeUndefined();
+  expect(listRow.last_dispatch_error).toBeUndefined();
+  expect(listRow.revert_reason).toBeUndefined();
+
+  // allTasksView (the cross-workspace LIST path, the other listTasks consumer) is identical.
+  const allRow = tasksMod.allTasksView({ workspace: DIR_ID }).find((t) => t.id === "lv-blob")!;
+  expect(allRow.output_snapshot).toBeUndefined();
+  expect(allRow.last_dispatch_error).toBeUndefined();
+  expect(allRow.revert_reason).toBeUndefined();
+
+  // ...but the per-task DETAIL projection (taskView → GET /api/work/:id) DOES carry the
+  // snapshot with its data, because getTask still runs `SELECT *`.
+  const detail = tasksMod.taskView("lv-blob")!;
+  expect(detail.output_snapshot).toBe(bigSnapshot);
+});
+
 test("scoped to the workspace and ordered newest-first", () => {
   seed({ id: "lv-ord-old", status: "queued", createdAt: "2026-01-04T00:00:00.000Z" });
   seed({ id: "lv-ord-new", status: "queued", createdAt: "2026-01-04T00:00:05.000Z" });
