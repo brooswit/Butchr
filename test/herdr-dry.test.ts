@@ -24,6 +24,7 @@ let FAIL_FILE: string;
 let herdrMod: typeof import("../src/herdr.ts");
 let cfg: typeof import("../src/config.ts").config;
 let originalBin: string;
+let originalTimeout: number;
 
 // Every stub invocation appends its argv (one JSON line) to CALLS_FILE; reset
 // between tests. When the FAIL_FILE sentinel exists the stub exits 1 with empty
@@ -61,31 +62,59 @@ beforeAll(async () => {
   // envelope carrying all three handles in one payload. When the FAIL_FILE sentinel
   // exists it exits 1 with empty stdout (no `"error"` field) — the guard regression
   // case (a crashed/unreachable herdr).
-  const stub = join(DATA_DIR, "fake-herdr.js");
+  //
+  // DELIBERATELY a plain `#!/bin/sh` (dash) stub, NOT `#!/usr/bin/env bun`: a cold
+  // `bun` interpreter spawn per shell-out could, under saturated full-suite CPU load,
+  // exceed the herdr shell-out timeout (config.herdrTimeoutMs, default 5s) — run()
+  // would then SIGKILL it, herdrSoft would map that to null (reader → undefined), and
+  // the killed process might die before it appended its argv line, making
+  // agentGetCount() nondeterministic. A /bin/sh stub has ~zero interpreter warmup, so
+  // every invocation is fork+exec-fast even under load, removing that timing race
+  // while exercising the exact same real shell-out round-trips.
+  const stub = join(DATA_DIR, "fake-herdr.sh");
   writeFileSync(
     stub,
-    `#!/usr/bin/env bun
-import { appendFileSync, existsSync } from "node:fs";
-const argv = process.argv.slice(2);
-appendFileSync(${JSON.stringify(CALLS_FILE)}, JSON.stringify(argv) + "\\n");
-if (existsSync(${JSON.stringify(FAIL_FILE)})) { process.exit(1); }
-const ok = (result) => process.stdout.write(JSON.stringify({ result }));
-if (argv[1] === "get") {
-  // One envelope with every handle the field-probes read.
-  ok({ agent: { tab_id: "tab-X", terminal_id: "term-X" }, pane: { pane_id: "pane-X" } });
-} else {
-  process.stdout.write("{}");
-}
+    `#!/bin/sh
+# Record this invocation's argv as a JSON ARRAY line, byte-identical to
+# JSON.stringify(process.argv.slice(2)) — e.g. ["agent","get","a"] — by wrapping each
+# positional arg in double quotes (q) and comma-joining. Args here are simple bareword
+# tokens (no quotes/backslashes/spaces), so no JSON escaping is needed.
+q='"'
+line='['
+i=0
+for a in "$@"; do
+  if [ "$i" -ne 0 ]; then line="$line,"; fi
+  line="$line$q$a$q"
+  i=1
+done
+line="$line]"
+printf '%s\\n' "$line" >> "${CALLS_FILE}"
+# FAIL_FILE present → exit 1 with EMPTY stdout (crashed/unreachable herdr; the res.ok
+# guard must read this as ABSENT).
+if [ -e "${FAIL_FILE}" ]; then exit 1; fi
+# The noun is argv[0], the verb argv[1] ('agent get' / '<noun> get'); in /bin/sh
+# positional terms that verb is $2. One envelope with every handle the field-probes read.
+if [ "$2" = "get" ]; then
+  printf '%s' '{"result":{"agent":{"tab_id":"tab-X","terminal_id":"term-X"},"pane":{"pane_id":"pane-X"}}}'
+else
+  printf '%s' '{}'
+fi
 `,
   );
   chmodSync(stub, 0o755);
 
   originalBin = cfg.herdrBin;
   cfg.herdrBin = stub;
+  // Belt-and-suspenders alongside the fast /bin/sh stub: raise the herdr shell-out
+  // timeout well above any plausible spawn latency so a slow spawn under full-suite
+  // CPU load can never trip it. Restored in afterAll with herdrBin.
+  originalTimeout = cfg.herdrTimeoutMs;
+  cfg.herdrTimeoutMs = 30000;
 });
 
 afterAll(() => {
   cfg.herdrBin = originalBin;
+  cfg.herdrTimeoutMs = originalTimeout;
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
