@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.241] - 2026-07-08
+
 ### Changed
 
 - **Workspace view: the CTO agent panel now renders ABOVE the Pipeline (swimlanes).**
