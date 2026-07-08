@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **De-flaked `test/herdr-dry.test.ts` H1 (the `agentTabId`/`agentPaneId`/
+  `agentTerminalId` readers plus the sibling `agentDeregister` / `teardownTask`
+  cases).** These passed in isolation but failed INTERMITTENTLY under full-suite
+  load. Root cause: the counting herdr stub was executed via a `#!/usr/bin/env bun`
+  shebang, so every reader's `herdrSoft`/`existsByGet` shell-out
+  (`run([config.herdrBin, …], {timeoutMs: config.herdrTimeoutMs})`, default 5s) paid
+  a COLD `bun` interpreter spawn — which under saturated CPU load can exceed the
+  budget, making `run()` return `ok:false` (→ `herdrSoft` null → reader `undefined`,
+  and the SIGKILL'd stub can die before appending its argv line → nondeterministic
+  `agentGetCount()`). Replaced the stub's shebang with a byte-equivalent `#!/bin/sh`
+  (dash) stub — near-zero interpreter warmup makes each shell-out fork+exec-fast even
+  under load — and, belt-and-suspenders, raised `config.herdrTimeoutMs` to 30s for the
+  duration of the file (restored in `afterAll` alongside `herdrBin`). Test-only; the
+  assertions, the real one-round-trip `agentInfo` shell-out, and the `res.ok`-guard
+  coverage are unchanged.
+
 ## [0.9.227] - 2026-07-08
 
 ### Changed
