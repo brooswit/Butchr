@@ -17,6 +17,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CEO OPERATING-MODEL finale (RFC Phase D1; story st-30a7dccd).** The two deliverables
+  that close the CEO-operating-model RFC out:
+  - **North-star acceptance test** (`test/rfc-ceo-operating-model-north-star.test.ts`) — a
+    single deterministic, CI-safe end-to-end proof that the whole model runs the canonical
+    library-extraction scenario over its REST surface against THROWAWAY sandbox repos: the
+    CEO (a) creates two new library repos (`POST /api/projects/:id/repos/create`, Phase A2);
+    (b) fans ONE directive-based initiative across all three member repos
+    (`POST /api/projects/:id/initiatives`, Phase B1) — a `directive` leaf per repo, one
+    shared `initiative_id`, no story/leader forged; (c) each CTO accepts & decomposes its
+    directive (`POST /api/work/:directiveId/stories`, Phase A3); (d) the source consume story
+    is sequenced behind BOTH library stories via node-on-node `blocked_by`
+    (`PUT /api/work/:id/blocked_by`, Phase A1) — its leader stays UNLAUNCHED (`desired=0`,
+    node `open`) until both libraries reach `done`, then AUTO-LAUNCHES; (e) the CEO reviews
+    landed work across every repo (`GET /api/projects/:id/initiatives/:iid/review`, Phase C1).
+    Validates ORCHESTRATION plumbing, not agent cognition — the CTO "accept" is the accept
+    verb, no live agent. Hermetic: temp data dir/db + temp `config.reposRoot` + injected git
+    identity + `BUTCHR_HERDR_BIN=true` no-op launches; no network, no registry publish
+    (sequence-on-MERGE only). Mirrors `test/revamp4-cross-repo-initiative.test.ts` and the
+    `bin/butchr selftest` harness.
+  - **Design of record** (`docs/rfc-ceo-operating-model.md`) — the CEO-operating-model design
+    AS SHIPPED across phases A1→C2, authored fresh from the landed code (the pre-build RFC
+    couldn't be committed through the task prompt — butchr truncates a prompt at its first
+    `##` header). Covers the thesis (the CTO pattern lifted one tier up and across repos:
+    `human → CEO → CTO → story-leader → build`), the north-star test, one section per resolved
+    question (Q1 directive delivery / `createDirective` / the `directive` attention status /
+    `acceptDirective` / retired `seedMemberRepoStory` cheat; Q2 `git.initRepo` /
+    `createRepoUnderProject` / `config.reposRoot` / the sequence-on-merge publish boundary; Q3
+    `setWorkBlockedBy`→`setStoryBlockedBy` / `storyLeaderReleasable` / `reevaluateBlockedStoryNodes`;
+    Q4 `buildCeoBrief`; Q5 `reviewProjectInitiative` / `acceptInitiativeReview` /
+    `initiative.completed`; Q6 the A→D phasing; Q7 `migrateAdoptLooseReposUnderDefaultProject`),
+    plus a live-terminal RUNBOOK.
+
 ## [0.9.230] - 2026-07-08
 
 ### Changed
