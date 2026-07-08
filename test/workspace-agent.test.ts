@@ -2343,37 +2343,37 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
 // the ~59 long-gone DONE/aborted leaders — was the fixed ~2–7 s cost of GET /api/work. The fix
 // short-circuits to `running: false` WITHOUT probing whenever the leader is NOT desired
 // (`!row || row.desired !== 1`), and probes ONLY a genuinely-desired leader.
-describe("storyAgentStatus PERF short-circuit — no herdr probe for non-desired leaders", () => {
-  /** Install a runner that COUNTS agentExists calls and treats `liveNames` as registered. */
-  function installProbeCounter(liveNames: Set<string>) {
-    let calls = 0;
-    const runner: AgentRunner = {
-      async isUp() { return true; },
-      async workspaceCreate() { return { workspaceId: "ws", rootPaneId: "rp" }; },
-      async workspaceExists() { return true; },
-      async workspaceClose() {},
-      async tabCreate() { return { tabId: "tab", rootPaneId: "rp" }; },
-      async tabClose() {},
-      async agentTabId() { return undefined; },
-      async agentStart(): Promise<StartedAgent> { return { paneId: "p", terminalId: "t" }; },
-      async agentExists(name) { calls++; return liveNames.has(name); },
-      async agentPaneId() { return undefined; },
-      async agentTerminalId() { return "t"; },
-      async paneTerminalId() { return "t"; },
-      async paneList(): Promise<PaneInfo[]> { return []; },
-      async resolveAgentPane() { return "p"; },
-      isAgentNameTaken() { return false; },
-      async agentRead() { return ""; },
-      async send() {},
-      async paneClose() {},
-      async teardownTask() {},
-      async agentDeregister() {},
-      async runHeadless() { return { ok: true, code: 0, stdout: "", stderr: "", timedOut: false }; },
-    };
-    harnessMod.setRunner(runner);
-    return () => calls;
-  }
+/** Install a runner that COUNTS agentExists calls and treats `liveNames` as registered. */
+function installProbeCounter(liveNames: Set<string>) {
+  let calls = 0;
+  const runner: AgentRunner = {
+    async isUp() { return true; },
+    async workspaceCreate() { return { workspaceId: "ws", rootPaneId: "rp" }; },
+    async workspaceExists() { return true; },
+    async workspaceClose() {},
+    async tabCreate() { return { tabId: "tab", rootPaneId: "rp" }; },
+    async tabClose() {},
+    async agentTabId() { return undefined; },
+    async agentStart(): Promise<StartedAgent> { return { paneId: "p", terminalId: "t" }; },
+    async agentExists(name) { calls++; return liveNames.has(name); },
+    async agentPaneId() { return undefined; },
+    async agentTerminalId() { return "t"; },
+    async paneTerminalId() { return "t"; },
+    async paneList(): Promise<PaneInfo[]> { return []; },
+    async resolveAgentPane() { return "p"; },
+    isAgentNameTaken() { return false; },
+    async agentRead() { return ""; },
+    async send() {},
+    async paneClose() {},
+    async teardownTask() {},
+    async agentDeregister() {},
+    async runHeadless() { return { ok: true, code: 0, stdout: "", stderr: "", timedOut: false }; },
+  };
+  harnessMod.setRunner(runner);
+  return () => calls;
+}
 
+describe("storyAgentStatus PERF short-circuit — no herdr probe for non-desired leaders", () => {
   test("an ABSENT story_agent row (never-launched leader) yields running:false WITHOUT probing herdr", async () => {
     const id = "st-perf-absent-leader";
     insertStoryNode(id); // node exists, but NO story_agent row was ever written
@@ -2436,6 +2436,91 @@ describe("storyAgentStatus PERF short-circuit — no herdr probe for non-desired
     const probeCount = installProbeCounter(new Set()); // NOT live
     try {
       const st = await wa.storyAgentStatus(id);
+      expect(probeCount()).toBe(1); // still probes — it is desired
+      expect(st.desired).toBe(true);
+      expect(st.running).toBe(false);
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+});
+
+// The SAME short-circuit for the unified workspace row (story st-ed265b9d): workspaceAgentStatus
+// probed herdr whenever the row merely EXISTED, so every torn-down / never-launched workspace paid
+// a subprocess spawn per read. It now probes ONLY a desired (`desired === 1`) agent.
+describe("workspaceAgentStatus PERF short-circuit — no herdr probe for non-desired agents", () => {
+  test("a NON-DESIRED (desired=0) workspace row yields running:false WITHOUT probing herdr", async () => {
+    dbMod.saveWorkspaceAgentRow("ws-perf-torndown", {
+      kind: "cto",
+      directory_id: DIR,
+      desired: 0,
+      session_id: "sess-td",
+      restarts: 3,
+    });
+    // The stray agent IS registered with herdr — the point of the fix is that we never ask.
+    const live = new Set<string>([
+      wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("ws-perf-torndown")!),
+    ]);
+    const probeCount = installProbeCounter(live);
+    try {
+      const st = await wa.workspaceAgentStatus("ws-perf-torndown");
+      expect(probeCount()).toBe(0);
+      expect(st.desired).toBe(false);
+      // INTENTIONAL: a stray agent whose row is desired=0 now reports running:false, not true.
+      expect(st.running).toBe(false);
+      // The retained row's fields still flow through unchanged.
+      expect(st.sessionId).toBe("sess-td");
+      expect(st.restarts).toBe(3);
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+
+  test("an ABSENT workspace row yields running:false WITHOUT probing herdr", async () => {
+    const probeCount = installProbeCounter(new Set());
+    try {
+      const st = await wa.workspaceAgentStatus("ws-perf-no-such-row");
+      expect(probeCount()).toBe(0);
+      expect(st.running).toBe(false);
+      expect(st.desired).toBe(false);
+      // Shape stays byte-identical to the full path (defaults from the missing row).
+      expect(st.kind).toBe("build");
+      expect(st.sessionId).toBeNull();
+      expect(st.since).toBeNull();
+      expect(st.restarts).toBe(0);
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+
+  test("a DESIRED (desired=1) workspace row STILL probes herdr and reflects live registration", async () => {
+    dbMod.saveWorkspaceAgentRow("ws-perf-desired", {
+      kind: "cto",
+      directory_id: DIR,
+      desired: 1,
+      session_id: "sess-live",
+    });
+    const name = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow("ws-perf-desired")!);
+    const probeCount = installProbeCounter(new Set([name]));
+    try {
+      const st = await wa.workspaceAgentStatus("ws-perf-desired");
+      expect(probeCount()).toBe(1); // desired is the ONLY case that spawns the probe
+      expect(st.desired).toBe(true);
+      expect(st.running).toBe(true); // reflected from the live set
+    } finally {
+      harnessMod.setRunner(originalRunner);
+    }
+  });
+
+  test("a DESIRED workspace row that is NOT registered probes and reports running:false", async () => {
+    dbMod.saveWorkspaceAgentRow("ws-perf-desired-dead", {
+      kind: "cto",
+      directory_id: DIR,
+      desired: 1,
+    });
+    const probeCount = installProbeCounter(new Set()); // NOT live
+    try {
+      const st = await wa.workspaceAgentStatus("ws-perf-desired-dead");
       expect(probeCount()).toBe(1); // still probes — it is desired
       expect(st.desired).toBe(true);
       expect(st.running).toBe(false);

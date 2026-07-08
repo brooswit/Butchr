@@ -1096,12 +1096,25 @@ export function stopWorkspaceAgent(id: string): Promise<WorkspaceAgentStatus> {
   });
 }
 
-/** A workspace's current managed-agent status (probes herdr for live registration). */
+/** A workspace's current managed-agent status (probes herdr for live registration).
+ *
+ *  PERF: the herdr `agent get` probe is a SUBPROCESS spawn, so — exactly as storyAgentStatus does
+ *  for a story leader — short-circuit when the agent is NOT desired (`!row || row.desired !== 1`:
+ *  torn-down / never-launched): such an agent is by definition not running, so `running: false`
+ *  without the probe. Only a genuinely DESIRED agent still probes for live registration. Stray-agent
+ *  reaping is unaffected: reconcileWorkspaceAgent and the supervisor call `harness.agentExists`
+ *  directly, never through this read.
+ *
+ *  INTENTIONAL behavior change: `toCtoStatus` exposes `running` on its own, so a STRAY herdr agent
+ *  whose row has `desired = 0` now reports `running: false` rather than `true`. That is the same
+ *  tradeoff storyAgentStatus already accepted; consumers that mean "live" (e.g. ceoAgentStatus'
+ *  `desired && running`) are byte-identical either way. */
 export async function workspaceAgentStatus(id: string): Promise<WorkspaceAgentStatus> {
   const row = getWorkspaceAgentRow(id);
-  const running = row
-    ? await harness.agentExists(workspaceAgentName(row)).catch(() => false)
-    : false;
+  const running =
+    row && row.desired === 1
+      ? await harness.agentExists(workspaceAgentName(row)).catch(() => false)
+      : false;
   return {
     id,
     kind: row?.kind ?? "build",

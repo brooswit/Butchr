@@ -31,6 +31,8 @@ let workApi: typeof import("../src/work-api.ts");
 let storiesMod: typeof import("../src/stories.ts");
 let tasksMod: typeof import("../src/tasks.ts");
 let dbMod: typeof import("../src/db.ts");
+let harnessMod: typeof import("../src/harness.ts");
+let waMod: typeof import("../src/workspace-agent.ts");
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-workapi-data-"));
@@ -52,6 +54,8 @@ beforeAll(async () => {
   storiesMod = await import("../src/stories.ts");
   tasksMod = await import("../src/tasks.ts");
   workApi = await import("../src/work-api.ts");
+  harnessMod = await import("../src/harness.ts");
+  waMod = await import("../src/workspace-agent.ts");
 
   // WS lives at the git repo root (createTask makes worktrees there); WS2 is just a row.
   dbMod.db
@@ -330,5 +334,69 @@ describe("BYTE-IDENTICAL guard: the existing views are unchanged by the work sur
     // The existing cross-resource views are byte-for-byte unchanged.
     expect(tasksMod.allTasksView()).toEqual(tasksBefore);
     expect(await storiesMod.allStoryViews()).toEqual(storiesBefore);
+  });
+});
+
+// PERF (story st-ed265b9d): a workspace-scoped listWork must not BUILD the other workspaces'
+// story views. The scope now lives in allStoryViews rather than a post-filter in listWork.
+//
+// The probe is the proof. Building a StoryView runs storyView → storyAgentStatus, which spawns
+// exactly ONE harness.agentExists call per story whose story_agent row is desired=1. So counting
+// agentExists calls counts the desired-leader stories actually CONSTRUCTED. Under the old
+// build-then-filter code the scoped call built WS2's story too and its leader probe fired, so the
+// scoped count was 2, not 1 — a result-set-equality check alone would have passed there.
+describe("listWork PERF: a scoped work list BUILDS only that workspace's story views", () => {
+  /** Swap in a runner that counts/records agentExists calls; returns the recorded names. */
+  function recordProbes(): { names: string[]; restore: () => void } {
+    const names: string[] = [];
+    const original = harnessMod.getRunner();
+    harnessMod.setRunner({
+      ...original,
+      async agentExists(name: string) {
+        names.push(name);
+        return false;
+      },
+    });
+    return { names, restore: () => harnessMod.setRunner(original) };
+  }
+
+  test("scoped listWork never constructs the other workspace's story views", async () => {
+    const mine = workApi.createWork(WS, "scoped story");
+    const theirs = workApi.createWork(WS2, "other-workspace story");
+    // Only a DESIRED leader probes herdr; createWork's leader hook marks both stories desired,
+    // so each story view actually BUILT contributes exactly one probe of its leader's name.
+    dbMod.saveStoryAgentRow(mine.id, { desired: 1 });
+    dbMod.saveStoryAgentRow(theirs.id, { desired: 1 });
+    const mineName = waMod.storyAgentName(mine.id);
+    const theirsName = waMod.storyAgentName(theirs.id);
+
+    const { names, restore } = recordProbes();
+    try {
+      const scoped = await workApi.listWork({ workspace: WS });
+      // WS2's story view was NEVER built — its leader was never probed. (The old build-then-filter
+      // code probed it here.) WS's own story WAS built, so the probe count is not trivially zero.
+      expect(names).not.toContain(theirsName);
+      expect(names).toContain(mineName);
+      expect(scoped.some((w) => w.id === mine.id)).toBe(true);
+      expect(scoped.some((w) => w.id === theirs.id)).toBe(false);
+      expect(scoped.every((w) => w.workspace_id === WS)).toBe(true);
+
+      // …and the UNSCOPED list still builds both (newest-first across workspaces).
+      names.length = 0;
+      const all = await workApi.listWork();
+      expect(names).toContain(mineName);
+      expect(names).toContain(theirsName);
+      expect(all.some((w) => w.id === theirs.id)).toBe(true);
+      const nodeDates = all.filter((w) => w.work_kind === "node").map((w) => w.created_at);
+      expect([...nodeDates].sort().reverse()).toEqual(nodeDates);
+    } finally {
+      restore();
+    }
+  });
+
+  test("an EMPTY `workspace` is UNSCOPED, exactly as the old post-filter treated it", async () => {
+    const nodeIds = async (opts: { workspace?: string }) =>
+      (await workApi.listWork(opts)).filter((w) => w.work_kind === "node").map((w) => w.id);
+    expect(await nodeIds({ workspace: "" })).toEqual(await nodeIds({}));
   });
 });

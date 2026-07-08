@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **PERF: a workspace-scoped `GET /api/work` no longer builds every OTHER workspace's story
+  views.** `listWork` awaited an unscoped `allStoryViews()` and filtered the result afterwards, so
+  a scoped list constructed (per-story counts + a leader probe) and discarded ~60 views it never
+  returned. `allStoryViews(workspaceId?)` now takes the scope and delegates to `listStoryViews`
+  when given one; unscoped behaviour (all workspaces, newest-first by `created_at`) is unchanged,
+  and an empty `?workspace=` stays unscoped as before.
+- **PERF: `workspaceAgentStatus` no longer spawns a herdr subprocess for a non-desired agent.** It
+  probed `harness.agentExists` whenever the row merely existed; it now short-circuits to
+  `running: false` unless `desired === 1`, mirroring the same fix already landed in
+  `storyAgentStatus`. Stray-agent reaping is unaffected (`reconcileWorkspaceAgent` and the
+  supervisor probe herdr directly). Intentional behaviour change: a stray herdr agent whose row has
+  `desired = 0` now reports `running: false` rather than `true` via `toCtoStatus`.
+
 ## [0.9.244] - 2026-07-08
 
 ### Removed

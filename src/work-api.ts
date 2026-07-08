@@ -164,8 +164,9 @@ export type WorkListItem =
  * The unified cross-resource WORK LIST for `GET /api/work` — every leaf (task) and node
  * (story) across all workspaces, newest-first, each tagged with its `kind`. Leaves reuse
  * `allTasksView` (so its `status` / `workspace` / `q` filtering is byte-identical to the
- * task list); nodes reuse `allStoryViews`, filtered here by the same optional `workspace` /
- * `status` / `q` (a story's searchable text is its brief + id). The two already-sorted
+ * task list); nodes reuse `allStoryViews`, which takes the `workspace` scope directly (so a
+ * scoped list never BUILDS the other workspaces' views) and are filtered here by the same
+ * optional `status` / `q` (a story's searchable text is its brief + id). The two already-sorted
  * lists are merged into one newest-first set, mirroring the merge sort the cross-workspace
  * views use elsewhere.
  */
@@ -175,8 +176,7 @@ export async function listWork(
   const leaves: WorkListItem[] = allTasksView(opts).map((t) => ({ ...t, work_kind: "leaf" as const }));
 
   const needle = (opts.q ?? "").trim().toLowerCase();
-  const nodes: WorkListItem[] = (await allStoryViews())
-    .filter((s) => !opts.workspace || s.workspace_id === opts.workspace)
+  const nodes: WorkListItem[] = (await allStoryViews(opts.workspace))
     .filter((s) => !opts.status || s.status === opts.status)
     .filter(
       (s) =>

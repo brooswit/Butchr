@@ -1512,9 +1512,20 @@ export async function listStoryViews(workspaceId: string): Promise<StoryView[]> 
   return views.filter((v): v is StoryView => v !== null);
 }
 
-/** EVERY workspace's stories as enriched StoryViews — the cross-workspace operator surface
- *  behind GET /api/stories (newest-first across all workspaces). */
-export async function allStoryViews(): Promise<StoryView[]> {
+/** Stories as enriched StoryViews — the NODE source of the unified work list (listWork).
+ *
+ *  Unscoped: EVERY workspace's stories, newest-first across all workspaces. Scoped to a
+ *  `workspaceId`: ONLY that workspace's stories. The scope belongs HERE, not in a post-filter at
+ *  the caller — building a StoryView is not free (per-story counts + a leader probe), so a scoped
+ *  `GET /api/work?workspace=X` used to build and discard every OTHER workspace's views (~60).
+ *  Filtering the unscoped newest-first list down to one workspace yields exactly what
+ *  listStoryViews returns for it, so the scoped branch is a pure delegation.
+ *
+ *  The guard is TRUTHINESS, not `!== undefined`: `?workspace=` reaches us as `""`, which the
+ *  caller's old post-filter treated as UNSCOPED. Empty string must keep falling through to the
+ *  cross-workspace fan-out, not scope to a workspace named "" (which has zero stories). */
+export async function allStoryViews(workspaceId?: string): Promise<StoryView[]> {
+  if (workspaceId) return listStoryViews(workspaceId);
   const lists = await Promise.all(listWorkspaces().map((w) => listStoryViews(w.id)));
   const out = lists.flat();
   out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
