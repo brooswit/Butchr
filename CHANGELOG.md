@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.235] - 2026-07-08
+
 ### Removed
 
 - **Repo-CREATION removed entirely — repos are USER-added only (story st-576b459f).** Walks back
