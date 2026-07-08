@@ -153,52 +153,27 @@ export function createStory(workspaceId: string, brief: unknown): StoryRow {
 }
 
 /**
- * CREATE a PROJECT-LEVEL INITIATIVE (REVAMP-4 Phase 3 / P3d, story st-1a82a2e1) — the CEO's
- * delegation surface: the CEO seeds a STORY into a member repo, and that repo's own CTO/leader
- * turn it into work. This MIRRORS the human→CEO handoff one rung down (a brief a subordinate
- * decomposes), reusing the EXACT createStory machinery a CTO uses — the CEO does NOT own the
- * story's lifecycle, it DELEGATES: the created story lands `open` in the repo's workspace, gets its
- * managed LEADER (onStoryCreated), and its story-level asks / completion route to the repo's CTO
- * (existing story→cto routing), with the CEO above only via the P3a escalation ladder.
+ * CREATE a PROJECT-LEVEL INITIATIVE (REVAMP-4 Phase 3 / P3d, RFC Q1/Q6 Phase B1) — the CEO's
+ * delegation surface. THE CAPABILITY FLIP: the CEO no longer forges a story (and launches its
+ * leader) directly — it lands a CEO DIRECTIVE under the member repo, and THAT repo's CTO accepts &
+ * decomposes it into stories (acceptDirective). This is the honest delegation model: the CEO hands
+ * the repo tier an instruction; the CTO owns turning it into work.
  *
- * `assertRepoIsProjectMember` enforces SINGLE-project scope: the repo must be registered under THIS
- * project (cross-repo spanning is P3e). One repo per initiative.
+ * `assertRepoIsProjectMember` (inside the shared fan-out) enforces SINGLE-project scope: the repo
+ * must be registered under THIS project. A single-repo initiative still mints its OWN
+ * `initiative_id` so the rollup (listProjectInitiatives, `initiative_id IS NOT NULL`) is UNIFORM
+ * with the cross-repo path. Returns the minted initiative + its one directive.
  *
- * REPO-PARENTING: createStory materializes the story NODE with parent_id NULL (a top-level story —
- * BYTE-IDENTICAL to a CTO-created story). To make the initiative bubble up to the CEO, we then
- * repoint its parent_id → the OWNING REPO node (its own workspace_id, which IS the repo node id by
- * S0a construction — the same shape migrateReparentTopLevelUnderRepo gives every top-level Work).
- * With the repo registered under the project, the story's chain is now story→repo→project ⇒
- * [{cto},{ceo},{user}] (immediate responder still {cto} — the CEO delegates, does not own). We do
- * NOT touch createStory itself, so the CTO/leader story-creation path stays byte-identical.
+ * NO story is created and NO leader is launched by an initiative anymore — that is the whole point
+ * of B1. REVERSIBLE: the flip is this one delegation (fanOutInitiativeDirectives), swappable back to
+ * a direct createStory-under-the-repo seed if ever needed.
  */
 export function createProjectInitiative(
   projectId: string,
   repoId: unknown,
   brief: unknown,
-): StoryRow {
-  return seedMemberRepoStory(projectId, repoId, brief);
-}
-
-/**
- * The SHARED per-repo initiative primitive behind both the single-repo (createProjectInitiative)
- * and CROSS-repo (createCrossRepoInitiative) surfaces: seed ONE story into a MEMBER repo of a
- * project and reparent it onto its owning repo node so its escalation chain reaches the CEO
- * (story→repo→project). BYTE-IDENTICAL to the original P3d createProjectInitiative body — the
- * single-repo path's behavior is unchanged. `assertRepoIsProjectMember` enforces the repo is
- * registered under THIS project (404/409). Does NOT stamp an initiative_id (single-repo
- * initiatives are ungrouped); the cross-repo caller stamps the grouping key on the returned node.
- */
-function seedMemberRepoStory(projectId: string, repoId: unknown, brief: unknown): StoryRow {
-  const repo = assertRepoIsProjectMember(projectId, repoId);
-  // Reuse the CTO's story machinery verbatim — repo.id is the repo node id == its directory id
-  // (S0a), the workspace createStory anchors the node + its leader to.
-  const story = createStory(repo.id, brief);
-  // Repoint the fresh story NODE onto its owning repo node so its escalation chain reaches the CEO
-  // (story→repo→project). parent_id = the repo node id (== story.workspace_id) — the canonical S1
-  // top-level shape. Immediate responder is unchanged ({cto}); only the chain gains the {ceo} tier.
-  db.query(`UPDATE tasks SET parent_id=? WHERE id=? AND work_kind='node'`).run(repo.id, story.id);
-  return getStory(story.id)!;
+): InitiativeDirectives {
+  return fanOutInitiativeDirectives(projectId, [{ repo: repoId, brief }]);
 }
 
 // --- CEO DIRECTIVE MACHINERY (RFC Q1 — Phase A3) ------------------------------
@@ -214,8 +189,8 @@ function seedMemberRepoStory(projectId: string, repoId: unknown, brief: unknown)
 // The CTO has two verbs: ACCEPT&DECOMPOSE (acceptDirective → 1+ stories, directive → `accepted`) or
 // PUSH-BACK (the EXISTING escalate verb — escalateTask, since a directive is `isAwaitingFeedback`).
 //
-// ADDITIVE + INERT this phase: nothing calls createDirective yet. Phase B1 flips
-// createProjectInitiative / createCrossRepoInitiative onto it and retires seedMemberRepoStory.
+// LIVE as of Phase B1: createProjectInitiative / createCrossRepoInitiative fan out directives through
+// createDirective (the retired seedMemberRepoStory "story-forging" cheat is gone).
 
 /**
  * CREATE a CEO DIRECTIVE under a repo node (RFC Q1). The `brief` is stored BOTH in the directive's
@@ -279,8 +254,8 @@ export type AcceptedDirective = {
 /**
  * ACCEPT & DECOMPOSE a CEO directive (RFC Q1 — POST /api/work/:directiveId/stories) — a repo CTO's
  * response: turn the directive into 1+ real stories under the SAME repo and mark the directive DONE
- * (`accepted`, a terminal state). Each story lands via the seedMemberRepoStory shape (createStory +
- * reparent onto the repo node) so it gets its managed leader + bubbles repo → {cto} → … like any
+ * (`accepted`, a terminal state). Each story lands via the createStory + reparent-onto-the-repo-node
+ * shape so it gets its managed leader + bubbles repo → {cto} → … like any
  * CTO-created story, and INHERITS the directive's `initiative_id` so the cross-repo completion rollup
  * can find its siblings.
  *
@@ -325,8 +300,8 @@ export function acceptDirective(directiveId: string, targets: unknown): Accepted
   for (const brief of briefs) {
     // Reuse the CTO's story machinery verbatim — createStory anchors the node + its leader to the repo
     // workspace, then reparent onto the repo node (story → repo) so it bubbles to the repo's CTO/CEO,
-    // stamping the inherited grouping key so the rollup finds its siblings. Byte-identical to
-    // seedMemberRepoStory minus the project-member guard (the directive already lives under the repo).
+    // stamping the inherited grouping key so the rollup finds its siblings. (The project-member guard is
+    // unneeded here — the directive already lives under the repo.)
     const story = createStory(repoId, brief);
     if (initiativeId != null) {
       db.query(`UPDATE tasks SET parent_id=?, initiative_id=? WHERE id=? AND work_kind='node'`).run(
@@ -346,14 +321,16 @@ export function acceptDirective(directiveId: string, targets: unknown): Accepted
   return { directive_id: directiveId, initiative_id: initiativeId, stories };
 }
 
-/** One target of a CROSS-repo initiative: a member repo id + the brief its child story carries. */
+/** One target of an initiative: a member repo id + the brief its DIRECTIVE carries. */
 export type InitiativeTarget = { repo: unknown; brief: unknown };
 
-/** A created CROSS-repo initiative: the grouping id, its project, and every per-repo child story. */
-export type CrossRepoInitiative = {
+/** A created initiative (single-repo OR cross-repo): the shared grouping id, its project, and the
+ *  per-repo DIRECTIVES it materialized. Post-B1 an initiative fans out DIRECTIVES (not stories) —
+ *  each repo's CTO accepts & decomposes its directive into the initiative_id-stamped stories. */
+export type InitiativeDirectives = {
   initiative_id: string;
   project_id: string;
-  children: StoryRow[];
+  directives: TaskRow[];
 };
 
 /** Mint an initiative grouping key not already in use by any node (mirrors uniqueStoryId). */
@@ -366,33 +343,24 @@ function uniqueInitiativeId(): string {
 }
 
 /**
- * CREATE a CROSS-REPO PROJECT INITIATIVE (REVAMP-4 Phase 3 / P3e) — the CEO's cross-repo delegation
- * surface: fan ONE initiative into MULTIPLE member repos, each landing an ordinary repo-scoped story
- * managed by that repo's own CTO/leader (reusing seedMemberRepoStory — the exact single-repo P3d
- * machinery). All children share ONE generated `initiative_id` grouping key so the completion ROLLUP
- * (listProjectInitiatives / reportInitiativeCompletionIfDone) can decide the initiative is DONE when
- * every child lands. The fan-out is PARALLEL/UNSEQUENCED in P3e: all children start immediately.
- * Cross-repo SEQUENCING (holding a repo-B child until a repo-A child merges) is NOT built here — it
- * needs node-on-node blocked_by, a separate follow-up (see the P3e R5 verification finding).
+ * The SHARED fan-out behind BOTH the single-repo (createProjectInitiative) and cross-repo
+ * (createCrossRepoInitiative) surfaces — the RFC Q1/Q6 Phase B1 CAPABILITY FLIP. It lands ONE CEO
+ * DIRECTIVE per target member repo (createDirective, parented under the repo node) — NOT a story and
+ * NOT a leader. Every target shares ONE minted `initiative_id` (a single-repo initiative mints one
+ * too, so the rollup's `initiative_id IS NOT NULL` filter is UNIFORM) which each directive carries and
+ * every story the CTO later decomposes it into inherits (acceptDirective), so the completion ROLLUP
+ * (listProjectInitiatives / reportInitiativeCompletionIfDone) can find its siblings across repos.
  *
- * `targets` must be a non-empty array of `{repo, brief}`. EVERY target is VALIDATED FIRST (repo is a
- * member of THIS project via assertRepoIsProjectMember — 404/409; brief non-blank — 400) BEFORE any
- * story is created, so a bad target rejects the whole initiative atomically (no half-created stories
- * with their leaders launched). Targets MAY repeat a repo (two stories in one repo, one initiative)
- * and MAY span repos (the point of P3e); a NON-member repo is refused by the member guard.
+ * VALIDATE-ALL-FIRST: member-guard every target repo (assertRepoIsProjectMember — 404 project/repo,
+ * 409 non-member) + require a non-blank brief (400) BEFORE creating ANY directive, so a bad target
+ * rejects the whole initiative atomically (no half-fanned initiative). Targets MAY repeat a repo and
+ * MAY span repos; the fan-out is PARALLEL/UNSEQUENCED (each repo's CTO acts independently).
  */
-export function createCrossRepoInitiative(
+function fanOutInitiativeDirectives(
   projectId: string,
-  targets: unknown,
-): CrossRepoInitiative {
-  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
-  if (!Array.isArray(targets) || targets.length === 0) {
-    throw new HttpError(400, "targets must be a non-empty array of { repo, brief }");
-  }
-  // VALIDATE-ALL-FIRST: member-guard every target repo + require a non-blank brief BEFORE creating
-  // any story, so an invalid target can't leave a partially-fanned initiative behind (createStory
-  // launches a leader as a side effect). assertRepoIsProjectMember enforces same-project scope.
-  const validated = (targets as InitiativeTarget[]).map((t) => {
+  targets: InitiativeTarget[],
+): InitiativeDirectives {
+  const validated = targets.map((t) => {
     const repo = assertRepoIsProjectMember(projectId, t?.repo);
     if (typeof t?.brief !== "string" || !t.brief.trim()) {
       throw new HttpError(400, "each initiative target requires a non-empty brief");
@@ -400,33 +368,61 @@ export function createCrossRepoInitiative(
     return { repoId: repo.id, brief: t.brief };
   });
   const initiativeId = uniqueInitiativeId();
-  const children: StoryRow[] = [];
-  for (const v of validated) {
-    const story = seedMemberRepoStory(projectId, v.repoId, v.brief);
-    // Stamp the shared grouping key on the child node so the rollup can find its siblings.
-    db.query(`UPDATE tasks SET initiative_id=? WHERE id=? AND work_kind='node'`).run(
-      initiativeId,
-      story.id,
-    );
-    children.push(getStory(story.id)!);
-  }
-  return { initiative_id: initiativeId, project_id: projectId, children };
+  // All targets validated → land the directives. createDirective stamps the shared grouping key so the
+  // rollup + the CTO-decomposed stories all key off the same initiative_id.
+  const directives = validated.map((v) => createDirective(v.repoId, v.brief, initiativeId));
+  return { initiative_id: initiativeId, project_id: projectId, directives };
 }
 
-// --- CROSS-REPO INITIATIVE COMPLETION ROLLUP (REVAMP-4 P3e) -------------------
-//
-// An initiative is DONE when EVERY per-repo child story (grouped by initiative_id) has landed
-// `done`. These reads power GET /api/projects/:id/initiatives (the CEO's authoritative pull view)
-// and the live completion push (reportInitiativeCompletionIfDone), MIRRORING story completion one
-// rung up. Membership is scoped to the project by joining each child node → its owning repo node
-// (parent_id) → the project (repo.parent_id === projectId), the same repo→project link
-// registerRepoUnderProject writes.
+/**
+ * CREATE a CROSS-REPO PROJECT INITIATIVE (REVAMP-4 Phase 3 / P3e; RFC Q1/Q6 Phase B1) — the CEO's
+ * cross-repo delegation surface: fan ONE initiative into MULTIPLE member repos. THE CAPABILITY FLIP:
+ * each target now lands a CEO DIRECTIVE (createDirective) that repo's CTO accepts & decomposes into
+ * stories — NOT a story butchr launches directly. All directives share ONE generated `initiative_id`
+ * grouping key so the completion ROLLUP fires when every repo's decomposed stories land.
+ *
+ * `targets` must be a non-empty array of `{repo, brief}`. EVERY target is VALIDATED FIRST (member of
+ * THIS project — 404/409; brief non-blank — 400) BEFORE any directive is created, so a bad target
+ * rejects the whole initiative atomically. Targets MAY repeat a repo and MAY span repos.
+ */
+export function createCrossRepoInitiative(
+  projectId: string,
+  targets: unknown,
+): InitiativeDirectives {
+  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw new HttpError(400, "targets must be a non-empty array of { repo, brief }");
+  }
+  return fanOutInitiativeDirectives(projectId, targets as InitiativeTarget[]);
+}
 
-/** One per-repo child of an initiative in the rollup view. */
+// --- INITIATIVE COMPLETION ROLLUP (REVAMP-4 P3e; RFC Q1/Q6 Phase B1) ----------
+//
+// An initiative is DONE when EVERY per-repo child (grouped by initiative_id) has landed `done`.
+// These reads power GET /api/projects/:id/initiatives (the CEO's authoritative pull view) and the
+// live completion push (reportInitiativeCompletionIfDone), MIRRORING story completion one rung up.
+// Membership is scoped to the project by joining each child → its owning repo node (parent_id) →
+// the project (repo.parent_id === projectId), the same repo→project link registerRepoUnderProject
+// writes.
+//
+// POST-B1: a per-repo child is either a decomposed STORY node OR a still-PENDING directive leaf (the
+// anchor until its CTO accepts & decomposes it — createDirective parents the directive under the same
+// repo node too). An ACCEPTED directive (status='accepted') drops OUT — it has been superseded by the
+// initiative_id-stamped stories the CTO created from it. A pending directive's status is 'directive'
+// (never 'done'), so an initiative CANNOT complete before every repo's CTO has decomposed + landed.
+
+/** SHARED child-set predicate (child alias `s`): a decomposed story NODE or a still-pending directive
+ *  LEAF. Used by BOTH the rollup view (listProjectInitiatives) and the completion push
+ *  (reportInitiativeCompletionIfDone) so both compute doneness over the IDENTICAL child set. */
+const INITIATIVE_CHILD_PREDICATE =
+  "(s.work_kind='node' OR (s.work_kind='leaf' AND s.status='directive'))";
+
+/** One per-repo child of an initiative in the rollup view. `status` is a story-node status
+ *  (open/done/aborted/…) OR 'directive' for a pending, not-yet-decomposed directive. */
 export type InitiativeChild = {
   id: string;
   workspace_id: string;
-  status: StoryStatus;
+  status: string;
   brief: string | null;
 };
 
@@ -457,16 +453,17 @@ function rollupInitiatives(
   }));
 }
 
-/** The cross-repo initiatives under a project (grouped by initiative_id), each with its per-repo
- *  children + rolled-up doneness. 404 if the project is gone. The CEO's authoritative rollup view
- *  behind GET /api/projects/:id/initiatives. */
+/** The initiatives under a project (grouped by initiative_id), each with its per-repo children
+ *  (decomposed stories and/or pending directives) + rolled-up doneness. 404 if the project is gone.
+ *  The CEO's authoritative rollup view behind GET /api/projects/:id/initiatives. Text is taken as
+ *  COALESCE(brief, summary) so a story surfaces its `brief` and a directive its `summary`. */
 export function listProjectInitiatives(projectId: string): InitiativeView[] {
   if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
   const rows = db
     .query<InitiativeChild & { initiative_id: string }, [string]>(
-      `SELECT s.id, s.workspace_id, s.status, s.brief, s.initiative_id
+      `SELECT s.id, s.workspace_id, s.status, COALESCE(s.brief, s.summary) AS brief, s.initiative_id
          FROM tasks s JOIN tasks r ON r.id = s.parent_id AND r.work_kind='repo'
-        WHERE s.work_kind='node' AND s.initiative_id IS NOT NULL AND r.parent_id = ?
+        WHERE ${INITIATIVE_CHILD_PREDICATE} AND s.initiative_id IS NOT NULL AND r.parent_id = ?
         ORDER BY s.initiative_id, s.created_at`,
     )
     .all(projectId);
@@ -483,12 +480,15 @@ export function getProjectInitiative(
 }
 
 /**
- * COMPLETION PUSH (REVAMP-4 P3e) — called right after a story NODE lands `done` (updateStory's
- * immediate-done branch + landStory's landed branch). If the story belongs to a CROSS-repo
+ * COMPLETION PUSH (REVAMP-4 P3e; RFC Q1/Q6 Phase B1) — called right after a story NODE lands `done`
+ * (updateStory's immediate-done branch + landStory's landed branch). If the story belongs to an
  * initiative (initiative_id set) AND every sibling child has now landed `done`, publish
- * `initiative.completed` up the PROJECT channel — mirroring story completion one rung up. A no-op
- * for a story with no initiative_id (single-repo P3d initiatives + ordinary stories are untouched,
- * so this is byte-identical for them) or when siblings are still in flight. Best-effort read-only.
+ * `initiative.completed` up the PROJECT channel — mirroring story completion one rung up. A no-op for
+ * a story with no initiative_id (ordinary stories are untouched) or when siblings are still in flight.
+ *
+ * SIBLINGS include still-PENDING directive leaves (the same INITIATIVE_CHILD_PREDICATE the rollup
+ * uses): a directive not yet accepted has status='directive' (never 'done'), so the push CANNOT fire
+ * prematurely while another repo's CTO has yet to decompose its directive. Best-effort read-only.
  */
 export function reportInitiativeCompletionIfDone(storyId: string): void {
   const iid = db
@@ -499,7 +499,7 @@ export function reportInitiativeCompletionIfDone(storyId: string): void {
   if (!iid) return;
   const siblings = db
     .query<{ status: string }, [string]>(
-      `SELECT status FROM tasks WHERE initiative_id=? AND work_kind='node'`,
+      `SELECT s.status FROM tasks s WHERE s.initiative_id=? AND ${INITIATIVE_CHILD_PREDICATE}`,
     )
     .all(iid);
   if (siblings.length === 0 || !siblings.every((s) => s.status === "done")) return;

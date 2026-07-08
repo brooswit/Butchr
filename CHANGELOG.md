@@ -17,6 +17,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CEO initiatives now delegate via DIRECTIVES, not forged stories (RFC Q1/Q6,
+  Phase B1) — the capability flip.** Previously a CEO initiative CHEATED: it seeded a
+  story straight into a member repo and launched its leader in-process, bypassing the
+  repo's CTO. Now `createProjectInitiative` / `createCrossRepoInitiative`
+  (`src/stories.ts`) fan out one CEO **directive** per target member repo (reusing the
+  A3 `createDirective` machinery), and that repo's CTO accepts & decomposes each into
+  the actual stories (the A3 `POST /api/work/:directiveId/stories` verb). An initiative
+  forges NO story and launches NO leader — the whole point. The retired
+  `seedMemberRepoStory` helper is deleted (pre-1.0, no back-compat shim). Every
+  initiative — single-repo too — now mints a shared `initiative_id` so the completion
+  rollup is uniform.
+- **Initiative rollup surfaces the pending directive as the per-repo anchor.**
+  `listProjectInitiatives` / `reportInitiativeCompletionIfDone` (`src/stories.ts`) count
+  a per-repo child as either a decomposed story node OR a still-pending `directive` leaf
+  (a shared `INITIATIVE_CHILD_PREDICATE`); an accepted directive drops out in favor of
+  its stamped stories. A pending directive is never `done`, so an initiative CANNOT
+  complete (or fire `initiative.completed`) before every repo's CTO has decomposed and
+  landed its work. `deleteProject` (`src/workspaces.ts`) likewise treats a pending
+  directive as an active initiative that blocks deletion.
+- **CEO creation authority is now `directive`, not `story`** (`src/tasks.ts`
+  `CREATION_AUTHORITY`; `POST /api/projects/:id/initiatives` gate in `src/server.ts`):
+  a CEO delegates one tier below via a directive and no longer forges a story directly.
+- **Honesty copy.** The CEO operator brief (`src/workspace-agent.ts`) and the Projects
+  launch-initiative UI (`public/app.js`) now describe the directive flow and that
+  single-repo initiatives appear in the rollup too.
+
 ## [0.9.226] - 2026-07-08
 
 ### Added

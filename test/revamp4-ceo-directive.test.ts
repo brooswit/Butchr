@@ -107,12 +107,14 @@ afterAll(() => {
 describe("REVAMP-4 P3d — assertCreationAllowed level rule", () => {
   test("each tier may create the tier ONE level below it", () => {
     expect(() => tasksMod.assertCreationAllowed("ceo", "repo")).not.toThrow();
-    expect(() => tasksMod.assertCreationAllowed("ceo", "story")).not.toThrow(); // initiative
+    expect(() => tasksMod.assertCreationAllowed("ceo", "directive")).not.toThrow(); // initiative (B1)
     expect(() => tasksMod.assertCreationAllowed("cto", "story")).not.toThrow();
     expect(() => tasksMod.assertCreationAllowed("leader", "subtask")).not.toThrow();
   });
 
-  test("reaching the wrong level is refused (403) — ceo↛subtask, cto↛project, leader↛story", () => {
+  test("reaching the wrong level is refused (403) — ceo↛story/subtask, cto↛project, leader↛story", () => {
+    // B1: the CEO no longer forges a story directly — it DELEGATES via a directive.
+    expect(statusOf(() => tasksMod.assertCreationAllowed("ceo", "story"))).toBe(403);
     expect(statusOf(() => tasksMod.assertCreationAllowed("ceo", "subtask"))).toBe(403); // no direct leaf
     expect(statusOf(() => tasksMod.assertCreationAllowed("ceo", "project"))).toBe(403); // not its own tier
     expect(statusOf(() => tasksMod.assertCreationAllowed("cto", "project"))).toBe(403);
@@ -194,26 +196,25 @@ describe("REVAMP-4 P3d — repo-work bubbles to the CEO after registration (opt-
 });
 
 // --- E. Initiative ownership (the CEO delegates, does not own) ----------------
-describe("REVAMP-4 P3d — a CEO initiative delegates to the member repo's CTO/leader", () => {
-  test("createProjectInitiative seeds a story into the member repo, managed by that repo's LEADER", () => {
-    const story = storiesMod.createProjectInitiative(PROJ, DIRA, "ship the widget");
-    // The story is a NODE landed OPEN in the member repo's workspace.
-    expect(story.status).toBe("open");
-    expect(story.workspace_id).toBe(DIRA);
-    const node = tasksMod.getTask(story.id)!;
-    expect(node.work_kind).toBe("node");
-    // Reparented onto the repo node so its chain reaches the CEO.
-    expect(node.parent_id).toBe(DIRA);
-    // Managed by the repo's own LEADER (the mini-CTO onStoryCreated materialized), NOT the CEO.
-    const leaderRow = dbMod.getWorkspaceAgentRow(`ws-leader-${story.id}`);
-    expect(leaderRow?.kind).toBe("leader");
-    expect(leaderRow?.work_id).toBe(story.id);
-    expect(leaderRow?.directory_id).toBe(DIRA);
-    expect(leaderRow?.desired).toBe(1);
-    // Story-level asks / completion route to the repo's CTO (immediate responder), CEO above only
-    // via the chain — proving the CEO DELEGATES, it does not own the story's lifecycle.
-    expect(workMod.resolveWorkResponder(story.id)).toEqual({ kind: "cto" });
-    expect(workMod.workResponderChain(story.id)).toEqual([
+describe("REVAMP-4 P3d + B1 — a CEO initiative delegates to the member repo's CTO via a directive", () => {
+  test("createProjectInitiative lands a DIRECTIVE under the member repo (no story, no leader)", () => {
+    const ini = storiesMod.createProjectInitiative(PROJ, DIRA, "ship the widget");
+    expect(ini.project_id).toBe(PROJ);
+    expect(ini.initiative_id).toMatch(/^ini-/); // grouped (uniform rollup, even single-repo)
+    expect(ini.directives).toHaveLength(1);
+    const d = ini.directives[0]!;
+    // A `directive` LEAF landed under the member repo's workspace, parented on the repo node.
+    expect(d.status).toBe("directive");
+    expect(d.work_kind).toBe("leaf");
+    expect(d.workspace_id).toBe(DIRA);
+    expect(d.parent_id).toBe(DIRA);
+    expect(d.summary).toBe("ship the widget");
+    // B1: the CEO forges NO story + launches NO leader — the repo's CTO decomposes the directive.
+    expect(dbMod.getWorkspaceAgentRow(`ws-leader-${d.id}`)).toBeNull();
+    // The directive routes to the repo's CTO (immediate responder), CEO above only via the chain —
+    // proving the CEO DELEGATES, it does not own the work's lifecycle.
+    expect(workMod.resolveWorkResponder(d.id)).toEqual({ kind: "cto" });
+    expect(workMod.workResponderChain(d.id)).toEqual([
       { kind: "cto" },
       { kind: "ceo", project_id: PROJ },
       { kind: "user" },

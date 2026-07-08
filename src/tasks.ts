@@ -1936,14 +1936,17 @@ export function assertWorkspaceTaskCreationAllowed(kind: TaskKind): void {
  * container; reaching deeper must be DELEGATED down the ladder. This encodes that rule as data so
  * the NEW CEO directive surface is gated by the SAME principle that already blocks a CTO from
  * creating a standalone leaf:
- *   - 'ceo'    (owns a project) → 'repo'  (register/reparent a repo under the project) and
- *                                 'story' (seed a repo-scoped INITIATIVE — a story into a member
- *                                          repo, the same artifact a CTO would create there).
- *   - 'cto'    (owns a repo)    → 'story' (createStory). The one direct LEAF a repo admits is a
- *                                 'rollback', gated separately by assertWorkspaceTaskCreationAllowed.
+ *   - 'ceo'    (owns a project) → 'repo'      (register/reparent a repo under the project) and
+ *                                 'directive' (RFC Q1/Q6 B1 — land a CEO DIRECTIVE into a member repo
+ *                                              for its CTO to accept & decompose; the CEO no longer
+ *                                              forges the story itself).
+ *   - 'cto'    (owns a repo)    → 'story' (createStory — incl. accepting a directive). The one direct
+ *                                 LEAF a repo admits is a 'rollback', gated separately by
+ *                                 assertWorkspaceTaskCreationAllowed.
  *   - 'leader' (owns a story)   → 'subtask' (createSubtask — a leaf).
- * Anything else is refused: a CEO may NOT create a build 'subtask' leaf directly, a CTO may NOT
- * create a 'project' or register 'repo's, a leader may NOT create a 'story'/'project', etc.
+ * Anything else is refused: a CEO may NOT create a 'story' or a build 'subtask' leaf directly (it
+ * DELEGATES via a directive), a CTO may NOT create a 'project' or register 'repo's, a leader may NOT
+ * create a 'story'/'project', etc.
  *
  * PURE + exported so the rule is unit-testable without the HTTP server (mirrors
  * assertWorkspaceTaskCreationAllowed / csrfGuard). Throws HttpError(403) when the tier may not
@@ -1953,10 +1956,10 @@ export function assertWorkspaceTaskCreationAllowed(kind: TaskKind): void {
  * landed path.
  */
 export type SupervisorTier = "ceo" | "cto" | "leader";
-export type CreatableArtifact = "project" | "repo" | "story" | "subtask";
+export type CreatableArtifact = "project" | "repo" | "directive" | "story" | "subtask";
 
 const CREATION_AUTHORITY: Record<SupervisorTier, ReadonlySet<CreatableArtifact>> = {
-  ceo: new Set<CreatableArtifact>(["repo", "story"]),
+  ceo: new Set<CreatableArtifact>(["repo", "directive"]),
   cto: new Set<CreatableArtifact>(["story"]),
   leader: new Set<CreatableArtifact>(["subtask"]),
 };

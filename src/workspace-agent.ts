@@ -424,18 +424,19 @@ Registering a repo does NOT change who handles its day-to-day work: the CTO stay
 responder for everything in that repo. You only enter the picture when something escalates past
 the CTO.
 
-### 2. Seed an initiative into a member repo (delegate to its CTO)
+### 2. Direct a member repo with an initiative (delegate to its CTO)
 
-To direct a repo, create an INITIATIVE — a STORY seeded into that member repo, which the repo's own
-CTO/leader turns into work:
+To direct a repo, create an INITIATIVE. You do NOT forge the story yourself — butchr lands a CEO
+**directive** into that member repo, and the repo's own **CTO** accepts & decomposes it into the
+actual stories:
 
 - **\`POST /api/projects/${projectId}/initiatives\`** body \`{ "repo": "<member repo id>",
   "brief": "<the initiative brief>" }\`.
-- The repo must be a member (register it first). butchr lands the story \`open\` in that repo and
-  launches its managed **story leader** (a mini-CTO), exactly as if the repo's CTO had created it.
-  The leader decomposes it into subtasks; the repo's CTO signs off story-level asks and completion.
-- You DELEGATE — you do not run the story. Its asks/sign-offs go to the repo's CTO first; they only
-  reach you if the CTO escalates them up to the project tier.
+- The repo must be a member (register it first). butchr lands ONE directive under that repo (grouped
+  under a fresh **initiative id** it returns) and surfaces it on the repo CTO's feed. The CTO accepts
+  it (turning it into 1+ stories, each managed by its own story leader) or pushes back to you.
+- You DELEGATE — you do not run the work. The stories' asks/sign-offs go to the repo's CTO first;
+  they only reach you if the CTO escalates them up to the project tier.
 
 ### 3. Fan ONE initiative across MULTIPLE repos (cross-repo)
 
@@ -445,11 +446,12 @@ each repo — same endpoint, a \`targets\` array instead of a single \`repo\`/\`
 - **\`POST /api/projects/${projectId}/initiatives\`** body
   \`{ "targets": [ { "repo": "<repo A id>", "brief": "<repo A's part>" },
   { "repo": "<repo B id>", "brief": "<repo B's part>" } ] }\`.
-- Every target repo must be a member (a non-member is refused). butchr lands ONE story per target
-  (each managed by that repo's own leader + CTO, exactly like a single-repo initiative) and groups
-  them under one **initiative id** it returns. Targets may repeat a repo or span repos.
+- Every target repo must be a member (a non-member is refused). butchr lands ONE directive per target
+  (each accepted & decomposed by that repo's own CTO) and groups them under one **initiative id** it
+  returns. Targets may repeat a repo or span repos.
 - Track it: **\`GET /api/projects/${projectId}/initiatives\`** lists each initiative with its
-  per-repo children + a rolled-up \`done\` flag; **\`GET /api/projects/${projectId}/initiatives/<initiative id>\`**
+  per-repo children — a **pending directive** until its CTO decomposes it, then the resulting stories —
+  plus a rolled-up \`done\` flag; **\`GET /api/projects/${projectId}/initiatives/<initiative id>\`**
   is the single-initiative view. The initiative is DONE when EVERY child story has landed — you are
   notified up the project channel when that happens.
 - **PARALLEL only, for now.** The children all start immediately; you CANNOT yet hold one repo's

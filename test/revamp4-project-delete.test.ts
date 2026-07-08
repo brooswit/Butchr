@@ -100,10 +100,12 @@ describe("REVAMP-4 — deleteProject", () => {
   test("(c) a project WITH an active initiative → 409, checked initiatives-FIRST (initiatives message)", async () => {
     const proj = workspacesMod.createProject(DIRR).id;
     workspacesMod.registerRepoUnderProject(proj, DIRR);
-    // An initiative = a story seeded into the member repo (story.parent_id = repo, repo.parent_id =
-    // project). It lands OPEN → non-terminal → an ACTIVE initiative.
-    const story = storiesMod.createProjectInitiative(proj, DIRR, "ship the thing");
-    expect(storiesMod.getStory(story.id)!.status).toBe("open");
+    // B1: an initiative = a CEO DIRECTIVE landed under the member repo (directive.parent_id = repo,
+    // repo.parent_id = project). It lands `directive` → non-terminal → an ACTIVE initiative (pending
+    // its CTO's decomposition).
+    const ini = storiesMod.createProjectInitiative(proj, DIRR, "ship the thing");
+    const directive = ini.directives[0]!;
+    expect(tasksMod.getTask(directive.id)!.status).toBe("directive");
 
     const err = await errOf(() => workspacesMod.deleteProject(proj));
     expect(err?.status).toBe(409);
@@ -112,8 +114,9 @@ describe("REVAMP-4 — deleteProject", () => {
     expect(err?.message).toContain("active initiative");
     expect(err?.message).not.toContain("registered repo");
 
-    // Once the initiative reaches a terminal status it no longer blocks (repos guard now surfaces).
-    dbMod.db.query(`UPDATE tasks SET status='aborted' WHERE id=?`).run(story.id);
+    // Once the directive reaches a terminal status (`accepted`) it no longer blocks (repos guard now
+    // surfaces).
+    dbMod.db.query(`UPDATE tasks SET status='accepted' WHERE id=?`).run(directive.id);
     const err2 = await errOf(() => workspacesMod.deleteProject(proj));
     expect(err2?.status).toBe(409);
     expect(err2?.message).toContain("registered repo");

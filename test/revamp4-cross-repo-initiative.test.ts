@@ -1,16 +1,23 @@
-// REVAMP-4 Phase 3 / P3e (story st-1a82a2e1) — CROSS-REPO project initiatives + the R5 blocked_by
-// verification that GATED this build. A CEO can fan ONE initiative into MULTIPLE member repos (each
-// landing an ordinary repo-scoped story managed by that repo's CTO/leader), grouped by one
-// initiative id with a completion ROLLUP that fires when every child lands.
+// REVAMP-4 Phase 3 / P3e (story st-1a82a2e1) + RFC Q1/Q6 Phase B1 (story st-30a7dccd) — project
+// initiatives + the R5 blocked_by verification that GATED the P3e build. THE B1 CAPABILITY FLIP: a
+// CEO initiative no longer FORGES stories (and launches their leaders) — it fans out CEO DIRECTIVES,
+// one per target member repo, and THAT repo's CTO accepts & decomposes each into the actual stories.
+// All directives (and the stories they become) share one initiative id with a completion ROLLUP that
+// fires when every decomposed story lands.
 //
 // This suite pins:
-//   FAN-OUT: createCrossRepoInitiative seeds one story per target member repo, spanning repos,
-//     each stamped with the shared initiative id + managed by its own leader; a non-member target
-//     is refused (409) ATOMICALLY (validate-all-first — no half-created stories); empty targets 400.
-//   ROLLUP: listProjectInitiatives / getProjectInitiative report per-repo children + doneness; the
-//     initiative is DONE only when EVERY child lands `done`, and `initiative.completed` fires up the
-//     project channel exactly on the LAST child's landing (not before).
-//   BYTE-IDENTICAL: the single-repo {repo,brief} initiative (P3d) is unchanged.
+//   FAN-OUT (B1): createCrossRepoInitiative / createProjectInitiative land one DIRECTIVE per target
+//     member repo — a `directive` leaf under the repo, stamped the shared initiative id, and NO story
+//     node / NO leader launched by the initiative (the whole point). A non-member target is refused
+//     (409) ATOMICALLY (validate-all-first — no half-fanned directives); empty targets 400. The
+//     single-repo {repo,brief} initiative now ALSO mints an initiative id (uniform rollup).
+//   ACCEPT (B1): the repo CTO's acceptDirective turns a directive into the initiative_id-stamped
+//     story node(s) + their leaders; the directive goes terminal `accepted`.
+//   ROLLUP: listProjectInitiatives / getProjectInitiative report per-repo children — a PENDING
+//     directive is the anchor until its CTO decomposes it, then the resulting stories; the initiative
+//     is DONE only when EVERY child story lands `done`, and `initiative.completed` fires up the project
+//     channel exactly on the LAST landing (a still-pending sibling directive GUARDS against a premature
+//     fire).
 //   R5 — Finding A (PROVEN GLOBAL): a LEAF in repo B blocked_by a LEAF in repo A stays `blocked`
 //     until A's blocker merges, then auto-unblocks to `inactive` — cross-REPO, resolved globally by
 //     the dispatcher's auto-unblock sweep (no dir scoping). This is why cross-repo fan-out is safe.
@@ -73,6 +80,15 @@ function nodeCount(dir: string): number {
     .get(dir)!.n;
 }
 
+/** Count PENDING directive leaves in a workspace (to assert B1 fan-out atomicity). */
+function directiveCount(dir: string): number {
+  return dbMod.db
+    .query<{ n: number }, [string]>(
+      `SELECT COUNT(*) AS n FROM tasks WHERE workspace_id=? AND work_kind='leaf' AND status='directive'`,
+    )
+    .get(dir)!.n;
+}
+
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-p3e-"));
   process.env.BUTCHR_DATA_DIR = DATA_DIR;
@@ -111,36 +127,55 @@ afterAll(() => {
   rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-// --- CROSS-REPO FAN-OUT ------------------------------------------------------
-describe("P3e — cross-repo initiative fan-out", () => {
-  test("fans ONE initiative into TWO member repos, grouped + each leader-managed", () => {
+// --- B1 CAPABILITY FLIP: FAN-OUT MATERIALIZES DIRECTIVES, NOT STORIES ---------
+describe("B1 — initiative fan-out lands DIRECTIVES (no story, no leader)", () => {
+  test("fans ONE initiative into TWO member repos as grouped DIRECTIVES", () => {
+    const beforeNodes = nodeCount(DIRA) + nodeCount(DIRB);
     const ini = storiesMod.createCrossRepoInitiative(PROJ, [
       { repo: DIRA, brief: "repo A part" },
       { repo: DIRB, brief: "repo B part" },
     ]);
     expect(ini.project_id).toBe(PROJ);
     expect(ini.initiative_id).toMatch(/^ini-/);
-    expect(ini.children).toHaveLength(2);
+    expect(ini.directives).toHaveLength(2);
 
-    // The children SPAN both repos, each an OPEN node stamped with the shared initiative id.
-    const byWs = new Map(ini.children.map((c) => [c.workspace_id, c]));
+    // The directives SPAN both repos, each a `directive` LEAF stamped with the shared initiative id.
+    const byWs = new Map(ini.directives.map((d) => [d.workspace_id, d]));
     expect([...byWs.keys()].sort()).toEqual([DIRA, DIRB]);
-    for (const child of ini.children) {
-      expect(child.status).toBe("open");
-      const node = tasksMod.getTask(child.id)!;
-      expect(node.work_kind).toBe("node");
-      expect(node.initiative_id).toBe(ini.initiative_id);
-      // Reparented onto its OWN repo node (so it bubbles repo→cto→project→ceo, exactly like P3d).
-      expect(node.parent_id).toBe(child.workspace_id);
-      // Managed by that repo's own LEADER (a mini-CTO), launched immediately — NOT the CEO.
-      const leader = dbMod.getWorkspaceAgentRow(`ws-leader-${child.id}`);
-      expect(leader?.kind).toBe("leader");
-      expect(leader?.desired).toBe(1);
+    for (const d of ini.directives) {
+      expect(d.work_kind).toBe("leaf");
+      expect(d.status).toBe("directive");
+      expect(d.initiative_id).toBe(ini.initiative_id);
+      // Parented UNDER its own repo node (so it bubbles repo→cto→project→ceo — the CTO decomposes it).
+      expect(d.parent_id).toBe(d.workspace_id);
+      expect(d.summary).toBe(d.workspace_id === DIRA ? "repo A part" : "repo B part");
+      // THE WHOLE POINT OF B1: an initiative launches NO leader (the CEO delegates to the CTO, who
+      // launches the leader only when it accepts the directive).
+      expect(dbMod.getWorkspaceAgentRow(`ws-leader-${d.id}`)).toBeNull();
     }
+    // ...and it created NO story node either — only the two directive leaves.
+    expect(nodeCount(DIRA) + nodeCount(DIRB)).toBe(beforeNodes);
   });
 
-  test("a NON-member target is refused (409) ATOMICALLY — no story created for the valid target", () => {
-    const before = nodeCount(DIRA) + nodeCount(DIRB);
+  test("the SINGLE-repo initiative ALSO lands a directive + mints an initiative id (uniform rollup)", () => {
+    const beforeNodes = nodeCount(DIRA);
+    const ini = storiesMod.createProjectInitiative(PROJ, DIRA, "single-repo directive");
+    expect(ini.project_id).toBe(PROJ);
+    // GROUPED now (was ungrouped/no-initiative_id pre-B1) so the rollup filter is uniform.
+    expect(ini.initiative_id).toMatch(/^ini-/);
+    expect(ini.directives).toHaveLength(1);
+    const d = ini.directives[0]!;
+    expect(d.work_kind).toBe("leaf");
+    expect(d.status).toBe("directive");
+    expect(d.workspace_id).toBe(DIRA);
+    expect(d.initiative_id).toBe(ini.initiative_id);
+    expect(d.summary).toBe("single-repo directive");
+    expect(dbMod.getWorkspaceAgentRow(`ws-leader-${d.id}`)).toBeNull();
+    expect(nodeCount(DIRA)).toBe(beforeNodes); // no story node forged
+  });
+
+  test("a NON-member target is refused (409) ATOMICALLY — no directive for the valid target", () => {
+    const before = directiveCount(DIRA) + directiveCount(DIRB);
     // DIRC is a real repo but NOT registered under PROJ → not a member.
     expect(
       statusOf(() =>
@@ -150,8 +185,8 @@ describe("P3e — cross-repo initiative fan-out", () => {
         ]),
       ),
     ).toBe(409);
-    // validate-all-first: the DIRA story was NEVER created (no partial fan-out).
-    expect(nodeCount(DIRA) + nodeCount(DIRB)).toBe(before);
+    // validate-all-first: the DIRA directive was NEVER created (no partial fan-out).
+    expect(directiveCount(DIRA) + directiveCount(DIRB)).toBe(before);
   });
 
   test("empty / non-array targets is a 400", () => {
@@ -159,8 +194,8 @@ describe("P3e — cross-repo initiative fan-out", () => {
     expect(statusOf(() => storiesMod.createCrossRepoInitiative(PROJ, "nope"))).toBe(400);
   });
 
-  test("a blank brief in a target is a 400 (validated before any story lands)", () => {
-    const before = nodeCount(DIRA) + nodeCount(DIRB);
+  test("a blank brief in a target is a 400 (validated before any directive lands)", () => {
+    const before = directiveCount(DIRA) + directiveCount(DIRB);
     expect(
       statusOf(() =>
         storiesMod.createCrossRepoInitiative(PROJ, [
@@ -169,34 +204,63 @@ describe("P3e — cross-repo initiative fan-out", () => {
         ]),
       ),
     ).toBe(400);
-    expect(nodeCount(DIRA) + nodeCount(DIRB)).toBe(before);
-  });
-
-  test("the SINGLE-repo initiative (P3d) is byte-identical (no initiative_id)", () => {
-    const story = storiesMod.createProjectInitiative(PROJ, DIRA, "single-repo, unchanged");
-    expect(story.status).toBe("open");
-    expect(story.workspace_id).toBe(DIRA);
-    // Ungrouped — a single-repo initiative carries NO initiative_id.
-    expect(tasksMod.getTask(story.id)!.initiative_id).toBeNull();
+    expect(directiveCount(DIRA) + directiveCount(DIRB)).toBe(before);
   });
 });
 
-// --- COMPLETION ROLLUP -------------------------------------------------------
-describe("P3e — initiative completion rollup", () => {
-  test("DONE only when EVERY child lands; initiative.completed fires on the LAST landing", () => {
+// --- B1: THE CTO ACCEPTS → the initiative_id-stamped stories appear -----------
+describe("B1 — the repo CTO's accept produces the stamped stories + their leaders", () => {
+  test("acceptDirective on each repo's directive yields initiative_id-stamped story nodes + leaders", () => {
+    const ini = storiesMod.createCrossRepoInitiative(PROJ, [
+      { repo: DIRA, brief: "A directive" },
+      { repo: DIRB, brief: "B directive" },
+    ]);
+    for (const d of ini.directives) {
+      const res = storiesMod.acceptDirective(d.id, [{ brief: `story for ${d.workspace_id}` }]);
+      expect(res.initiative_id).toBe(ini.initiative_id);
+      expect(res.stories).toHaveLength(1);
+      const node = tasksMod.getTask(res.stories[0]!.id)!;
+      expect(node.work_kind).toBe("node");
+      expect(node.status).toBe("open");
+      // Inherited the directive's grouping key + parented onto the repo node (bubbles like any story).
+      expect(node.initiative_id).toBe(ini.initiative_id);
+      expect(node.parent_id).toBe(d.workspace_id);
+      // NOW a leader IS launched — by the CTO's accept, not by the initiative.
+      expect(dbMod.getWorkspaceAgentRow(`ws-leader-${node.id}`)?.desired).toBe(1);
+      // The directive itself is terminal `accepted`.
+      expect(tasksMod.getTask(d.id)!.status).toBe("accepted");
+    }
+  });
+});
+
+// --- COMPLETION ROLLUP (directive anchor + premature-completion guard) --------
+describe("B1 — rollup shows pending directives, then stories; completion guarded", () => {
+  test("pending directive is the anchor; done only when EVERY child STORY lands (last landing pushes)", () => {
     const ini = storiesMod.createCrossRepoInitiative(PROJ, [
       { repo: DIRA, brief: "rollup A" },
       { repo: DIRB, brief: "rollup B" },
     ]);
-    const [c1, c2] = ini.children;
+    const dA = ini.directives.find((d) => d.workspace_id === DIRA)!;
+    const dB = ini.directives.find((d) => d.workspace_id === DIRB)!;
 
-    // Fresh initiative — surfaced by the rollup, not yet done.
-    const found = storiesMod
+    // Fresh initiative — the rollup surfaces its TWO PENDING DIRECTIVES (not yet decomposed), not done.
+    // Each child's brief is taken from the directive's summary via COALESCE(brief, summary).
+    let found = storiesMod
       .listProjectInitiatives(PROJ)
       .find((i) => i.initiative_id === ini.initiative_id)!;
     expect(found).toBeDefined();
     expect(found.done).toBe(false);
     expect(found.children).toHaveLength(2);
+    expect(found.children.every((c) => c.status === "directive")).toBe(true);
+    expect(found.children.map((c) => c.brief).sort()).toEqual(["rollup A", "rollup B"]);
+
+    // Repo A's CTO accepts → A's child becomes an OPEN story node; the accepted directive drops out of
+    // the rollup, replaced by its story. Repo B's directive is STILL a pending anchor.
+    const sA = storiesMod.acceptDirective(dA.id, [{ brief: "A story" }]).stories[0]!;
+    found = storiesMod.getProjectInitiative(PROJ, ini.initiative_id)!;
+    expect(found.children).toHaveLength(2);
+    expect(found.children.map((c) => c.status).sort()).toEqual(["directive", "open"]);
+    expect(found.done).toBe(false);
 
     // Capture initiative.completed pushes for THIS initiative.
     const completed: Array<Record<string, unknown>> = [];
@@ -207,13 +271,17 @@ describe("P3e — initiative completion rollup", () => {
       }
     });
     try {
-      // First child lands → still not done, NO completion push yet.
-      storiesMod.updateStory(c1.id, { status: "done" });
+      // A's story lands `done` — but repo B's directive is STILL PENDING, so the initiative is NOT done
+      // and NO completion push fires (the premature-completion GUARD: a pending directive is not-done).
+      storiesMod.updateStory(sA.id, { status: "done" });
       expect(storiesMod.getProjectInitiative(PROJ, ini.initiative_id)!.done).toBe(false);
       expect(completed).toHaveLength(0);
 
-      // Last child lands → DONE + exactly ONE completion push, project-scoped.
-      storiesMod.updateStory(c2.id, { status: "done" });
+      // Repo B's CTO accepts → its story lands. Only now is EVERY child a done story → DONE + exactly
+      // ONE completion push, project-scoped.
+      const sB = storiesMod.acceptDirective(dB.id, [{ brief: "B story" }]).stories[0]!;
+      expect(storiesMod.getProjectInitiative(PROJ, ini.initiative_id)!.done).toBe(false);
+      storiesMod.updateStory(sB.id, { status: "done" });
       const done = storiesMod.getProjectInitiative(PROJ, ini.initiative_id)!;
       expect(done.done).toBe(true);
       expect(done.children.every((c) => c.status === "done")).toBe(true);

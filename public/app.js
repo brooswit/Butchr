@@ -3833,11 +3833,11 @@ function confirmDeleteProject(project) {
 }
 
 // The Initiatives panel: header with a right-aligned "Launch initiative" action, then one
-// .init block per CROSS-repo initiative (GET /api/projects/:id/initiatives). Each block shows a
-// derived heading, its per-repo child rows (resolved repo name + shared-palette status chip + the
-// child's brief), and a rolled-up doneness bar. Empty-state when there are none. NOTE: single-repo
-// initiatives are seeded ungrouped and don't appear here (only cross-repo do) — the launch modal
-// says so, and a single-repo launch toast names the repo it was seeded into.
+// .init block per initiative (GET /api/projects/:id/initiatives). Each block shows a derived
+// heading, its per-repo child rows (resolved repo name + shared-palette status chip + the child's
+// brief), and a rolled-up doneness bar. Empty-state when there are none. Both single-repo and
+// cross-repo initiatives appear here — a child is a pending directive until its CTO decomposes it,
+// then the resulting stories.
 function initiativesPanel(project, initiatives, repos, wsById) {
   const panel = el("div", { class: "panel" });
 
@@ -3893,14 +3893,15 @@ function initiativeMarkup(init, wsById) {
 }
 
 // LAUNCH-INITIATIVE modal — reuses openModal/action/api. A segmented toggle switches between the
-// two backend shapes on POST /api/projects/:id/initiatives:
-//   Single repo      → { repo, brief }         (one member repo + a brief; seeded UNGROUPED)
+// two backend shapes on POST /api/projects/:id/initiatives (each lands a CEO DIRECTIVE per repo for
+// its CTO to accept & decompose — the CEO no longer forges the story itself):
+//   Single repo      → { repo, brief }         (one member repo + a brief; grouped under an initiative)
 //   Cross-repo fan-out → { targets:[{repo,brief}] } (repeatable rows, atomic all-or-nothing)
 // Member repos (the select options) come from the project's repos list, resolved to friendly
 // names via repoDisplay. A 409 (non-member repo) is shown INLINE in .m-error, not just a toast.
 // Submit is disabled with an honest message when the project has no member repos. On a 201 the
-// modal closes and the view re-renders (refreshing the list); a single-repo success toast names
-// the repo it was seeded into, since that story is tracked on the repo's board, not this panel.
+// modal closes and the view re-renders (refreshing the list); both shapes now appear in this panel's
+// rollup (a pending directive until its CTO decomposes it, then the stories).
 function openLaunchModal(project, repos, wsById) {
   let mode = "single"; // 'single' | 'fanout'
   const repoOpts = (repos || []).map((r) => ({ id: r.id, name: repoDisplay(r, wsById).name }));
@@ -3945,8 +3946,8 @@ function openLaunchModal(project, repos, wsById) {
         '<label class="field"><span class="lbl">repo</span>' + repoSelectHtml("li-repo") + '</label>' +
         '<label class="field" style="margin-bottom:6px"><span class="lbl">brief — what to build in this repo</span>' +
           '<textarea class="tgt-brief" placeholder="Describe the initiative for this repo…"></textarea></label>' +
-        '<small class="hint muted">A single-repo initiative seeds one story into that repo (managed by its CTO) — ' +
-          'it’s tracked on that repo’s board and won’t appear in this cross-repo list. ' +
+        '<small class="hint muted">A single-repo initiative sends a directive to that repo’s CTO, who ' +
+          'decomposes it into stories — it’s tracked here (and on that repo’s board). ' +
           'Use fan-out to coordinate several repos under one rolled-up initiative.</small>';
     } else {
       inner +=
@@ -3999,7 +4000,7 @@ function openLaunchModal(project, repos, wsById) {
           throw e; // let action() toast + re-enable the button
         }
       }, {
-        success: "initiative seeded into " + repoName + " — track it on that repo’s board",
+        success: "directive sent to " + repoName + "’s CTO — track it here once decomposed",
         onDone: () => { close(); render(); },
       });
     } else {
@@ -4020,8 +4021,8 @@ function openLaunchModal(project, repos, wsById) {
           throw e;
         }
       }, {
-        success: targets.length + " stories fanned out across " + targets.length + " target" +
-          (targets.length === 1 ? "" : "s"),
+        success: targets.length + " directive" + (targets.length === 1 ? "" : "s") +
+          " fanned out to " + targets.length + " repo CTO" + (targets.length === 1 ? "" : "s"),
         onDone: () => { close(); render(); },
       });
     }

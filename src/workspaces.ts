@@ -563,10 +563,10 @@ export function createProject(anchorWorkspaceId: string, brief?: unknown): TaskR
  * only deletes once it is EMPTY. Guards, checked initiatives-FIRST (an active initiative always
  * implies a registered repo, so a repos-first order would make the initiatives 409 unreachable):
  *   - 404 if `id` is not a project node (getProject).
- *   - 409 if it still has ACTIVE (non-terminal) INITIATIVES — a work_kind='node' story whose OWNING
- *     repo (story.parent_id) is registered under THIS project (repo.parent_id = id; the seedMemberRepoStory
- *     link) and whose status is NOT terminal. StoryStatus is open|merging|merge_blocked|done|aborted
- *     (db.ts), so non-terminal = anything NOT IN ('done','aborted'). Let them finish / abort them first.
+ *   - 409 if it still has ACTIVE (non-terminal) INITIATIVES — a per-repo child (a decomposed
+ *     work_kind='node' story OR a still-pending `directive` leaf, post-B1) whose OWNING repo
+ *     (child.parent_id) is registered under THIS project (repo.parent_id = id) and whose status is NOT
+ *     terminal (NOT IN ('done','aborted'); an `accepted` directive drops out). Finish / abort first.
  *   - 409 if it still has REGISTERED REPOS (listProjectRepos) — unregister them first.
  * An EMPTY project deletes cleanly: (a) tear down the CEO runtime — stopWorkspaceAgent('ws-ceo-<id>')
  * then delete that workspace agent row if present (mirrors setWorkspaceCeoEnabled's ws-ceo-<id> row
@@ -579,16 +579,20 @@ export async function deleteProject(projectId: string): Promise<TaskRow> {
   const project = getProject(projectId);
   if (!project) throw new HttpError(404, `project not found: ${projectId}`);
 
-  // Active initiatives FIRST — a story (work_kind='node') under one of this project's member repos
-  // (story.parent_id = repo.id, repo.parent_id = this project) that has not reached a terminal
-  // status. Mirrors the seedMemberRepoStory (story→repo) + registerRepoUnderProject (repo→project)
-  // links (stories.ts).
+  // Active initiatives FIRST — a non-terminal per-repo child under one of this project's member repos
+  // (child.parent_id = repo.id, repo.parent_id = this project). POST-B1 an initiative starts life as a
+  // PENDING CEO DIRECTIVE leaf (status='directive') and, once the repo's CTO decomposes it, becomes
+  // story NODE(s) — so BOTH count as active work (an accepted directive is terminal and drops out; the
+  // node branch excludes done/aborted). Mirrors the createDirective / acceptDirective (child→repo) +
+  // registerRepoUnderProject (repo→project) links (stories.ts).
   const activeInitiatives =
     db
       .query<{ n: number }, [string]>(
         `SELECT COUNT(*) AS n
            FROM tasks s JOIN tasks r ON r.id = s.parent_id AND r.work_kind='repo'
-          WHERE s.work_kind='node' AND r.parent_id = ? AND s.status NOT IN ('done','aborted')`,
+          WHERE r.parent_id = ?
+            AND (s.work_kind='node' OR (s.work_kind='leaf' AND s.status='directive'))
+            AND s.status NOT IN ('done','aborted')`,
       )
       .get(projectId)?.n ?? 0;
   if (activeInitiatives > 0) {

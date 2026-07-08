@@ -71,9 +71,10 @@ import pkg from "../package.json" with { type: "json" };
 // imports tasks.ts/stories.ts itself — the legacy /api/tasks + /api/stories routes that used
 // the rest were deleted in the step-6e cutover.
 import { assertCreationAllowed, attentionList, getTask, statsRollup, strandedTotals } from "./tasks.ts";
-// REVAMP-4 P3d/P3e: the CEO's project-level INITIATIVE surface — seed a story into a member repo
-// (createProjectInitiative), or FAN one initiative into MULTIPLE member repos with a completion
-// rollup (createCrossRepoInitiative / listProjectInitiatives / getProjectInitiative). See stories.ts.
+// REVAMP-4 P3d/P3e; RFC Q1/Q6 Phase B1: the CEO's project-level INITIATIVE surface — land a CEO
+// DIRECTIVE into a member repo (createProjectInitiative) for its CTO to accept & decompose, or FAN one
+// initiative into MULTIPLE member repos with a completion rollup (createCrossRepoInitiative /
+// listProjectInitiatives / getProjectInitiative). See stories.ts.
 import {
   createCrossRepoInitiative,
   createProjectInitiative,
@@ -859,25 +860,27 @@ route("DELETE", "/api/projects/:id/repos/:repoId", async (_req, p) => {
   return json(unregisterRepoFromProject(p.id!, p.repoId!));
 });
 
-// Create a project-level INITIATIVE — the CEO seeds work into its member repos, delegating to their
-// CTOs/leaders (the CEO does NOT own the stories' lifecycle). TWO shapes on one route:
-//   - SINGLE-repo (P3d, byte-identical): body `{ repo, brief }` → one story in that member repo.
-//   - CROSS-repo (P3e): body `{ targets: [{ repo, brief }, …] }` → one story PER target member repo,
+// Create a project-level INITIATIVE — the CEO delegates work into its member repos by landing a CEO
+// DIRECTIVE per target repo (RFC Q1/Q6 Phase B1); that repo's CTO accepts & decomposes it into
+// stories. The CEO forges NO story and launches NO leader. TWO shapes on one route:
+//   - SINGLE-repo: body `{ repo, brief }` → one directive in that member repo.
+//   - CROSS-repo:  body `{ targets: [{ repo, brief }, …] }` → one directive PER target member repo,
 //     all grouped by a shared initiative id, fanned out in PARALLEL (unsequenced). Cross-repo
-//     SEQUENCING (blocked_by across repos) is a later follow-up. Returns { initiative_id, project_id,
-//     children }.
-// Both are member-guarded (409 for a non-member repo) and gated by the CEO→story authority rule.
+//     SEQUENCING (blocked_by across repos) is a later follow-up. Both mint an initiative id (uniform
+//     rollup) and return { initiative_id, project_id, directives }.
+// Both are member-guarded (409 for a non-member repo) and gated by the CEO→directive authority rule.
 route("POST", "/api/projects/:id/initiatives", async (req, p) => {
   const body = await readJson(req);
-  assertCreationAllowed("ceo", "story");
+  assertCreationAllowed("ceo", "directive");
   if (Array.isArray(body.targets)) {
     return json(createCrossRepoInitiative(p.id!, body.targets), 201);
   }
   return json(createProjectInitiative(p.id!, body.repo, body.brief), 201);
 });
-// The CROSS-repo initiatives under this project (grouped by initiative id), each with its per-repo
-// children + rolled-up doneness (done ⇔ every child story landed). The CEO's authoritative rollup
-// view. 404 if the project is gone.
+// The initiatives under this project (grouped by initiative id), each with its per-repo children
+// (a pending directive until its CTO decomposes it, then the initiative_id-stamped stories) +
+// rolled-up doneness (done ⇔ every child story landed). The CEO's authoritative rollup view. 404 if
+// the project is gone.
 route("GET", "/api/projects/:id/initiatives", async (_req, p) => {
   return json(listProjectInitiatives(p.id!));
 });
