@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.240] - 2026-07-08
+
 ### Changed
 
 - **SIMPLIFY: `./scripts/ci` is now the SOLE gate — butchr carries ZERO gate configuration.**
