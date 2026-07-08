@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.238] - 2026-07-08
+
 ### Performance
 
 - Add a covering index `idx_tasks_parent` on `tasks(parent_id, work_kind, status)` to eliminate
