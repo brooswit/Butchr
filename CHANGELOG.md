@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.233] - 2026-07-08
+
 ### Added
 
 - **Uniform UPDATE-instruction+NOTIFY verb — DIRECTIVE tier (story st-7a7b0654, S3).**
