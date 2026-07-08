@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.244] - 2026-07-08
+
 ### Removed
 
 - **Dead-code sweep — eight unreferenced functions deleted, no behaviour change.**
