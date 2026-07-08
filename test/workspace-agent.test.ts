@@ -2267,30 +2267,53 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     }
   });
 
-  test("the CEO brief describes the real DIRECTIVE surface (register repos + seed initiatives)", () => {
+  test("the CEO brief is a full OPERATING MODEL mirroring the CTO brief one tier up (Phase C2)", () => {
     const proj = dirsMod.createProject(DIR);
     const brief = wa.buildWorkspaceBrief(
       mkRow({ id: `ws-ceo-${proj.id}`, kind: "ceo", work_id: proj.id, directory_id: DIR }),
     );
     expect(brief).toContain("CEO of project");
-    // The P3d directive surface, scoped to THIS project id: register repos + seed initiatives.
+    // Spine: cross-repo work flows through DIRECTIVES — the CEO directs CTOs, who create the stories
+    // (POST /api/work/<directive id>/stories). The CEO forges NO story directly.
+    expect(brief).toContain("DIRECTIVES");
+    expect(brief).toContain("POST /api/work/<directive id>/stories");
+    expect(brief).toMatch(/NEVER forge a story|never forge a story/i);
+    // The directive/initiative surface, scoped to THIS project id.
     expect(brief).toContain(`POST /api/projects/${proj.id}/repos`);
     expect(brief).toContain(`POST /api/projects/${proj.id}/initiatives`);
     // No longer inert — the P3c "stand by" placeholder is gone.
     expect(brief).not.toContain("stand by");
-    // P3e: cross-repo initiatives (fan ONE initiative into MULTIPLE member repos) are now
-    // documented — the `targets` array shape + the completion-rollup GET.
+    // Cross-repo initiatives: the `targets` array shape + the rollup GET.
     expect(brief).toContain("cross-repo");
     expect(brief).toContain("targets");
     expect(brief).toContain(`GET /api/projects/${proj.id}/initiatives`);
-    // Honest about the REMAINING boundary: cross-repo SEQUENCING (blocked_by across repos) is not
-    // yet available — a cross-repo initiative fans out in PARALLEL.
-    expect(brief).toContain("PARALLEL only");
-    // RFC Q5 — Phase C1: the CEO's cross-repo REVIEW surface is documented — the review rollup GET, the
-    // ACCEPT verb, and the leaf-diff drill-down handle.
+    // "How you receive work" — the two inbound streams: the human via the terminal + the project
+    // channel event catalog.
+    expect(brief).toContain("How you receive work");
+    expect(brief).toContain("BUTCHR_CHANNEL_PROJECT");
+    // The "Who acts" state→action table at the project tier.
+    expect(brief).toContain("Who acts");
+    // A2 — CREATE a brand-new repo (the library-extraction worked example needs new homes).
+    expect(brief).toContain(`POST /api/projects/${proj.id}/repos/create`);
+    // A1 — cross-repo SEQUENCING is now REAL (node-capable blocked_by), so the old "PARALLEL only"
+    // caveat is GONE and the sequencing verb is documented instead.
+    expect(brief).not.toContain("PARALLEL only");
+    expect(brief).toContain("blocked_by");
+    expect(brief).toContain("PUT /api/work/");
+    // The worked example is baked in (doubles as D1's acceptance setup).
+    expect(brief).toContain("claude-session-reader");
+    expect(brief).toContain("agent-harness");
+    // C1: the CEO's cross-repo REVIEW surface — the review rollup GET, the ACCEPT verb, and the
+    // leaf-diff drill-down handle.
     expect(brief).toContain(`GET /api/projects/${proj.id}/initiatives/<initiative id>/review`);
     expect(brief).toContain(`POST /api/projects/${proj.id}/initiatives/<initiative id>/accept`);
     expect(brief).toContain("GET /api/work/<subtask id>/diff"); // the per-diff drill-down (a LEAF)
+    // The human↔CEO loop + the ceo→user top escalation seam + never-a-silent-dead-end.
+    expect(brief).toContain("ceo→user");
+    expect(brief).toContain("Never a silent dead-end");
+    // Hard rules: operator not builder; corrective follow-up is a new directive, never reject/rollback.
+    expect(brief).toContain("OPERATOR, not a builder");
+    expect(brief).toMatch(/never a reject\/rollback|never reject\/rollback/i);
     // Must NOT instruct a GET /api/work/<project> — a 'project' node 404s there (P3a). The leaf-diff
     // drill-down above is a LEAF id, which is valid; only the project-node read is forbidden.
     expect(brief).not.toContain(`GET /api/work/${proj.id}`);

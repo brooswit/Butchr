@@ -17,6 +17,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CEO OPERATING-MODEL brief (RFC Phase C2; story st-30a7dccd).** Rewrote the per-project
+  CEO brief (`buildCeoBrief`, `src/workspace-agent.ts`) from a delegation-mechanics list
+  into a genuine operating model that mirrors the CTO brief one tier UP — so the project
+  tier reads as a real operator the human talks to, not plumbing. It now documents the REAL
+  capabilities A1–C1 built, using exact current endpoint/verb names:
+  - **Directives, not stories, as the spine** — the CEO DIRECTS CTOs; the CTOs create the
+    stories (`POST /api/work/<directive id>/stories`). The CEO forges NO story or task
+    directly.
+  - **"How you receive work"** — two inbound streams: the human via the CEO's terminal, and
+    the project channel (`BUTCHR_CHANNEL_PROJECT`) event catalog (directive pushed back,
+    initiative child landed, initiative ready for review, failures).
+  - **A "Who acts" state→action table at the project tier** — pushed-back directive →
+    reshape/re-direct or escalate to the human; child landed → track; ready-for-review →
+    review + accept or corrective follow-up; complete → verify + report up; repo needed →
+    create it.
+  - **The decompose-one-directive-across-repos play** with the LIBRARY-EXTRACTION worked
+    example (extract `claude-session-reader` + `agent-harness` out of butchr): create repos
+    (A2: `POST /api/projects/:id/repos/create`) → fan directives (B1:
+    `POST /api/projects/:id/initiatives`) → SEQUENCE the resulting cross-repo stories (A1:
+    `PUT /api/work/:id/blocked_by`, now NODE-capable) → review (C1:
+    `GET /api/projects/:id/initiatives/:iid/review`).
+  - **The human↔CEO loop** — take intent via the terminal, run unattended, escalate the
+    meaty calls up the `ceo→user` top seam; never a silent dead-end.
+  - **Hard rules** — operator not builder; direct CTOs, never forge stories; a corrective
+    follow-up is a NEW directive, never a reject/rollback (per-diff merge stays the CTO's).
+  - Replaced the now-false "cross-repo initiatives fan out in PARALLEL only / sequencing is a
+    later follow-up" caveat: A1's node-on-node `blocked_by` makes cross-repo SEQUENCING real,
+    so the brief now teaches sequencing the stories instead. Updated the CEO-brief test to
+    assert the new operating-model sections. Prose/brief change only — no endpoint changes.
+
 ## [0.9.229] - 2026-07-08
 
 ### Added
