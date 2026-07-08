@@ -990,6 +990,18 @@ ensureColumn("tasks", "isolated", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("tasks", "pending_ask", "TEXT");
 ensureColumn("tasks", "ask_responder", "TEXT");
 
+// COVERING INDEX for the per-story member ROLLUP. storyCounts (stories.ts) and the tasks.ts
+// parent_id story-rollup reads both filter `WHERE parent_id=? AND work_kind='leaf'` (then
+// count/group by status). Without an index on parent_id, each is a FULL SCAN of the tasks
+// table, run 2x per story x ~60 story nodes on EVERY GET /api/work — the dominant remaining
+// list-latency cost (profiled on a copy of the live 71MB DB: storyCounts x60 = 1482ms -> 1.7ms
+// with this index; listWork ~1874ms -> ~300-430ms). Column order (parent_id, work_kind, status)
+// makes it a COVERING index for those reads. Declared HERE, after the parent_id/work_kind
+// column migrations above, because the baseline CREATE-TABLE block runs before those ALTERs —
+// so the columns do not exist yet up there. Idempotent (IF NOT EXISTS); built in ~30ms on the
+// 71MB DB — a trivial one-time startup migration.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id, work_kind, status);`);
+
 // PER-PROJECT CEO-AGENT ENABLE (REVAMP-4 Phase 3 / P3c — story st-1a82a2e1). The CEO analog of
 // `directory.cto_enabled`, but keyed on the PROJECT NODE's OWN `tasks` row (a work_kind='project'
 // node — there is no `directory` sidecar for a project). Read ONLY for that project node (every

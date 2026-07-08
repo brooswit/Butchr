@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Add a covering index `idx_tasks_parent` on `tasks(parent_id, work_kind, status)` to eliminate
+  the dominant remaining cost of the WORK LIST path (`GET /api/work`). Building each story node's
+  view calls `storyCounts` (`src/stories.ts`), which runs two `WHERE parent_id=? AND
+  work_kind='leaf'` rollup queries PER story node; with no index on `parent_id`, each was a FULL
+  SCAN of the (multi-MB) `tasks` table, run ~2×~60 times on every list call. Profiled on a copy of
+  the live 71 MB DB: `storyCounts` ×60 drops 1482 ms → 1.7 ms and `listWork` drops ~1874 ms →
+  ~300–430 ms (EXPLAIN QUERY PLAN goes from `SCAN tasks USING INDEX idx_tasks_status` to `SEARCH
+  tasks USING COVERING INDEX idx_tasks_parent`). The index is additive and idempotent (`CREATE
+  INDEX IF NOT EXISTS`), declared after the `parent_id`/`work_kind` column migrations, and builds
+  in ~30 ms on the 71 MB DB — a trivial one-time startup migration.
+
 ## [0.9.237] - 2026-07-08
 
 ### Performance
