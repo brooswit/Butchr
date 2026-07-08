@@ -2366,11 +2366,6 @@ export function listCtoAgentRows(): CtoAgentRow[] {
   return db.query<CtoAgentRow, []>(`SELECT * FROM cto_agent`).all();
 }
 
-/** Drop a workspace's CTO-agent record (the workspace DELETE also cascades this). */
-export function deleteCtoAgentRow(workspaceId: string): void {
-  db.query(`DELETE FROM cto_agent WHERE workspace_id=?`).run(workspaceId);
-}
-
 /**
  * Upsert a partial patch onto a workspace's CTO-agent record (stamping updated_at).
  * Single-row write; the supervisor/lifecycle treat this as best-effort durable state
@@ -2440,11 +2435,6 @@ export function getStoryAgentRow(storyId: string): StoryAgentRow | null {
       .query<StoryAgentRow, [string]>(`SELECT * FROM story_agent WHERE story_id=?`)
       .get(storyId) ?? null
   );
-}
-
-/** Every story-leader-agent record (one per story that has ever launched/been desired). */
-export function listStoryAgentRows(): StoryAgentRow[] {
-  return db.query<StoryAgentRow, []>(`SELECT * FROM story_agent`).all();
 }
 
 /**

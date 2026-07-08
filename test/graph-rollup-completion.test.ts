@@ -31,12 +31,11 @@ function extract(name: string): string {
 const harness = `
 ${extract("complete-status")}
 ${extract("prune-caches")}
-return { COMPLETE_STATUSES, isCompleteStatus, countComplete, pruneWorkCaches };
+return { COMPLETE_STATUSES, isCompleteStatus, pruneWorkCaches };
 `;
-const { isCompleteStatus, countComplete, pruneWorkCaches } = new Function(harness)() as {
+const { isCompleteStatus, pruneWorkCaches } = new Function(harness)() as {
   COMPLETE_STATUSES: Set<string>;
   isCompleteStatus: (status: string) => boolean;
-  countComplete: (ids: Iterable<string>, byId: Map<string, any>) => number;
   pruneWorkCaches: (liveIds: Set<string>, expanded: Set<string>, activity: Map<string, any>) => void;
 };
 
@@ -52,28 +51,6 @@ test("isCompleteStatus treats a STORY's `done` as complete (not just `merged`)",
   expect(isCompleteStatus("failed")).toBe(false);
   expect(isCompleteStatus("aborted")).toBe(false);
   expect(isCompleteStatus("open")).toBe(false);
-});
-
-test("gated-subtree count INCLUDES a `done` story — a {done story, merged leaf} subtree reads 2/2", () => {
-  // The exact pre-fix bug: one done STORY + one merged LEAF.
-  const byId = new Map<string, any>([
-    ["st-1", { id: "st-1", work_kind: "node", status: "done" }],
-    ["t-1", { id: "t-1", work_kind: "leaf", status: "merged" }],
-  ]);
-  const subIds = ["st-1", "t-1"];
-  // pre-fix (merged-only) reported 1/2; the fix must report 2/2.
-  expect(countComplete(subIds, byId)).toBe(2);
-});
-
-test("countComplete excludes in-flight/dead and tolerates unknown ids", () => {
-  const byId = new Map<string, any>([
-    ["st-1", { id: "st-1", work_kind: "node", status: "done" }],
-    ["t-1", { id: "t-1", work_kind: "leaf", status: "in_progress" }],
-    ["t-2", { id: "t-2", work_kind: "leaf", status: "failed" }],
-    ["t-3", { id: "t-3", work_kind: "leaf", status: "merged" }],
-  ]);
-  // 2 complete (st-1 done, t-3 merged); t-1 in_progress + t-2 failed excluded; "ghost" missing.
-  expect(countComplete(["st-1", "t-1", "t-2", "t-3", "ghost"], byId)).toBe(2);
 });
 
 // ---------- F4: cache prune bound ----------

@@ -44,7 +44,6 @@ import {
   storyStatusOf,
   listWorkspaceAgentRows,
   listWorkspaceAgentRowsForWork,
-  liveWorkspaceForWork,
   nowIso,
   saveStoryAgentRow,
   saveWorkspaceAgentRow,
@@ -1097,15 +1096,6 @@ export function stopWorkspaceAgent(id: string): Promise<WorkspaceAgentStatus> {
   });
 }
 
-/** RESTART a workspace's agent (RESUME by default; `fresh` cold-starts a new session). */
-export async function restartWorkspaceAgent(
-  id: string,
-  opts: { fresh?: boolean } = {},
-): Promise<WorkspaceAgentStatus> {
-  await stopWorkspaceAgent(id);
-  return startWorkspaceAgent(id, { fresh: opts.fresh });
-}
-
 /** A workspace's current managed-agent status (probes herdr for live registration). */
 export async function workspaceAgentStatus(id: string): Promise<WorkspaceAgentStatus> {
   const row = getWorkspaceAgentRow(id);
@@ -1166,14 +1156,6 @@ export async function reanchorCeoHome(wsId: string, ceoDirId: string): Promise<v
     }
     return workspaceAgentStatus(wsId);
   });
-}
-
-/**
- * The single LIVE workspace for a unit of Work (db.liveWorkspaceForWork), exposed here as
- * the unified module's reader for the RFC-Q3 1:N "one live per Work" relationship.
- */
-export function liveWorkspaceFor(workId: string): WorkspaceAgentRow | null {
-  return liveWorkspaceForWork(workId);
 }
 
 // ---- CTO-COMPAT SURFACE (REVAMP-1 Phase C, S3) --------------------------------------------

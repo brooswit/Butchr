@@ -443,20 +443,6 @@ function terminalToast(r) {
   toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
 }
 
-// The <a class="term-link"> control that opens a task's live agent terminal —
-// rendered only when the task has a live pane. Returns "" otherwise. Caller wires
-// the click via wireTermLink once the markup is in the DOM.
-function termLinkMarkup(t) {
-  return isLive(t)
-    ? `<a href="#" class="term-link" data-id="${esc(t.id)}">⌗ terminal</a>` : "";
-}
-
-// Wire the .term-link inside `container` (if present) to open the task's terminal.
-function wireTermLink(container, taskId) {
-  const tl = container.querySelector(".term-link");
-  if (tl) tl.addEventListener("click", (ev) => { ev.preventDefault(); openTaskTerminal(taskId); });
-}
-
 // Open a GUI terminal attached to a running task's live agent pane. Routed through
 // action(), which owns the disable/try/toast/re-enable dance; `btn` is optional
 // (the term-link callers pass none). onDone re-enables on success (action's catch
@@ -782,28 +768,6 @@ let activityTimer = null;
 const activityCache = new Map(); // task id -> { lastAction, lastAt, elapsedMs }
 function stopActivity() {
   if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
-}
-
-// A task whose agent is live enough to have transcript activity worth pulsing:
-// in_progress (incl. the idle sub-state, which is still status==="in_progress").
-function isPulsing(t) {
-  return t.status === "in_progress";
-}
-
-// The pulse markup embedded into a card/row's innerHTML. Pre-fills the last-known
-// action from the cache so an SSE-driven rebuild repaints instantly; the poller
-// fills in the rest. `data-started` drives the locally-ticked elapsed readout.
-function pulseMarkup(t) {
-  if (!isPulsing(t)) return "";
-  const cached = activityCache.get(t.id);
-  const action = cached && cached.lastAction
-    ? esc(cached.lastAction)
-    : `<span class="muted">waiting for activity…</span>`;
-  return `<div class="pulse" data-id="${esc(t.id)}" data-started="${esc(t.started_at || "")}" title="latest agent activity (read-only)">
-      <span class="pulse-dot" aria-hidden="true"></span>
-      <span class="pulse-action">${action}</span>
-      <span class="pulse-elapsed"></span>
-    </div>`;
 }
 
 function applyPulse(node, a) {
@@ -1293,13 +1257,6 @@ function pruneWorkCaches(liveIds, expanded, activity) {
 // never in the merged numerator). Failure/abort are terminal but NOT complete (they're the ✗).
 const COMPLETE_STATUSES = new Set(["merged", "rolled_back", "done"]);
 function isCompleteStatus(status) { return COMPLETE_STATUSES.has(status); }
-// Shared numerator behind both cross-type progress bars (graph node sub-bar + dependentRollup):
-// how many of `ids` resolve (via the byId map) to a COMPLETE work item.
-function countComplete(ids, byId) {
-  let n = 0;
-  for (const id of ids) if (isCompleteStatus((byId.get(id) || {}).status)) n++;
-  return n;
-}
 // </test-extract:complete-status>
 
 function queueLine(tasks) {

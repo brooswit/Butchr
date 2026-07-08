@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Dead-code sweep — eight unreferenced functions deleted, no behaviour change.**
+  Backend: `deleteCtoAgentRow` and `listStoryAgentRows` (`src/db.ts`), `restartWorkspaceAgent`
+  and `liveWorkspaceFor` (`src/workspace-agent.ts`; the latter was a thin re-export of
+  `db.liveWorkspaceForWork`, which callers already use directly — its now-unused import was
+  dropped too). Front-end (`public/app.js`): `termLinkMarkup` + `wireTermLink` (and the stale
+  comment naming them; the surviving `openTaskTerminal` is wired by real buttons), `pulseMarkup`
+  plus its sole helper `isPulsing` (the live pulse path is `applyPulse` off `activityCache`), and
+  `countComplete` — production-dead since `drawGraphSvg` was removed, so its two tests in
+  `test/graph-rollup-completion.test.ts` and its slot in that file's source-extract harness went
+  with it. `isCompleteStatus` / `pruneWorkCaches` coverage there is untouched. Kept: `togglePause`
+  (live `addEventListener` wiring), `listCtoAgentRows` and `workChildCount` (each asserted on by a
+  meaningful live test).
+
 ## [0.9.243] - 2026-07-08
 
 ### Changed
