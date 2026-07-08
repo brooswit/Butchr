@@ -76,10 +76,12 @@ import { assertCreationAllowed, attentionList, getTask, statsRollup, strandedTot
 // initiative into MULTIPLE member repos with a completion rollup (createCrossRepoInitiative /
 // listProjectInitiatives / getProjectInitiative). See stories.ts.
 import {
+  acceptInitiativeReview,
   createCrossRepoInitiative,
   createProjectInitiative,
   getProjectInitiative,
   listProjectInitiatives,
+  reviewProjectInitiative,
 } from "./stories.ts";
 import {
   abortWork,
@@ -890,6 +892,23 @@ route("GET", "/api/projects/:id/initiatives/:iid", async (_req, p) => {
   const view = getProjectInitiative(p.id!, p.iid!);
   if (!view) throw new HttpError(404, `initiative not found: ${p.iid}`);
   return json(view);
+});
+// The CEO's cross-repo REVIEW of ONE initiative (RFC Q5 — Phase C1): per child story, WHAT LANDED —
+// the story summary + its story-level merge sha + its MERGED subtasks (each a drill-down handle for
+// the leaf GET /api/work/:id/diff). READ-ONLY rollup; UNGATED for parity with the sibling initiative
+// GETs (the CEO gate governs the mutating accept verb below). 404 project/initiative gone.
+route("GET", "/api/projects/:id/initiatives/:iid/review", async (_req, p) => {
+  return json(reviewProjectInitiative(p.id!, p.iid!));
+});
+// ACCEPT a completed initiative's cross-repo review (RFC Q5 — Phase C1): the CEO signs off on what
+// landed across its member repos and REPORTS completion up to the human (publishes initiative.reviewed
+// + stamps the review so it stops surfacing). Gated by the CEO authority rule (the review sibling of
+// the 'directive' verb). The CEO issues NO reject/rollback — per-diff merge stays the CTO's. 409
+// unless the initiative is fully landed (`done`); 404 project/initiative gone. The CEO's OTHER review
+// verb — a CORRECTIVE follow-up — reuses POST /api/projects/:id/initiatives (createDirective).
+route("POST", "/api/projects/:id/initiatives/:iid/accept", async (_req, p) => {
+  assertCreationAllowed("ceo", "directive");
+  return json(acceptInitiativeReview(p.id!, p.iid!));
 });
 
 // ---- WORK (UNIFIED SURFACE) -----------------------------------------------

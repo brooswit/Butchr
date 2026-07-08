@@ -2286,8 +2286,14 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     // Honest about the REMAINING boundary: cross-repo SEQUENCING (blocked_by across repos) is not
     // yet available — a cross-repo initiative fans out in PARALLEL.
     expect(brief).toContain("PARALLEL only");
-    // Must NOT instruct a GET /api/work/<project> — a 'project' node 404s there (P3a).
-    expect(brief).not.toContain("GET /api/work");
+    // RFC Q5 — Phase C1: the CEO's cross-repo REVIEW surface is documented — the review rollup GET, the
+    // ACCEPT verb, and the leaf-diff drill-down handle.
+    expect(brief).toContain(`GET /api/projects/${proj.id}/initiatives/<initiative id>/review`);
+    expect(brief).toContain(`POST /api/projects/${proj.id}/initiatives/<initiative id>/accept`);
+    expect(brief).toContain("GET /api/work/<subtask id>/diff"); // the per-diff drill-down (a LEAF)
+    // Must NOT instruct a GET /api/work/<project> — a 'project' node 404s there (P3a). The leaf-diff
+    // drill-down above is a LEAF id, which is valid; only the project-node read is forbidden.
+    expect(brief).not.toContain(`GET /api/work/${proj.id}`);
     expect(brief.length).toBeGreaterThan(200); // a real brief, not an 80-byte stub
   });
 });

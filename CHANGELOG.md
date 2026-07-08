@@ -17,6 +17,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CEO cross-repo INITIATIVE REVIEW (RFC Q5 — Phase C1; story st-30a7dccd).** The
+  CEO can now review landed work across its member repos at INITIATIVE granularity —
+  the project-tier mirror of a story leader's completion sign-off, one rung up. The
+  per-diff merge stays the CTO's authority; the CEO gets no reject/rollback verb.
+  - **`GET /api/projects/:id/initiatives/:iid/review`** (`reviewProjectInitiative`,
+    `src/stories.ts`) — a READ-ONLY rollup of WHAT LANDED per child story: the story
+    summary + its story-level merge sha + the list of its MERGED subtasks, each a
+    drill-down handle for the existing leaf **`GET /api/work/:id/diff`** (a node has
+    no diff of its own — `taskDiff` is leaf-only). UNGATED for parity with the sibling
+    initiative GETs.
+  - **`initiative.completed` is now surfaced to the CEO** as an "initiative READY FOR
+    REVIEW" notification: the channel bridge (`src/channel.ts`) consumes the event for
+    the PROJECT/CEO bridge whose `scopeProject` matches (the project mirror of a story
+    `completion-review`), and `ceoInitiativesAwaitingReview` (`src/stories.ts`) is the
+    CEO's actionable-review set (completed-but-unreviewed initiatives) — a dedicated
+    reader mirroring `leaderStoryAwaitsCompletion` (a completed initiative is not a
+    leaf attention item).
+  - **Review VERBS:** **`POST /api/projects/:id/initiatives/:iid/accept`**
+    (`acceptInitiativeReview`) signs off and REPORTS completion to the human
+    (publishes `initiative.reviewed`, stamps the new nullable `tasks.initiative_reviewed_at`
+    on the initiative's child story nodes so it stops surfacing); 409 unless the
+    initiative is fully landed. The CORRECTIVE follow-up verb reuses the existing
+    initiative path (`POST /api/projects/:id/initiatives` → `createDirective`). The
+    CEO brief (`src/workspace-agent.ts`) documents the review workflow.
+
 ## [0.9.228] - 2026-07-08
 
 ### Fixed

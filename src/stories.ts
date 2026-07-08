@@ -520,6 +520,184 @@ export function reportInitiativeCompletionIfDone(storyId: string): void {
   });
 }
 
+// --- CEO CROSS-REPO INITIATIVE REVIEW (RFC Q5 — Phase C1; story st-30a7dccd) --
+//
+// The CEO reviews landed work across its member repos at INITIATIVE granularity — mirroring a story
+// LEADER's completion sign-off, one tier up. A node has no diff of its own (taskDiff is leaf-only),
+// so the review ROLLS UP what LANDED per child story: the story's summary + its story-level merge sha
+// (isolated stories) + the list of its MERGED subtasks with drill-down handles. The CEO drills into
+// any repo's actual diff via the existing leaf GET /api/work/:id/diff. This is a READ-ONLY rollup +
+// two REVIEW VERBS (accept / corrective-directive) — it is NOT a merge gate: the per-diff merge stays
+// the CTO's authority, and the CEO issues NO reject/rollback.
+
+/** One MERGED subtask under a reviewed story: its drill-down handle (GET /api/work/:id/diff) + what
+ *  it landed. `status` is 'merged' | 'rolled_back'; `merged_sha` is the leaf's landed tip (NULL if
+ *  the row predates sha capture). */
+export type MergedSubtask = {
+  id: string;
+  summary: string | null;
+  status: string;
+  merged_sha: string | null;
+};
+
+/** One child STORY of an initiative in the review rollup: what LANDED in its repo. `workspace_id` is
+ *  the repo/workspace the story landed in; `merged_sha` is the STORY-level landed tip (set only for an
+ *  isolated story; NULL otherwise); `merged_subtasks` are its terminal-merged leaves (drill-down). */
+export type InitiativeStoryReview = {
+  story_id: string;
+  workspace_id: string;
+  summary: string | null;
+  status: string;
+  merged_sha: string | null;
+  merged_subtasks: MergedSubtask[];
+};
+
+/** A completed initiative's cross-repo REVIEW rollup: per-child-story landed summaries/shas +
+ *  drill-down subtask handles, plus whether it is fully landed (`done`) and already CEO-reviewed. */
+export type InitiativeReview = {
+  initiative_id: string;
+  project_id: string;
+  done: boolean;
+  reviewed: boolean;
+  stories: InitiativeStoryReview[];
+};
+
+/**
+ * The CEO's cross-repo REVIEW of ONE initiative (GET /api/projects/:id/initiatives/:iid/review) —
+ * per child story, WHAT LANDED: the story summary + its story-level merge sha + the list of its
+ * MERGED subtasks (each a drill-down handle for the existing leaf GET /api/work/:id/diff). Assembled
+ * from existing story/subtask rows; READ-ONLY. 404 if the project is gone; 404 if there is no such
+ * initiative in this project (reuse getProjectInitiative — the SAME project-scoping join as the rollup).
+ *
+ * Only DECOMPOSED story NODES appear (a still-pending directive leaf has landed nothing). Membership
+ * is scoped to the project by joining each child → its owning repo node (parent_id) → the project
+ * (repo.parent_id === projectId), the same repo→project link listProjectInitiatives uses.
+ */
+export function reviewProjectInitiative(
+  projectId: string,
+  initiativeId: string,
+): InitiativeReview {
+  const view = getProjectInitiative(projectId, initiativeId);
+  if (!view) throw new HttpError(404, `initiative not found: ${initiativeId}`);
+  // Child STORY NODES of this initiative, scoped to the project via repo.parent_id (a pending
+  // directive leaf is EXCLUDED — nothing landed). initiative_reviewed_at tells whether the CEO has
+  // signed off (stamped on every child node by acceptInitiativeReview).
+  const nodes = db
+    .query<
+      {
+        id: string;
+        workspace_id: string;
+        summary: string | null;
+        status: string;
+        merged_sha: string | null;
+        initiative_reviewed_at: string | null;
+      },
+      [string, string]
+    >(
+      `SELECT s.id, s.workspace_id, COALESCE(s.brief, s.summary) AS summary, s.status,
+              s.merged_sha, s.initiative_reviewed_at
+         FROM tasks s JOIN tasks r ON r.id = s.parent_id AND r.work_kind='repo'
+        WHERE s.initiative_id=? AND s.work_kind='node' AND r.parent_id=?
+        ORDER BY s.created_at`,
+    )
+    .all(initiativeId, projectId);
+  const stories: InitiativeStoryReview[] = nodes.map((n) => ({
+    story_id: n.id,
+    workspace_id: n.workspace_id,
+    summary: n.summary,
+    status: n.status,
+    merged_sha: n.merged_sha,
+    // The story's terminal-MERGED leaves (merged + rolled_back) — the drill-down handles. taskDiff is
+    // leaf-only, so THESE are what the CEO opens (GET /api/work/:id/diff) to see the actual diff.
+    merged_subtasks: db
+      .query<MergedSubtask, [string]>(
+        `SELECT id, summary, status, merged_sha
+           FROM tasks
+          WHERE parent_id=? AND work_kind='leaf' AND (status='merged' OR status='rolled_back')
+          ORDER BY created_at`,
+      )
+      .all(n.id),
+  }));
+  return {
+    initiative_id: initiativeId,
+    project_id: projectId,
+    done: view.done,
+    reviewed: nodes.length > 0 && nodes.every((n) => n.initiative_reviewed_at != null),
+    stories,
+  };
+}
+
+/**
+ * The CEO's ACTIONABLE-REVIEW set for a project: the initiatives that have fully LANDED (`done`) but
+ * the CEO has NOT yet ACCEPTED (no initiative_reviewed_at stamp). The PROJECT-tier mirror of the
+ * story leader's completion bubble-up (tasks.leaderStoryAwaitsCompletion) — a completed initiative is
+ * NOT a leaf attention item, so like the leader case it is a DEDICATED reader, not a row in the
+ * leaf-only operatorActionableItems set. Surfaced live to a booted CEO via the project channel
+ * (channel.ts consumes `initiative.completed`) and available for the CEO to pull. Pure read; 404 if
+ * the project is gone. Returns the completed-unreviewed InitiativeViews, initiative-ordered.
+ */
+export function ceoInitiativesAwaitingReview(projectId: string): InitiativeView[] {
+  return listProjectInitiatives(projectId).filter(
+    (i) => i.done && !isInitiativeReviewed(i.initiative_id),
+  );
+}
+
+/** Whether an initiative has been CEO-ACCEPTED: acceptInitiativeReview stamps initiative_reviewed_at
+ *  on EVERY child story node atomically, so ANY stamped child means the whole initiative is reviewed. */
+function isInitiativeReviewed(initiativeId: string): boolean {
+  return (
+    db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n FROM tasks
+          WHERE initiative_id=? AND work_kind='node' AND initiative_reviewed_at IS NOT NULL`,
+      )
+      .get(initiativeId)!.n > 0
+  );
+}
+
+/** The result of ACCEPTING an initiative review: the initiative + its project + the sign-off stamp. */
+export type ReviewedInitiative = {
+  initiative_id: string;
+  project_id: string;
+  reviewed_at: string;
+};
+
+/**
+ * ACCEPT a completed initiative's cross-repo review (POST /api/projects/:id/initiatives/:iid/accept)
+ * — the CEO signs off on what landed across the member repos and REPORTS completion up to the human.
+ * The CEO's OTHER review verb (a CORRECTIVE follow-up) reuses the initiative path (createProjectInitiative
+ * / createCrossRepoInitiative → createDirective); the CEO issues NO reject/rollback (per-diff merge
+ * authority stays the CTO's), so there is no such verb here.
+ *
+ * Stamps initiative_reviewed_at (nowIso) on EVERY child story node whose stamp is still NULL — so
+ * ceoInitiativesAwaitingReview drops it and it never re-nags — and publishes `initiative.reviewed` up
+ * the project SSE stream (the human/dashboard surfaces it). 404 if the project/initiative is gone;
+ * 409 unless the initiative is fully LANDED (`done`) — an in-flight initiative has nothing to accept.
+ * IDEMPOTENT: a re-accept re-stamps only still-NULL children (none, once reviewed) and re-reports.
+ */
+export function acceptInitiativeReview(
+  projectId: string,
+  initiativeId: string,
+): ReviewedInitiative {
+  const view = getProjectInitiative(projectId, initiativeId);
+  if (!view) throw new HttpError(404, `initiative not found: ${initiativeId}`);
+  if (!view.done) {
+    throw new HttpError(409, "initiative is not fully landed — nothing to accept yet");
+  }
+  const reviewedAt = nowIso();
+  db.query(
+    `UPDATE tasks SET initiative_reviewed_at=?
+      WHERE initiative_id=? AND work_kind='node' AND initiative_reviewed_at IS NULL`,
+  ).run(reviewedAt, initiativeId);
+  publish({
+    type: "initiative.reviewed",
+    project_id: projectId,
+    initiative_id: initiativeId,
+    detail: `initiative ${initiativeId}: CEO accepted the cross-repo review (${view.children.length} member-repo stories)`,
+  });
+  return { initiative_id: initiativeId, project_id: projectId, reviewed_at: reviewedAt };
+}
+
 /**
  * F5 (story st-a632b2cc) — tear down a leaked ISOLATED story's worktree + branch AFTER its
  * member cascade settles (so no member worktree is still checked out against the story branch).

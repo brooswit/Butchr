@@ -413,6 +413,15 @@ export class AttentionBridge {
       return this.consumeStoryAttention(e);
     }
 
+    // PROJECT-LEVEL initiative completion (RFC Q5 — Phase C1; story st-30a7dccd) — a live push that an
+    // initiative has fully landed across its member repos and is READY FOR the CEO's cross-repo review
+    // (the project-tier analog of a story's `completion-review`). Owned ONLY by the PROJECT/CEO bridge
+    // whose scopeProject matches the event's project; a story/CTO bridge never sees it. Like `complete`
+    // it carries no marker — a live signal, never resynced — so it bypasses the reconnect-resync set.
+    if (e.type === "initiative.completed") {
+      return this.consumeInitiativeCompleted(e);
+    }
+
     // Keep the workspace-label cache fresh off the same stream.
     if (e.type === "workspace.created" || e.type === "workspace.updated") {
       const dir = e.workspace as Record<string, unknown> | undefined;
@@ -626,6 +635,29 @@ export class AttentionBridge {
     const detail = tidy(e.detail);
     const content = `[${storyId}] ${label} — ${phrase}` + (detail ? `: ${detail}` : "");
     return { content, meta: { story_id: storyId, workspace: dirId, state } };
+  }
+
+  /**
+   * Translate an `initiative.completed` event into a CEO 'ready for review' notification, or null when
+   * THIS bridge's scope does not own it (RFC Q5 — Phase C1). Owned ONLY by the PROJECT/CEO bridge whose
+   * scopeProject === the event's project_id — the exact project mirror of a story `completion-review`
+   * one tier up. A story-leader OR workspace/CTO bridge never sees it. Resilient: a missing/unknown
+   * field yields null rather than throwing. Stateless (no de-dup map) — the publisher fires once and it
+   * carries no marker, so it is never reconnect-resynced.
+   */
+  private consumeInitiativeCompleted(e: Record<string, unknown>): ChannelNotification | null {
+    const projectId = typeof e.project_id === "string" && e.project_id ? e.project_id : null;
+    const iid = typeof e.initiative_id === "string" && e.initiative_id ? e.initiative_id : null;
+    if (!projectId || !iid) return null;
+    // OWNERSHIP — only the project bridge scoped to this initiative's project owns it.
+    if (!this.scopeProject || this.scopeProject !== projectId) return null;
+    const detail = tidy(e.detail);
+    const content = `[${iid}] initiative READY FOR REVIEW — all member-repo stories landed` +
+      (detail ? `: ${detail}` : "");
+    return {
+      content,
+      meta: { initiative_id: iid, project_id: projectId, state: "initiative_review" },
+    };
   }
 
   /**

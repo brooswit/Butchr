@@ -89,6 +89,17 @@ export type ButchrEvent =
       initiative_id: string;
       detail: string | null;
     }
+  // The CEO ACCEPTED a completed initiative's cross-repo review (RFC Q5 — Phase C1; story
+  // st-30a7dccd): the CEO signed off on what landed across the member repos and is REPORTING
+  // completion up to the human. Additive + EVENT-ONLY — the human/dashboard SSE surfaces it; butchr
+  // takes no action. The CEO's other review verb (a CORRECTIVE follow-up) reuses the initiative
+  // path (createDirective); the CEO issues NO reject/rollback (per-diff merge stays CTO authority).
+  | {
+      type: "initiative.reviewed";
+      project_id: string;
+      initiative_id: string;
+      detail: string | null;
+    }
   | { type: "hello"; now: string };
 
 type Subscriber = (e: ButchrEvent) => void;

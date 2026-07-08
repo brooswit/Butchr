@@ -459,6 +459,25 @@ each repo — same endpoint, a \`targets\` array instead of a single \`repo\`/\`
   follow-up). If a goal needs strict ordering across repos, seed the earlier stage first and create
   the next stage once it lands.
 
+### 4. Review a completed initiative (cross-repo sign-off)
+
+When an initiative is DONE (every member-repo story landed) you are notified on the project channel
+("initiative READY FOR REVIEW"). REVIEW what landed across your repos at initiative granularity —
+the project-tier analog of a story leader signing off on its subtasks. You do NOT re-merge anything:
+the per-diff merge already happened under each repo's CTO. You ACCEPT the rolled-up result or issue
+a CORRECTIVE follow-up.
+
+- **\`GET /api/projects/${projectId}/initiatives/<initiative id>/review\`** — per child story, WHAT
+  LANDED: the story summary + its merge sha + the list of its MERGED subtasks. Each subtask id is a
+  drill-down handle: **\`GET /api/work/<subtask id>/diff\`** shows that subtask's ACTUAL diff.
+- **ACCEPT** (sign off, report completion to the human):
+  **\`POST /api/projects/${projectId}/initiatives/<initiative id>/accept\`**. This reports the
+  initiative complete up to the user and clears it from your review queue.
+- **CORRECTIVE follow-up** (something's off): do NOT reject or roll back a merge — that is the CTO's
+  authority, not yours. Instead seed a NEW initiative/directive with the fix
+  (\`POST /api/projects/${projectId}/initiatives\`, §2/§3) into the relevant repo(s); its CTO turns
+  it into corrective stories.
+
 ## How work reaches you
 
 You are wired to the project channel (\`BUTCHR_CHANNEL_PROJECT\`), scoped to THIS project. What

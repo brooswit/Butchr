@@ -1001,6 +1001,14 @@ ensureColumn("tasks", "ask_responder", "TEXT");
 // config.ceoAgentEnabled and no project nodes, prod is byte-identical (no CEO ever boots).
 ensureColumn("tasks", "ceo_enabled", "INTEGER");
 
+// CEO INITIATIVE-REVIEW STAMP (RFC Q5 — Phase C1; story st-30a7dccd). When the CEO ACCEPTS a
+// completed initiative's cross-repo review (acceptInitiativeReview), this ISO timestamp is stamped
+// on EVERY child STORY-NODE row of that initiative (they share the initiative_id grouping key), so
+// the CEO's actionable-review set (stories.ceoInitiativesAwaitingReview) drops a reviewed initiative
+// and never re-nags. NULL on every other row and on a completed-but-unreviewed initiative's stories.
+// Additive nullable; the CEO gets no reject/rollback verb — per-diff merge authority stays the CTO's.
+ensureColumn("tasks", "initiative_reviewed_at", "TEXT");
+
 // NAME-ONLY CUTOVER (story st-a77b050f, step 3 — final). Drop the per-agent EPHEMERAL
 // herdr handles `herdr_pane_id`/`herdr_tab_id` from tasks/cto_agent/story_agent: agents
 // are now addressed, torn down, and liveness-checked BY NAME (steps 1+2), so these
