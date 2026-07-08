@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.231] - 2026-07-08
+
 ### Added
 
 - **CEO OPERATING-MODEL finale (RFC Phase D1; story st-30a7dccd).** The two deliverables
