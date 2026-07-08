@@ -7,10 +7,12 @@
 // story or a task's story_id yet. Later phases add a story-leader agent (a mini-CTO that
 // decomposes / feedbacks / merges) + a responder-escalation chain that consume it. This
 // module mirrors the shape of src/workspaces.ts (a thin CRUD service over the DB).
-import { ALL_STATUSES, db, ensureStoryWorkNode, getStoryRow, isTerminal, nowIso } from "./db.ts";
+import { ALL_STATUSES, db, ensureStoryWorkNode, getStoryRow, isTerminal, nowIso, recordTaskEvent } from "./db.ts";
 import type { StoryRow, StoryStatus, TaskKind, TaskRow, TaskStatus } from "./db.ts";
 import { publish } from "./events.ts";
 import * as git from "./git.ts";
+import { harness } from "./harness.ts";
+import { claudeAlive } from "./liveness.ts";
 import { generateInitiativeId, generateStoryId, uniqueTaskId } from "./ids.ts";
 import { abortTask, createTask, getTask, mergeStoryBranch, taskView } from "./tasks.ts";
 import { writeTaskMd } from "./taskmd.ts";
@@ -21,6 +23,7 @@ import { owningRepoOf, workResponderChain } from "./work.ts";
 import {
   onStoryCreated,
   onStoryStatusChanged,
+  storyAgentName,
   storyAgentStatus,
   stopStoryAgent,
   teardownLeaderWorkspaceForWork,
@@ -884,6 +887,83 @@ export function updateStory(
   if (target === "done" || target === "aborted") {
     void teardownLeaderWorkspaceForWork(id).catch(() => {});
   }
+  return getStory(id)!;
+}
+
+/**
+ * UPDATE a STORY NODE's in-flight instruction and NOTIFY its LEADER (the `update` verb at the
+ * NODE tier — POST /api/work/:id/update; story st-7a7b0654 S2). The exact structural analog of
+ * the leaf `updateTask` (tasks.ts) one tier up: AMEND the brief, then deliver the change to
+ * WHERE the leader is. A CTO refines a story's brief mid-decompose; the leader must fold it in.
+ *
+ * GUARDS: 404 if the story is gone; 400 if `brief` is blank/missing; 409 on a TERMINAL/in-flight
+ * story (`done`/`aborted`/`merging`) — a correction of finished (or actively-landing) work is a
+ * fresh story, not an amendment. `open` and `merge_blocked` (leader kept up to re-attempt) accept.
+ *
+ * AMEND (ONE path): reuse updateStory(id, {brief}) — a brief-only patch writes the node row's
+ * `tasks.brief` (no status change, allowed in any state). A node has no task.md `## Prompt` of its
+ * own the leader runs (its members carry the task.md), so the amend IS the DB brief write.
+ *
+ * NOTIFY split on LEADER liveness — EXACTLY ONE notification per call (steer XOR re-surface; the
+ * amend above always runs), so an amend never both pokes the pane AND pushes to the CTO:
+ *  - LIVE leader (a herdr agent registered under the leader name AND its claude genuinely alive):
+ *    STEER the running pane the way updateTask steers a live agent — harness.send(storyAgentName)
+ *    with a line telling the leader its brief was UPDATED and to RE-FETCH GET /api/work/:id and
+ *    fold the change into its current decomposition WITHOUT restarting. Session/context preserved;
+ *    a within-state audit event recorded.
+ *  - PARKED / dead-shell leader (not live: never launched, torn down, at completion-review, awaiting
+ *    an ask answer, OR a dead login shell whose herdr name still lingers): RE-SURFACE the item on
+ *    the CTO channel (the story's responder — the node tier's analog of a parked subtask surfacing
+ *    to its leader) via a one-shot `story.attention { target:'cto', reason:'updated' }`. We do NOT
+ *    poke a dead pane: the unified supervisor relaunches the desired leader, which re-reads the
+ *    amended brief, and the CTO is told so it can steer. Markerless — a live-only push, NEVER
+ *    reconnect-resynced (mirrors the leaf `task.instruction_updated`).
+ */
+export async function updateStoryInstruction(id: string, brief: unknown): Promise<StoryRow> {
+  const story = getStory(id);
+  if (!story) throw new HttpError(404, `story not found: ${id}`);
+  if (story.status === "done" || story.status === "aborted" || story.status === "merging") {
+    throw new HttpError(
+      409,
+      `cannot update the instruction on a ${story.status} story — a correction of finished ` +
+        `(or actively-landing) work is a fresh story, which already exists`,
+    );
+  }
+  if (typeof brief !== "string" || !brief.trim()) {
+    throw new HttpError(400, "provide a non-empty brief to update the instruction");
+  }
+  const next = brief.trim();
+
+  // AMEND: brief-only patch → writes the node row's `tasks.brief` (no status change).
+  updateStory(id, { brief: next });
+
+  // NOTIFY split — deliver the amendment based on where the leader is (exactly one path).
+  const leader = await storyAgentStatus(id);
+  const leaderLive = leader.desired && leader.running && claudeAlive(leader.sessionId);
+  if (leaderLive) {
+    // LIVE leader — STEER the running pane (never restart / relaunch a live leader).
+    const steer =
+      `Your story brief was UPDATED. The revised brief is:\n\n${next}\n\n` +
+      `RE-FETCH \`GET /api/work/${id}\` (it now holds this brief) and fold the change into your ` +
+      `current decomposition — keep going, do NOT restart.`;
+    await harness.send(storyAgentName(id), { text: steer, enter: true });
+    const note = `[butchr] story instruction updated; live leader steered to re-fetch and fold it in`;
+    recordTaskEvent(id, story.status, story.status, note);
+    console.log(`[butchr] story ${id} ${note}`);
+    return getStory(id)!;
+  }
+
+  // PARKED / dead-shell leader — RE-SURFACE to the CTO (never poke a dead pane). One-shot,
+  // markerless live push (never reconnect-resynced — the story-tier sibling of the leaf's
+  // `task.instruction_updated`). The supervisor relaunches the desired leader on the amended brief.
+  publish({
+    type: "story.attention",
+    story_id: id,
+    workspace_id: story.workspace_id,
+    target: "cto",
+    reason: "updated",
+    detail: next,
+  });
   return getStory(id)!;
 }
 

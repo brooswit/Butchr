@@ -29,9 +29,14 @@ let liveMod: typeof import("../src/liveness.ts");
 let eventsMod: typeof import("../src/events.ts");
 let workApiMod: typeof import("../src/work-api.ts");
 let channelMod: typeof import("../src/channel.ts");
+let storiesMod: typeof import("../src/stories.ts");
+let wsAgentMod: typeof import("../src/workspace-agent.ts");
 let originalRunner: AgentRunner;
 
 let sends: Array<[string, SendInput]> = [];
+// Herdr agent NAMES the fake harness reports as EXISTING (storyAgentStatus.running probes this).
+// Empty by default → a story's leader is treated as absent unless a test registers it.
+let liveAgentNames = new Set<string>();
 
 function makeFakeRunner(): AgentRunner {
   const noop = async () => undefined as never;
@@ -41,6 +46,9 @@ function makeFakeRunner(): AgentRunner {
         return async (name: string, input: SendInput) => {
           sends.push([name, input]);
         };
+      }
+      if (prop === "agentExists") {
+        return async (name: string) => liveAgentNames.has(name);
       }
       return noop;
     },
@@ -84,6 +92,23 @@ function seedNode(id: string, status = "open"): void {
     .run(id, WS, status, "story brief", dbMod.nowIso());
 }
 
+/**
+ * Give a seeded story a LEADER: a `story_agent` row (desired + session) AND, when `running`,
+ * register its herdr name so `storyAgentStatus(id).running` is true. `claudeAlive` is still
+ * gated separately by the injected cmdline lister, so a "running but dead-shell" leader is
+ * modelled by registering the name but pointing the lister at a DIFFERENT session.
+ */
+function seedLeader(
+  storyId: string,
+  opts: { desired?: number; sessionId?: string | null; running?: boolean } = {},
+): void {
+  dbMod.saveStoryAgentRow(storyId, {
+    desired: opts.desired ?? 1,
+    session_id: opts.sessionId ?? null,
+  });
+  if (opts.running) liveAgentNames.add(wsAgentMod.storyAgentName(storyId));
+}
+
 function rowOf(id: string) {
   return tasksMod.getTask(id)!;
 }
@@ -115,6 +140,8 @@ beforeAll(async () => {
   eventsMod = await import("../src/events.ts");
   workApiMod = await import("../src/work-api.ts");
   channelMod = await import("../src/channel.ts");
+  storiesMod = await import("../src/stories.ts");
+  wsAgentMod = await import("../src/workspace-agent.ts");
 
   originalRunner = harnessMod.getRunner();
   harnessMod.setRunner(makeFakeRunner());
@@ -126,6 +153,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   sends = [];
+  liveAgentNames = new Set<string>();
   liveMod.setCmdlineLister(null);
 });
 
@@ -300,8 +328,154 @@ describe("updateWork facade — kind routing", () => {
     expect(taskmdMod.readTaskMd(REPO_ROOT, "u-facade").prompt).toBe("amended via the work facade");
   });
 
-  test("a NODE is a 409 seam (the story/directive tiers land in S2/S3)", async () => {
-    seedNode("u-node");
-    expect(await statusOf(() => workApiMod.updateWork("u-node", "x"))).toBe(409);
+  test("a NODE routes through to updateStoryInstruction (amend persists)", async () => {
+    seedNode("u-facade-node");
+    await workApiMod.updateWork("u-facade-node", "amended a story via the work facade");
+    expect(storiesMod.getStory("u-facade-node")!.brief).toBe("amended a story via the work facade");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NODE (STORY) TIER — updateStoryInstruction (story st-7a7b0654 S2). The exact structural
+// analog of the leaf path one tier up: AMEND the story brief, then STEER a live LEADER (by
+// storyAgentName) XOR RE-SURFACE a parked story to the CTO — exactly one delivery per call.
+// ---------------------------------------------------------------------------
+
+describe("updateStoryInstruction — (a) amend persists in tasks.brief", () => {
+  test("the story NODE row's brief is rewritten (no status change)", async () => {
+    seedNode("s-amend", "open");
+    await storiesMod.updateStoryInstruction("s-amend", "the revised story brief");
+    expect(storiesMod.getStory("s-amend")!.brief).toBe("the revised story brief");
+    expect(storiesMod.getStory("s-amend")!.status).toBe("open"); // untouched
+  });
+});
+
+describe("updateStoryInstruction — (b) LIVE leader is STEERED, not relaunched", () => {
+  test("a live leader is poked BY NAME with the new brief; session preserved, no re-surface", async () => {
+    seedNode("s-live", "open");
+    seedLeader("s-live", { desired: 1, sessionId: "sess-s-live", running: true });
+    // The /proc probe finds a live claude carrying the leader's session id → claudeAlive == true.
+    liveMod.setCmdlineLister(() => [["claude", "--session-id", "sess-s-live"]]);
+
+    const captured: any[] = [];
+    const unsub = eventsMod.subscribe((e) => {
+      if (e.type === "story.attention" && (e as any).reason === "updated") captured.push(e);
+    });
+    try {
+      await storiesMod.updateStoryInstruction("s-live", "fold in the new cross-cutting constraint");
+    } finally {
+      unsub();
+    }
+
+    // Exactly one steer send, to the LEADER'S herdr name, carrying the update signal + new brief.
+    expect(sends.length).toBe(1);
+    const [name, input] = sends[0]!;
+    expect(name).toBe(wsAgentMod.storyAgentName("s-live"));
+    expect(input.enter).toBe(true);
+    expect(input.text).toContain("UPDATED");
+    expect(input.text).toContain("fold in the new cross-cutting constraint");
+    expect(input.text).toContain("GET /api/work/s-live"); // told to re-fetch its story
+    // MUTUAL EXCLUSIVITY: a live steer NEVER also re-surfaces to the CTO.
+    expect(captured).toEqual([]);
+    // NOT relaunched: the leader's desired/session are preserved.
+    const agent = dbMod.getStoryAgentRow("s-live")!;
+    expect(agent.desired).toBe(1);
+    expect(agent.session_id).toBe("sess-s-live");
+    // A within-state audit event was recorded (open→open), like the leaf steer path.
+    const evs = dbMod.listTaskEvents("s-live");
+    expect(evs.some((e) => e.from_status === "open" && e.to_status === "open")).toBe(true);
+    // The amendment still landed.
+    expect(storiesMod.getStory("s-live")!.brief).toBe("fold in the new cross-cutting constraint");
+  });
+});
+
+describe("updateStoryInstruction — (c) dead-shell leader is RE-SURFACED, not poked", () => {
+  test("a leader whose herdr name lingers but whose claude is dead re-surfaces (no send)", async () => {
+    seedNode("s-dead", "open");
+    // running=true (the herdr name still exists) but the probe finds NO claude with its session.
+    seedLeader("s-dead", { desired: 1, sessionId: "sess-s-dead", running: true });
+    liveMod.setCmdlineLister(() => [["claude", "--session-id", "some-other-session"]]);
+
+    const captured: any[] = [];
+    const unsub = eventsMod.subscribe((e) => {
+      if (e.type === "story.attention" && (e as any).reason === "updated") captured.push(e);
+    });
+    try {
+      await storiesMod.updateStoryInstruction("s-dead", "revised brief while the shell is dead");
+    } finally {
+      unsub();
+    }
+
+    // No pane poke — re-surfaced to the CTO instead (the supervisor relaunches the desired leader).
+    expect(sends).toEqual([]);
+    expect(captured.length).toBe(1);
+    expect((captured[0] as any).target).toBe("cto");
+    expect((captured[0] as any).detail).toBe("revised brief while the shell is dead");
+    // The amendment still landed.
+    expect(storiesMod.getStory("s-dead")!.brief).toBe("revised brief while the shell is dead");
+  });
+});
+
+describe("updateStoryInstruction — (d) PARKED story re-surfaces to the CTO", () => {
+  test("an absent-leader story publishes a `story.attention {target:cto, reason:updated}` the CTO bridge emits", async () => {
+    seedNode("s-parked", "open"); // no leader row → not running → parked
+
+    const captured: any[] = [];
+    const unsub = eventsMod.subscribe((e) => {
+      if (e.type === "story.attention" && (e as any).reason === "updated") captured.push(e);
+    });
+    try {
+      await storiesMod.updateStoryInstruction("s-parked", "also carve out the migration path");
+    } finally {
+      unsub();
+    }
+
+    // A parked story is NOT poked (no live leader) — it is re-surfaced instead.
+    expect(sends).toEqual([]);
+    expect(captured.length).toBe(1);
+    const ev = captured[0];
+    expect(ev.target).toBe("cto");
+    expect(ev.story_id).toBe("s-parked");
+    expect(ev.detail).toBe("also carve out the migration path");
+    expect(ev.marker ?? null).toBeNull(); // markerless — a live-only push, never reconnect-resynced
+
+    // The WORKSPACE/CTO bridge OWNS it and emits the notification…
+    const ctoBridge = new channelMod.AttentionBridge(WS);
+    const note = ctoBridge.consume(ev);
+    expect(note).not.toBeNull();
+    expect(note!.meta.state).toBe("story_instruction_updated");
+    expect(note!.meta.story_id).toBe("s-parked");
+    expect(note!.content).toContain("also carve out the migration path");
+
+    // …while a STORY-leader bridge (target:'story' scope) NEVER owns a target:'cto' event.
+    const leaderBridge = new channelMod.AttentionBridge(WS, false, "s-parked");
+    expect(leaderBridge.consume(ev)).toBeNull();
+  });
+});
+
+describe("updateStoryInstruction — (e) guards + validation", () => {
+  test("404 when the story is gone", async () => {
+    expect(await statusOf(() => storiesMod.updateStoryInstruction("s-nope", "x"))).toBe(404);
+  });
+
+  test("400 on a blank/missing brief", async () => {
+    seedNode("s-blank", "open");
+    expect(await statusOf(() => storiesMod.updateStoryInstruction("s-blank", "  "))).toBe(400);
+    expect(await statusOf(() => storiesMod.updateStoryInstruction("s-blank", undefined))).toBe(400);
+  });
+
+  test("409 on a terminal (done) story — a correction is a fresh story", async () => {
+    seedNode("s-done", "done");
+    expect(await statusOf(() => storiesMod.updateStoryInstruction("s-done", "x"))).toBe(409);
+  });
+
+  test("409 on an aborted story", async () => {
+    seedNode("s-aborted", "aborted");
+    expect(await statusOf(() => storiesMod.updateStoryInstruction("s-aborted", "x"))).toBe(409);
+  });
+
+  test("409 on a merging (actively landing) story", async () => {
+    seedNode("s-merging", "merging");
+    expect(await statusOf(() => storiesMod.updateStoryInstruction("s-merging", "x"))).toBe(409);
   });
 });

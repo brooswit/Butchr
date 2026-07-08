@@ -74,7 +74,12 @@ export type ButchrEvent =
         | "ask"
         | "ask-answered"
         | "member-blocked"
-        | "leader-idle";
+        | "leader-idle"
+        // A CTO AMENDED a story's brief in flight (the `update` verb — story st-7a7b0654 S2). A
+        // one-shot LIVE re-surface (`target:'cto'`) for a story whose LEADER is not live to steer
+        // directly — the node-tier sibling of `task.instruction_updated`. Markerless + NEVER
+        // reconnect-resynced (replaying an amendment on reconnect would be a spurious re-notify).
+        | "updated";
       detail: string | null;
       marker?: string | null;
     }

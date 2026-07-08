@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Uniform UPDATE-instruction+NOTIFY verb — STORY (node) tier (story st-7a7b0654, S2).**
+  `POST /api/work/:id/update` (`{brief}`) now works when `:id` is a STORY (`work_kind='node'`):
+  a CTO amends the story's brief and its LEADER is notified. Builds directly on the S1 core —
+  the same `updateWork` facade (`src/work-api.ts`) now routes a node to the new
+  `stories.updateStoryInstruction`, the structural analog of the leaf `updateTask` one tier up.
+  It AMENDS the brief (reusing `updateStory({brief})` — a brief-only write to the node's
+  `tasks.brief`, no status change), then delivers the change based on where the leader is, with
+  EXACTLY ONE delivery per call (steer XOR re-surface XOR amend-only): a LIVE leader is STEERED
+  in place — `harness.send(storyAgentName(id), …)` injects a line telling it to re-fetch
+  `GET /api/work/:id` and fold the change into its decomposition, session/context preserved, no
+  relaunch (with the same dead-shell `claudeAlive` guard the nudge path uses); a PARKED or
+  dead-shell leader instead RE-SURFACES the revised instruction to the CTO via a one-shot
+  `story.attention {target:'cto', reason:'updated'}` (a new, markerless story-attention surface
+  that is never reconnect-resynced — the node-tier sibling of the leaf `task.instruction_updated`),
+  and the supervisor relaunches the desired leader on the amended brief. Guards: 400 on a blank
+  brief; 409 on a terminal/in-flight story (`done`/`aborted`/`merging`) — a correction of finished
+  work is a fresh story. Additive/reversible; `updateStory`/`patchWork` and the S1 leaf path are
+  unchanged.
+
 ## [0.9.233] - 2026-07-08
 
 ### Added

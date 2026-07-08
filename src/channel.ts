@@ -137,7 +137,8 @@ const STORY_ATTENTION: Record<
   | "ask"
   | "ask-answered"
   | "member-blocked"
-  | "leader-idle",
+  | "leader-idle"
+  | "updated",
   { phrase: string; state: string }
 > = {
   "completion-review": { phrase: "story ready for completion review", state: "story_completion_review" },
@@ -148,6 +149,10 @@ const STORY_ATTENTION: Record<
   ask: { phrase: "story ask awaiting an answer", state: "story_ask" },
   "ask-answered": { phrase: "story ask answered", state: "story_ask_answered" },
   "leader-idle": { phrase: "leader IDLE with work awaiting it", state: "story_leader_idle" },
+  // The CTO amended a PARKED story's brief (the `update` verb, story st-7a7b0654 S2) — its leader
+  // is not live to steer, so re-surface the revised instruction on the CTO feed. The node-tier
+  // sibling of the leaf's INSTRUCTION_UPDATED_PHRASE (a story has a brief, not a task.md).
+  updated: { phrase: "story instruction UPDATED — re-read the brief + re-review", state: "story_instruction_updated" },
 };
 
 // The phrase for an operator INSTRUCTION-UPDATE re-surface (the `update` verb — story
@@ -614,7 +619,8 @@ export class AttentionBridge {
       e.reason === "ask" ||
       e.reason === "ask-answered" ||
       e.reason === "member-blocked" ||
-      e.reason === "leader-idle"
+      e.reason === "leader-idle" ||
+      e.reason === "updated"
         ? e.reason
         : null;
     if (!storyId || !target || !reason) return null;
