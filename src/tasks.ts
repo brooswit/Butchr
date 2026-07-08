@@ -750,6 +750,20 @@ function rowForView(row: TaskRow): TaskRow {
   return r as TaskRow;
 }
 
+// PERF (story st-337b45bc): three columns are DETAIL-ONLY — `output_snapshot` (the full agent
+// transcript, up to ~2 MB/task and 97%+ of a bulk /api/work payload) plus the singleton
+// `last_dispatch_error` / `revert_reason` error blobs. The LIST views (taskListView / allTasksView)
+// don't need them — the dashboard swimlanes render none of them; only the per-task DETAIL render
+// (GET /api/work/:id → taskView) reads them (app.js). So the list projection strips them here while
+// the SHARED rowForView (and thus taskView / workView) stays byte-identical, keeping GET /api/work
+// small/fast. Mirrors the FOLD_VIEW_OMIT pattern above.
+const LIST_VIEW_OMIT = ["output_snapshot", "last_dispatch_error", "revert_reason"] as const;
+function listRowForView(row: TaskRow): TaskRow {
+  const r = rowForView(row) as Record<string, unknown>;
+  for (const k of LIST_VIEW_OMIT) delete r[k];
+  return r as TaskRow;
+}
+
 export function taskView(id: string): TaskView | null {
   const row = getTask(id);
   if (!row) return null;
@@ -805,7 +819,9 @@ export function taskView(id: string): TaskView | null {
 // estimate recompute) that the full taskView would do.
 export type TaskListView = Omit<
   TaskView,
-  "prompt" | "context" | "review_notes" | "estimate"
+  // The task.md-derived + per-row-estimate fields the list never reads, PLUS the three
+  // DETAIL-ONLY columns the list projection strips for payload size (see LIST_VIEW_OMIT).
+  "prompt" | "context" | "review_notes" | "estimate" | "output_snapshot" | "last_dispatch_error" | "revert_reason"
 >;
 
 /**
@@ -855,7 +871,7 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
     if (needle && !matchesQuery(taskSearchText(row, dirPath), needle)) continue;
     const blocked_by = parseBlockedBy(row.blocked_by);
     out.push({
-      ...rowForView(row),
+      ...listRowForView(row),
       blocked_by,
       tags: parseTags(row.tags),
       allowlist: parseAllowlist(row.allowlist),
@@ -904,7 +920,7 @@ export function allTasksView(
       if (needle && !matchesQuery(taskSearchText(row, ws.path), needle)) continue;
       const blocked_by = parseBlockedBy(row.blocked_by);
       out.push({
-        ...rowForView(row),
+        ...listRowForView(row),
         blocked_by,
         tags: parseTags(row.tags),
         blockerStates: blockerStatesOf(blocked_by),

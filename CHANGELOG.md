@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Strip the detail-only `output_snapshot` (the full agent transcript — up to ~2 MB/task and the
+  bulk of the payload), `last_dispatch_error`, and `revert_reason` columns from the WORK LIST
+  projection (`taskListView` / `allTasksView`), so `GET /api/work` returns a small, fast payload
+  instead of ~71 MB. The per-task DETAIL view (`GET /api/work/:id`) is unchanged and still carries
+  all three fields, which is where the webapp reads them.
+
 ## [0.9.235] - 2026-07-08
 
 ### Removed
