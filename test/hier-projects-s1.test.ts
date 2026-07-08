@@ -314,4 +314,25 @@ describe("registerWorkspaceUnderProject + POST /api/projects/:id/workspaces", ()
       .get(repoPath)!.n;
     expect(looseAtomic).toBe(0);
   });
+
+  // KEEP-WORKING invariant (story st-576b459f): removing repo-CREATION dropped the vestigial
+  // assertCreationAllowed("ceo","repo") guard from the register-EXISTING routes. Registering an
+  // already-materialized repo node by id is ADOPTION (not creation) and must still 201 — the guard
+  // would have 403'd it once "repo" left the ceo authority set.
+  test("POST /api/projects/:id/repos: adopting an existing repo node by id still returns 201", async () => {
+    const REG = "hp-ep-adopt-repo";
+    dbMod.db
+      .query(`INSERT OR IGNORE INTO workspaces (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
+      .run(REG, join(DATA_DIR, REG), REG, dbMod.nowIso());
+    dbMod.migrateMaterializeRepoNodes();
+    expect(workspacesMod.getRepoNode(REG)!.parent_id).toBeNull(); // a loose repo node
+
+    const res = await fetch(`${BASE}/api/projects/${PROJ}/repos`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo: REG }),
+    });
+    expect(res.status).toBe(201);
+    expect(workspacesMod.getRepoNode(REG)!.parent_id).toBe(PROJ); // now a member of the project
+  });
 });

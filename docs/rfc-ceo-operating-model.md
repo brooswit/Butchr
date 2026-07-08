@@ -79,14 +79,15 @@ source repo**: stand up new library repos, build them, then gut the source repo
 to depend on them — and don't start the gutting until the libraries exist.
 `test/rfc-ceo-operating-model-north-star.test.ts` proves this end-to-end,
 deterministically and CI-safely, driving the REST surface directly against
-**throwaway sandbox repos** (temp `BUTCHR_DATA_DIR`/`BUTCHR_DB` + temp
-`config.reposRoot` + injected git identity + `BUTCHR_HERDR_BIN=true` no-op leader
+**throwaway sandbox repos** (temp `BUTCHR_DATA_DIR`/`BUTCHR_DB` + a temp repos
+dir + injected git identity + `BUTCHR_HERDR_BIN=true` no-op leader
 launches + `afterAll` cleanup — no network, no registry publish). It asserts
 every hop:
 
-1. **(a) create-new-repos (Phase A2).** The CEO stands up two library repos —
-   `POST /api/projects/:id/repos/create` ×2 → a real `git init` repo on disk
-   under `config.reposRoot`, each registered + parented under the project.
+1. **(a) member repos added by the USER.** The two library repos are `git init`ed
+   on disk and registered under the project via the register-EXISTING flow
+   (`registerWorkspaceUnderProject`) — the USER adds members; the CEO does NOT
+   provision repos. Each becomes a project member the CEO can then direct.
 2. **(b) directive fan-out (Phase B1).** The CEO fans **one** initiative across
    all three member repos (the two new libraries + the source) —
    `POST /api/projects/:id/initiatives` with a `{targets:[…]}` body → one
@@ -140,18 +141,18 @@ repo, skipping the CTO). The retired shortcut is gone; the real path is:
   `POST /api/work/:id/escalate` → `escalateWork`, bubbling the directive back up
   to the CEO when it can't be handled at the repo.
 
-### Q2 — Create new repos (Phase A2)
+### Q2 — Repos are USER-added (register-existing)
 
-**Shipped.** The CEO can stand up a brand-new repo, not just register an existing
-one. `POST /api/projects/:id/repos/create` → `createRepoUnderProject`
-(`src/workspaces.ts`) sanitizes the name to a single traversal-free segment,
-`git init`s a fresh repo at `join(config.reposRoot, name)` via `git.initRepo`
-(`src/git.ts` — `git init -b main`, durability config, `.butchr/` gitignore, a
-root commit), then hands it to the existing `registerWorkspaceUnderProject` so the
-repo node is materialized and parented under the project and a herdr workspace is
-minted. `config.reposRoot` defaults to `join(dataDir, "repos")`
-(`BUTCHR_REPOS_ROOT`). Guards: 404 (missing project), 400 (invalid/traversal
-name), 409 (a non-empty path is never clobbered).
+**The CEO does NOT create or provision repos.** Repos are added to a project by
+the USER via the register-EXISTING flow — `POST /api/projects/:id/repos`
+(`{ repo }`, adopt an existing repo node) or `POST /api/projects/:id/workspaces`
+(`{ path }`, register an existing directory) → `registerRepoUnderProject` /
+`registerWorkspaceUnderProject` (`src/workspaces.ts`). Registration is ADOPTION,
+not creation: it materializes/reparents the repo node under the project and mints
+a herdr workspace, but butchr never `git init`s a repo on the CEO's behalf. The
+CEO DIRECTS work over the members the user has added; it does not stand up new
+repos. (An earlier build shipped a `POST /api/projects/:id/repos/create`
+create-new primitive; it was walked back — repo creation is a USER action.)
 
 **The publish boundary.** butchr sequences on node **MERGE**, not on package
 registry publish. A downstream repo depending on a new library is unblocked when
@@ -267,15 +268,18 @@ behalf. Substitute your project id for `<proj>`.
    terminal* (or attach to the `ws-ceo-<proj>` pane). Confirm the CEO is live
    (`GET /api/projects/<proj>/ceo` → `live:true`).
 
-2. **Create the library repos.** Tell the CEO: *"stand up two new library repos,
-   `libcore` and `libutil`."* It runs, per repo:
+2. **Add the library repos (YOU, the user).** Repos are user-added — create the
+   `libcore` and `libutil` repos on disk yourself and register each as a project
+   member via the register-EXISTING flow. The CEO does NOT provision repos:
 
    ```
-   POST /api/projects/<proj>/repos/create   { "name": "libcore", "label": "Lib Core" }
-   POST /api/projects/<proj>/repos/create   { "name": "libutil", "label": "Lib Util" }
+   POST /api/projects/<proj>/workspaces   { "path": "/abs/path/to/libcore", "label": "Lib Core" }
+   POST /api/projects/<proj>/workspaces   { "path": "/abs/path/to/libutil", "label": "Lib Util" }
    ```
 
-   Each returns the new member repo's id (note them as `<libcore>` / `<libutil>`).
+   Each returns the member repo's id (note them as `<libcore>` / `<libutil>`).
+   Confirm the members with `GET /api/projects/<proj>/repos`, then hand the CEO
+   the cross-repo intent.
 
 3. **Fan the initiative.** Tell the CEO the intent: *"build both libraries, then
    gut the source repo to depend on them."* It fans one cross-repo initiative:

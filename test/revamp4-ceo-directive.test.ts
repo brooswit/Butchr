@@ -106,13 +106,14 @@ afterAll(() => {
 // --- A. Level-based creation authority (pure) --------------------------------
 describe("REVAMP-4 P3d — assertCreationAllowed level rule", () => {
   test("each tier may create the tier ONE level below it", () => {
-    expect(() => tasksMod.assertCreationAllowed("ceo", "repo")).not.toThrow();
     expect(() => tasksMod.assertCreationAllowed("ceo", "directive")).not.toThrow(); // initiative (B1)
     expect(() => tasksMod.assertCreationAllowed("cto", "story")).not.toThrow();
     expect(() => tasksMod.assertCreationAllowed("leader", "subtask")).not.toThrow();
   });
 
-  test("reaching the wrong level is refused (403) — ceo↛story/subtask, cto↛project, leader↛story", () => {
+  test("reaching the wrong level is refused (403) — ceo↛repo/story/subtask, cto↛project, leader↛story", () => {
+    // Repos are USER-added (register-existing) — the CEO DIRECTS members, it does NOT create/register repos.
+    expect(statusOf(() => tasksMod.assertCreationAllowed("ceo", "repo"))).toBe(403);
     // B1: the CEO no longer forges a story directly — it DELEGATES via a directive.
     expect(statusOf(() => tasksMod.assertCreationAllowed("ceo", "story"))).toBe(403);
     expect(statusOf(() => tasksMod.assertCreationAllowed("ceo", "subtask"))).toBe(403); // no direct leaf

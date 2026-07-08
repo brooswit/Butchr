@@ -2293,8 +2293,9 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     expect(brief).toContain("BUTCHR_CHANNEL_PROJECT");
     // The "Who acts" state→action table at the project tier.
     expect(brief).toContain("Who acts");
-    // A2 — CREATE a brand-new repo (the library-extraction worked example needs new homes).
-    expect(brief).toContain(`POST /api/projects/${proj.id}/repos/create`);
+    // Repos are USER-added: the brief must NOT advertise a create-repo verb (that surface was
+    // walked back). The library-extraction homes are added by the user via register-existing.
+    expect(brief).not.toContain("repos/create");
     // A1 — cross-repo SEQUENCING is now REAL (node-capable blocked_by), so the old "PARALLEL only"
     // caveat is GONE and the sequencing verb is documented instead.
     expect(brief).not.toContain("PARALLEL only");

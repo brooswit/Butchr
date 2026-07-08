@@ -1,6 +1,6 @@
 // Workspace service: register/list/unregister workspaces. Each workspace is a
 // git repo that maps 1:1 to a herdr workspace.
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import {
   existsSync,
@@ -1189,61 +1189,6 @@ export async function registerWorkspaceUnderProject(
     throw e;
   }
   return view;
-}
-
-/**
- * CREATE a brand-new git repo AND register it under a project (REVAMP-4 CEO-operating-model RFC,
- * Q2 / DECISION 1 = config.reposRoot). The one missing primitive so the CEO can MATERIALIZE a repo
- * (not just adopt an existing one): butchr `git init`s a fresh repo at `<config.reposRoot>/<name>`,
- * then hands it to the EXISTING registerWorkspaceUnderProject — the dir is now a git repo, so it
- * passes isGitRepo, gets its repo node materialized + parented under the project, and mints a herdr
- * workspace, all carrying registerWorkspaceUnderProject's own unregister compensator (so a failed
- * reparent is reversible and strands nothing). Purely additive: the register-EXISTING path is untouched.
- *
- * Guards, in order:
- *  - 404 if the project is gone.
- *  - 400 if `name` is not a non-empty string, or is not a SINGLE safe path segment: any `/`, `\`,
- *    `..`, or an absolute path is rejected (no directory traversal outside reposRoot).
- *  - 400 belt-and-braces: the resolved path must stay strictly under resolve(config.reposRoot).
- *  - 409 if the target path ALREADY EXISTS and is NON-EMPTY (never clobber existing content — an
- *    absent or empty dir proceeds).
- *
- * Returns the created workspace view (the route answers 201).
- */
-export async function createRepoUnderProject(
-  projectId: string,
-  name: unknown,
-  label?: string,
-): Promise<WorkspaceView> {
-  if (!getProject(projectId)) throw new HttpError(404, `project not found: ${projectId}`);
-  if (typeof name !== "string" || !name.trim()) {
-    throw new HttpError(400, "repo name is required");
-  }
-  const clean = name.trim();
-  // SANITIZE: a single safe path segment only — no traversal, no separators, no absolute path.
-  if (
-    clean.includes("/") ||
-    clean.includes("\\") ||
-    clean.split(sep).includes("..") ||
-    clean === "." ||
-    clean === ".." ||
-    isAbsolute(clean)
-  ) {
-    throw new HttpError(400, `invalid repo name (must be a single path segment): ${name}`);
-  }
-  const root = resolve(config.reposRoot);
-  const path = resolve(join(root, clean));
-  // BELT: the resolved path must live strictly under reposRoot (defends against any residual escape).
-  if (path === root || !path.startsWith(root + sep)) {
-    throw new HttpError(400, `invalid repo name (resolves outside reposRoot): ${name}`);
-  }
-  // GUARD: refuse to create over a pre-existing NON-empty directory (an empty/absent dir proceeds).
-  if (existsSync(path) && readdirSync(path).length > 0) {
-    throw new HttpError(409, `path already exists and is not empty: ${path}`);
-  }
-
-  await git.initRepo(path);
-  return await registerWorkspaceUnderProject(projectId, path, label);
 }
 
 export async function unregisterWorkspace(id: string): Promise<void> {

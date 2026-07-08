@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Repo-CREATION removed entirely — repos are USER-added only (story st-576b459f).** Walks back
+  the A2 create-new-repo primitive (shipped 0.9.222). butchr no longer `git init`s a repo on the
+  CEO's behalf; repos are added to a project by the USER via the existing register-EXISTING flow
+  (`POST /api/projects/:id/repos` `{repo}`, `POST /api/projects/:id/workspaces` `{path}`). The CEO
+  DIRECTS work over the members the user has added; it does not provision them. Deleted: the
+  `POST /api/projects/:id/repos/create` route + `workspaces.createRepoUnderProject` +
+  `config.reposRoot` / `BUTCHR_REPOS_ROOT` (no other consumer) + the now-dead `git.initRepo`
+  (its sole production caller was `createRepoUnderProject`).
+
+### Changed
+
+- **CEO creation authority narrowed to `directive` only (story st-576b459f).** `"repo"` is dropped
+  from the CEO's `CREATION_AUTHORITY` set (`src/tasks.ts`) — the CEO may create a `directive`, and
+  nothing else at the repo tier. Because the two register-EXISTING routes hard-coded a vestigial
+  `assertCreationAllowed("ceo","repo")` guard (registration is ADOPTION, not creation), that guard
+  is removed from both so they keep returning `201` — register-existing behavior is otherwise
+  unchanged. `"repo"` stays a real node kind in the `CreatableArtifact` type union. The CEO
+  operating brief (`buildCeoBrief`) and `docs/rfc-ceo-operating-model.md` are updated: the CEO no
+  longer creates repos; the library-extraction worked example has the USER add the member repos and
+  the CEO direct + sequence + review over them.
+
 ## [0.9.234] - 2026-07-08
 
 ### Added

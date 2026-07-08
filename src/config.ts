@@ -126,15 +126,6 @@ export const config = {
   dbPath: env("BUTCHR_DB", join(dataDir, "butchr.db")),
 
   /**
-   * ROOT under which the CEO's NEWLY-CREATED repos are materialized (REVAMP-4 CEO-operating-model
-   * RFC, Q2 / DECISION 1). `POST /api/projects/:id/repos/create` resolves a sanitized `name` to
-   * `join(reposRoot, name)`, `git init`s a fresh repo there, and registers it under the project.
-   * Defaults to `<dataDir>/repos`; override with BUTCHR_REPOS_ROOT. Only the create-new-repo
-   * primitive reads this — registering an EXISTING repo by path is unaffected.
-   */
-  reposRoot: env("BUTCHR_REPOS_ROOT", join(dataDir, "repos")),
-
-  /**
    * Persistent server log file. butchr's console output is teed here (in
    * addition to stdout) so logs survive restarts and detached runs. Empty
    * disables file logging. Rotated by size — see `logMaxBytes`/`logKeep`.

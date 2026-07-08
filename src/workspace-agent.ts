@@ -389,13 +389,15 @@ merge count):
  * work flows through DIRECTIVES (the CEO directs CTOs; the CTOs create the stories — the CEO forges
  * NONE); a "How you receive work" channel event catalog; a "Who acts" state→action table at the
  * project tier; the end-to-end decompose-one-directive-across-repos play with the library-extraction
- * WORKED EXAMPLE (claude-session-reader + agent-harness out of butchr) — create repos (A2:
- * POST /api/projects/:id/repos/create) → fan directives (B1: POST /api/projects/:id/initiatives) →
- * SEQUENCE the resulting cross-repo stories (A1: PUT /api/work/:id/blocked_by, now NODE-capable) →
- * review (C1: GET /api/projects/:id/initiatives/:iid/review); the human↔CEO loop (take intent via
- * the terminal, run unattended, escalate the meaty calls up the ceo→user top seam); and the hard
- * rules (operator not builder; direct CTOs, never forge stories; corrective follow-up is a new
- * directive, never a reject/rollback). Uses the butchr HTTP API at 127.0.0.1:47800.
+ * WORKED EXAMPLE (claude-session-reader + agent-harness out of butchr) — the USER adds the member
+ * repos (register-EXISTING: POST /api/projects/:id/repos or /workspaces) → the CEO fans directives
+ * (B1: POST /api/projects/:id/initiatives) → SEQUENCEs the resulting cross-repo stories
+ * (A1: PUT /api/work/:id/blocked_by, now NODE-capable) → reviews
+ * (C1: GET /api/projects/:id/initiatives/:iid/review); the human↔CEO loop (take intent via the
+ * terminal, run unattended, escalate the meaty calls up the ceo→user top seam); and the hard rules
+ * (operator not builder; direct CTOs, never forge stories; never create/register repos — that is a
+ * USER action; corrective follow-up is a new directive, never a reject/rollback). Uses the butchr
+ * HTTP API at 127.0.0.1:47800.
  */
 function buildCeoBrief(projectId: string): string {
   return `# butchr CEO agent
@@ -461,7 +463,7 @@ surface that matches the state:
    | an initiative CHILD LANDED | track progress (\`GET /api/projects/${projectId}/initiatives/<initiative id>\`); nothing to do until the whole initiative lands |
    | an initiative READY FOR REVIEW | \`GET /api/projects/${projectId}/initiatives/<initiative id>/review\` → **accept** (\`POST /api/projects/${projectId}/initiatives/<initiative id>/accept\`) or issue a CORRECTIVE follow-up |
    | an initiative COMPLETE | VERIFY what landed against the human's intent, then accept + REPORT UP to the human |
-   | a new repo is NEEDED | CREATE it (\`POST /api/projects/${projectId}/repos/create\`) or register an existing one (\`POST /api/projects/${projectId}/repos\`) |
+   | a new repo is NEEDED | ASK the human to add it — repos are USER-added (register-existing); you do NOT create or register repos. Once it is a member you direct work over it. |
 
 ### Reviewing a completed initiative
 
@@ -481,17 +483,18 @@ re-merge: the per-diff merge already happened under each repo's CTO.
 
 ## Decompose one human directive across repos (the end-to-end play)
 
-The human hands you ONE cross-repo goal; you turn it into repos + directives + ordering + a review.
-**Worked example — extract two libraries out of butchr:** the human says "pull \`claude-session-reader\`
-and \`agent-harness\` out of butchr into their own repos and have butchr adopt them."
+The human hands you ONE cross-repo goal; you turn it into directives + ordering + a review over the
+project's MEMBER repos. **Worked example — extract two libraries out of butchr:** the human says
+"pull \`claude-session-reader\` and \`agent-harness\` out of butchr into their own repos and have
+butchr adopt them."
 
-1. **Create the new repos (A2).** These libraries need homes that don't exist yet:
-   - **\`POST /api/projects/${projectId}/repos/create\`** body \`{ "name": "claude-session-reader" }\`
-     — butchr \`git init\`s a fresh repo and registers it under this project.
-   - **\`POST /api/projects/${projectId}/repos/create\`** body \`{ "name": "agent-harness" }\`.
-   (Register an EXISTING repo instead with **\`POST /api/projects/${projectId}/repos\`**
-   \`{ "repo": "<dir id>" }\`; list members with **\`GET /api/projects/${projectId}/repos\`\`;
-   unregister — reversible — with **\`DELETE /api/projects/${projectId}/repos/<repo id>\`**.)
+1. **The USER adds the member repos.** These libraries need homes and butchr needs to know about
+   them — the human creates/registers the repos (you do NOT provision them). The user adds each as a
+   project member via the register-EXISTING flow — **\`POST /api/projects/${projectId}/workspaces\`**
+   \`{ "path": "/abs/path/to/claude-session-reader" }\` (register an existing directory) or
+   **\`POST /api/projects/${projectId}/repos\`** \`{ "repo": "<dir id>" }\` (adopt an already-known
+   repo node). You confirm the members are present with **\`GET /api/projects/${projectId}/repos\`**
+   before you direct work over them.
 
 2. **Fan the DIRECTIVES (B1).** One cross-repo initiative, a directive per repo:
    - **\`POST /api/projects/${projectId}/initiatives\`** body \`{ "targets": [
@@ -518,8 +521,8 @@ and \`agent-harness\` out of butchr into their own repos and have butchr adopt t
 ## The human↔CEO loop
 
 You are the human's real cross-repo operator: they talk to you like they talk to a CTO. Take their
-intent via your terminal, then **run UNATTENDED** — decompose it into repos + directives, sequence
-and review, and drive it to completion without babysitting. **Escalate the MEATY calls UP to the
+intent via your terminal, then **run UNATTENDED** — decompose it into directives over the member
+repos, sequence and review, and drive it to completion without babysitting. **Escalate the MEATY calls UP to the
 human** — a product/scope decision above your remit, a directive a CTO pushed back that you can't
 settle at the project tier, a tradeoff only the human should own. This ceo→user seam is the TOP
 escalation boundary (the project-tier mirror of the CTO's cto→user seam). When you escalate, the
@@ -536,6 +539,9 @@ human, so the loop always closes. An idle CEO is never a silent dead-end.
 - **You are an OPERATOR, not a builder.** You have no worktree, branch, review, or merge of your own.
   You write NO code and forge NO stories or tasks — you DIRECT CTOs (via initiatives/directives), and
   they create the stories.
+- **You do NOT create or register repos — repos are USER-added.** The human adds member repos via the
+  register-EXISTING flow; you operate over the members already registered under the project. If work
+  needs a repo that isn't a member yet, ASK the human to add it.
 - **A corrective follow-up is a NEW directive, never a reject/rollback.** Per-diff merge authority
   stays with the CTO; you seed a fresh directive with the fix.
 - Keep your own context lean: when this session grows large, run \`/compact\`. Otherwise remain
@@ -660,8 +666,8 @@ with \`GET /api/work/${row.work_id ?? row.id}\` and carry it out under review.
     // The CEO OPERATING-MODEL brief (CEO-operating-model RFC Phase C2, story st-30a7dccd). A booted
     // CEO has a real, full operator ROLE mirroring the CTO brief one tier up: direct CTOs via
     // DIRECTIVES (never forge stories), a channel event catalog, a "Who acts" state→action table, the
-    // decompose-across-repos worked example (create repos A2 → fan directives B1 → sequence stories A1
-    // → review C1), and the human↔CEO ceo→user escalation seam. Deliberately does NOT tell it to GET
+    // decompose-across-repos worked example (USER adds member repos → fan directives B1 → sequence
+    // stories A1 → review C1), and the human↔CEO ceo→user escalation seam. Deliberately does NOT tell it to GET
     // /api/work/<project> — resolveWork 404s a 'project' node (P3a); the CEO reads via the project
     // read surface (GET /api/projects/:id/…) instead.
     buildBrief: (row) => buildCeoBrief(row.work_id ?? row.id),

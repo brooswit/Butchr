@@ -2,7 +2,6 @@
 // is a git repository. Task branches/worktrees are named by task ID.
 import {
   existsSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -1694,34 +1693,6 @@ export async function cleanup(dir: string, taskId: string): Promise<void> {
     await run([git, "-C", dir, "worktree", "remove", "--force", path]);
   }
   await run([git, "-C", dir, "branch", "-D", taskId]);
-}
-
-/**
- * CREATE a brand-new git repo at `path` — the first WRITE-side git op butchr owns (every
- * other helper here only reads or mutates an EXISTING managed repo). Used by the CEO's
- * create-new-repo primitive (workspaces.createRepoUnderProject): butchr materializes the repo
- * on disk so the standard register path (which 400s a non-git dir via isGitRepo) can then adopt
- * it. Idempotent-friendly and safe on an empty dir; the caller guards a non-empty existing path.
- *
- * Steps, in order so branching + durability have a real base:
- *  1. `mkdir -p path` — create the directory tree if absent.
- *  2. `git init -b main path` — initialize with `main` as the initial branch so defaultBranch()
- *     resolves cleanly without falling back.
- *  3. setGitDurability + ensureGitignore — harden object writes and drop a `.gitignore` carrying
- *     `.butchr/`, which also gives the root commit real (non-empty) content so we needn't rely on
- *     `--allow-empty`.
- *  4. `git add -A` + an initial ROOT commit — a base commit so task/story branches have somewhere
- *     to fork from. Uses the ambient git user config like every other butchr commit.
- *
- * Throws (via runOrThrow) if init/commit fails — the caller treats a failed create as a hard error.
- */
-export async function initRepo(path: string): Promise<void> {
-  mkdirSync(path, { recursive: true });
-  await runOrThrow([git, "init", "-b", "main", path]);
-  await setGitDurability(path);
-  ensureGitignore(path);
-  await runOrThrow([git, "-C", path, "add", "-A"]);
-  await runOrThrow([git, "-C", path, "commit", "-m", "butchr: initialize repository"]);
 }
 
 /** Ensure `.butchr/` is gitignored in the workspace root. */

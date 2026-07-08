@@ -1935,32 +1935,34 @@ export function assertWorkspaceTaskCreationAllowed(kind: TaskKind): void {
  *
  * and each tier may create/seed EXACTLY the artifacts at the tier ONE LEVEL BELOW its own
  * container; reaching deeper must be DELEGATED down the ladder. This encodes that rule as data so
- * the NEW CEO directive surface is gated by the SAME principle that already blocks a CTO from
+ * the CEO directive surface is gated by the SAME principle that already blocks a CTO from
  * creating a standalone leaf:
- *   - 'ceo'    (owns a project) → 'repo'      (register/reparent a repo under the project) and
- *                                 'directive' (RFC Q1/Q6 B1 — land a CEO DIRECTIVE into a member repo
- *                                              for its CTO to accept & decompose; the CEO no longer
- *                                              forges the story itself).
+ *   - 'ceo'    (owns a project) → 'directive' (RFC Q1/Q6 B1 — land a CEO DIRECTIVE into a member repo
+ *                                 for its CTO to accept & decompose; the CEO no longer forges the
+ *                                 story itself). The CEO DIRECTS work over the project's members; it
+ *                                 does NOT create or register repos — repos are USER-added via the
+ *                                 register-EXISTING flow (POST /api/projects/:id/repos + /workspaces),
+ *                                 which is adoption, not creation, and carries no creation-authority gate.
  *   - 'cto'    (owns a repo)    → 'story' (createStory — incl. accepting a directive). The one direct
  *                                 LEAF a repo admits is a 'rollback', gated separately by
  *                                 assertWorkspaceTaskCreationAllowed.
  *   - 'leader' (owns a story)   → 'subtask' (createSubtask — a leaf).
  * Anything else is refused: a CEO may NOT create a 'story' or a build 'subtask' leaf directly (it
- * DELEGATES via a directive), a CTO may NOT create a 'project' or register 'repo's, a leader may NOT
- * create a 'story'/'project', etc.
+ * DELEGATES via a directive) and may NOT create/register a 'repo' (that is a USER action), a CTO may
+ * NOT create a 'project' or register 'repo's, a leader may NOT create a 'story'/'project', etc.
  *
  * PURE + exported so the rule is unit-testable without the HTTP server (mirrors
  * assertWorkspaceTaskCreationAllowed / csrfGuard). Throws HttpError(403) when the tier may not
- * create the target; returns for an allowed pair. This is CONSULTED BY the NEW CEO endpoints only
- * (POST /api/projects/:id/repos + /initiatives); the existing operator/CTO/leader creation paths
- * are UNCHANGED (byte-identical) — this adds authority for the new surface without re-gating any
- * landed path.
+ * create the target; returns for an allowed pair. This is CONSULTED BY the CEO initiative endpoints
+ * (POST /api/projects/:id/initiatives — the directive surface); the register-EXISTING repo routes
+ * are adoption (no creation gate), and the existing operator/CTO/leader creation paths are
+ * UNCHANGED.
  */
 export type SupervisorTier = "ceo" | "cto" | "leader";
 export type CreatableArtifact = "project" | "repo" | "directive" | "story" | "subtask";
 
 const CREATION_AUTHORITY: Record<SupervisorTier, ReadonlySet<CreatableArtifact>> = {
-  ceo: new Set<CreatableArtifact>(["repo", "directive"]),
+  ceo: new Set<CreatableArtifact>(["directive"]),
   cto: new Set<CreatableArtifact>(["story"]),
   leader: new Set<CreatableArtifact>(["subtask"]),
 };

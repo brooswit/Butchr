@@ -3,9 +3,10 @@
 // canonical LIBRARY-EXTRACTION scenario over its REST surface. This is the one runnable validation
 // the RFC is judged by — it exercises the FULL plumbing built across phases A1→C1, in order:
 //
-//   (a) CREATE-NEW-REPOS (Phase A2 / Q2): the CEO stands up 2 fresh library repos under
-//       config.reposRoot — POST /api/projects/:id/repos/create → real `git init` on disk, each
-//       registered + parented under the project.
+//   (a) MEMBER REPOS ADDED BY THE USER: 2 fresh library repos are `git init`ed on disk (as the USER
+//       does) and registered under the project via the register-EXISTING flow
+//       (registerWorkspaceUnderProject). The CEO does NOT provision repos — repos are USER-added; the
+//       CEO then DIRECTS work over the members. (Repo-CREATION was walked back — story st-576b459f.)
 //   (b) DIRECTIVE FAN-OUT (Phase B1 / Q1): the CEO fans ONE directive-based initiative across all
 //       three member repos (the 2 new libs + the source repo) — POST /api/projects/:id/initiatives
 //       with a {targets:[…]} body → one `directive` LEAF per repo, all sharing one initiative id,
@@ -27,11 +28,12 @@
 // merge-driven unblock sweep is invoked in-process (reevaluateAllBlocked) since no dispatcher runs
 // under test; landing a story `done` uses the service transition (updateStory) exactly as the
 // sibling suites (revamp4-cross-repo-initiative / initiative-review) do. Everything is hermetic:
-// a temp BUTCHR_DATA_DIR/BUTCHR_DB + temp config.reposRoot + injected git identity + afterAll
+// a temp BUTCHR_DATA_DIR/BUTCHR_DB + a temp repos dir + injected git identity + afterAll
 // cleanup — fully isolated from any live state, no network, no registry publish (sequence-on-MERGE
 // only). Mirrors the style of test/revamp4-cross-repo-initiative.test.ts and bin/butchr selftest.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -95,6 +97,18 @@ function seedMergedSubtask(dir: string, storyId: string, summary: string, sha: s
   return id;
 }
 
+/** Stand up a real git repo on disk at `path` (as the USER would before registering it): a
+ *  `main`-branch repo with a root commit so it passes isGitRepo + resolves defaultBranch cleanly. */
+function gitInitAt(path: string): void {
+  mkdirSync(path, { recursive: true });
+  execFileSync("git", ["init", "-q", "-b", "main", path], { stdio: "ignore" });
+  execFileSync("git", ["-C", path, "config", "user.email", "t@butchr.local"], { stdio: "ignore" });
+  execFileSync("git", ["-C", path, "config", "user.name", "butchr test"], { stdio: "ignore" });
+  execFileSync("git", ["-C", path, "commit", "--allow-empty", "-q", "-m", "init"], {
+    stdio: "ignore",
+  });
+}
+
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-ns-"));
   REPOS_ROOT = join(DATA_DIR, "repos");
@@ -115,11 +129,11 @@ beforeAll(async () => {
   workspacesMod = await import("../src/workspaces.ts");
   storiesMod = await import("../src/stories.ts");
   serverMod = await import("../src/server.ts");
-  // config is a singleton locked at first import — pin the mutable fields for this run: an ephemeral
-  // port and a temp reposRoot (BUTCHR_REPOS_ROOT may be stale in a shared suite run).
+  // config is a singleton locked at first import — pin the ephemeral port for this run (BUTCHR_PORT
+  // may be stale in a shared suite run). The library repos are git-init'ed under REPOS_ROOT, a plain
+  // temp dir, by the USER-style setup below (butchr no longer provisions repos).
   const { config } = await import("../src/config.ts");
   config.port = 0;
-  config.reposRoot = REPOS_ROOT;
 
   // The SOURCE repo: a dedicated directory row + its repo node, anchored + registered as a PROJECT
   // member. (No git needed — nothing merges here; the leaders are no-ops and the library repos are
@@ -141,23 +155,26 @@ afterAll(() => {
 });
 
 describe("NORTH STAR — the CEO operating model runs the library-extraction scenario end-to-end", () => {
-  test("create-repos → directive fan-out → accept → cross-repo sequencing → cross-repo review", async () => {
-    // ---- (a) CREATE-NEW-REPOS (Phase A2): the CEO stands up two fresh library repos ------------
-    const libRepos: Record<string, string> = {}; // label → workspace id
+  test("user-added repos → directive fan-out → accept → cross-repo sequencing → cross-repo review", async () => {
+    // ---- (a) MEMBER REPOS ADDED BY THE USER: two library repos git-init'ed on disk, then --------
+    // registered under the project via the register-EXISTING flow. The CEO does NOT provision repos;
+    // the USER stands them up and adds them, and the CEO then directs work over the members.
+    const libRepos: Record<string, string> = {}; // name → workspace id
     for (const [name, label] of [
       ["libcore", "Lib Core"],
       ["libutil", "Lib Util"],
     ] as const) {
-      const { status, body } = await post(`/api/projects/${PROJ}/repos/create`, { name, label });
-      expect(status).toBe(201);
       const path = join(REPOS_ROOT, name);
-      expect(body.path).toBe(path);
+      gitInitAt(path); // the USER stands up a real repo on disk
       expect(existsSync(path)).toBe(true);
       expect(await gitMod.isGitRepo(path)).toBe(true); // a REAL git repo on disk
       expect(await gitMod.defaultBranch(path)).toBe("main");
+      // The USER registers it under the project (register-EXISTING = adoption, not creation).
+      const view = await workspacesMod.registerWorkspaceUnderProject(PROJ, path, label);
+      expect(view.path).toBe(path);
       // Registered + parented under the project (a member the CEO can now direct).
-      expect(workspacesMod.getRepoNode(body.id)!.parent_id).toBe(PROJ);
-      libRepos[name] = body.id;
+      expect(workspacesMod.getRepoNode(view.id)!.parent_id).toBe(PROJ);
+      libRepos[name] = view.id;
     }
     const LIB1 = libRepos.libcore!;
     const LIB2 = libRepos.libutil!;
