@@ -44,3 +44,17 @@ export function fmtPct(rate) {
   const pct = rate * 100;
   return (pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)) + "%";
 }
+
+// A compact title derived from the project's brief (a project node has no short-title
+// field). Splits on the first sentence/clause boundary and clamps length. Mirrors the
+// mockup's projectTitle so the real UI reads identically.
+//
+// It lives with the formatters, not with the projects code in app.js, because it has
+// callers in TWO modules: app.js's projects overview/detail surfaces AND views/workspace.js's
+// breadcrumb (which names the parent project). A view may never import app.js, and copying it
+// would be a defect — so the shared derivation sits in this leaf.
+export function projectTitle(p) {
+  const t = String((p && p.brief) || "").split(/[—\-:.]/)[0].trim();
+  if (!t) return "Untitled project";
+  return t.length > 60 ? t.slice(0, 57) + "…" : t;
+}

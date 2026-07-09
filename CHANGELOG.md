@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Front-end module split (RFC Phase 2): the WORKSPACE view moved out of `public/app.js` into a new
+  `public/views/workspace.js` — `renderWorkspace` plus its private helpers (the `queueLine` launcher
+  summary, the New-story brief modal, and the live activity-pulse poller with its module-scope timer
+  and cache). It is the last of the three big views; only the projects/CEO surfaces remain inline in
+  `app.js`. `renderRoute` imports `renderWorkspace` / `stopActivity` back.
+- The per-workspace CTO-agent card (`ctoState` + `ctoPanel`) moved out of `public/app.js` into a new
+  `public/components/cto-panel.js`. It is a shared leaf, not a view's private helper, so it belongs
+  under `components/` where the workspace view (and any future caller) can import it.
+- `projectTitle` moved from `public/app.js` into `public/core/format.js`. It now has callers in two
+  modules — the projects overview/detail surfaces in `app.js` and the workspace view's breadcrumb —
+  and a view may never import `app.js`, so the shared derivation lives in a leaf.
+
+  A pure move throughout: no behaviour change, the workspace page renders identically. None of the
+  new modules import `app.js` — that cycle stays closed.
+
 ## [0.9.261] - 2026-07-09
 
 ### Changed

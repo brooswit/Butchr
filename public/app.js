@@ -12,8 +12,11 @@
 // local const, which would snapshot the empty pre-load value and silently break every
 // status chip.
 import { el, esc } from "./core/dom.js";
-// fmtBytes/fmtPct left with the metrics view — they had no other caller in this file.
-import { fmtDuration, fmtTime } from "./core/format.js";
+// fmtBytes/fmtPct left with the metrics view; fmtDuration went with the workspace view's
+// activity pulse and fmtTime with the CTO panel — neither has another caller in this file.
+// projectTitle is a SHARED leaf: the projects surfaces below and views/workspace.js's
+// breadcrumb both derive a project's display name from it.
+import { projectTitle } from "./core/format.js";
 import { api, terminalToast, toast } from "./core/api.js";
 // FILTER_STATUSES is no longer imported here: its only consumer was dirCard's count-pill row,
 // which died with the unreachable dashboard surface. TERMINAL_STATUSES / statusLabel left with
@@ -22,11 +25,13 @@ import { loadStateMeta, stateMetaLoaded } from "./core/state-meta.js";
 // `components/` holds the presentational leaves — DOM-free at load, importing only from
 // `core/` and from each other. chips.js owns the CHIP + BADGE cluster (status/kind/tag/
 // liveness pills); panel.js the collapsible scaffold + the containers and gate badges built
-// on it; overlay.js the modal scaffold + the directory picker. Nothing under components/
+// on it; overlay.js the modal scaffold + the directory picker; cto-panel.js the per-workspace
+// CTO-agent card (a shared leaf, not a view's private helper). Nothing under components/
 // imports THIS file — that cycle is the one thing the split must never close.
 // panel.js is no longer imported here at all: its whole cluster (block/blockerRow/ciBadge/
-// collapsible/conformanceBadge/listPanel/rollupPanel) went with the task view.
-import { chip, effStatus, kindBadge } from "./components/chips.js";
+// collapsible/conformanceBadge/listPanel/rollupPanel) went with the task view. effStatus went
+// with the workspace view's queueLine.
+import { chip, kindBadge } from "./components/chips.js";
 import { openModal, openPicker } from "./components/overlay.js";
 // nav.js owns the `#app` mount point, hash navigation, and the re-render handle. The route
 // DISPATCHER still lives here (renderRoute, below); app.js registers it via setRenderer() so
@@ -35,112 +40,26 @@ import { openModal, openPicker } from "./components/overlay.js";
 import { mount, render, setRenderer } from "./core/nav.js";
 // action() lives under core/ because it only needs `render` from the nav leaf above — never
 // app.js. work-graph.js holds the pure, DOM-free work-list/dependency-graph leaves the task,
-// workspace, and pipeline views all share.
+// workspace, and pipeline views all share — no longer imported HERE, only by those views.
 import { action } from "./core/action.js";
-import { pruneWorkCaches, workLeaves, workListPath } from "./core/work-graph.js";
 // `views/` holds one module per route: each owns its fetch → build → mount() entry point and
-// imports only leaves. metrics.js is the first (RFC Phase 2); the rest follow. task.js is the
-// task detail / review page: renderRoute dispatches to its renderTask, and clears its live-output
-// poll timer via stopLiveOutput on every route change. diff.js is the task page's diff reader
-// (parse + highlight + inline review comments) — not a route of its own; renderTask (now in
-// task.js) is its only caller, so only setPendingInlineRestore is imported here: it is the SSE
-// path's one write into diff.js's state, and an imported `let` cannot be assigned, so the owning
-// module exports a setter instead.
-// swimlanes.js is the workspace body's Pipeline view; its SWIM_DONE_EXPANDED is the module state
-// renderWorkspace prunes against the live work-id set (the view owns it; app.js only bounds it).
+// imports only leaves. With the workspace view extracted, ALL THREE big views now live here —
+// metrics.js, task.js, workspace.js — and only the projects/CEO surfaces remain inline below.
+// task.js is the task detail / review page: renderRoute dispatches to its renderTask, and clears
+// its live-output poll timer via stopLiveOutput on every route change. workspace.js is a repo's
+// page: renderRoute dispatches to its renderWorkspace and clears its activity-pulse poll timer
+// via stopActivity on every route change (renderWorkspace restarts it itself after mount).
+// swimlanes.js is the workspace body's Pipeline view — imported by workspace.js, not here.
+// diff.js is the task page's diff reader (parse + highlight + inline review comments) — not a
+// route of its own; renderTask (now in task.js) is its only caller, so only setPendingInlineRestore
+// is imported here: it is the SSE path's one write into diff.js's state, and an imported `let`
+// cannot be assigned, so the owning module exports a setter instead.
 import { renderMetrics } from "./views/metrics.js";
-import { SWIM_DONE_EXPANDED, renderSwimlanes } from "./views/swimlanes.js";
 import { renderTask, stopLiveOutput } from "./views/task.js";
+import { renderWorkspace, stopActivity } from "./views/workspace.js";
 import { setPendingInlineRestore } from "./views/diff.js";
 
 setRenderer(renderRoute); // hoisted function declaration — safe to register before its body appears
-
-// ---------- managed CTO agent (PER-WORKSPACE) ----------
-// The CTO agent's tri-state status, mapped from running/desired to a display label
-// and the matching cto-badge CSS class. Used by the workspace panel (its dashboard-card
-// mini-badge counterpart went with the dashboard).
-function ctoState(s) {
-  return {
-    state: s.running ? "running" : (s.desired ? "starting…" : "stopped"),
-    cls: s.running ? "ok" : (s.desired ? "warn" : "off"),
-  };
-}
-
-// Each workspace runs its OWN CTO agent (in that repo's root — its principal/dev
-// agent). This panel renders that workspace's CTO agent: a status line (running/
-// stopped, session, since, restarts) plus controls — Open CTO terminal (reuses the
-// workspace-agent attach), Enable/Start/Stop, Restart, and Restart fresh (a brand-new
-// session) — all scoped to `dirId` via /api/workspaces/:id/cto/*.
-async function ctoPanel(dirId) {
-  const base = "/workspaces/" + dirId + "/cto";
-  let s;
-  try {
-    s = await api("GET", base);
-  } catch {
-    return el("div", { class: "panel cto-card stacked" },
-      el("small", { class: "muted" }, "CTO agent status unavailable"));
-  }
-  const card = el("div", { class: "panel cto-card stacked" });
-  const { state, cls: stateCls } = ctoState(s);
-  const bits = [];
-  if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
-  if (s.since) bits.push(`since ${fmtTime(s.since)}`);
-  if (s.restarts) bits.push(`${s.restarts} restart${s.restarts === 1 ? "" : "s"}`);
-  if (!s.enabled) bits.push("auto-start disabled");
-  card.innerHTML = `
-    <div class="row between">
-      <div>
-        <h2>${kindBadge("cto")} CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
-        <div class="meta">${bits.map(esc).join(" · ") || "not started"}</div>
-        ${s.lastError ? `<div class="meta err">last error: ${esc(s.lastError)}</div>` : ""}
-      </div>
-      <div class="row cto-controls"></div>
-    </div>`;
-  const controls = card.querySelector(".cto-controls");
-  const btn = (label, cls, fn) => {
-    const b = el("button", { class: "btn " + cls }, label);
-    b.addEventListener("click", async () => {
-      b.disabled = true;
-      try { await fn(); } catch (e) { toast(e.message || "failed", true); }
-      finally { b.disabled = false; render(); }
-    });
-    return b;
-  };
-  if (s.running) {
-    controls.appendChild(btn("Open CTO terminal", "", async () => {
-      const r = await api("POST", base + "/terminal");
-      terminalToast(r);
-    }));
-  }
-  if (s.running || s.desired) {
-    controls.appendChild(btn("Restart", "ghost", async () => {
-      await api("POST", base + "/restart");
-      toast("CTO agent restarting (resuming session)");
-    }));
-    controls.appendChild(btn("Restart fresh", "ghost", async () => {
-      await api("POST", base + "/restart?fresh=1");
-      toast("CTO agent restarting with a fresh session");
-    }));
-    controls.appendChild(btn("Stop", "ghost danger-outline", async () => {
-      await api("POST", base + "/stop");
-      toast("CTO agent stopped");
-    }));
-  } else {
-    controls.appendChild(btn("Start", "", async () => {
-      await api("POST", base + "/start");
-      toast("CTO agent starting");
-    }));
-    // Opt the workspace into boot auto-start + supervision, and start it now.
-    if (!s.enabled) {
-      controls.appendChild(btn("Enable", "ghost", async () => {
-        await api("PATCH", "/workspaces/" + dirId, { cto_enabled: true });
-        await api("POST", base + "/start");
-        toast("CTO agent enabled + starting");
-      }));
-    }
-  }
-  return card;
-}
 
 // ---------- router ----------
 // Returns the parsed route, or NULL for a hash this app does not recognize. A null route is not
@@ -168,65 +87,6 @@ function parseHash() {
   if (parts[0] === "workspace") return { name: "workspace", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
   return null; // unknown hash → renderRoute redirects to the Projects overview
-}
-
-// ---------- live activity pulse ----------
-// A read-only one-line "what is the agent doing right now" on each running task's
-// card/row, polled from GET /api/work/:id/activity (which reads only the tail of
-// the session transcript). The workspace view re-renders wholesale on every SSE
-// event, which destroys+rebuilds the pulse nodes; this timer is module-scope and
-// re-discovers the live `.pulse[data-id]` nodes each tick, and `activityCache`
-// survives re-renders so a rebuild repaints the last-known action without flashing
-// empty. render() stops it up front; renderWorkspace restarts it after mount.
-let activityTimer = null;
-const activityCache = new Map(); // task id -> { lastAction, lastAt, elapsedMs }
-function stopActivity() {
-  if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
-}
-
-function applyPulse(node, a) {
-  const actionEl = node.querySelector(".pulse-action");
-  if (actionEl) {
-    if (a && a.lastAction) actionEl.textContent = a.lastAction;
-    else actionEl.innerHTML = `<span class="muted">waiting for activity…</span>`;
-  }
-}
-
-// Locally-ticked "elapsed since started" (computed from data-started so it advances
-// between polls without a round-trip). Falls back to the server's elapsedMs only via
-// the action poll; here we just keep the displayed duration fresh and cheap.
-function tickPulseElapsed(node) {
-  const elapsedEl = node.querySelector(".pulse-elapsed");
-  if (!elapsedEl) return;
-  const started = node.getAttribute("data-started");
-  const ms = started ? Date.now() - Date.parse(started) : NaN;
-  elapsedEl.textContent = isFinite(ms) && ms >= 0 ? "· " + fmtDuration(ms) : "";
-}
-
-async function pollActivity() {
-  const nodes = Array.from(document.querySelectorAll(".pulse[data-id]"));
-  if (!nodes.length) { stopActivity(); return; }
-  for (const node of nodes) {
-    tickPulseElapsed(node);
-    const cached = activityCache.get(node.getAttribute("data-id"));
-    if (cached) applyPulse(node, cached); // repaint cache first (avoids flashing empty)
-  }
-  await Promise.all(nodes.map(async (node) => {
-    const id = node.getAttribute("data-id");
-    try {
-      const a = await api("GET", "/work/" + id + "/activity");
-      activityCache.set(id, a);
-      applyPulse(node, a);
-      tickPulseElapsed(node);
-    } catch (e) { /* best-effort — leave the last-known pulse in place */ }
-  }));
-}
-
-function startActivity() {
-  stopActivity();
-  if (!document.querySelector(".pulse[data-id]")) return;
-  pollActivity();
-  activityTimer = setInterval(pollActivity, 2500);
 }
 
 // Map a flat workspace/repo id to the PROJECT that owns it, for the legacy `#/workspace/:wid`
@@ -291,177 +151,6 @@ async function renderRoute() {
   }
 }
 
-// ---------- workspace view ----------
-async function renderWorkspace(id, projectId) {
-  // Pull the workspace from the dashboard rollup (it carries the effective gate
-  // command + override state the gate panel needs) alongside its task list.
-  const [dash, work] = await Promise.all([
-    api("GET", "/dashboard"),
-    // The UNIFIED work list for this workspace (leaf tasks + node stories — see workListPath).
-    // Best-effort: a failure leaves both surfaces empty rather than blanking the page.
-    api("GET", workListPath(id)).catch(() => []),
-  ]);
-  // The leaf (task) members of the leaf|node union — used only for the launcher's one-line
-  // queue summary below (queueLine). The Pipeline view consumes the full union directly.
-  const tasks = workLeaves(work);
-  // Bound the long-lived module caches against this render's live work-id set (nodes + leaves),
-  // dropping entries for work that has left the list so neither grows unbounded over a session:
-  // the Pipeline view's expanded-done piles (keyed by story id) and the activity pulse cache.
-  const liveWorkIds = new Set((Array.isArray(work) ? work : []).map((w) => w && w.id).filter(Boolean));
-  pruneWorkCaches(liveWorkIds, SWIM_DONE_EXPANDED, activityCache);
-  const dir = dash.workspaces.find((x) => x.id === id);
-  if (!dir) return mount(el("div", { class: "empty" }, "workspace not found"));
-
-  // When reached through the nested project route (`#/projects/:pid/workspaces/:wid`), resolve
-  // the parent project's display name for the breadcrumb back-link. Best-effort and DERIVED FROM
-  // THE URL's projectId (not click-set state) so a cold load / paste-the-URL / SSE re-render works
-  // identically; a lookup miss falls back to the id so the crumb never blanks or crashes.
-  let projectName = projectId;
-  if (projectId) {
-    try {
-      const p = await api("GET", "/projects/" + encodeURIComponent(projectId));
-      projectName = projectTitle(p) || projectId;
-    } catch (e) { /* keep the id fallback */ }
-  }
-
-  const wrap = el("div");
-  const crumbsHtml = projectId
-    ? `<a href="#/projects">Projects</a> / <a href="#/projects/${esc(projectId)}">${esc(projectName)}</a> / <span aria-current="page">${esc(dir.label || dir.path)}</span>`
-    : `<a href="#/projects">Projects</a> / <span aria-current="page">${esc(dir.label || dir.path)}</span>`;
-  wrap.appendChild(el("div", { class: "crumbs", html: crumbsHtml }));
-  wrap.appendChild(el("h1", {}, dir.label || dir.path));
-  wrap.appendChild(el("div", { class: "path" }, dir.path));
-
-  // This workspace's managed CTO agent (its principal/dev agent, running in the repo
-  // root) — status + Start/Stop/Restart/Enable + Open-CTO-terminal, scoped to this
-  // workspace. Rendered at the TOP of the workspace view (above the Pipeline) so the
-  // operator reaches the CTO controls without scrolling past the swimlanes. Best-effort:
-  // rendered async so a status-probe hiccup never blocks the page — the placeholder slot
-  // appends synchronously and the panel swaps in once it resolves.
-  const ctoSlot = el("div");
-  wrap.appendChild(ctoSlot);
-  ctoPanel(id).then((panel) => ctoSlot.replaceWith(panel)).catch(() => {});
-
-  // create-work launcher (AUTHORITY FLIP, Phase 7) — the operator's entry point for new
-  // work is now a STORY, not a standalone task. A single "New story" button opens the
-  // brief modal (POST /api/workspaces/:id/work); a story leader then decomposes it into
-  // subtasks. Standalone task + idea creation are gone (the server rejects them) — the only
-  // task creatable directly is a rollback, via the per-task "Roll back" button.
-  // Rendered UNDER the CTO panel (above the Pipeline) so the CTO controls stay at the top.
-  const launch = el("div", { class: "row between stacked" });
-  launch.appendChild(el("small", { class: "muted" },
-    `New work is a STORY — a leader decomposes it into subtasks. ${queueLine(tasks)}`));
-  const newStoryBtn = el("button", { class: "btn", id: "new-story" }, "New story");
-  newStoryBtn.addEventListener("click", () => openNewStoryModal(id));
-  launch.appendChild(newStoryBtn);
-  wrap.appendChild(launch);
-
-  // The workspace body is the Pipeline (swimlanes) view — the sole work view. It shows ALL
-  // work (stories as lanes, their subtasks as the pipeline within each lane) and re-renders
-  // wholesale on every SSE event, so it live-updates with no view-mode state to persist.
-  const body = el("div", { class: "ws-body" });
-  body.appendChild(el("h2", {}, "Pipeline"));
-  body.appendChild(renderSwimlanes(work));
-  wrap.appendChild(body);
-
-  // (The gate is now the repo's own `./scripts/ci` — butchr carries zero gate config — so
-  // there is no per-workspace gate-command panel here anymore.)
-  // (Responder routing is now STRUCTURAL — per-task pending_responder, not per-workspace
-  // config — so there is no step-responder config panel here anymore.)
-
-  // danger zone
-  const dz = el("div", { class: "row ws-danger-zone" });
-  const del = el("button", { class: "btn ghost" }, "Unregister workspace");
-  del.addEventListener("click", async () => {
-    if (!confirm("Unregister this workspace? Non-merged worktrees will be removed.")) return;
-    try {
-      await api("DELETE", "/workspaces/" + id);
-      toast("workspace unregistered");
-      location.hash = "#/";
-    } catch (e) { toast(e.message, true); }
-  });
-  dz.appendChild(del);
-  wrap.appendChild(dz);
-
-  mount(wrap);
-  // Begin polling the live activity pulse for any running task cards now in the DOM.
-  startActivity();
-}
-
-// ---------- stories panel + new-story modal (AUTHORITY FLIP, Phase 7) ----------
-// New work is a STORY, not a standalone task: the operator creates a story (a one-line
-// brief) and a managed story-LEADER agent decomposes it into the subtasks. So the old
-// New-task / Add-idea modals are gone — the server now REJECTS standalone task creation
-// (only a rollback may be created directly, via the per-task "Roll back" button). Two
-// surfaces replace them: a minimal "New story" modal, and a read-only stories list/progress
-// panel built from the node members of the GET /api/work list (brief + status + per-status
-// subtask counts + leader status), so the operator isn't blind to the stories they just created.
-
-// The brief modal: jot a one-line story brief and POST it to /api/workspaces/:id/work.
-// butchr lands the story `open` and launches its leader (which creates + reviews the
-// subtasks); the new story surfaces via the SSE-driven re-render.
-function openNewStoryModal(workspaceId) {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML = `
-    <label class="field tight">
-      <span class="lbl">story — a one-line brief; a story leader decomposes it into the subtasks needed to deliver it</span>
-      <textarea id="ns-brief" placeholder="Describe the story in a sentence or two…"></textarea>
-    </label>
-    <small class="hint muted">The operator creates STORIES; the leader creates + reviews the tasks. Each story's subtask progress shows below.</small>`;
-  const briefEl = body.querySelector("#ns-brief");
-
-  const foot = el("div", { class: "m-foot" });
-  const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const submit = el("button", { class: "btn" }, "Create story");
-  foot.appendChild(errEl);
-  foot.appendChild(cancel);
-  foot.appendChild(submit);
-
-  const { close } = openModal({ title: "New story", body, footer: foot });
-  cancel.addEventListener("click", close);
-  briefEl.focus();
-
-  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
-
-  submit.addEventListener("click", () => {
-    const brief = briefEl.value.trim();
-    if (!brief) { showErr("Describe the story first."); briefEl.focus(); return; }
-    showErr("");
-    // action(): disables the button, toasts on success/failure, re-enables on error. On
-    // success close + re-render so the new story appears in the panel below.
-    action(submit, () => api("POST", "/workspaces/" + workspaceId + "/work", { brief }),
-      { success: "story created", onDone: () => { close(); render(); } });
-  });
-}
-
-// ---------- unified work list (stories + tasks) ----------
-function queueLine(tasks) {
-  const idea = tasks.filter((t) => t.status === "idea").length;
-  const specRev = tasks.filter((t) => t.status === "spec_review").length;
-  const b = tasks.filter((t) => t.status === "blocked").length;
-  const ni = tasks.filter((t) => t.status === "needs_info").length;
-  const ready = tasks.filter((t) => t.status === "inactive").length;
-  const nui = tasks.filter((t) => effStatus(t) === "needs_user_input").length;
-  const r = tasks.filter((t) => t.status === "in_progress" && !t.idle && !t.needs_user_input).length;
-  const i = tasks.filter((t) => t.status === "in_progress" && t.idle && !t.needs_user_input).length;
-  const inRev = tasks.filter((t) => t.status === "in_review").length;
-  const rb = tasks.filter((t) => t.status === "rolling_back").length;
-  const parts = [];
-  // Surface FIRST — a wedged agent needing a human is the most urgent line.
-  if (nui) parts.push(`${nui} needs your input`);
-  if (r) parts.push(`${r} in progress`);
-  if (i) parts.push(`${i} idle`);
-  if (ready) parts.push(`${ready} ready`);
-  if (rb) parts.push(`${rb} rolling back`);
-  if (inRev) parts.push(`${inRev} in review`);
-  if (specRev) parts.push(`${specRev} spec review`);
-  if (ni) parts.push(`${ni} needs info`);
-  if (b) parts.push(`${b} blocked`);
-  if (idea) parts.push(`${idea} idea`);
-  return parts.length ? parts.join(", ") + "." : "Idle.";
-}
-
 // ---------- topnav active state ----------
 // Highlight the topbar nav link matching the current route. With the flat "Workspaces" top level
 // retired (Hierarchical Projects IA S3), only two nav items remain: Metrics → #/metrics and
@@ -487,15 +176,6 @@ function syncTopnav(route) {
 // project-detail view, repos list, initiative rollup, and the full CEO card land in
 // later subtasks (S3–S5) — so cards are STATIC (no detail-click yet) and show honest
 // muted PLACEHOLDERS ("repos —" / "initiatives —") rather than fake counts.
-
-// A compact title derived from the project's brief (a project node has no short-title
-// field). Splits on the first sentence/clause boundary and clamps length. Mirrors the
-// mockup's projectTitle so the real UI reads identically.
-function projectTitle(p) {
-  const t = String((p && p.brief) || "").split(/[—\-:.]/)[0].trim();
-  if (!t) return "Untitled project";
-  return t.length > 60 ? t.slice(0, 57) + "…" : t;
-}
 
 // CEO status pill derived from the LIST row's `ceo_enabled` ALONE — the overview must
 // not assert a resolved on/off it cannot know. Three-way + honest:
@@ -750,7 +430,7 @@ function projectInitiativeRollup(inits) {
 // </test-extract:initiative-rollup>
 
 // ---------- managed CEO agent (PER-PROJECT, REVAMP-4 P3c) ----------
-// The tier-above analog of ctoPanel (app.js:530): a project node's managed CEO-agent card on
+// The tier-above analog of ctoPanel (components/cto-panel.js): a project node's managed CEO-agent card on
 // the project-detail view. Fed by GET /api/projects/:id/ceo → { enabled, overridden, globalGate,
 // live }, ALL RESOLVED server-side — `enabled` already folds the per-project override vs the
 // global gate, so the pill/toggle-checked state read straight off it (never ceo_enabled alone,
