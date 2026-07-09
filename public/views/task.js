@@ -671,9 +671,11 @@ export async function renderTask(id) {
     wrap.appendChild(el("h2", {}, "Diff vs main"));
     const diffBox = el("div", { class: "diffview" }, [el("div", { class: "meta" }, "loading diff…")]);
     wrap.appendChild(diffBox);
+    // renderDiff returns a DocumentFragment. Attach it FIRST — a fragment's children are
+    // unreachable through diffBox.querySelectorAll until then — and only then wireDiff().
     api("GET", "/work/" + id + "/diff")
-      .then((d) => { diffBox.innerHTML = renderDiff(d.diff); wireDiff(diffBox, id); })
-      .catch((e) => { diffBox.innerHTML = `<div class="meta">diff error: ${esc(e.message)}</div>`; });
+      .then((d) => { diffBox.replaceChildren(renderDiff(d.diff)); wireDiff(diffBox, id); })
+      .catch((e) => { diffBox.replaceChildren(el("div", { class: "meta" }, `diff error: ${e.message}`)); });
 
     const controls = el("div", { class: "panel stacked" });
     controls.innerHTML = `

@@ -2,19 +2,28 @@
 // syntax highlighting, per-file collapse, and the inline review-comment editor. Extracted from
 // app.js (RFC Phase 2, story st-46f1e8d9 S5).
 //
-// It imports only LEAVES — `core/dom.js` for `el`/`esc` — and NOTHING else. In particular it does
+// It imports only LEAVES — `core/dom.js` for `el` — and NOTHING else. In particular it does
 // NOT import core/nav.js: nothing here navigates or re-renders. (The `render` mentioned in the
 // comments below is the app's SSE re-render, which this module survives rather than triggers.)
 // It never imports app.js; see the header of core/nav.js for why that edge is fatal.
+//
+// Everything here builds NODES, never markup strings: renderDiff() returns a DocumentFragment, so
+// escaping is STRUCTURAL (createTextNode cannot be forgotten the way esc() could) and no caller has
+// to trust a string. That is why this module imports no `esc`.
 //
 // DOM-free at module load: the module-level state below is a Map, two Sets, and a null. `document`
 // is touched only inside a CALLED function (updateCommentSummary), so this module is importable
 // under a non-browser runner.
 //
-// Called only by renderTask (still in app.js): renderDiff() builds the markup, wireDiff() wires the
+// Called only by renderTask (views/task.js): renderDiff() builds the nodes, wireDiff() wires the
 // freshly-painted result, composeReviewNote() folds the inline comments into a change-request note.
 // setPendingInlineRestore() is the ONE inbound write — see the comment on pendingInlineRestore.
-import { el, esc } from "../core/dom.js";
+//
+// PAINT AND WIRE ARE SPLIT ON PURPOSE. renderDiff() registers no listeners; wireDiff() queries the
+// LIVE box after the fragment is attached. A DocumentFragment's children are unreachable through
+// `box.querySelectorAll` until then, so the call site must replaceChildren() FIRST and wireDiff()
+// second. The split is also what lets the SSE restore path call wireDiff() on its own.
+import { el } from "../core/dom.js";
 
 // Parse a unified diff into per-file groups for a readable, GitHub-style view.
 // Each non-meta line also carries the source line numbers it maps to (oldNo on the
@@ -86,7 +95,28 @@ const JS_KEYWORDS = new Set(
    "switch,this,throw,true,try,type,typeof,undefined,var,void,while,with,yield").split(","),
 );
 
-function tok(cls, raw) { return `<span class="tok-${cls}">${esc(raw)}</span>`; }
+function tok(cls, raw) { return el("span", { class: `tok-${cls}` }, raw); }
+
+// A line builder for the scanners below. The string version concatenated `esc(c)` ONE CHARACTER AT
+// A TIME for every char the lexer didn't classify; translating that literally would mint a text node
+// per character, and a diff runs to thousands of lines. So unclassified chars accumulate in a plain
+// string `run`, flushed as a SINGLE text node just before each tok span and once at the end. Net:
+// one node per SEGMENT, exactly the granularity the string version rendered.
+function lineBuilder() {
+  const frag = document.createDocumentFragment();
+  let run = "";
+  return {
+    text(s) { run += s; },
+    tok(cls, raw) {
+      if (run) { frag.appendChild(document.createTextNode(run)); run = ""; }
+      frag.appendChild(tok(cls, raw));
+    },
+    done() {
+      if (run) { frag.appendChild(document.createTextNode(run)); run = ""; }
+      return frag;
+    },
+  };
+}
 
 // Scan a quoted string starting at i (text[i] is the quote). Returns the end index
 // (one past the closing quote, or end-of-line if unterminated). Honors backslash
@@ -99,134 +129,171 @@ function scanString(text, i) {
 }
 
 function highlightJs(text) {
-  let out = "", i = 0;
+  const out = lineBuilder();
+  let i = 0;
   const n = text.length;
   while (i < n) {
     const c = text[i];
-    if (c === "/" && text[i + 1] === "/") { out += tok("c", text.slice(i)); break; }
+    if (c === "/" && text[i + 1] === "/") { out.tok("c", text.slice(i)); break; }
     if (c === "/" && text[i + 1] === "*") {
       const end = text.indexOf("*/", i + 2);
       const stop = end === -1 ? n : end + 2;
-      out += tok("c", text.slice(i, stop)); i = stop; continue;
+      out.tok("c", text.slice(i, stop)); i = stop; continue;
     }
     if (c === '"' || c === "'" || c === "`") {
       const stop = scanString(text, i);
-      out += tok("s", text.slice(i, stop)); i = stop; continue;
+      out.tok("s", text.slice(i, stop)); i = stop; continue;
     }
     if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(text[i + 1] || ""))) {
       let j = i + 1;
       while (j < n && /[0-9a-fA-Fx._]/.test(text[j])) j++;
-      out += tok("n", text.slice(i, j)); i = j; continue;
+      out.tok("n", text.slice(i, j)); i = j; continue;
     }
     if (/[A-Za-z_$]/.test(c)) {
       let j = i + 1;
       while (j < n && /[A-Za-z0-9_$]/.test(text[j])) j++;
       const word = text.slice(i, j);
-      out += JS_KEYWORDS.has(word) ? tok("k", word) : esc(word);
+      if (JS_KEYWORDS.has(word)) out.tok("k", word); else out.text(word);
       i = j; continue;
     }
-    out += esc(c); i++;
+    out.text(c); i++;
   }
-  return out;
+  return out.done();
 }
 
 function highlightCss(text) {
-  let out = "", i = 0;
+  const out = lineBuilder();
+  let i = 0;
   const n = text.length;
   while (i < n) {
     const c = text[i];
     if (c === "/" && text[i + 1] === "*") {
       const end = text.indexOf("*/", i + 2);
       const stop = end === -1 ? n : end + 2;
-      out += tok("c", text.slice(i, stop)); i = stop; continue;
+      out.tok("c", text.slice(i, stop)); i = stop; continue;
     }
     if (c === '"' || c === "'") {
       const stop = scanString(text, i);
-      out += tok("s", text.slice(i, stop)); i = stop; continue;
+      out.tok("s", text.slice(i, stop)); i = stop; continue;
     }
     if (c === "@") { // at-rule (@media, @keyframes, …)
       let j = i + 1;
       while (j < n && /[A-Za-z-]/.test(text[j])) j++;
-      out += tok("k", text.slice(i, j)); i = j; continue;
+      out.tok("k", text.slice(i, j)); i = j; continue;
     }
     if (c === "#") { // hex color (#fff / #ffffff / #ffffffff)
       let j = i + 1;
       while (j < n && /[0-9A-Fa-f]/.test(text[j])) j++;
       const span = text.slice(i, j);
       if (/^#([0-9A-Fa-f]{3,4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(span)) {
-        out += tok("n", span); i = j; continue;
+        out.tok("n", span); i = j; continue;
       }
-      out += esc(c); i++; continue;
+      out.text(c); i++; continue;
     }
     if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(text[i + 1] || ""))) {
       let j = i + 1;
       while (j < n && /[0-9a-zA-Z%._-]/.test(text[j])) j++; // number + unit (px, em, %, …)
-      out += tok("n", text.slice(i, j)); i = j; continue;
+      out.tok("n", text.slice(i, j)); i = j; continue;
     }
-    out += esc(c); i++;
+    out.text(c); i++;
   }
-  return out;
+  return out.done();
 }
 
-// Highlight one line of code → escaped HTML with <span class="tok-*"> wrappers.
-// Unknown languages (lang null) and any scanner failure fall back to plain esc().
+// Highlight one line of code → a DocumentFragment of text nodes and <span class="tok-*"> wrappers.
+// Unknown languages (lang null) and any scanner failure fall back to ONE plain text node — which is
+// precisely where esc() stopped being needed: createTextNode escapes structurally, so a `<` or `&`
+// in the source lands in the DOM as itself and can never be re-parsed as markup.
 function highlightCode(text, lang) {
-  if (!text) return "";
+  if (!text) return document.createDocumentFragment();
   try {
     if (lang === "js") return highlightJs(text);
     if (lang === "css") return highlightCss(text);
   } catch (e) { /* fall through to plain text */ }
-  return esc(text);
+  return document.createTextNode(text);
 }
 
+// Build one diff line row: the gutter number, the +/−/space sign, and the (possibly
+// highlighted) text. Registers no listeners — wireDiff() does that against the live DOM.
+function renderLine(l, name, lang) {
+  if (l.t === "hunk" || l.t === "meta") {
+    // `.dl` is `white-space: pre`, so the hunk header's EMPTY sign and the meta line's
+    // single-space sign are a real rendered difference. Keep both verbatim.
+    return el("div", { class: `dl ${l.t === "hunk" ? "hunk" : "ctx meta"}` }, [
+      el("span", { class: "dl-num" }),
+      el("span", { class: "dl-sign" }, l.t === "hunk" ? [] : " "),
+      el("span", { class: "dl-text" }, l.text),
+    ]);
+  }
+  const sign = l.t === "add" ? "+" : l.t === "del" ? "−" : " ";
+  const text = l.t === "add" || l.t === "del" ? l.text.slice(1) : l.text;
+  // Comment anchor: deletions reference the pre-image line, everything else
+  // the post-image line. The key (path + side + line) is stable across diff
+  // re-fetches, so stored inline comments re-attach after an SSE re-render.
+  const lineNo = l.t === "del" ? l.oldNo : l.newNo;
+  const side = l.t === "del" ? "o" : "n";
+  const key = `${name}␟${side}${lineNo}`;
+  const ctx = `${name}:${lineNo}`;
+  return el("div", { class: `dl ${l.t}`, "data-key": key, "data-ctx": ctx }, [
+    el("span", { class: "dl-num", title: `comment on ${ctx}` }, String(lineNo)),
+    el("span", { class: "dl-sign" }, sign),
+    el("span", { class: "dl-text" }, highlightCode(text, lang)),
+  ]);
+}
+
+// Build one file card. The body is assembled into a DETACHED fragment and appended once, so a
+// thousand-line file costs one insertion into the card, not one per line, and nothing reads
+// layout mid-build.
+function renderFileCard(f) {
+  const name = f.path || f.oldPath || "(unknown)";
+  const lang = langForPath(name);
+  const body = el("div", { class: "diff-file-body" });
+  if (f.binary) {
+    body.appendChild(el("div", { class: "diff-binary" }, "Binary file not shown"));
+  } else {
+    const lines = document.createDocumentFragment();
+    for (const l of f.lines) lines.appendChild(renderLine(l, name, lang));
+    body.appendChild(lines);
+  }
+  // `.fstat` is an inline span (no flex), so the literal space between the two counts IS
+  // rendered — it stays an explicit text node. The whitespace the old template carried
+  // between the head's own children was non-rendering (`.diff-file-head` is `display: flex`).
+  const fstat = el("span", { class: "fstat" }, [
+    el("span", { class: "add" }, `+${f.add}`),
+    " ",
+    el("span", { class: "del" }, `−${f.del}`),
+  ]);
+  return el("div", { class: "diff-file", "data-file-key": name }, [
+    el("button", { class: "diff-file-head", type: "button" }, [
+      el("span", { class: "caret" }, "▾"),
+      el("span", { class: "fname" }, name),
+      fstat,
+    ]),
+    body,
+  ]);
+}
+
+// Render a unified diff to a DocumentFragment: the summary line plus one card per file.
+// Returns NODES, not markup — the caller attaches it (replaceChildren) and only THEN wires it.
 export function renderDiff(diff) {
-  if (!diff || !diff.trim()) return '<div class="meta">(no changes)</div>';
+  const frag = document.createDocumentFragment();
+  if (!diff || !diff.trim()) {
+    frag.appendChild(el("div", { class: "meta" }, "(no changes)"));
+    return frag;
+  }
   const files = parseDiff(diff);
   const totAdd = files.reduce((a, f) => a + f.add, 0);
   const totDel = files.reduce((a, f) => a + f.del, 0);
 
-  const summary = `<div class="diff-summary">
-    <span>${files.length} file${files.length === 1 ? "" : "s"} changed</span>
-    <span class="add">+${totAdd}</span><span class="del">−${totDel}</span>
-  </div>`;
-
-  const cards = files.map((f) => {
-    const name = f.path || f.oldPath || "(unknown)";
-    const lang = langForPath(name);
-    const body = f.binary
-      ? `<div class="diff-binary">Binary file not shown</div>`
-      : f.lines.map((l) => {
-          if (l.t === "hunk" || l.t === "meta") {
-            const cls = l.t === "hunk" ? "hunk" : "ctx meta";
-            return `<div class="dl ${cls}"><span class="dl-num"></span>` +
-              `<span class="dl-sign">${l.t === "hunk" ? "" : " "}</span>` +
-              `<span class="dl-text">${esc(l.text)}</span></div>`;
-          }
-          const sign = l.t === "add" ? "+" : l.t === "del" ? "−" : " ";
-          const text = l.t === "add" || l.t === "del" ? l.text.slice(1) : l.text;
-          // Comment anchor: deletions reference the pre-image line, everything else
-          // the post-image line. The key (path + side + line) is stable across diff
-          // re-fetches, so stored inline comments re-attach after an SSE re-render.
-          const lineNo = l.t === "del" ? l.oldNo : l.newNo;
-          const side = l.t === "del" ? "o" : "n";
-          const key = `${name}␟${side}${lineNo}`;
-          const ctx = `${name}:${lineNo}`;
-          return `<div class="dl ${l.t}" data-key="${esc(key)}" data-ctx="${esc(ctx)}">` +
-            `<span class="dl-num" title="comment on ${esc(ctx)}">${lineNo}</span>` +
-            `<span class="dl-sign">${sign}</span>` +
-            `<span class="dl-text">${highlightCode(text, lang)}</span></div>`;
-        }).join("");
-    return `<div class="diff-file" data-file-key="${esc(name)}">
-      <button class="diff-file-head" type="button">
-        <span class="caret">▾</span>
-        <span class="fname">${esc(name)}</span>
-        <span class="fstat"><span class="add">+${f.add}</span> <span class="del">−${f.del}</span></span>
-      </button>
-      <div class="diff-file-body">${body}</div>
-    </div>`;
-  }).join("");
-
-  return summary + cards;
+  // `.diff-summary` is `display: flex` with a gap, so the old template's newline+indent between
+  // these spans generated no anonymous flex item and is dropped rather than reproduced.
+  frag.appendChild(el("div", { class: "diff-summary" }, [
+    el("span", {}, `${files.length} file${files.length === 1 ? "" : "s"} changed`),
+    el("span", { class: "add" }, `+${totAdd}`),
+    el("span", { class: "del" }, `−${totDel}`),
+  ]));
+  for (const f of files) frag.appendChild(renderFileCard(f));
+  return frag;
 }
 
 // ---------- inline review comments ----------

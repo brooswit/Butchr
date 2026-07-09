@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Front-end Phase 4 (RFC §5): `public/views/diff.js` builds DOM, not HTML strings.** `renderDiff()`
+  returns a `DocumentFragment` (the summary plus one card per file) instead of a markup string, and
+  the dependency-free syntax highlighter emits text nodes and `<span class="tok-*">` elements rather
+  than concatenated HTML — driving the module's eleven `esc()` calls to zero, since `createTextNode`
+  escapes structurally. This removes the LAST place a markup string crossed a module boundary:
+  `public/views/task.js` now paints the diff with `diffBox.replaceChildren(renderDiff(d.diff))` before
+  calling the unchanged `wireDiff()`, whose selectors resolve only once the fragment is attached. The
+  highlighter flushes each unclassified run as ONE text node, so a large diff costs one node per
+  segment rather than one per character. New `test/diff-view.test.ts` pins the rendered structure.
+
 ## [0.9.270] - 2026-07-09
 
 - **Front-end (RFC Phase 4):** `public/views/projects.js` now builds its DOM entirely with `el()` —
