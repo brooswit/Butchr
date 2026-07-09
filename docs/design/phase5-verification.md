@@ -93,6 +93,79 @@ is react-aria's documented fallback and it keeps the dialog announced on open; T
 moves into the ring normally. `overlay.tsx:12`'s claim that focus is "TRAPPED AND
 RESTORED on close — which the hand-rolled one never did at all" is confirmed on all five.
 
-## 3. The directory picker (Autocomplete + ListBox + SearchField)
+## 3. The directory picker (Autocomplete + ListBox + SearchField) — **SETTLED**
 
-NOT INVESTIGATED
+The spike said which of `ComboBox` / `Autocomplete` fits was UNVERIFIED. Phase 4d chose
+`Autocomplete` + `SearchField` + `ListBox` + `ListBoxItem` (`overlay.tsx:95-118`). Driven
+against a scratch tree: `scratch-repo/sub/{alpha, beta, gamma-repo}` where `gamma-repo` is
+a real git repo.
+
+Opened from `Add workspace` -> `Browse…`; two dialogs stack (`Add workspace` +
+`Choose a git repository`) and the picker seeds from the path field's current value.
+Unfiltered rows: `▸alpha`, `▸beta`, `◆gamma-repo git`.
+
+**Filter by typing** — typed `gam` into the SearchField: rows narrowed to
+`["◆gamma-repo git"]`. Typed on to `gamzzz`: `renderEmptyState` painted
+`(no matching subfolders)` — so the single-owner filter note at `overlay.tsx:165` holds
+(the array is not pre-filtered, `Autocomplete` filters the collection, and the empty state
+still renders). `.. (up)` stayed visible throughout, confirming the comment at
+`overlay.tsx:190` that it is chrome outside the filtered collection — a filter can never
+hide the way back up.
+
+**Select with the keyboard** — from the SearchField, `ArrowDown` moved the listbox's
+focused option onto `◆gamma-repo` (Autocomplete forwards nav keys to the collection);
+`Enter` fired `onAction` and navigated: `…/sub` -> `…/sub/gamma-repo`. This is the real
+arrow-key/listbox navigation the hand-rolled `.fs-row` divs never had.
+
+**Select with the mouse** — clicked `.. (up)` back to `…/sub`, then clicked the `beta`
+row: navigated to `…/sub/beta`.
+
+**`onSelect(path)` fires with the correct path** — twice, and rows never commit (they
+navigate; committing is the foot's job, exactly as `overlay.tsx:115-118` argues):
+
+| Path | Foot (scoped to the picker dialog) | Hint | Commit | Value landed in the caller's field |
+|---|---|---|---|---|
+| `…/sub/gamma-repo` (git) | `Register this folder` | "This folder is a git repository." | click | `…/sub/gamma-repo` ✅ |
+| `…/sub/beta` (plain) | `Use this path` | "Open a folder, or pick its path." | click | `…/sub/beta` ✅ |
+
+In both cases the picker closed, the `Add workspace` modal stayed open, and its `path`
+input held exactly the committed path. `Escape` inside the picker closes **only** the
+picker and leaves `Add workspace` mounted.
+
+**The accessibility claim checks out.** `overlay.tsx:113` says a `ListBoxItem` renders
+`role="option"` and may not contain interactive content, so the vanilla row's nested
+"Register" button was removed. Observed: `0` nested `button`/`a`/`input` inside any
+`[role=option]`; `ListBox` carries `aria-label="Subfolders"` and the `SearchField`
+`aria-label="Filter subfolders"`. Re-seeding on every open (`overlay.tsx:150`) also
+confirmed: reopening after committing `gamma-repo` started the picker at `…/gamma-repo`,
+not where the previous session left off.
+
+`Autocomplete` was the right call. Nothing here needs `ComboBox`, and a popover-backed
+listbox inside the dialog would have nested an overlay in an overlay as the comment warned.
+
+---
+
+## Verdict
+
+All three behaviours are **SETTLED**. No regressions found, so this change is docs-only
+and adds no CHANGELOG entry. Nothing was left `NOT INVESTIGATED`.
+
+The one substantive correction to the record: `views/task.tsx:50-51` cites "see the task
+summary" for the typed-text property, and that summary never existed. The evidence is now
+here instead.
+
+## How to re-run this
+
+Scratch DB and scratch port only — never the live instance or its database.
+
+```
+BUTCHR_DATA_DIR=$S/data BUTCHR_DB=$S/data/scratch.db BUTCHR_PORT=47911 bun run src/index.ts
+```
+
+The browser was driven over the Chrome DevTools Protocol (`google-chrome --headless=new
+--remote-debugging-port`), using `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent` so
+that every keystroke and click is a real user-input event, not a synthetic `dispatchEvent`
+that would bypass React's event plumbing and prove nothing. The driver and the three
+scripts are scratch-only and are deliberately not committed: they hard-code a scratch DB,
+a seeded project id and absolute `/tmp` paths, so they would rot immediately as a test.
+`bun test` and `scripts/ci` remain the committed gates.
