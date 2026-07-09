@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.269] - 2026-07-09
+
 ### Changed
 - **Front-end Phase 4 (RFC §5): the workspace view and the PROJECTS modals build DOM, not HTML strings.**
   `public/views/workspace.js` and `public/components/project-modals.js` now construct every element
