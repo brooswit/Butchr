@@ -5,38 +5,20 @@
 // (REVAMP-4's repo/project, future agent perspectives) — falls back safely for an
 // unmapped kind instead of throwing.
 //
-// public/app.js is a classic browser script (touches `document` at module load, no
-// exports), so we can't import it. We extract the PURE, DOM-free helper block fenced
-// with `// <test-extract:kind-badge>` sentinels and eval it in isolation — the same
-// approach as test/state-meta-fallback.test.ts and test/graph-rollup-completion.test.ts.
+// The chip/badge cluster now lives in public/components/chips.js, which is DOM-free at
+// module load (it imports only core/dom.js + core/state-meta.js, neither of which touches
+// `document` at load), so we IMPORT it directly and assert on the real exports. (This test
+// used to scrape a `<test-extract:kind-badge>` sentinel block out of the classic
+// public/app.js script and eval it with `new Function`, injecting its own stand-in `esc`;
+// that harness is gone along with the sentinel. Do not reintroduce one.)
+//
+// Everything asserted here is INDEPENDENT of the /api/state-meta tables (kindBadge keys off
+// KIND_VISUAL alone), so this file deliberately does NOT call applyStateMeta — that would
+// mutate module state shared across the whole `bun test` process and break
+// test/state-meta-fallback.test.ts's pre-load assertions. The live-binding guard for
+// taskChips -> AGENT_TYPE lives there instead, alongside the applyStateMeta call it needs.
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-/** Pull the source fenced by `// <test-extract:name>` ... `// </test-extract:name>`. The
- *  opening sentinel may share its `//` line with prose, so capture from the NEXT line. */
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-// The kind-badge block references `esc()` for HTML-escaping; provide a faithful stand-in
-// (the real one lives elsewhere in app.js) so the eval'd block is self-contained.
-const harness = `
-function esc(s){ return String(s).replace(/[&<>"']/g, c => (
-  { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c])); }
-${extract("kind-badge")}
-return { KIND_VISUAL, kindVisual, kindBadge };
-`;
-const { KIND_VISUAL, kindVisual, kindBadge } = new Function(harness)() as {
-  KIND_VISUAL: Record<string, { label: string; glyph: string; cls: string }>;
-  kindVisual: (k: string) => { label: string; glyph: string; cls: string };
-  kindBadge: (k: string) => string;
-};
+import { KIND_VISUAL, kindBadge, kindVisual, taskChips } from "../public/components/chips.js";
 
 test("KIND_VISUAL maps the six known kinds (2 work-item + 4 agent)", () => {
   expect(Object.keys(KIND_VISUAL).sort()).toEqual(["build", "ceo", "cto", "leader", "leaf", "node"]);
@@ -98,12 +80,20 @@ test("a node routed through kindBadge renders STORY, not TASK", () => {
 });
 
 test("taskChips keys its type badge off the authoritative work_kind (regression guard)", () => {
-  // Regression guard for the finished-story mislabel: taskChips must pass the item's
-  // work_kind into kindBadge, NOT a hardcoded 'leaf' literal (which would badge a finished
-  // STORY as '▪ TASK'). Assert at the source level since taskChips has DOM/helper deps that
-  // make it impractical to eval in isolation.
-  const body = APP.match(/function taskChips\([^]*?\n\}/);
-  if (!body) throw new Error("could not locate taskChips() body");
-  expect(body[0]).toContain("kindBadge(t.work_kind)");
-  expect(body[0]).not.toContain('kindBadge("leaf")');
+  // Regression guard for the finished-story mislabel: taskChips must badge the item by its
+  // work_kind, NOT a hardcoded 'leaf' (which would badge a finished STORY as '▪ TASK').
+  // This used to be a source-level regex over app.js; now that chips.js is importable we
+  // assert on the RENDERED OUTPUT, which is what actually mattered all along.
+  const story = taskChips({ work_kind: "node", status: "done" });
+  expect(story).toContain("kind-node");
+  expect(story).toContain("STORY");
+  expect(story).not.toContain("kind-leaf");
+
+  const task = taskChips({ work_kind: "leaf", status: "merged" });
+  expect(task).toContain("kind-leaf");
+  expect(task).toContain("TASK");
+  expect(task).not.toContain("kind-node");
+
+  // An item with no work_kind lands on the neutral fallback rather than silently reading TASK.
+  expect(taskChips({ status: "merged" })).toContain("kind-unknown");
 });

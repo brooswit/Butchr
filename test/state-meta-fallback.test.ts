@@ -12,6 +12,12 @@
 import { expect, test } from "bun:test";
 import { ALL_STATUSES, STATE_META, isTerminal } from "../src/db.ts";
 import { DEFAULT_STATE_META, statusSetsFrom } from "../public/core/state-meta.js";
+// STATIC, top-level import — on purpose. It evaluates components/chips.js BEFORE any test
+// body runs applyStateMeta, exactly as app.js does (it imports chips.js at load, then calls
+// loadStateMeta at boot). A lazy `await import()` inside the test would evaluate chips.js
+// AFTER the tables were populated, and a `const {AGENT_TYPE} = ...` snapshot regression in
+// chips.js would sail straight through. See the live-binding assertion below.
+import { taskChips } from "../public/components/chips.js";
 
 // The cases that stand in for a FAILED / empty /api/state-meta response. loadStateMeta()
 // passes DEFAULT_STATE_META on the catch path; statusSetsFrom also falls back internally
@@ -84,4 +90,17 @@ test("core/state-meta.js loads DOM-free, and applyStateMeta propagates to import
   // stateKind() reads the live table, plus the synthetic needs_user_input override.
   expect(m.stateKind("in_progress")).toBe("agent");
   expect(m.stateKind("needs_user_input")).toBe("feedback");
+
+  // (3) the live binding must reach a REAL importer, not just this test. components/chips.js
+  //     (imported statically at the top of this file, so it evaluated BEFORE the reassignment
+  //     above) reads AGENT_TYPE / stateKind at CALL time. A regression to
+  //     `const {AGENT_TYPE} = ...` there would snapshot the empty pre-load table and silently
+  //     drop the agent-type text from every status chip.
+  const running = taskChips({ work_kind: "leaf", status: "in_progress" }, { kind: true });
+  expect(running).toContain("state-kind-agent");
+  expect(running).toContain("workspace-agent is running");
+  // A feedback state names the awaited artifact instead of an agent type.
+  const review = taskChips({ work_kind: "leaf", status: "in_review" }, { kind: true });
+  expect(review).toContain("state-kind-feedback");
+  expect(review).toContain("diff review");
 });

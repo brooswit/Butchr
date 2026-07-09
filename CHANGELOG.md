@@ -17,6 +17,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **FE modernization P2 (step 2): extracted the chip + badge cluster into
+  `public/components/chips.js`.** A verbatim move of the twelve DOM-free,
+  string-returning helpers (`chip`, `AWAITED_LABEL`, `responderChip`,
+  `feedbackStepLabel`, `awaitedLabel`, `effStatus`, `KIND_VISUAL`, `kindVisual`,
+  `kindBadge`, `taskChips`, `tagChips`, `livenessChip`) out of `public/app.js`,
+  which now imports the seven it still calls. No behavior change; the rendered
+  markup is byte-identical. `AGENT_TYPE`/`stateKind` moved with their only caller
+  (`taskChips`) and are no longer imported by `app.js`. Establishes the
+  `components/` layer of the RFC's `core/` → `components/` → `views/` dependency
+  order (`docs/rfc-frontend-design-system.md`, Phase 2).
+- **Retired the `kind-badge` test-extraction harness.** `test/kind-badge.test.ts`
+  now `import`s `public/components/chips.js` directly and asserts on the real
+  exports, instead of regexing a `<test-extract:kind-badge>` sentinel block out of
+  `app.js` and `eval`ing it with `new Function` under a stand-in `esc`. The
+  sentinel comments are deleted with it. Its last assertion — a source-level regex
+  proving `taskChips` badges by `work_kind` — became a real assertion on rendered
+  output, and a new test pins that `taskChips` reads the `AGENT_TYPE` **live
+  binding** at call time (a regression to `const {AGENT_TYPE} = …` would snapshot
+  the empty pre-load table and silently blank every status chip).
+
 ## [0.9.252] - 2026-07-09
 
 - `public/core/` — front-end **Phase 2, step 1**: the module scaffold. Four dependency-free leaf
