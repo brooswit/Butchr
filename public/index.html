@@ -4,6 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>butchr</title>
+    <!--
+      `./`, not `/`. This file is a bun BUILD ENTRY: bun resolves these two refs on disk, bundles
+      them, and rewrites both to the content-hashed emitted names. An absolute `/style.css` is not
+      a path bun will resolve from here.
+
+      The paths it REWRITES them to are absolute, because `build:fe` passes `--public-path=/`.
+      That matters: serveStatic gives every extensionless route-like path the SPA fallback, so a
+      typed `/task/<id>` is answered with this document — and a relative `./index-<hash>.js` would
+      then resolve to `/task/index-<hash>.js`, which 404s (a missing path WITH an extension does
+      not fall back). Absolute emitted refs load from any depth, exactly as `/app.js` used to.
+      `<base href="/">` would also fix it, and must NOT be used: it reroutes the sprite's
+      `<use href="#lp-icon-…">` fragment refs to another document and blanks every icon.
+    -->
     <link rel="stylesheet" href="./style.css" />
     <script>
       // Set the theme before first paint so there's no flash of the wrong theme.

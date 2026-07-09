@@ -29,11 +29,18 @@ function tokenCss(n: number): string {
   return `:root {\n${decls.join("\n")}\n}\n`;
 }
 
-const HTML_WITH_SPRITE =
-  '<!DOCTYPE html><html><body>\n<svg aria-hidden="true" style="display:none"><defs>' +
-  '<symbol id="lp-icon-edit" viewBox="0 0 20 20"></symbol></defs></svg>\n' +
-  '<main id="app"></main></body></html>';
-const HTML_WITHOUT_SPRITE = '<!DOCTYPE html><html><body><main id="app"></main></body></html>';
+const SPRITE =
+  '<svg aria-hidden="true" style="display:none"><defs>' +
+  '<symbol id="lp-icon-edit" viewBox="0 0 20 20"></symbol></defs></svg>\n';
+
+/** A dist-like index.html: relative hashed asset refs, exactly as bun's HTML entry mode emits. */
+function html(cssName: string, jsName: string, sprite: boolean): string {
+  return (
+    `<!DOCTYPE html><html><head><link rel="stylesheet" href="./${cssName}" /></head><body>\n` +
+    (sprite ? SPRITE : "") +
+    `<main id="app"></main><script type="module" src="./${jsName}"></script></body></html>`
+  );
+}
 
 /**
  * Write a dist-like fixture. Defaults are the HEALTHY artifact; each option degrades exactly one
@@ -47,20 +54,32 @@ function fixture(
     devReact?: boolean;
     unminified?: boolean;
     empty?: boolean;
+    /** Leave a previous build's stylesheet behind, unreferenced by index.html. */
+    staleCssDefs?: number;
+    /** Reference a stylesheet that was never emitted. */
+    danglingCss?: boolean;
   } = {},
 ): string {
   const dir = join(TMP, name);
   mkdirSync(dir, { recursive: true });
   if (opts.empty) return dir;
-  writeFileSync(join(dir, "index.html"), opts.sprite === false ? HTML_WITHOUT_SPRITE : HTML_WITH_SPRITE);
-  writeFileSync(join(dir, "index-abc123.css"), tokenCss(opts.tokenDefs ?? 377));
+  const cssName = "index-abc123.css";
+  const jsName = "index-abc123.js";
+  writeFileSync(
+    join(dir, "index.html"),
+    html(opts.danglingCss ? "index-GONE.css" : cssName, jsName, opts.sprite !== false),
+  );
+  if (!opts.danglingCss) writeFileSync(join(dir, cssName), tokenCss(opts.tokenDefs ?? 377));
+  if (opts.staleCssDefs !== undefined) {
+    writeFileSync(join(dir, "index-stale99.css"), tokenCss(opts.staleCssDefs));
+  }
   // A minified bundle is one long line with no indentation; an unminified one is thousands of
   // indented ones. `bun build` without --production emitted 3,266 indented lines for today's
   // 24-module graph; 200 is far from both that and the minified build's 1.
   const body = opts.unminified
     ? `function f() {\n${Array.from({ length: 200 }, (_, i) => `  const x${i} = ${i};`).join("\n")}\n}\n`
     : 'console.log("hi");';
-  writeFileSync(join(dir, "index-abc123.js"), opts.devReact ? `${body}\nconsole.log("react-dom.development");` : body);
+  writeFileSync(join(dir, jsName), opts.devReact ? `${body}\nconsole.log("react-dom.development");` : body);
   return dir;
 }
 
@@ -97,6 +116,24 @@ describe("scripts/assert-fe-artifact", () => {
   test("silent-failure 1: a token count just under the threshold fails", () => {
     expect(runAssert(fixture("few-tokens", { tokenDefs: 300 })).code).toBe(1);
     expect(runAssert(fixture("enough-tokens", { tokenDefs: 301 })).code).toBe(0);
+  });
+
+  // REGRESSION. `bun build --outdir` does not clean, and assets are content-hashed, so a rebuild
+  // leaves the previous bundle behind under its old name. An earlier version of this script
+  // globbed `$DIST/*.css` and unioned them: dropping the themes.css import took the real sheet
+  // from 377 definitions to 149, and the stale 377-definition file from the last build masked it.
+  // The gate exited 0 on an unstyled artifact. `build:fe` now cleans dist/, AND the script reads
+  // only what index.html references — either fix alone would have caught it; both is correct.
+  test("silent-failure 1: a STALE unreferenced stylesheet cannot mask a broken one", () => {
+    const r = runAssert(fixture("stale-css", { tokenDefs: 149, staleCssDefs: 377 }));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("only 149");
+  });
+
+  test("a dangling stylesheet reference is a stale/partial build, not a pass", () => {
+    const r = runAssert(fixture("dangling-css", { danglingCss: true }));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("does not exist");
   });
 
   test("silent-failure 2: an un-inlined sprite fails", () => {

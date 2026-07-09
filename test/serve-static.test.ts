@@ -47,7 +47,9 @@ beforeAll(async () => {
   }
 
   const html = await Bun.file(join(DIST, "index.html")).text();
-  emittedAssets = [...html.matchAll(/(?:src|href)="\.(\/[^"]+)"/g)].map((m) => m[1]!);
+  // ABSOLUTE (`/index-<hash>.js`), because build:fe passes `--public-path=/`. The nav's
+  // `href="#/…"` hash links do not match: the path must start with `/`, and theirs starts with `#`.
+  emittedAssets = [...html.matchAll(/(?:src|href)="(\/[^"]+)"/g)].map((m) => m[1]!);
   // A match set of zero must FAIL, never silently pass — an assertion over no input is an
   // assertion that cannot fail. bun injects exactly one hashed .js and one hashed .css.
   expect(emittedAssets.find((p) => p.endsWith(".js"))).toBeDefined();
@@ -102,6 +104,24 @@ test("a stale hashed bundle path 404s rather than falling through to index.html"
   const res = await serveStatic("/index-DEADBEEF.js");
   expect(res.status).toBe(404);
   expect(res.headers.get("content-type") ?? "").not.toContain("text/html");
+});
+
+// REGRESSION. The two serveStatic rules interact, and the interaction bites exactly here. Rule 2
+// answers a typed `/task/<id>` with index.html; rule 1 then 404s that document's own <script src>
+// if it is RELATIVE, because `./index-<hash>.js` resolves to `/task/index-<hash>.js` — a missing
+// path WITH an extension. The dashboard renders blank with an opaque module-load error, and no
+// test that only loads `/` can see it. `--public-path=/` is what keeps the refs absolute; this is
+// what proves it, at the depth where it matters.
+test("assets referenced by the SPA fallback resolve from a DEEP route, not just from /", async () => {
+  for (const route of ["/projects", "/task/some-deep-task-id"]) {
+    expect((await serveStatic(route)).status).toBe(200);
+  }
+  for (const asset of emittedAssets) {
+    // Absolute, so the browser requests the same path from any document depth.
+    expect(asset.startsWith("/")).toBe(true);
+    expect(asset.startsWith("//")).toBe(false);
+    expect((await serveStatic(asset)).status).toBe(200);
+  }
 });
 
 // ---- the "/" mapping and the SPA fallback are preserved ----

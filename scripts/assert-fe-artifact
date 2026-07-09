@@ -15,13 +15,45 @@ if [ -z "$DIST" ] || [ ! -d "$DIST" ]; then
   exit 2
 fi
 
+shopt -s nullglob
+if [ ! -f "$DIST/index.html" ]; then
+  echo "FE ARTIFACT: $DIST is not a built front end (no index.html)" >&2
+  exit 1
+fi
+
+# The CSS is the set index.html ACTUALLY REFERENCES, not `$DIST/*.css`.
+#
+# This is not fastidiousness; the glob is unsound and it was measured. `bun build --outdir` does
+# NOT clean its output directory, and every build names its assets by content hash. So a rebuild
+# after a source change LEAVES THE PREVIOUS BUNDLE IN PLACE under its old hash, and a glob unions
+# the two. Dropping `@launchpad-ui/tokens/themes.css` from the entry takes the real stylesheet
+# from 377 `--lp-*` definitions to 149 — comfortably red — but the stale 377-definition CSS from
+# the last build is still sitting in dist/, so the union is 377 and assertion 1 PASSES. Observed,
+# not theorised: the gate exited 0 on a genuinely unstyled artifact.
+#
+# `build:fe` now `rm -rf dist` first, which fixes the cause. This fixes the assertion, because an
+# assertion whose correctness depends on somebody else having cleaned up is not an assertion. The
+# entry HTML is the only thing that says which bytes the browser will load.
+mapfile -t REFS < <(grep -ohE '(src|href)="\./[^"]+"' "$DIST/index.html" | sed -E 's/^[a-z]+="\.\///; s/"$//')
+CSS=()
+for r in "${REFS[@]}"; do
+  [ "${r##*.}" = "css" ] || continue
+  if [ ! -f "$DIST/$r" ]; then
+    echo "FE ARTIFACT: $DIST/index.html references ./$r, which does not exist — stale or partial build." >&2
+    exit 1
+  fi
+  CSS+=("$DIST/$r")
+done
+
+# The JS is every .js in the tree, NOT just the referenced entry: a lazily-imported chunk is not
+# named in index.html and is exactly as capable of carrying React's development build. Sourcemaps
+# are excluded — `.js.map` does not match `*.js`.
+JS=("$DIST"/*.js)
+
 # A glob matching zero files must FAIL, never silently pass: an assertion that runs over no
 # input is an assertion that cannot fail, which is worse than no assertion at all.
-shopt -s nullglob
-CSS=("$DIST"/*.css)
-JS=("$DIST"/*.js)
-if [ "${#CSS[@]}" -eq 0 ] || [ "${#JS[@]}" -eq 0 ] || [ ! -f "$DIST/index.html" ]; then
-  echo "FE ARTIFACT: $DIST is not a built front end (need index.html + at least one .css and .js)" >&2
+if [ "${#CSS[@]}" -eq 0 ] || [ "${#JS[@]}" -eq 0 ]; then
+  echo "FE ARTIFACT: $DIST is not a built front end (index.html must reference a .css; need at least one .js)" >&2
   exit 1
 fi
 
@@ -31,9 +63,16 @@ fi
 # UNSTYLED. The fix is two imports in the entry module — `@launchpad-ui/tokens/index.css` and
 # `.../themes.css` — and this is what proves they are still there.
 #
-# The threshold is 300, not an exact count: the real numbers are 377 definitions WITH both sheets
-# and 1 WITHOUT. An exact count would go red on every `@launchpad-ui/tokens` bump for no reason;
-# the failure being guarded is 1-vs-377, and 300 is far from both.
+# The threshold is 300, not an exact count: an exact count would go red on every
+# `@launchpad-ui/tokens` bump for no reason. Measured against the real 0.16.0 package:
+#
+#   both sheets        377 definitions   <- the only healthy state
+#   index.css only     149               <- red: the colour VALUES live in themes.css
+#   themes.css only    228               <- red
+#   neither              0               <- red (and grep exits 1 — see `|| true` below)
+#
+# So the guard is not merely 0-vs-377: it catches dropping EITHER sheet, which is the mistake an
+# author is actually likely to make. 300 sits above 228 and far below 377.
 #
 # `|| true` is load-bearing: grep exits 1 on ZERO matches, and under `set -o pipefail` that
 # would abort the script here — going red with an EMPTY diagnostic, in the one case the
