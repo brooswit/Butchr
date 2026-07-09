@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.249] - 2026-07-09
+
 - `public/style.css` gains a SPACING scale (`--space-1` 4px … `--space-6` 18px) alongside the
   existing `--radius-*` tokens, completing the design-token set. Values are the ones already
   hardcoded across `public/app.js`, not invented; the scale is not mirrored into the dark-theme
