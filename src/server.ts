@@ -118,7 +118,11 @@ import { attachArgv, openTerminal } from "./terminal.ts";
 import { readSessionActivity, readSessionTranscript } from "./transcript.ts";
 import { worktreePath } from "./git.ts";
 
-const PUBLIC_DIR = join(import.meta.dir, "..", "public");
+// The webapp is BUILT, not served raw: `bun build public/index.html --outdir dist` emits hashed
+// JS/CSS/font assets plus a rewritten index.html, and `dist/` is what ships. `dist/` is
+// gitignored, so `git revert` + rebuild is the rollback. `bun run build:fe` is a prerequisite of
+// `bun start`; startServer() warns loudly if it never ran (see assertPublicDirBuilt).
+const PUBLIC_DIR = join(import.meta.dir, "..", "dist");
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -1251,8 +1255,22 @@ route("POST", "/api/projects/:id/ceo/terminal", async (_req, p) => {
   return attachAgentTerminal(ceoAgentName(p.id!));
 });
 
+// A missing dist/index.html means "you did not build", not "the operator typed a bad URL".
+// serveStatic answers 404 for it either way, which is correct but reads as a blank dashboard with
+// no explanation. Say so once, at boot, where someone will see it. Warn rather than exit: the
+// /api/* surface and the CLI still work without a front end, and refusing to boot would turn a
+// cosmetic mistake into an outage.
+function assertPublicDirBuilt(): void {
+  if (existsSync(join(PUBLIC_DIR, "index.html"))) return;
+  console.error(
+    `[butchr] ${PUBLIC_DIR}/index.html is missing — the web UI will 404.\n` +
+      `[butchr] The webapp is a build artifact now. Run: bun run build:fe`,
+  );
+}
+
 /** Boot the HTTP server (REST + SSE) on `config.host:config.port`, wiring routing, CORS/CSRF, and error handling. Returns the running server so callers/tests can `.stop()` it. */
 export function startServer(): ReturnType<typeof Bun.serve> {
+  assertPublicDirBuilt();
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,

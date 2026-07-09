@@ -36,6 +36,15 @@ EnvironmentFile=-%h/.config/butchr/butchr.env
 # (`systemctl --user import-environment …`) and butchr ALSO self-discovers the
 # display at runtime (src/terminal.ts), so this works without hardcoding a display
 # here. See CONTRIBUTING.md §3 to re-import after a fresh login.
+#
+# The webapp is a BUILD ARTIFACT now: dist/ is gitignored, so a fresh clone or a `git pull` that
+# changes public/ leaves no front end to serve. ExecStartPre rebuilds it (~0.1s) on every start,
+# which is cheaper than the class of "why is the dashboard blank after a deploy" incident that a
+# missing dist/ produces. A non-zero ExecStartPre aborts the start, so a broken front-end build
+# fails visibly here instead of silently 404ing at runtime. `bun start` does the same two steps;
+# this unit cannot use it because ExecStart must be an absolute path.
+ExecStartPre=@BUN@ install --frozen-lockfile
+ExecStartPre=@BUN@ run build:fe
 ExecStart=@BUN@ run src/index.ts
 # Relaunch on ANY exit (crash, OOM, the post-power-loss restart). A deliberate
 # `systemctl --user stop` is a manual stop, which Restart=always does NOT

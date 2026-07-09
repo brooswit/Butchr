@@ -8,14 +8,35 @@
     "butchr": "bin/butchr"
   },
   "scripts": {
-    "start": "bun run src/index.ts",
+    "build:fe": "bun build public/index.html --outdir dist --production --sourcemap=linked && scripts/inline-sprite dist/index.html",
+    "dev:fe": "bun build public/index.html --outdir dist --watch",
+    "start": "bun run build:fe && bun run src/index.ts",
     "start:supervised": "bash scripts/supervise.sh",
-    "dev": "bun --watch run src/index.ts"
+    "dev": "bun run build:fe && (bun run dev:fe & bun --watch run src/index.ts)"
   },
   "engines": {
     "bun": ">=1.1.0"
   },
+  "dependencies": {
+    "@launchpad-ui/components": "0.21.0",
+    "@launchpad-ui/icons": "0.26.0",
+    "@launchpad-ui/tokens": "0.16.0",
+    "@react-aria/focus": "3.22.1",
+    "@react-aria/interactions": "3.28.1",
+    "@react-aria/utils": "3.34.1",
+    "@react-stately/utils": "3.12.1",
+    "@react-types/shared": "3.35.0",
+    "react": "19.2.6",
+    "react-aria": "3.49.0",
+    "react-aria-components": "1.18.0",
+    "react-dom": "19.2.6",
+    "react-hook-form": "7.59.0",
+    "react-router": "7.15.1",
+    "react-stately": "3.47.0"
+  },
   "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
     "bun-types": "1.3.14",
     "typescript": "5.9.3"
   }

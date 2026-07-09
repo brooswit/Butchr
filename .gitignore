@@ -142,3 +142,11 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 .butchr/
+
+# butchr's own build artifacts. The webapp under public/ is bundled by `bun build` into dist/
+# (RFC docs/rfc-frontend-launchpad.md §3.1) and that is what the server serves. Committing it
+# would put a 0.46 MB minified diff + a 2.3 MB sourcemap on every front-end branch, inflate the
+# CHANGELOG rebase-race surface, and create a class of bug where the committed bundle and the
+# source disagree. Anchored, so it cannot swallow a future src/**/dist source directory the way
+# the bare `dist` above (Nuxt boilerplate) would.
+/dist/

@@ -52,6 +52,15 @@ trap 'forward_signal INT' INT
 restart_count=0
 window_start=$SECONDS
 
+# The webapp is a build artifact (dist/, gitignored), so build it before the first start — once,
+# not per restart: a crash loop must not re-bundle 10 times, and the sources cannot have changed
+# between two restarts of the same supervisor.
+echo "[supervisor] building the webapp (dist/)…" >&2
+if ! bun run build:fe >&2; then
+  echo "[supervisor] build:fe FAILED — the dashboard would 404. Refusing to start." >&2
+  exit 1
+fi
+
 echo "[supervisor] starting butchr (restart delay ${RESTART_DELAY}s)…" >&2
 while true; do
   bun run src/index.ts &

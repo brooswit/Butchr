@@ -12,14 +12,24 @@
 // extensionless, route-like path still gets index.html.
 //
 // Pure / in-process: serveStatic is a function over a pathname reading the REAL
-// public/ dir — no HTTP server, no claude, no herdr.
+// dist/ dir — no HTTP server, no claude, no herdr.
+//
+// dist/ is a BUILD ARTIFACT (gitignored) whose asset names carry a content hash, so the
+// served-file tests below cannot pin a literal `/app.js`. They read the emitted index.html and
+// request whatever the bundler actually injected. That tests the real contract — "whatever bun
+// emitted is servable" — instead of a filename that changes with its own contents.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+const REPO_ROOT = dirname(import.meta.dir);
+const DIST = join(REPO_ROOT, "dist");
 
 let DATA_DIR: string;
 let serveStatic: typeof import("../src/server.ts").serveStatic;
+/** The hashed paths bun injected into dist/index.html, as server paths (`/index-abc123.js`). */
+let emittedAssets: string[];
 
 beforeAll(async () => {
   DATA_DIR = mkdtempSync(join(tmpdir(), "butchr-static-data-"));
@@ -27,6 +37,21 @@ beforeAll(async () => {
   process.env.BUTCHR_DB = join(DATA_DIR, "test.db");
   process.env.BUTCHR_LOG_FILE = "";
   process.env.BUTCHR_HERDR_BIN = "true";
+
+  // scripts/ci always builds before it tests, but a bare `bun test ./test` need not have. Build
+  // on demand rather than skip: a serveStatic suite that silently vanishes when dist/ is absent
+  // is worse than a slow one.
+  if (!existsSync(join(DIST, "index.html"))) {
+    const built = Bun.spawnSync(["bun", "run", "build:fe"], { cwd: REPO_ROOT });
+    if (built.exitCode !== 0) throw new Error(`build:fe failed:\n${built.stderr.toString()}`);
+  }
+
+  const html = await Bun.file(join(DIST, "index.html")).text();
+  emittedAssets = [...html.matchAll(/(?:src|href)="\.(\/[^"]+)"/g)].map((m) => m[1]!);
+  // A match set of zero must FAIL, never silently pass — an assertion over no input is an
+  // assertion that cannot fail. bun injects exactly one hashed .js and one hashed .css.
+  expect(emittedAssets.find((p) => p.endsWith(".js"))).toBeDefined();
+  expect(emittedAssets.find((p) => p.endsWith(".css"))).toBeDefined();
 
   ({ serveStatic } = await import("../src/server.ts"));
 });
@@ -52,17 +77,31 @@ test("a missing file 404s for any extension, not just .js", async () => {
 });
 
 // ---- real files still served, with the right content-type ----
+//
+// Named by the bundler, not by us: whatever index.html points at must be servable.
 
-test("/app.js returns 200 with a JavaScript content-type", async () => {
-  const res = await serveStatic("/app.js");
+test("the emitted JS bundle returns 200 with a JavaScript content-type", async () => {
+  const jsPath = emittedAssets.find((p) => p.endsWith(".js"))!;
+  const res = await serveStatic(jsPath);
   expect(res.status).toBe(200);
   expect(res.headers.get("content-type") ?? "").toContain("javascript");
 });
 
-test("/style.css returns 200 with a CSS content-type", async () => {
-  const res = await serveStatic("/style.css");
+test("the emitted CSS bundle returns 200 with a CSS content-type", async () => {
+  const cssPath = emittedAssets.find((p) => p.endsWith(".css"))!;
+  const res = await serveStatic(cssPath);
   expect(res.status).toBe(200);
   expect(res.headers.get("content-type") ?? "").toContain("text/css");
+});
+
+// The extension-404 rule doing its most valuable work under a hashed bundle. A mistyped import
+// path is now impossible (the paths are generated) — but a STALE one is not: an operator holding
+// a cached index.html requests the previous build's hash. That must be a clean 404, never an HTML
+// page the module loader then chokes on with an opaque MIME error.
+test("a stale hashed bundle path 404s rather than falling through to index.html", async () => {
+  const res = await serveStatic("/index-DEADBEEF.js");
+  expect(res.status).toBe(404);
+  expect(res.headers.get("content-type") ?? "").not.toContain("text/html");
 });
 
 // ---- the "/" mapping and the SPA fallback are preserved ----
