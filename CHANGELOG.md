@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.266] - 2026-07-09
+
 ### Changed
 
 - **Front-end: the shared `Button` component lands, and the two rival async-action-button
