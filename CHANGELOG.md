@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.251] - 2026-07-09
+
 - `scripts/ci` now FAILS a diff that deletes a released version header from `CHANGELOG.md`. This
   repo is high-velocity `release_mode`: every branch adds to `[Unreleased]` and the merge gate
   rebases onto main, and when two tasks race the rebase can silently drop an already-released
