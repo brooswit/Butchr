@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.256] - 2026-07-09
+
 ### Changed
 
 - **Front-end module split (RFC Phase 2, step 5): the diff view moves to
