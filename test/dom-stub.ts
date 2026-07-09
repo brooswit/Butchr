@@ -22,10 +22,11 @@
 // appendChild, setAttribute/getAttribute, addEventListener, `className`, `classList.toggle`,
 // and a `textContent` GETTER that concatenates descendant text.
 //
-// Deliberately ABSENT: `innerHTML`. That means core/dom.js's transitional htmlOf() CANNOT run
-// under this stub — which is correct. Tests here assert on STRUCTURE (className / getAttribute /
-// textContent), never on serialized markup. If you ever think you need innerHTML, add the getter
-// deliberately and say why; do not reach for it by reflex.
+// Deliberately ABSENT: `innerHTML`. Nothing under public/ writes it any more — escaping is
+// structural, and test/no-opt-in-escaping.test.ts keeps it that way — so a component that reached
+// for innerHTML would throw here rather than quietly serialize. Tests assert on STRUCTURE
+// (className / getAttribute / textContent), never on serialized markup. If you ever think you need
+// innerHTML, add the getter deliberately and say why; do not reach for it by reflex.
 
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;

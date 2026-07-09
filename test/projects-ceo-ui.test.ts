@@ -26,7 +26,8 @@
 //     class they were written to test. A test that passes for the wrong reason is worse than a
 //     deleted one.
 // So `surface()` reproduces the old string's coverage: class list + rendered text, lowercased.
-// It must NOT use core/dom.js's htmlOf() — the DOM stub deliberately has no `innerHTML`.
+// It walks the node tree directly; there is no markup-serializing helper to reach for (htmlOf() is
+// deleted) and the DOM stub deliberately has no `innerHTML`.
 import { expect, test } from "bun:test";
 import { withDom } from "./dom-stub";
 import { ceoNote, ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects.js";

@@ -392,13 +392,25 @@ fully working and is independently shippable and revertible. Ordering is by
     **Phases 2 and 4 move nodes** — they would break silently, and there is
     **zero front-end test coverage** to catch it. Use explicit classes
     (`.panel-title`, `.lede`, `.tight`, `.stacked`, `.mono`, `.field-row`).
-- **Phase 4 — Unify on nodes, one component at a time.** Convert the 12
+- **Phase 4 — Unify on nodes, one component at a time. ✅ DELIVERED.** Convert the 12
   string helpers to `(props) => HTMLElement`, innermost-first (Badge, Chip,
   Pill → Button → Card, Panel → Modal). Each conversion deletes its `esc()`
   calls and its `innerHTML`/`{html:}` bridge. **Convert a component only when
   every one of its call sites is converted** — mixed states are where bugs
   hide. Introduce the missing `Button`. Target end-state: `esc()` and `html:`
   have **zero** callers and are deleted.
+
+  **Outcome.** The target end-state is met. `esc()`, `el()`'s `{html:}` prop, and the
+  transitional `htmlOf()` bridge are **removed from `public/core/dom.js`**. Opt-in
+  escaping is gone as a *category*, not merely tidied: `el()` is the only way to build
+  DOM and it routes every text child through `createTextNode`, so agent-authored text is
+  auto-escaped **structurally**. D3 is closed — the 56 raw-markup injection sites and the
+  126 hand-written `esc()` calls of §3 no longer exist, and nothing can reintroduce them
+  by accident. `test/no-opt-in-escaping.test.ts` enforces the end-state, including a ban
+  on raw `innerHTML =` writes (a bare `= ""` repaint clear stays legal). That last check
+  is the load-bearing one: `{html:}` was only *sugar* for `innerHTML`, and its failure
+  mode is **silent** — `el()` would fall through to `setAttribute("html", …)` and the
+  markup would simply stop rendering, with no build or runtime error.
 - **Phase 5 — (OPTIONAL, defer) targeted re-render.** Only if D5 hurts after
   Phases 1–4. Revisit `captureUiState` and consider keyed patching. **Do not
   schedule this now**; re-evaluate with evidence.

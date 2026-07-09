@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Opt-in escaping is removed as a CATEGORY (RFC §5, Phase 4 complete).** `esc()`, `el()`'s
+  `{html:}` prop, and the transitional `htmlOf()` bridge are deleted from `public/core/dom.js`.
+  Agent-authored text — task titles, tags, transcripts, diff bodies — is now auto-escaped
+  **everywhere, structurally**: `el()` is the only way to build DOM, and it routes every text
+  child through `createTextNode`, so a `<` or `&` can never be re-parsed as markup. There is no
+  longer an `esc()` to forget, because there is no longer an `esc()`. This is a correctness and
+  security improvement, not a cleanup. `test/no-opt-in-escaping.test.ts` locks the end-state and
+  additionally bans raw `innerHTML =` writes (a bare `= ""` repaint clear stays legal) — `{html:}`
+  was only sugar for `innerHTML`, and its failure mode was **silent**: with the branch gone, `el()`
+  falls through to `setAttribute("html", …)` and the markup quietly stops rendering, with no build
+  or runtime error to catch it.
+
 ## [0.9.272] - 2026-07-09
 
 - **Front-end Phase 4 (RFC §5): `public/views/task.js` builds DOM, not HTML strings — the last

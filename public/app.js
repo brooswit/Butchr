@@ -12,9 +12,9 @@
 // local const, which would snapshot the empty pre-load value and silently break every
 // status chip.
 //
-// Only `el` survives from core/dom.js: renderRoute's catch mounts an .empty error node, and
-// that is now the sole DOM construction left in this file. `esc` went with the projects views —
-// every one of its call sites was inside a moved body.
+// Only `el` is needed from core/dom.js: renderRoute's catch mounts an .empty error node, and
+// that is now the sole DOM construction left in this file. `esc` no longer exists anywhere —
+// el() escapes every text child through createTextNode.
 import { el } from "./core/dom.js";
 // core/format.js is no longer imported here at all. fmtBytes/fmtPct left with the metrics view;
 // fmtDuration went with the workspace view's activity pulse and fmtTime with the CTO panel; and

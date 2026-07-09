@@ -5,9 +5,10 @@
 // author's job — this file has no esc() calls left. Keeping the markup for a given badge in
 // exactly ONE place here is what stops a chip's look from drifting across the views.
 //
-// A call site that is still an innerHTML template literal bridges via core/dom.js's transitional
-// `htmlOf(node)` until a later subtask converts it. Every chip is listener-free presentational
-// markup, which is precisely the case htmlOf is valid for.
+// Every call site consumes these as NODES. The transitional `htmlOf(node)` bridge that once let an
+// innerHTML template literal swallow a converted chip is DELETED, along with esc() and el()'s
+// `{html:}` prop — there is no longer any way to turn a chip back into a markup string, and none
+// is needed.
 //
 // DOM-FREE AT MODULE LOAD, like everything under core/ and components/: `document` is touched
 // only INSIDE a called function (via el() / the frag+text helpers below), never at module scope.
@@ -217,9 +218,10 @@ export function taskChips(t, { plan = false, kind = false, responder = false } =
 // (el() skips a null child, and the one call site already guards). Tags are free-form
 // operator labels set at creation — purely for filtering/organizing the list.
 //
-// A tag is the one FREE-FORM string in this file. It used to run through esc(), which turned an
-// apostrophe into `&#39;`; as an el() text child it stays a literal `'`. Serialized through
-// htmlOf() those differ in BYTES — the rendered DOM is identical. Expected; see htmlOf's note.
+// A tag is the one FREE-FORM string in this file, so it is where escaping matters most. It used to
+// run through esc(); as an el() text child it goes through createTextNode instead, which cannot be
+// forgotten. An apostrophe now stays a literal `'` rather than becoming `&#39;` — a difference in
+// bytes only, never in the rendered DOM.
 export function tagChips(t) {
   const tags = Array.isArray(t.tags) ? t.tags : [];
   if (!tags.length) return null;

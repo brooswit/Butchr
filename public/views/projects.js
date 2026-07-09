@@ -25,10 +25,10 @@
 // DOM-free at module load: `document` is touched only inside a CALLED function, exactly like
 // views/metrics.js, views/workspace.js and views/swimlanes.js.
 //
-// Every surface here is built with el() — no esc(), no `html:` bridge, no htmlOf(), no innerHTML
-// write. el() appends each text child through createTextNode, so escaping is STRUCTURAL rather
-// than the author's job. Do not reintroduce a markup string: the chips/badges this view composes
-// already return nodes, and core/dom.js's esc()/htmlOf()/`html:` are scheduled for deletion.
+// Every surface here is built with el() — no innerHTML write anywhere. el() appends each text child
+// through createTextNode, so escaping is STRUCTURAL rather than the author's job. Do not reintroduce
+// a markup string: the chips/badges this view composes already return nodes, and core/dom.js's
+// esc()/htmlOf()/`html:` escape hatches are DELETED (see test/no-opt-in-escaping.test.ts).
 import { el } from "../core/dom.js";
 import { projectTitle, repoDisplay } from "../core/format.js";
 import { api, terminalToast, toast } from "../core/api.js";

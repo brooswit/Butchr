@@ -18,10 +18,11 @@
 // `new Function`, because a classic script could not be imported. That harness is gone — do not
 // reintroduce a sentinel here.
 //
-// This view is fully NODE-BUILT: no esc(), no el() `html:` bridge, no htmlOf(). Every text child
-// goes through el()'s createTextNode, so escaping is structural rather than the author's job. The
-// one remaining `innerHTML` touch is `wrap.innerHTML = ""` in renderSwimlanes — a repaint CLEAR,
-// which escapes nothing. Do not reintroduce a template literal here.
+// This view is fully NODE-BUILT. Every text child goes through el()'s createTextNode, so escaping
+// is structural rather than the author's job — the esc()/`{html:}`/htmlOf() escape hatches no longer
+// exist. The one remaining `innerHTML` touch is `wrap.innerHTML = ""` in renderSwimlanes — a repaint
+// CLEAR, which escapes nothing and is the one form test/no-opt-in-escaping.test.ts still allows. Do
+// not reintroduce a template literal here.
 //
 // ⚠ The literal SPACES passed as string children below (" " between two inline elements) are REAL
 // text nodes and are the rendered gap between them. They came over verbatim from the template

@@ -19,9 +19,9 @@
 // module scope would touch `document` at import AND would be one shared node silently MOVED
 // between parents by each append.
 //
-// FULLY NODE-BUILT (RFC Phase 4, final conversion): no esc(), no el() `html:` bridge, no htmlOf(),
-// no innerHTML write. Every element comes from el(), whose text children go through
-// createTextNode — so escaping is STRUCTURAL rather than the author's job. Each control below is
+// FULLY NODE-BUILT (RFC Phase 4, delivered): no innerHTML write anywhere. Every element comes from
+// el(), whose text children go through createTextNode — so escaping is STRUCTURAL rather than the
+// author's job, and the esc()/`{html:}`/htmlOf() escape hatches are deleted. Each control below is
 // built, held as a local const, and wired on that held node; nothing is re-queried after
 // construction. The ids that remain are the ones read ACROSS a module boundary
 // (`#inline-comment-summary`, from views/diff.js) or by app.js's `[data-restore-key]` scan, plus

@@ -9,7 +9,8 @@
 //
 // Everything here builds NODES, never markup strings: renderDiff() returns a DocumentFragment, so
 // escaping is STRUCTURAL (createTextNode cannot be forgotten the way esc() could) and no caller has
-// to trust a string. That is why this module imports no `esc`.
+// to trust a string. This matters more here than anywhere else — a diff body is arbitrary source
+// text, angle brackets and all.
 //
 // DOM-free at module load: the module-level state below is a Map, two Sets, and a null. `document`
 // is touched only inside a CALLED function (updateCommentSummary), so this module is importable
