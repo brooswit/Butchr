@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.252] - 2026-07-09
+
 - `public/core/` — front-end **Phase 2, step 1**: the module scaffold. Four dependency-free leaf
   modules now hold what the whole app shares, moved **verbatim** out of `public/app.js` (no rewrites,
   no renames, no signature changes) and imported back: `core/dom.js` (`el`, `svg`, `SVG_NS`, `esc`),
