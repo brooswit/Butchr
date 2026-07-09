@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.264] - 2026-07-09
+
 ### Changed
 - **Front-end modernization P2 (module split), tranche 3 — the PROJECTS modals.** Extracted
   `openNewProjectModal`, `openLaunchModal`, and `openAddWorkspaceModal` out of `public/app.js`
