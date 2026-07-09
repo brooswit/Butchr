@@ -129,14 +129,14 @@ test("assets referenced by the SPA fallback resolve from a DEEP route, not just 
 test("/ returns index.html", async () => {
   const res = await serveStatic("/");
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain('<main id="app">');
+  expect(await res.text()).toContain(`id="root"`);
 });
 
 test("an extensionless unknown path still returns index.html (SPA fallback)", async () => {
   for (const p of ["/projects", "/metrics", "/work/st-abc123"]) {
     const res = await serveStatic(p);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain('<main id="app">');
+    expect(await res.text()).toContain(`id="root"`);
   }
 });
 
@@ -145,7 +145,7 @@ test("an extensionless unknown path still returns index.html (SPA fallback)", as
 test("a dot in a directory segment does not defeat the SPA fallback", async () => {
   const res = await serveStatic("/v1.2/settings");
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain('<main id="app">');
+  expect(await res.text()).toContain(`id="root"`);
 });
 
 // ---- traversal guard unchanged, and it still wins over everything ----

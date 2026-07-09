@@ -6,6 +6,9 @@
 # defence. Do not delete them as "redundant with the build" — the build is exactly what cannot
 # see them. `test/fe-artifact-assertions.test.ts` proves each one still fires.
 #
+# Assertion 3 is three greps, not one, and the third was added in Phase 3 after the first build with
+# React in it PROVED the other two miss `--minify`-without-NODE_ENV. See its comment block.
+#
 # Usage:  bun run assert:fe <dist-dir>   (scripts/ci must invoke it this way — see scripts/ci)
 set -euo pipefail
 
@@ -104,18 +107,27 @@ fi
 # which is what selects React's PRODUCTION bundle over its DEVELOPMENT one (1.61 MB vs 0.46 MB,
 # with dev-mode checks running in the operator's browser). Nothing warns.
 #
-# It is checked TWO ways, deliberately, because in Phase 1 the obvious check is VACUOUS. public/
-# is still 19 vanilla modules and imports no React, so `grep react-dom.development` matches
-# nothing whether or not `--production` was passed — measured: dropping `--production` from
-# `build:fe` today still exits 0 through that grep alone. An assertion that cannot fail is worse
-# than none, because it is trusted. So the LOAD-BEARING check today is minification, which
-# `--production` controls from the very first build:
+# It is checked THREE ways, and none of the three subsumes the others. Measured against the real
+# Phase 3 bundle (React + @launchpad-ui in the graph), on bun 1.3.11:
 #
-#   with --production:     84 KB,    14 lines,     1 indented line
-#   without --production: 133 KB, 3,696 lines, 1,289 indented lines
+#   flags            bytes   indented lines   react-dom.development   jsxDEV
+#   --production     400 KB          ~0                 0                0     <- the only healthy state
+#   --minify         604 KB          ~0                 0               55     <- RED, and only check 3 sees it
+#   (none)         1,400 KB      26,983                 1               60     <- RED
 #
-# The React grep stays, and starts doing real work the moment Phase 3 puts React in the graph. It
-# catches a case minification cannot: `--minify` without NODE_ENV. Neither check subsumes the other.
+# 1. MINIFICATION. `--production` is `--minify` plus `NODE_ENV=production`, so this catches the flag
+#    being dropped outright. It was the load-bearing check through Phases 1-2, when public/ imported
+#    no React at all and the greps below could not match anything.
+#
+# 2. `react-dom.development`. Real work since Phase 3 put React in the graph: an unflagged build
+#    carries it. It CANNOT, however, catch `--minify` without NODE_ENV — bun's minifier resolves
+#    react-dom to its production copy anyway, and that row above is measured, not assumed. The
+#    comment that used to live here claimed the opposite. It was wrong.
+#
+# 3. `jsxDEV`. This is what actually closes the `--minify`-without-NODE_ENV hole. React's DEVELOPMENT
+#    JSX runtime (`react/jsx-dev-runtime`) survives minification with its warning strings and 32
+#    `react.dev/link` doc URLs intact — 200 KB of dev-mode checks running in the operator's browser,
+#    through a bundle that is minified and carries the production react-dom. Nothing else sees it.
 INDENTED=$({ grep -chE '^[[:space:]]{2,}[^[:space:]]' "${JS[@]}" || true; } | awk '{s+=$1} END {print s+0}')
 if [ "$INDENTED" -ge 100 ]; then
   echo "FE ARTIFACT: the JS bundle is NOT minified — $INDENTED indented lines (a minified bundle has ~0)." >&2
@@ -127,6 +139,13 @@ if grep -q 'react-dom.development' "${JS[@]}"; then
   echo "FE ARTIFACT: React DEVELOPMENT build in the output — NODE_ENV was not production." >&2
   echo "  That is 1.61 MB instead of 0.46 MB, with dev-mode checks running in the browser." >&2
   echo "  --production sets NODE_ENV; --minify alone does not." >&2
+  exit 1
+fi
+if grep -q 'jsxDEV' "${JS[@]}"; then
+  echo "FE ARTIFACT: React's DEVELOPMENT JSX runtime in the output — NODE_ENV was not production." >&2
+  echo "  A minified bundle hides this: react-dom resolves to its production copy, so the grep above" >&2
+  echo "  stays green while react/jsx-dev-runtime ships 200 KB of dev-mode checks to the browser." >&2
+  echo "  Use --production, which sets NODE_ENV. --minify alone does NOT." >&2
   exit 1
 fi
 

@@ -52,6 +52,8 @@ function fixture(
     tokenDefs?: number;
     sprite?: boolean;
     devReact?: boolean;
+    /** React's development JSX runtime — what survives `--minify` without NODE_ENV=production. */
+    devJsxRuntime?: boolean;
     unminified?: boolean;
     empty?: boolean;
     /** Leave a previous build's stylesheet behind, unreferenced by index.html. */
@@ -79,7 +81,11 @@ function fixture(
   const body = opts.unminified
     ? `function f() {\n${Array.from({ length: 200 }, (_, i) => `  const x${i} = ${i};`).join("\n")}\n}\n`
     : 'console.log("hi");';
-  writeFileSync(join(dir, jsName), opts.devReact ? `${body}\nconsole.log("react-dom.development");` : body);
+  const marks = [
+    opts.devReact ? 'console.log("react-dom.development");' : "",
+    opts.devJsxRuntime ? 'console.log("jsxDEV");' : "",
+  ].filter(Boolean);
+  writeFileSync(join(dir, jsName), [body, ...marks].join("\n"));
   return dir;
 }
 
@@ -142,24 +148,37 @@ describe("scripts/assert-fe-artifact", () => {
     expect(r.out).toContain("sprite not inlined");
   });
 
-  // Assertion 3 is checked TWO ways and BOTH are needed. `grep react-dom.development` is VACUOUS
-  // until Phase 3 puts React in the graph — dropping `--production` from build:fe today produces a
-  // 133 KB unminified bundle that sails through that grep, because there is no React to be the dev
-  // build of. The minification check is what actually fails a `--production`-less build in Phases
-  // 1-3; the React grep is what catches `--minify` without NODE_ENV once React lands.
-  test("silent-failure 3a: a non-minified bundle fails (this is the check that fires TODAY)", () => {
+  // Assertion 3 is checked THREE ways and all three are needed. Measured against the real Phase 3
+  // bundle on bun 1.3.11: an unflagged build is 1.4 MB, 26,983 indented lines, and carries
+  // `react-dom.development`; a `--minify`-only build is 604 KB, minified, and carries NO
+  // `react-dom.development` (bun resolves react-dom to its production copy anyway) — but it DOES
+  // carry React's development JSX runtime. `--production` alone gets all three to zero.
+  test("silent-failure 3a: a non-minified bundle fails", () => {
     const r = runAssert(fixture("unminified", { unminified: true }));
     expect(r.code).toBe(1);
     expect(r.out).toContain("NOT minified");
   });
 
   test("silent-failure 3b: React's development bundle in a minified output still fails", () => {
-    // Minified, so ONLY the React grep can be what reddens this — proving the two checks are
+    // Minified, so ONLY the React grep can be what reddens this — proving the checks are
     // independent rather than one masking the other.
     const r = runAssert(fixture("dev-react", { devReact: true }));
     expect(r.code).toBe(1);
     expect(r.out).toContain("DEVELOPMENT build");
     expect(r.out).not.toContain("NOT minified");
+  });
+
+  // REGRESSION, and the reason this check exists at all. `--minify` without NODE_ENV=production is
+  // the mistake the two checks above were BELIEVED to cover between them, and neither does: the
+  // bundle is minified and its react-dom is the production copy, so both go green while
+  // react/jsx-dev-runtime ships its warning strings and dev-mode checks to the operator's browser.
+  test("silent-failure 3c: React's development JSX runtime fails even when minified and react-dom is production", () => {
+    const r = runAssert(fixture("dev-jsx-runtime", { devJsxRuntime: true }));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("DEVELOPMENT JSX runtime");
+    expect(r.out).not.toContain("NOT minified");
+    // The `react-dom.development` grep is silent here — that is exactly the gap being covered.
+    expect(r.out).not.toContain("DEVELOPMENT build in the output");
   });
 
   // An assertion that runs over zero files is an assertion that cannot fail.

@@ -5,21 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>butchr</title>
     <!--
-      `./`, not `/`. This file is a bun BUILD ENTRY: bun resolves these two refs on disk, bundles
-      them, and rewrites both to the content-hashed emitted names. An absolute `/style.css` is not
-      a path bun will resolve from here.
+      `./`, not `/`. This file is a bun BUILD ENTRY: bun resolves the script ref below on disk,
+      bundles it, and rewrites it to the content-hashed emitted name. An absolute `/main.tsx` is not
+      a path bun will resolve from here. (RFC §10 Phase 3 writes it absolute; the bundler wins.)
 
-      The paths it REWRITES them to are absolute, because `build:fe` passes `--public-path=/`.
-      That matters: serveStatic gives every extensionless route-like path the SPA fallback, so a
-      typed `/task/<id>` is answered with this document — and a relative `./index-<hash>.js` would
-      then resolve to `/task/index-<hash>.js`, which 404s (a missing path WITH an extension does
-      not fall back). Absolute emitted refs load from any depth, exactly as `/app.js` used to.
-      `<base href="/">` would also fix it, and must NOT be used: it reroutes the sprite's
-      `<use href="#lp-icon-…">` fragment refs to another document and blanks every icon.
+      Do NOT write a `src=`/`href=` pair with an absolute path anywhere in a comment in this file.
+      bun copies comments into dist/index.html verbatim, and both test/serve-static.test.ts and
+      scripts/assert-fe-artifact discover the emitted assets by scraping those two attributes out of
+      the built HTML. A commented-out one is indistinguishable from a real one, and 404s.
+
+      The path it REWRITES it to is absolute, because `build:fe` passes `--public-path=/`. That
+      matters: serveStatic gives every extensionless route-like path the SPA fallback, so a typed
+      `/task/<id>` is answered with this document — and a relative `./index-<hash>.js` would then
+      resolve to `/task/index-<hash>.js`, which 404s (a missing path WITH an extension does not fall
+      back). Absolute emitted refs load from any depth. `<base href="/">` would also fix it, and must
+      NOT be used: it reroutes the sprite's `<use href="#lp-icon-…">` fragment refs to another
+      document and blanks every icon.
+
+      There is no `<link rel="stylesheet">` here any more. main.tsx imports every stylesheet, in a
+      deliberate order, and bun injects the one hashed `<link>` for the merged result (RFC §2.2).
     -->
-    <link rel="stylesheet" href="./style.css" />
     <script>
       // Set the theme before first paint so there's no flash of the wrong theme.
+      //
+      // PRESERVED VERBATIM. This is the whole of butchr's dark-mode wiring and it is ALSO the whole
+      // of @launchpad-ui/tokens' — `themes.css` keys off `[data-theme='dark']` on an ancestor, and
+      // this stamps exactly that attribute on <html> (RFC §7.5). The bundle's `<script type=module>`
+      // is deferred by definition, so this always runs first and LaunchPad's tokens resolve against
+      // the already-stamped attribute on the very first paint.
       (function () {
         try {
           var t = localStorage.getItem("butchr-theme");
@@ -31,48 +44,13 @@
     </script>
   </head>
   <body>
-    <header class="topbar">
-      <a href="#/" class="brand">butchr<span class="dot">·</span></a>
-      <nav class="topnav">
-        <a href="#/projects" class="topnav-link">Projects</a>
-        <a href="#/metrics" class="topnav-link">Metrics</a>
-      </nav>
-      <div class="topbar-right">
-        <a
-          href="#/"
-          id="attention"
-          class="attention"
-          hidden
-          title="Tasks need your attention"
-        ></a>
-        <button
-          type="button"
-          id="pause-toggle"
-          class="pause-toggle"
-          title="Pause new task dispatch (maintenance mode)"
-          aria-label="Pause new task dispatch"
-        >⏸ Pause</button>
-        <button
-          type="button"
-          id="theme-toggle"
-          class="theme-toggle"
-          title="Toggle light / dark theme"
-          aria-label="Toggle light / dark theme"
-        >☾</button>
-        <div class="conn" id="conn" title="live connection">
-          <span class="led"></span><span class="conn-label">connecting…</span>
-        </div>
-      </div>
-    </header>
-    <div id="pause-banner" class="pause-banner" hidden role="status" aria-live="polite">
-      <span class="pb-dot" aria-hidden="true"></span>
-      <span class="pb-text">
-        <b>PAUSED</b> — new task dispatch is halted (maintenance mode). Running,
-        review, and idle tasks continue; queued tasks wait until you resume.
-      </span>
-      <button type="button" id="pause-banner-resume" class="btn">Resume dispatch</button>
-    </div>
-    <main id="app"><div class="loading">loading…</div></main>
-    <script type="module" src="./app.js"></script>
+    <!--
+      scripts/inline-sprite splices @launchpad-ui/icons' 337-symbol sprite in here, as the first
+      child of <body>, after `bun build` has rewritten this document. Without it every `Icon`
+      renders BLANK while keeping its 20x20 box: `Icon` emits `<use href="#lp-icon-…">`, a
+      document-local fragment reference (RFC §3.4). `bun run assert:fe` is what proves it happened.
+    -->
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
   </body>
 </html>

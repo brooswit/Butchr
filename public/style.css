@@ -8,15 +8,28 @@
 }
 
 :root {
-  /* LaunchPad LIGHT theme (default) */
-  --bg: #ffffff;       /* bg-ui-primary  (white-950) */
-  --panel: #f7f9fb;    /* bg-ui-secondary (gray-0) */
-  --panel-2: #eceff2;  /* bg-ui-tertiary  (gray-50) */
-  --border: #d8dde3;   /* border-ui-primary (gray-100) */
-  --text: #23252a;     /* text-ui-primary-base (gray-900) */
-  --muted: #545a62;    /* text-ui-secondary (gray-600) */
-  --accent: #425eff;   /* blue-500 (interactive primary) */
-  --accent-2: #3144d9; /* blue-600 (interactive text / hover) */
+  /* THE ALIAS BLOCK (RFC §7.4). These seven values used to be hand-transcribed hex copies of
+     LaunchPad's palette, with a header comment claiming as much. They are now the REAL tokens: the
+     names stay butchr's, and 413 `var(--…)` usage sites stay untouched, but a drifting copy has
+     become a live reference. `@launchpad-ui/tokens/themes.css` (imported by main.tsx) defines each
+     `--lp-*` below under BOTH `:root,[data-theme]` and `[data-theme='dark']`, so the dark-theme
+     block further down no longer needs to restate them — but it still does, and it still WINS:
+     `html[data-theme="dark"]` (0,1,1) out-specifies `[data-theme='dark']` (0,1,0). That is
+     deliberate (RFC §7.5 #3) and is what lets this block be re-based token by token.
+
+     `--muted` is the exception and it must STAY LITERAL. Its natural target,
+     `--lp-color-text-ui-secondary-base`, is one of two tokens that `@launchpad-ui/components@0.21.0`
+     references but `@launchpad-ui/tokens@0.16.0` never defines — verified again against the
+     installed themes.css, which has ZERO definitions of it. Aliasing to it would make every muted
+     label in the app inherit its parent's colour. Upstream bug; see RFC §5.4. */
+  --bg: var(--lp-color-bg-ui-primary);
+  --panel: var(--lp-color-bg-ui-secondary);
+  --panel-2: var(--lp-color-bg-ui-tertiary);
+  --border: var(--lp-color-border-ui-primary);
+  --text: var(--lp-color-text-ui-primary-base);
+  --muted: #545a62;    /* NOT --lp-color-text-ui-secondary-base: undefined upstream (RFC §5.4) */
+  --accent: var(--lp-color-bg-interactive-primary-base);   /* #425eff */
+  --accent-2: var(--lp-color-bg-interactive-primary-hover);
 
   /* status — LaunchPad semantics, mid-tones so filled white-text chips stay legible.
      CANONICAL 12-STATE MODEL: idea | spec_review | blocked | needs_info | inactive |
@@ -45,7 +58,9 @@
        --rejected (17 refs) is the app's DANGER RED: .btn.danger, .btn.ghost.danger-outline,
          .toast.err, .conn.down .led, .attention:hover, .icon-btn:hover, .modal .m-error.on,
          .ci-badge.fail, .blocker-row.dead, .cto-card .meta.err.
-       --review (8 refs) is the PAUSE-banner orange: .pause-toggle.paused and the banner beside it.
+       --review (4 refs, was 8) is the ATTENTION-badge orange: .attention. Phase 3 gave the pause
+         banner and its toggle to LaunchPad's Alert/Button, taking the other four refs with them;
+         what is left is .attention plus the three status-keyed rules below.
        --running (5 refs) is the in-flight blue: .ci-badge.running, .conf-badge.checking.
      Renaming those three to say what they mean is a cleanup, not a deletion.
        --finalizing / --queued / --awaiting (3 refs each) are read ONLY by status-keyed rules
@@ -204,63 +219,21 @@ a:hover { text-decoration: underline; }
 .topnav-link:hover { color: var(--text); background: var(--panel-2); text-decoration: none; }
 .topnav-link.active { color: var(--text); background: var(--panel-2); }
 
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  font-size: 15px;
-  line-height: 1;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-}
-.theme-toggle:hover { background: var(--panel-2); color: var(--text); }
+/* The topbar's theme toggle and pause control are LaunchPad's `ToggleButton` and `Button` now, and
+   they bring their own styling from @launchpad-ui/components' CSS. The hand-rolled `.theme-toggle`
+   and `.pause-toggle` rules they replaced are deleted. */
 
-/* dispatcher pause / maintenance-mode control (topbar). Neutral ghost button that
-   turns warning-colored once dispatch is paused, so the running state reads at a
-   glance. */
-.pause-toggle {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 32px; padding: 0 11px;
-  font: inherit; font-size: 12px; font-weight: 600; line-height: 1;
-  background: transparent; color: var(--muted);
-  border: 1px solid var(--border); border-radius: var(--radius-md);
-  cursor: pointer; white-space: nowrap;
-}
-.pause-toggle:hover { background: var(--panel-2); color: var(--text); }
-.pause-toggle.paused {
-  color: #fff; background: var(--review); border-color: var(--review);
-}
-.pause-toggle.paused:hover { background: var(--review); filter: brightness(1.08); }
-
-/* PAUSED banner — a full-width warning strip under the topbar, shown only while
-   dispatch is paused. Sticky just below the (sticky) topbar so it stays visible. */
+/* PAUSED banner — a full-width strip under the topbar, shown only while dispatch is paused. Sticky
+   just below the (sticky) topbar so it stays visible. The strip's LOOK is LaunchPad's
+   `Alert status="warning" variant="inline"`; this rule only positions it. `[hidden]` is gone with
+   the static markup — React renders the banner or it doesn't. */
 .pause-banner {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 20px;
-  background: var(--review); color: #fff;
-  border-bottom: 1px solid var(--border);
   position: sticky; top: 52px; z-index: 9;
-  font-size: 13px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
-.pause-banner[hidden] { display: none; }
-.pause-banner .pb-dot {
-  flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
-  background: #fff; box-shadow: 0 0 6px rgba(255, 255, 255, 0.8);
-  animation: pause-pulse 1.6s ease-in-out infinite;
-}
-@keyframes pause-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.pause-banner .pb-text { flex: 1; }
-.pause-banner .pb-text b { letter-spacing: 0.04em; }
-.pause-banner .btn {
-  flex: 0 0 auto; background: #fff; color: var(--review);
-}
-.pause-banner .btn:hover { background: rgba(255, 255, 255, 0.88); }
+.pause-banner b { letter-spacing: 0.04em; }
 
 /* needs-attention header indicator — a count badge that appears only when tasks
    are waiting in review or have failed to dispatch. Links to the Projects overview. */
@@ -271,7 +244,6 @@ a:hover { text-decoration: underline; }
   color: #fff; background: var(--review);
   border-radius: 11px;
 }
-.attention[hidden] { display: none; }
 .attention:hover { background: var(--rejected); text-decoration: none; }
 
 .conn { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }

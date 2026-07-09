@@ -4,21 +4,25 @@
 // across that render. The logic is correct (clobber-prevented, vanished-node no-op, scroll
 // clamp) but had ZERO tests.
 //
-// public/app.js is a classic browser script (touches `document` at module load, no exports),
-// so we can't import it. Mirroring test/state-meta-fallback.test.ts, we pull the three
-// helper blocks fenced with `<test-extract:...>` sentinels and eval them — but these helpers
-// touch document/window, so we hand the eval'd harness a minimal hand-rolled fake DOM and
-// exercise the REAL capture/restore logic against it. The only module-level dependency is
-// `setPendingInlineRestore` — restoreUiState hands an open inline-comment editor to the diff
-// view through it (the real one lives in public/views/diff.js, which owns that cell; an
-// imported binding is read-only, so app.js writes it via the setter). The harness stands in a
-// local cell + setter of the same shape and reads it back through getInline().
+// The three helpers moved out of public/app.js — which RFC Phase 3 deleted, replacing its router,
+// SSE wiring and shell with the React entry — into public/ui-state.js, unchanged. They are still
+// scraped rather than imported: they touch document/window, so we hand the eval'd harness a minimal
+// hand-rolled fake DOM and exercise the REAL capture/restore logic against it. (Importing the module
+// would need a full DOM, and the sentinel fences are deleted outright in Phase 4 along with the
+// harness itself — see RFC §1.4/§9.4 — so investing in a DOM here would be investing in a corpse.)
+//
+// The only module-level dependency is `setPendingInlineRestore` — restoreUiState hands an open
+// inline-comment editor to the diff view through it (the real one lives in public/views/diff.js,
+// which owns that cell; an imported binding is read-only, so the harness writes it via the setter).
+// The harness stands in a local cell + setter of the same shape and reads it back through
+// getInline(). The fenced source therefore declares plain `function`s and is exported below the
+// fences: an `export` keyword inside a `new Function` body is a syntax error.
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
+const APP = readFileSync(join(ROOT, "public", "ui-state.js"), "utf8");
 
 /** Pull the source fenced by `// <test-extract:name>` ... `// </test-extract:name>`. The
  *  opening sentinel may share its `//` line with descriptive prose, so capture from the

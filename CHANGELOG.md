@@ -17,6 +17,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The React shell** (RFC `docs/rfc-frontend-launchpad.md` §10 Phase 3). `public/index.html` is now
+  an authored bun entry loading `main.tsx`; React owns the topbar, the pause banner
+  (`Alert` + `AlertText`), the conn LED, the theme `ToggleButton`, the `ToastRegion`, the
+  `react-router` hash routes, the state-meta store, and the SSE `useEffect`. The six views stay
+  vanilla, mounted into a React-owned `<main id="app">` through a single deliberate bridge
+  (`public/bridge.tsx`) that Phase 4 deletes. The no-flash-of-wrong-theme script is preserved
+  verbatim, and `@launchpad-ui/tokens`' `themes.css` keys off the same `data-theme` attribute it
+  already stamped.
+- `scripts/assert-fe-artifact` gained a **third** production-build check: `grep jsxDEV`. Measured on
+  the first bundle with React in it, `--minify` without `NODE_ENV=production` ships React's
+  development JSX runtime (604 KB vs 400 KB) while both existing checks stay green — bun's minifier
+  resolves `react-dom` to its production copy, so the `react-dom.development` grep never fires. The
+  comment claiming otherwise is corrected. Covered by a new `fe-artifact-assertions` case.
+
+### Changed
+
+- `public/style.css`'s seven core colour tokens (`--bg`, `--panel`, `--panel-2`, `--border`,
+  `--text`, `--accent`, `--accent-2`) are now aliases of the real `--lp-*` tokens rather than
+  hand-transcribed hex copies (RFC §7.4). `--muted` stays literal: its target,
+  `--lp-color-text-ui-secondary-base`, is referenced by `@launchpad-ui/components@0.21.0` and never
+  defined by `@launchpad-ui/tokens@0.16.0` (RFC §5.4).
+- `components/toast.js` gained a `setToastSink()` seam so the seven vanilla `toast()` callers surface
+  through LaunchPad's `ToastRegion` without dragging React into every view's module graph.
+
+### Removed
+
+- `public/app.js`. Its router, SSE wiring, theme setup, pause/attention handling and shell moved into
+  `App.tsx`; its UI-state preservation harness moved verbatim to `public/ui-state.js` (deleted with
+  the bridge in Phase 4). The hand-rolled `.theme-toggle` / `.pause-toggle` CSS went with the
+  LaunchPad controls that replaced them.
+
 ## [0.9.280] - 2026-07-09
 
 - **The front end's pure logic is split out of its DOM builders (RFC

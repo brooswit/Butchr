@@ -10,9 +10,28 @@
 // called function.
 import { el } from "../core/dom.js";
 
+// THE PHASE-3 SINK — deleted with the vanilla fallback below in Phase 4.
+//
+// React owns the toast surface now: the shell renders @launchpad-ui's `ToastRegion` and registers a
+// sink that pushes into `toastQueue`. The seven vanilla callers of toast() keep calling toast(), and
+// keep importing only from `core/`. The inversion is the point: importing @launchpad-ui from this
+// leaf would drag React and a CSS import into the module graph of every view — and of the six tests
+// that import those views directly, none of which has a DOM at module load.
+//
+// Null sink = the vanilla `.toast` div. That is what `bun test` sees, and what a bridge-less page
+// would fall back to.
+let sink = null;
+export function setToastSink(fn) {
+  sink = fn;
+}
+
 // Module-private: only toast() reads or clears it, so it is deliberately not exported.
 let toastTimer = null;
 export function toast(msg, isErr) {
+  if (sink) {
+    sink(msg, !!isErr);
+    return;
+  }
   const old = document.querySelector(".toast");
   if (old) old.remove();
   const t = el("div", { class: "toast" + (isErr ? " err" : "") }, msg);
