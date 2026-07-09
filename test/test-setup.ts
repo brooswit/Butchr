@@ -1,10 +1,19 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { registerDom } from "./dom-env.ts";
 
 // Test-suite preload (wired via `bunfig.toml` → `[test] preload`). Runs ONCE before any
 // test file is imported, so it can set process.env defaults that `src/config.ts` reads via
 // `envInt(...)` at its first import.
+//
+// It is ALSO where the DOM comes from, and the ordering is the whole point: `public/` is React
+// now, and `react-dom/client` + `@launchpad-ui/components` reference DOM globals inside their
+// module graphs. A test file that imports a component needs `document` to exist BEFORE its own
+// import statements are evaluated — which no in-file `beforeAll` can arrange, because ES imports
+// hoist. A preload is the only hook that runs early enough. See test/dom-env.ts for why the
+// network primitives are handed back to bun immediately afterwards.
+registerDom();
 //
 // WHY THIS EXISTS — detached startup-auto-confirm probes must not bleed across test files.
 // The launch auto-confirm (`autoConfirmStartupPrompts`) is FIRE-AND-FORGET on both the build
