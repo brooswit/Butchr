@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.279] - 2026-07-09
+
 - **The webapp is a build artifact (RFC `docs/rfc-frontend-launchpad.md`, Phase 1).** `public/` is
   now bundled by `bun build public/index.html --outdir dist --production --sourcemap=linked`, and
   `src/server.ts`'s `PUBLIC_DIR` points at `dist/` instead of `public/`. `dist/` is gitignored, so
