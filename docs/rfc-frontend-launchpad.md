@@ -1,9 +1,11 @@
 # RFC: Front end → LaunchDarkly LaunchPad (React), bundled with bun (story st-95b7d87c)
 
-> **Status: DRAFT — awaiting CTO sign-off.**
+> **Status: SIGNED OFF by the CTO (2026-07-09). All nine §12 decisions approved.**
 >
-> The story leader escalates this to the CTO. **No phase below may begin before
-> sign-off**, and no dependency may be added before Phase 1 lands.
+> The story leader escalated this to the CTO, and the CTO signed it off. The phases
+> in §10 may proceed, in order; no dependency may be added before **Phase 1a**
+> lands. Two CTO decisions were taken *after* sign-off — they created Phase 1a and
+> ruled it in scope — and are recorded in **§0.4**.
 >
 > **This RFC SUPERSEDES `docs/rfc-frontend-design-system.md`** (story st-b1ca22e5,
 > signed off by the CTO on 2026-07-08), which chose **Option 0 — no framework, no
@@ -214,6 +216,28 @@ in place at §7.4. Evidence: §13.3.
 | **§4** — the no-build serve story (`public/` served raw) | **VOID** | §3 |
 | **§5, Phase 5** — targeted re-render, *deferred* | **VOID — delivered free by React** | §1.4 |
 | **CONTRIBUTING §4** — the zero-dependency hard constraint | **VOID** — replacement prose in §8 | §8 |
+
+## 0.4 Decisions taken after sign-off
+
+Two decisions post-date the CTO's sign-off. They are recorded here so that §10's
+phase numbering does not confuse a later reader.
+
+1. **Phase 1a exists, and it lands before Phase 1.** Phase 0 discovered that `src/`
+   does not typecheck — **21 pre-existing errors** (§13.4 item 1; full list and
+   method in §13.2). The story leader created a new **Phase 1a** in response. It
+   fixes all 21 errors, takes **butchr's first dependency** (`typescript`), adds a
+   `tsc --noEmit` gate step for **`src/` only**, and carries the **CONTRIBUTING §4
+   rewrite** (§8) — decision 8 tied that rewrite to the phase that adds the first
+   dependency, and Phase 1a is now that phase. **Phase 1 is re-scoped to the
+   front-end toolchain only**, and depends on Phase 1a.
+2. **The CTO SANCTIONED Phase 1a remaining under story st-95b7d87c**, ruling it in
+   scope by **entailment** rather than scope-creep: decision 3's `tsc` gate cannot
+   land green over 21 pre-existing errors, so making `src/` typecheck is that
+   decision's prerequisite.
+
+The CTO reviewed Errata **E1–E4** and did not object. §10 and §12 are reconciled
+with them below; the Errata themselves remain the primary record and are
+cross-referenced rather than restated.
 
 ---
 
@@ -874,9 +898,9 @@ And `CONTRIBUTING.md:31-32`:
 
 **Every recommendation in this RFC violates all three sentences.** §8 writes the
 replacement prose. **CONTRIBUTING must be amended in the same phase that adds the
-first dependency (Phase 1), not after** — otherwise the repo's own governing
-document forbids the code on `main`, and the next agent to read it will
-faithfully revert the work.
+first dependency — which is now Phase 1a (§0.4), not Phase 1** — otherwise the
+repo's own governing document forbids the code on `main`, and the next agent to
+read it will faithfully revert the work.
 
 ### 5.2 The pinning problem, stated precisely
 
@@ -937,6 +961,11 @@ them to this list** (Errata E3). `react@19.2.6` and `react-dom@19.2.6` ship **ze
 `TS7016: Could not find a declaration file for module 'react/jsx-runtime'` — while
 `bun build` exits **0** and produces a working bundle. That asymmetry is the whole
 thesis of §5.5 in miniature.
+
+**They are `devDependencies`, so the count of EXACT-pinned DIRECT dependencies is
+unchanged: still 15.** §12 decision 2 — "exact pinning of 15 direct dependencies,
+no carets" — stands exactly as the CTO approved it; only the `devDependencies`
+list grew, by two.
 
 They are `@types/*` packages, so `bun install` resolves them independently of
 `@launchpad-ui`'s exact-peer set; the versions above are what resolved against the
@@ -1003,8 +1032,10 @@ used `icon="pencil"` — **not a real icon name**; the real one is `edit`. It bu
 clean and *rendered an empty box*. LaunchPad ships an `IconName` union of all 337
 names that would have caught it — **but only under a typechecker.**
 
-**Recommendation: add `typescript` as a `devDependency` and `bunx tsc --noEmit`
-as gate step 2 (§4.2).**
+**Recommendation: add `typescript` as a `devDependency` and `bunx --bun tsc
+--noEmit` as gate step 2 (§4.2), passed `-p` twice** — `--bun` because a bare
+`bunx tsc` honours the node shebang and dies on this host's node v12, and `-p`
+twice because one `tsconfig.json` cannot cover both trees (Errata E2, §13.2).
 
 Defence: the whole point of adopting a typed component library is the types.
 Without `tsc`, butchr pays 78 MB of `node_modules` and 15 pinned dependencies and
@@ -1184,13 +1215,14 @@ than the migration style.
 
 | After phase | What the operator sees | Dashboard usable? |
 |---|---|---|
-| **P1** — deps + CONTRIBUTING + gate + build pipeline, **no FE code change** | **Nothing changes.** `dist/` is built from the *existing* vanilla `public/`; `serveStatic` points at it. Identical pixels. | **Yes — identical** |
+| **P1a** — `src/` typecheck fixes + `typescript` + CONTRIBUTING, **no FE change at all** (§0.4) | **Nothing changes.** Backend-only. | **Yes — identical** |
+| **P1** — FE deps + gate + build pipeline, **no FE code change** | **Nothing changes.** `dist/` is built from the *existing* vanilla `public/`; `serveStatic` points at it. Identical pixels. | **Yes — identical** |
 | **P2** — horizontal split: pure logic extracted from the 5 mixed modules | **Nothing changes.** Pure re-export shuffle, still vanilla. | **Yes — identical** |
 | **P3** — React shell only (topbar, pause banner, conn LED, theme, router, toasts); views still vanilla, mounted into a React-owned container | Shell is LaunchPad; view bodies are the old DOM. Visibly a hybrid for **one phase**. | **Yes** |
 | **P4** — all six views rebuilt in React; `dom.js`/`nav.js` deleted | The new UI. | **Yes** |
 | **P5** — swimlanes polish + a11y + dark-mode verification | Refinements. | **Yes** |
 
-The crucial property: **P1 and P2 change zero pixels and zero behaviour.** The
+The crucial property: **P1a, P1 and P2 change zero pixels and zero behaviour.** The
 risky work is concentrated in P3–P4, and P3's hybrid is a *shell-vs-body* split,
 not a view-vs-view split — the shell is `index.html`'s topbar and banner (65
 lines of static markup), so there is exactly one bridge, not six, and it lives
@@ -1459,8 +1491,8 @@ re-measure. It confirmed the selectors exist in `themes.css` and nothing more.
 ## 8. (G) CONTRIBUTING — the rewrite
 
 **Do not edit `CONTRIBUTING.md` in this subtask.** The prose below is the proposed
-replacement, to be applied in **Phase 1**, in the same commit that adds the first
-dependency (§5.1).
+replacement, to be applied in **Phase 1a** (§0.4), in the same commit that adds the
+first dependency (§5.1).
 
 ### 8.1 Replacing lines 31–32
 
@@ -1527,9 +1559,10 @@ dependency (§5.1).
 >
 > `bun build` will happily compile `const n: number = "a string"`, a bogus
 > component prop, and a nonexistent `<Icon name="pencil">` (there is no `pencil`;
-> it is `edit`) — all exit 0. `bunx tsc --noEmit` is a **required gate step**. Do
-> not remove it: without it, adopting a typed component library buys the `.d.ts`
-> files and none of their protection.
+> it is `edit`) — all exit 0. `bunx --bun tsc --noEmit` is a **required gate step**
+> (`--bun`, not bare `bunx tsc`, and `-p` once per tsconfig). Do not remove it:
+> without it, adopting a typed component library buys the `.d.ts` files and none of
+> their protection.
 >
 > ### 4.4 Escaping is still structural
 >
@@ -1766,42 +1799,67 @@ typecheck).
 
 **Gate:** none (no code). **Rollback:** n/a.
 
-### Phase 1 — the toolchain, with **zero FE code change**
+### Phase 1a — make `src/` typecheck; butchr's first dependency
 
-🚨 **Re-scoped by Phase 0.** As written, this phase adds `tsc --noEmit` to the gate
-and the gate goes red on `main`: `src/` carries **21 pre-existing type errors**
-(§13.2). The typecheck step cannot land until they are fixed, and fixing them is
-real backend work touching `db.ts`, `tasks.ts`, `dispatcher.ts`, `channel.ts`,
-`stories.ts`, `exec.ts`, `herdr.ts`, `mcp.ts`, `workspace-agent.ts`,
-`startup-confirm.ts`. **The leader must decide** between (a) a Phase 1a that fixes
-the 21 first, (b) landing gate step 2 as `public/`-only and deferring `src/`, or
-(c) folding the fixes into Phase 1 and accepting a much larger diff. This RFC
-recommends **(a)** — a separate, purely-backend, reviewable phase, because mixing
-21 type fixes into the toolchain diff destroys the "deliberately boring" property
-that is the whole point of Phase 1.
+**Created after sign-off** (§0.4 decision 1), because Phase 0 found `src/` carries
+**21 pre-existing type errors** (§13.2, §13.4 item 1) and `tsc` has never run
+against this repository. Gate step 2 cannot land green over them, so this phase
+lands **before Phase 1**. It is the option §10's earlier re-scoping note called
+(a): a separate, purely-backend, reviewable phase.
 
-- Add the 15 exact dependencies + **5** devDependencies (§5.3 — `typescript`,
-  `@types/react`, `@types/react-dom`, `happy-dom`, `@testing-library/react`, plus
-  `@types/bun`/`bun-types` which `tsconfig.json` already names but was never
-  installed); commit `bun.lock`.
-- `.gitignore`: `node_modules/`, `dist/`.
-- **Add `tsconfig.public.json`** (§5.5). The root `tsconfig.json` is unchanged.
-- Add `scripts/inline-sprite`, `scripts/assert-fe-artifact`.
-- Rewrite `scripts/ci` per §4.2 — **including replacing `--outfile /dev/null` with
-  `--outdir`**, which is required before any CSS enters the graph, and using
-  **`bunx --bun tsc -p <each config>`**, not `bunx tsc` (Errata E2).
-- `build:fe` bundles the **existing vanilla `public/app.js`**; `PUBLIC_DIR` → `dist/`.
-- **Rewrite `CONTRIBUTING.md` §4 and lines 31–32** per §8. *Same commit.*
+**The CTO SANCTIONED this phase remaining under story st-95b7d87c**, in scope by
+**entailment**, not scope-creep: decision 3's `tsc` gate presupposes a `src/` that
+typechecks (§0.4 decision 2).
+
+- Fix all **21** errors across `db.ts`, `tasks.ts`, `dispatcher.ts`, `channel.ts`,
+  `stories.ts`, `exec.ts`, `herdr.ts`, `mcp.ts`, `workspace-agent.ts`,
+  `startup-confirm.ts`. §13.4 item 1 enumerates every one.
+- Add `typescript` (§5.5), plus the `bun-types`/`@types/bun` the root
+  `tsconfig.json` already names but which was never installed — **butchr's first
+  dependency.** Commit `bun.lock`. `.gitignore`: `node_modules/`.
+- Add **gate step 2 for `src/` only**:
+  `bunx --bun tsc --noEmit -p tsconfig.json`. `--bun`, not bare `bunx tsc`
+  (Errata E2). The root `tsconfig.json` is unchanged.
+- **Rewrite `CONTRIBUTING.md` §4 and lines 31–32** per §8. *Same commit* —
+  decision 8 ties that rewrite to the phase adding the first dependency, and this
+  is that phase (§0.4, §5.1).
 - **Do NOT change the release step** — Errata E1 withdrew that requirement.
+
+**Operator sees:** nothing. No FE change; no React, no `@launchpad-ui`.
+**Gate:** full `scripts/ci`, now with `tsc` over `src/`.
+**Rollback:** revert; the gate loses step 2 and `src/` returns to untypechecked.
+
+> Purely backend, and reviewable as such. Folding 21 type fixes into Phase 1's
+> toolchain diff would destroy the "deliberately boring" property that is Phase 1's
+> whole point.
+
+### Phase 1 — the front-end toolchain, with **zero FE code change**
+
+**Depends on Phase 1a**, and **re-scoped** by it (§0.4 decision 1): the backend
+typecheck, the first dependency, and the CONTRIBUTING rewrite have moved there.
+What remains here is the front-end toolchain.
+
+- Add the 15 exact dependencies (§5.3 — the count is **unchanged**) + the
+  front-end devDependencies `@types/react`, `@types/react-dom`, `happy-dom`,
+  `@testing-library/react` (§5.3; the first two are mandatory, per Errata E3);
+  update `bun.lock`.
+- `.gitignore`: `dist/`.
+- **Add `tsconfig.public.json`** (§5.5) and extend gate step 2 with a second `-p`
+  for it — one config **cannot** cover both trees (§13.2).
+- Add `scripts/inline-sprite`, `scripts/assert-fe-artifact`.
+- Rewrite `scripts/ci`'s front-end rules per §4.2 — **including replacing
+  `--outfile /dev/null` with `--outdir`**, which is required before any CSS enters
+  the graph.
+- `build:fe` bundles the **existing vanilla `public/app.js`**; `PUBLIC_DIR` → `dist/`.
 
 **Operator sees:** nothing. Identical pixels, identical behaviour.
 **Gate:** full `scripts/ci`; `test/serve-static.test.ts` updated per §9.6.
 **Rollback:** revert; `PUBLIC_DIR` returns to `public/`.
 
-> This phase is deliberately boring and deliberately first. It proves the build,
-> the serve, the sprite step, the three assertions, and the lockfile *before* a
-> single line of React exists. If anything in §2–§5 is wrong, it is wrong here,
-> against a UI we can still see working.
+> This phase is deliberately boring and deliberately first *among the front-end
+> phases*. It proves the build, the serve, the sprite step, the three assertions,
+> and the lockfile *before* a single line of React exists. If anything in §2–§5 is
+> wrong, it is wrong here, against a UI we can still see working.
 
 ### Phase 2 — the horizontal split (still vanilla, still zero pixels)
 
@@ -1860,10 +1918,13 @@ dashboard. **This is the reason Phase 3 exists as a boundary.**
 - **Verify `Modal`/`DialogTrigger` open state and keyboard a11y** (spike
   `UNVERIFIED:` #12 — "I rendered the trigger; I never clicked it").
 - ~~Map `--space-*` → `--lp-spacing-*` **only if** Phase 0's pixel diff says they
-  align.~~ **Phase 0 says they do not align** (Errata E4, §13.3). The alias task is
-  **cancelled**; `--space-1..6` stays literal. What remains is an optional
-  *design* call — whether to snap `--space-2/4/6` (6/10/18px) onto LaunchPad's 4px
-  grid, moving pixels on **7 CSS rules**. Cheap either way; not required for parity.
+  align.~~ **CANCELLED, not deferred.** §7.4 conditioned the mapping on the two
+  scales aligning, and Phase 0 measured that they do not: LaunchPad is a strict 4px
+  grid, butchr's scale is `4/6/8/10/12/18px`, and `--space-2/4/6` have **no
+  LaunchPad equivalent at any tier** (Errata E4; evidence §13.3). **All six
+  `--space-*` stay literal.** What remains is an optional *design* call — whether
+  to snap `--space-2/4/6` (6/10/18px) onto the 4px grid, moving pixels on **7 CSS
+  rules**. Cheap either way; not required for parity.
 - Measure the real bundle with the full component surface; consider `--splitting`
   (spike `UNVERIFIED:` #11).
 
@@ -1901,8 +1962,8 @@ carried forward as **open questions, not settled facts.**
    both trees; `tsconfig.public.json` is required (§5.5, §13.2). *A new, larger
    risk replaced it:* **`src/` has 21 pre-existing type errors** and `tsc` has
    never run against this repo, so gate step 2 red-builds `main` on day one
-   (§13.2, §13.4). See Phase 1's re-scoping. The `"jsx": "react"` typo hazard is
-   unchanged and still real — **exit 0, throws at runtime** (spike §3).
+   (§13.2, §13.4). **Addressed by Phase 1a** (§0.4, §10). The `"jsx": "react"` typo
+   hazard is unchanged and still real — **exit 0, throws at runtime** (spike §3).
 7. ⚠️ **happy-dom vs React Aria.** Overlay positioning reads layout geometry,
    which no headless DOM implements faithfully. Modal/Popover/Tooltip tests may
    need a real browser or may simply be untestable at the unit level. jsdom has
@@ -1940,7 +2001,8 @@ carried forward as **open questions, not settled facts.**
 17. **`dist/` must exist before `Bun.serve` binds** (§3.1). A missing `dist/`
     means a blank dashboard. Boot should refuse, or log loudly — not 404 quietly.
 18. 🚨 **`src/` does not typecheck** (21 errors, §13.2). **New, and the largest
-    thing Phase 0 found.** It is not a migration risk so much as a pre-existing
+    thing Phase 0 found. Now owned by Phase 1a** (§0.4, §10).
+    It is not a migration risk so much as a pre-existing
     debt the migration is about to expose: adopting `tsc` as a gate step means
     adopting `tsc`'s verdict on code nobody has ever typechecked. Three of the 21
     are references to names that do not exist in scope (`TaskKind` ×3,
@@ -1964,13 +2026,28 @@ real tokens, which is what `style.css` was already imitating by hand.
 
 ## 12. DECISIONS REQUESTED FROM THE CTO
 
+**All nine were APPROVED by the CTO on 2026-07-09** (see the status block). The
+CTO also reviewed Errata E1–E4 and did not object; where an erratum touches a
+decision, the reconciliation is noted inline below. Two further decisions taken
+after sign-off are in §0.4.
+
 1. **Approve the supersession** of `docs/rfc-frontend-design-system.md` (Option 0)
    and the §0.3 survivals.
 2. **Approve exact pinning of 15 direct dependencies, no carets** (§5.3), and the
    procedural consequence that a LaunchPad bump is a task, not a chore.
-3. **Approve `typescript` + `bunx tsc --noEmit` as a required gate step** (§5.5).
-   *This is the decision that determines whether adopting a typed component
+   *Reconciled with Errata E3: the **devDependency** list gains `@types/react` and
+   `@types/react-dom` (`react` ships no `.d.ts`). **The count of exact-pinned
+   direct dependencies is unchanged: 15.***
+3. **Approve `typescript` + `bunx --bun tsc --noEmit` as a required gate step**
+   (§5.5). *This is the decision that determines whether adopting a typed component
    library is worth anything.*
+   *Reconciled with Errata E2: the invocation is `bunx --bun tsc` — a bare
+   `bunx tsc` honours the `#!/usr/bin/env node` shebang and dies on this host's
+   node v12 — and it is passed `-p` twice, because one `tsconfig.json` cannot cover
+   both trees. **Measured cost ~10.6 s**, which contradicts §4.2's original ~100 ms
+   ordering rationale (the step stays where it is regardless). And per §0.4, this
+   decision is what entails Phase 1a: the gate cannot land green over `src/`'s 21
+   pre-existing errors.*
 4. **Approve `happy-dom` + `@testing-library/react`, and the deletion of
    `test/dom-stub.ts` and the `document`-undefined tripwire** (§9.2, §9.3) — the
    CTO previously rejected happy-dom/jsdom *on the zero-dependency ground that no
@@ -1981,10 +2058,15 @@ real tokens, which is what `style.css` was already imitating by hand.
    (§6.2).
 7. **Approve the 14 status colours and 7 kind colours staying custom** — i.e.
    *not* collapsing them into LaunchPad `Tag`'s 8 variants (§7.2).
-8. **Approve the CONTRIBUTING §4 rewrite** in §8, landing in Phase 1 alongside the
-   first dependency.
+8. **Approve the CONTRIBUTING §4 rewrite** in §8, landing alongside the first
+   dependency. *Reconciled with §0.4: the phase that adds the first dependency is
+   now **Phase 1a**, so the rewrite lands there, not in Phase 1.*
 9. **Note** that `dist/` is gitignored and `bun run build:fe` becomes a
    prerequisite of `bun start` (§3.1).
+
+*Errata E1 and E4 touch no decision above.* E1 **withdrew** §5.6's proposed release
+step change — the release step is unchanged (§5.6, §13.1). E4 **cancelled** Phase
+5's `--space-*` alias task (§10 Phase 5, §7.4, §13.3).
 
 ---
 
@@ -2344,3 +2426,8 @@ Two things this phase deliberately did **not** do:
   update line 3.** Note also that Errata E1–E4 touch decisions **2** (the
   dependency list grows by two `@types/*`) and **3** (`tsc` as a gate step is now
   known to red-build `main`), so the sign-off may warrant a second look regardless.
+
+  > **[Leader, 2026-07-09 — done.]** The status block now records the CTO's
+  > sign-off. The second look was taken: decisions 2 and 3 stand as approved, with
+  > the E2/E3 reconciliations noted inline in §12; the `tsc` red-build is what
+  > entails **Phase 1a** (§0.4). Phase 0 was right to refuse the flip.
