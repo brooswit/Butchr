@@ -5,31 +5,15 @@
 // isCeoEnabled makes an explicit override WIN over the global gate, so an explicit-ON CEO
 // runs REGARDLESS of the gate and must NEVER be labeled inert.
 //
-// public/app.js is a classic browser script (no exports), so we extract the DOM-free helper
-// block fenced with `// <test-extract:projects-ceo-status>` sentinels and eval it in isolation
-// — the same approach as test/kind-badge.test.ts / test/projects-detail-ui.test.ts.
+// All three helpers now live in public/views/projects.js, which is DOM-free at module load (it
+// touches `document` only inside a called function and imports only leaves), so we IMPORT it
+// directly and assert on the real exports. (This test used to scrape a
+// `// <test-extract:projects-ceo-status>` sentinel block out of the classic public/app.js script
+// and eval it with `new Function`, because that script could not be imported; app.js is now the
+// router + bootstrap alone and that harness is gone along with the sentinel. Do not reintroduce
+// one. Same approach as test/kind-badge.test.ts / test/graph-rollup-completion.test.ts.)
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-type CeoStatus = { enabled: boolean; overridden: boolean; globalGate: boolean; live: boolean };
-const { ceoStatusPill, ceoNoteHtml, ceoTerminalBtnState } = new Function(`
-${extract("projects-ceo-status")}
-return { ceoStatusPill, ceoNoteHtml, ceoTerminalBtnState };
-`)() as {
-  ceoStatusPill: (s: CeoStatus) => { cls: string; label: string; title?: string };
-  ceoNoteHtml: (s: CeoStatus) => string;
-  ceoTerminalBtnState: (s: CeoStatus) => { enabled: boolean; title: string };
-};
+import { ceoNoteHtml, ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects.js";
 
 // --- status pill (live > enabled > default/disabled) -------------------------------------
 test("pill: live wins → green 'CEO live'", () => {

@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Front-end modernization (RFC Phase 2, final view extraction).** The two PROJECTS views —
+  the overview (`renderProjects`) and a project's detail page (`renderProjectDetail`) — and all
+  their private helpers moved out of `public/app.js` into a new `public/views/projects.js`. That
+  completes the module split: `app.js` is now the router (`parseHash`/`renderRoute`/`syncTopnav`)
+  and the app bootstrap (mount/`setRenderer` wiring, SSE, attention/title badge, pause, theme,
+  UI-state capture/restore) alone, down from 1036 to 460 lines, importing nothing from
+  `components/` and only `el` from `core/dom.js`. Pure mechanical extraction — the UI is
+  unchanged.
+- `test/projects-initiatives-ui.test.ts` and `test/projects-ceo-ui.test.ts` no longer scrape
+  `public/app.js` by path and `new Function`-eval a `<test-extract:…>` fenced block: the six pure,
+  DOM-free helpers they cover (`initiativeHeading`, `initiativeRollup`, `projectInitiativeRollup`,
+  `ceoStatusPill`, `ceoNoteHtml`, `ceoTerminalBtnState`) are now real exports of
+  `public/views/projects.js` and are imported directly. Both sentinels are deleted; every existing
+  assertion is retained. (The three `capture-ui-state`/`restore-ui-state`/`apply-input-restore`
+  sentinels belong to the bootstrap and remain in `app.js`.)
+
 ## [0.9.264] - 2026-07-09
 
 ### Changed
