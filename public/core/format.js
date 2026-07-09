@@ -58,3 +58,21 @@ export function projectTitle(p) {
   if (!t) return "Untitled project";
   return t.length > 60 ? t.slice(0, 57) + "…" : t;
 }
+
+// A member repo's display fields, resolved against the workspaces map. Defensive: a repo
+// whose id isn't in /api/workspaces (stale/filtered directory) still renders honestly
+// from its id/brief rather than blanking the panel or throwing on basename(undefined).
+export function repoDisplay(repo, wsById) {
+  const ws = wsById.get(repo.id);
+  if (ws) {
+    return { name: ws.label || basenameOf(ws.path) || repo.id, dir: ws.path || repo.id };
+  }
+  return { name: (repo.brief && String(repo.brief).trim()) || repo.id, dir: repo.id };
+}
+
+// Basename of a path (last non-empty segment), tolerating trailing slashes. "" for a
+// null/empty input so callers can fall back.
+export function basenameOf(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "";
+}

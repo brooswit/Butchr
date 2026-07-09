@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **FE modernization (P2 prep):** moved the shared, pure repo-display helpers `repoDisplay()`
+  and `basenameOf()` out of `public/app.js` into `public/core/format.js` as named exports,
+  where the other DOM-free display formatters live. No behavior change; the UI is byte-identical.
+- `test/projects-detail-ui.test.ts` now imports those helpers directly from
+  `public/core/format.js` instead of scraping `public/app.js` by path with a
+  `<test-extract:projects-repo-display>` sentinel + `new Function` eval. The sentinel is gone;
+  a path-pinned scrape can no longer rot silently.
+
 ## [0.9.262] - 2026-07-09
 
 ### Changed

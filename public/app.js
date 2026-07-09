@@ -16,7 +16,7 @@ import { el, esc } from "./core/dom.js";
 // activity pulse and fmtTime with the CTO panel — neither has another caller in this file.
 // projectTitle is a SHARED leaf: the projects surfaces below and views/workspace.js's
 // breadcrumb both derive a project's display name from it.
-import { projectTitle } from "./core/format.js";
+import { projectTitle, repoDisplay } from "./core/format.js";
 import { api, terminalToast, toast } from "./core/api.js";
 // FILTER_STATUSES is no longer imported here: its only consumer was dirCard's count-pill row,
 // which died with the unreachable dashboard surface. TERMINAL_STATUSES / statusLabel left with
@@ -372,26 +372,8 @@ async function openNewProjectModal() {
 // human path/label against GET /api/workspaces (fetched alongside the members). The same
 // workspaces list, minus the current members, is the "Add repo" picker's option set.
 
-// <test-extract:projects-repo-display> — pure, DOM-free repo-display resolution,
-// unit-tested in test/projects-detail-ui.test.ts.
-// A member repo's display fields, resolved against the workspaces map. Defensive: a repo
-// whose id isn't in /api/workspaces (stale/filtered directory) still renders honestly
-// from its id/brief rather than blanking the panel or throwing on basename(undefined).
-function repoDisplay(repo, wsById) {
-  const ws = wsById.get(repo.id);
-  if (ws) {
-    return { name: ws.label || basenameOf(ws.path) || repo.id, dir: ws.path || repo.id };
-  }
-  return { name: (repo.brief && String(repo.brief).trim()) || repo.id, dir: repo.id };
-}
-
-// Basename of a path (last non-empty segment), tolerating trailing slashes. "" for a
-// null/empty input so callers can fall back.
-function basenameOf(path) {
-  const parts = String(path || "").split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : "";
-}
-// </test-extract:projects-repo-display>
+// The pure resolution helper (repoDisplay) lives in core/format.js — it is DOM-free and
+// shared, and is unit-tested there via a real import.
 
 // <test-extract:initiative-rollup> — pure, DOM-free initiative heading + rollup derivation,
 // unit-tested in test/projects-initiatives-ui.test.ts.

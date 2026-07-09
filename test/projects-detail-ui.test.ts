@@ -5,30 +5,15 @@
 // the workspaces list must still render honestly (from its id/brief) instead of blanking
 // the panel or throwing on basename(undefined).
 //
-// public/app.js is a classic browser script (touches `document` at module load, no
-// exports), so we can't import it. We extract the DOM-free helper block fenced with
-// `// <test-extract:projects-repo-display>` sentinels and eval it in isolation — the same
-// approach as test/kind-badge.test.ts / test/story-lifecycle-ui.test.ts.
+// repoDisplay/basenameOf now live in public/core/format.js — pure display formatters, no
+// DOM and no module state — so we IMPORT them directly and assert on the real exports.
+// (They used to be fenced by `<test-extract:projects-repo-display>` sentinels inside the
+// classic public/app.js script and eval'd out with `new Function`, because that script
+// could not be imported. That harness is gone, along with the sentinel — do not
+// reintroduce one. Same approach as test/kind-badge.test.ts and
+// test/graph-rollup-completion.test.ts.)
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-const { repoDisplay, basenameOf } = new Function(`
-${extract("projects-repo-display")}
-return { repoDisplay, basenameOf };
-`)() as {
-  repoDisplay: (repo: any, wsById: Map<string, any>) => { name: string; dir: string };
-  basenameOf: (path: string | null | undefined) => string;
-};
+import { basenameOf, repoDisplay } from "../public/core/format.js";
 
 function wsMap(rows: Array<{ id: string; path?: string | null; label?: string | null }>) {
   return new Map(rows.map((r) => [r.id, r]));
