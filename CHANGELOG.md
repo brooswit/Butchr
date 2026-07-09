@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.287] - 2026-07-09
+
 ### Changed
 
 - **RFC front-end Phase 4d — the last two views become React; no route goes through the bridge.**
