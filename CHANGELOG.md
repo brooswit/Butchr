@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Front-end module split (RFC Phase 2): the TASK view moved out of `public/app.js` into a new
+  `public/views/task.js` — `renderTask` plus its private helpers (the needs-your-input card, the
+  live-output panel state and poller, the timeline and rescue note, the model/tokens/cost/estimate
+  label formatters, the agent-transcript panel, and the dependent-subtree rollup). A pure move: no
+  behaviour change, the task page renders identically. `app.js` shrinks by ~880 lines and now
+  imports `renderTask` / `stopLiveOutput` back; `components/panel.js` is no longer imported by
+  `app.js` at all. The new module never imports `app.js` — that cycle stays closed.
+
+### Fixed
+
+- `test/output-snapshot-retired.test.ts` asserted `t.output_snapshot` was absent from
+  `public/app.js` by hardcoded path. That guard rotted silently whenever the module split moved the
+  task view, staying green while watching a file the render it guards no longer lived in. It now
+  sweeps every `public/**/*.js` module (and fails on an empty glob), so it follows the code.
+
 ## [0.9.260] - 2026-07-09
 
 ### Changed

@@ -15,11 +15,11 @@
 //           webapp's Timeline plus a dedicated "Why butchr moved this to review" panel.
 //       The db-side half of (B) is asserted in test/watchdog.test.ts (the rescue's audit-event
 //       note contains "stuck/runaway"). The FE half is asserted HERE, by driving the real
-//       `rescueNote()` out of public/app.js.
+//       `rescueNote()` out of public/views/task.js.
 //   (C) The boot migration NULLs the payload and is IDEMPOTENT across boots.
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,8 +51,19 @@ describe("(A) nothing writes output_snapshot", () => {
     expect(tasks).toContain('const LIST_VIEW_OMIT = ["last_dispatch_error", "revert_reason"] as const');
   });
 
-  test("the webapp no longer renders t.output_snapshot", () => {
-    expect(read("public/app.js")).not.toContain("t.output_snapshot");
+  test("NO front-end module renders t.output_snapshot", () => {
+    // Deliberately GLOBBED, not path-pinned. Pinned at `public/app.js` this guard rots silently
+    // every time the FE module split relocates the task view: it keeps PASSING while watching a
+    // file the render it guards no longer lives in. Sweeping every module under public/ means the
+    // guard follows the code wherever the remaining P2/P4 cuts land it.
+    const files = readdirSync(join(ROOT, "public"), { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".js"));
+    // A zero-file glob must FAIL, never vacuously pass — the whole point of the sweep.
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      expect(read(join("public", f))).not.toContain("t.output_snapshot");
+    }
   });
 
   test("the column and its row type SURVIVE (dead-but-present; DROP is batched separately)", () => {
@@ -69,12 +80,13 @@ describe("(A) nothing writes output_snapshot", () => {
 });
 
 describe("(B) the rescue reason is still visible on a rescued task", () => {
-  // Drive the REAL `rescueNote()` from public/app.js (the browser bundle is not importable, so
-  // scrape the function and evaluate it — the same harness other FE tests use). This is what
-  // decides whether the "Why butchr moved this to review" panel renders.
-  const src = read("public/app.js");
+  // Drive the REAL `rescueNote()` from public/views/task.js, where it moved with the task view
+  // (the browser module is not importable here, so scrape the function and evaluate it — the same
+  // harness other FE tests use). This is what decides whether the "Why butchr moved this to
+  // review" panel renders. It is a plain (non-exported) declaration, so the regex still matches.
+  const src = read("public/views/task.js");
   const fn = src.match(/function rescueNote\(events, status\) \{[\s\S]*?\n\}/);
-  if (!fn) throw new Error("rescueNote() not found in public/app.js — did it get renamed?");
+  if (!fn) throw new Error("rescueNote() not found in public/views/task.js — did it get renamed?");
   const rescueNote = new Function(`${fn[0]}; return rescueNote;`)() as (
     events: unknown[],
     status: string,
