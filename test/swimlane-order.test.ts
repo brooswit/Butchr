@@ -3,11 +3,15 @@
 // is the PURE helper that computes that order (ties broken by original index for a stable layout).
 //
 // public/app.js is a classic browser script (touches `document` at module load, no exports), so we
-// can't import it. We extract the DOM-free `swimlane-order` fence AND the standalone graphLevels it
-// reuses, then eval them in isolation — the same approach as test/graph-hierarchy.test.ts.
+// can't import it. We extract the DOM-free `swimlane-order` fence and eval it in isolation — the
+// same approach as test/story-lifecycle-ui.test.ts. The block's one dependency, graphLevels, has
+// moved to public/core/work-graph.js: we IMPORT the real function and inject it into the eval'd
+// harness, so this test exercises the same graphLevels the app does. Once the swimlane view moves
+// to public/views/, this fence goes with it and the eval disappears entirely.
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { graphLevels } from "../public/core/work-graph.js";
 
 const ROOT = join(import.meta.dir, "..");
 const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
@@ -17,20 +21,12 @@ function extract(name: string): string {
   if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
   return m[1];
 }
-// graphLevels is a standalone (unfenced) function the swimlane-order block depends on; pull it by
-// its signature up to the first column-0 closing brace (inner braces are indented).
-function extractFn(name: string): string {
-  const m = APP.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
-  if (!m) throw new Error(`missing function: ${name}`);
-  return m[0];
-}
 
 const harness = `
-${extractFn("graphLevels")}
 ${extract("swimlane-order")}
 return { orderLaneLeaves, swimEmphasis, laneTitle };
 `;
-const { orderLaneLeaves, swimEmphasis, laneTitle } = new Function(harness)() as {
+const { orderLaneLeaves, swimEmphasis, laneTitle } = new Function("graphLevels", harness)(graphLevels) as {
   orderLaneLeaves: (memberIds: string[], byId: Map<string, any>) => string[];
   swimEmphasis: (st: string) => string;
   laneTitle: (brief: string | null | undefined, id: string, max?: number) => string;

@@ -27,8 +27,7 @@ import {
 // `core/` and from each other. chips.js owns the CHIP + BADGE cluster (status/kind/tag/
 // liveness pills); panel.js the collapsible scaffold + the containers and gate badges built
 // on it; overlay.js the modal scaffold + the directory picker. Nothing under components/
-// imports THIS file — that cycle is the one thing the split must never close, which is why
-// action() (whose onDone defaults to render) stays below rather than moving to overlay.js.
+// imports THIS file — that cycle is the one thing the split must never close.
 import {
   chip,
   effStatus,
@@ -53,6 +52,23 @@ import { openModal, openPicker } from "./components/overlay.js";
 // that views can import `render` from a leaf instead of from this file. That inversion is what
 // keeps `views/ -> app.js` from ever existing — see core/nav.js's header for why it is fatal.
 import { backToWorkspace, mount, render, setRenderer } from "./core/nav.js";
+// action() lives under core/ because it only needs `render` from the nav leaf above — never
+// app.js. work-graph.js holds the pure, DOM-free work-list/dependency-graph leaves the task,
+// workspace, and pipeline views all share.
+import { action } from "./core/action.js";
+import {
+  gatedSubtree,
+  graphChildOf,
+  graphLevels,
+  isCompleteStatus,
+  isHistoryItem,
+  pruneWorkCaches,
+  reverseDeps,
+  storyMemberIds,
+  storySubtaskTotal,
+  workLeaves,
+  workListPath,
+} from "./core/work-graph.js";
 // `views/` holds one module per route: each owns its fetch → build → mount() entry point and
 // imports only leaves. metrics.js is the first (RFC Phase 2); the rest follow. diff.js is the
 // task page's diff reader (parse + highlight + inline review comments) — not a route of its own;
@@ -221,32 +237,6 @@ async function ctoPanel(dirId) {
     }
   }
   return card;
-}
-
-// Owns the disable/try/restore/toast dance every action button repeats: disable
-// `btn` (when present), run `fn` (typically an api() call), and on success toast
-// `success` (a string, or a fn of fn's result) then run `onDone` (defaults to
-// render()). On failure, toast the error and re-enable the button so it can be
-// retried. The few buttons whose success message depends on the response toast
-// inside `fn` themselves and pass no `success`. `btn` is optional — a caller with
-// no button to disable (e.g. a term-link) passes none. Any pre-flight confirm()
-// must run before calling action(), so a cancel never disables the button.
-//
-// This stays in app.js rather than moving to components/overlay.js with the modals:
-// `onDone` DEFAULTS to render(), so the body closes over an app-level binding, and a
-// components/ module that reached for it would import app.js — the one cycle the
-// module split must not close. It is a BUTTON concern regardless (RFC D6: the missing
-// Button component), and belongs in components/button.js once Phase 4 lands it.
-async function action(btn, fn, { success, onDone } = {}) {
-  if (btn) btn.disabled = true;
-  try {
-    const r = await fn();
-    if (success != null) toast(typeof success === "function" ? success(r) : success);
-    (onDone || render)();
-  } catch (e) {
-    toast(e.message, true);
-    if (btn) btn.disabled = false;
-  }
 }
 
 // ---------- router ----------
@@ -561,29 +551,6 @@ function openNewStoryModal(workspaceId) {
 // across a long session.
 const SWIM_DONE_EXPANDED = new Set();
 
-// <test-extract:prune-caches>
-// Bound the two long-lived module caches so they don't grow unbounded across a long session:
-// SWIM_DONE_EXPANDED (story ids whose done pile is open) and activityCache (task id -> last pulse).
-// Both only ever ADD ids; work that leaves the list (merged/aborted, or you switch workspaces)
-// kept its entry forever. On each workspace render we drop every id no longer in the current
-// work-id set — functionally harmless (a stale id renders nothing) — purely a growth bound.
-function pruneWorkCaches(liveIds, expanded, activity) {
-  for (const id of expanded) if (!liveIds.has(id)) expanded.delete(id);
-  for (const id of activity.keys()) if (!liveIds.has(id)) activity.delete(id);
-}
-// </test-extract:prune-caches>
-
-// <test-extract:complete-status>
-// A work item counts as COMPLETE once it reaches a SUCCESSFUL terminal status. A LEAF task ends
-// at `merged` (or `rolled_back`); a STORY NODE ends at `done`. This is the ONE source of truth
-// for "is this work finished", reused by storyProgress's done count AND the cross-type graph/rollup
-// progress bars — those bars mix nodes + leaves in one subtree, so they MUST count node `done`
-// too, else any subtree containing a completed story UNDER-reports (it sits in the total but
-// never in the merged numerator). Failure/abort are terminal but NOT complete (they're the ✗).
-const COMPLETE_STATUSES = new Set(["merged", "rolled_back", "done"]);
-function isCompleteStatus(status) { return COMPLETE_STATUSES.has(status); }
-// </test-extract:complete-status>
-
 function queueLine(tasks) {
   const idea = tasks.filter((t) => t.status === "idea").length;
   const specRev = tasks.filter((t) => t.status === "spec_review").length;
@@ -609,114 +576,6 @@ function queueLine(tasks) {
   if (idea) parts.push(`${idea} idea`);
   return parts.length ? parts.join(", ") + "." : "Idle.";
 }
-
-// The unified WORK-LIST URL for one workspace: GET /api/work scoped to this workspace
-// (?workspace=). The single replacement for the split /workspaces/:id/tasks +
-// /workspaces/:id/stories fetches — the response is the WorkView leaf|node union, which
-// callers split by `work_kind` (leaves → task list, nodes → stories).
-function workListPath(workspaceId) {
-  return "/work?workspace=" + encodeURIComponent(workspaceId);
-}
-// The LEAF (task) members of a /api/work list — used for the launcher's one-line queue summary.
-// The Pipeline view consumes the full leaf|node union directly, so there's no node-only splitter.
-function workLeaves(work) {
-  return (Array.isArray(work) ? work : []).filter((w) => w && w.work_kind === "leaf");
-}
-
-// Whether a work item is FINISHED (terminal): a NODE (story) once it reaches done/aborted, a
-// LEAF (task) by the server's terminal status set. In the Pipeline view a finished story is
-// dropped from the lanes and a finished subtask collapses into its lane's "N done" pile;
-// everything else stays active — including stories that are open/merging/merge_blocked and any
-// feedback task awaiting the operator.
-function isHistoryItem(w) {
-  if (!w) return false;
-  if (w.work_kind === "node") return w.status === "done" || w.status === "aborted";
-  return TERMINAL_STATUSES.includes(w.status);
-}
-
-// Reverse the blocked_by edges into a dependents map: blocker id → [ids of tasks
-// that list it in their blocked_by]. Used to walk the dependency graph the
-// other way (from a gating task down to what it gates) for the progress rollup and
-// the graph-node annotations. Purely client-side from the already-fetched list.
-function reverseDeps(tasks) {
-  const m = new Map();
-  for (const t of tasks) {
-    for (const b of (t.blocked_by || [])) {
-      if (!m.has(b)) m.set(b, []);
-      m.get(b).push(t.id);
-    }
-  }
-  return m;
-}
-
-// The transitive set of task ids a given task GATES — every task that lists it
-// (directly or through a chain) in blocked_by. BFS over the reversed edges; the
-// `seen` set both collects the result and guards against a stray cycle. The root
-// itself is excluded.
-function gatedSubtree(rootId, dependentsOf) {
-  const seen = new Set();
-  const queue = [...(dependentsOf.get(rootId) || [])];
-  while (queue.length) {
-    const id = queue.shift();
-    if (id === rootId || seen.has(id)) continue;
-    seen.add(id);
-    for (const d of (dependentsOf.get(id) || [])) if (!seen.has(d)) queue.push(d);
-  }
-  return seen;
-}
-
-// Assign each node a column (level) = longest blocker-chain depth, so blockers sit
-// strictly left of the tasks they block (a layered topological layout). Roots
-// (no in-graph blockers) land at level 0. The backend forbids dependency cycles,
-// but a guard bounds the relaxation passes so a stray cycle can't loop forever.
-function graphLevels(nodeIds, edges) {
-  const level = {};
-  for (const id of nodeIds) level[id] = 0;
-  const incoming = {};
-  for (const id of nodeIds) incoming[id] = [];
-  for (const e of edges) incoming[e.to].push(e.from);
-  let changed = true;
-  let guard = 0;
-  const cap = nodeIds.size + 1;
-  while (changed && guard <= cap) {
-    changed = false;
-    for (const id of nodeIds) {
-      for (const from of incoming[id]) {
-        if (level[from] + 1 > level[id]) { level[id] = level[from] + 1; changed = true; }
-      }
-    }
-    guard++;
-  }
-  return level;
-}
-
-// <test-extract:graph-membership> — pure, DOM-free story→subtask membership, unit-tested in
-// test/graph-hierarchy.test.ts. The graph's containment (and S3's future grouping) derives from
-// this ONE set of rules, so app.js and the tests can't drift.
-// A leaf's owning story id: parent_id wins over story_id (the canonical membership rule). A story
-// NODE carries neither, so this is only meaningful for leaves.
-function graphChildOf(w) { return w && (w.parent_id || w.story_id); }
-// The VISIBLE member leaves of a story: every id in `ids` (the rendered node set) whose work item
-// is a LEAF owned by `storyId`. Returns leaf ids only — NOT the story itself; callers add the
-// story node. Because it filters to `ids`, a member hidden by the generations/depth slider is
-// excluded here, so no dangling child-of edge is ever synthesized for a hidden child.
-function storyMemberIds(storyId, ids, byId) {
-  const out = [];
-  for (const cid of ids) {
-    const c = byId.get(cid);
-    if (c && c.work_kind === "leaf" && graphChildOf(c) === storyId) out.push(cid);
-  }
-  return out;
-}
-// A story's TRUE subtask total from its server-computed per-status `counts` rollup (idle is a
-// pseudo-bucket, not a real subtask — excluded, mirroring storyProgress). Drives the HONEST empty
-// state: only a story with ZERO subtasks total is "no subtasks yet"; a story whose children are
-// all finished or slider-hidden has counts>0 and is NOT childless.
-function storySubtaskTotal(counts) {
-  const c = counts || {};
-  return Object.keys(c).reduce((n, k) => (k === "idle" ? n : n + (c[k] || 0)), 0);
-}
-// </test-extract:graph-membership>
 
 // <test-extract:story-lifecycle-ui>
 // Story lifecycle — a SECONDARY, purely front-end-DERIVED signal (story st-f4858e23 ask #4) so a

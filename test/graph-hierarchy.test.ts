@@ -2,32 +2,13 @@
 // story→subtask HIERARCHY explicitly — an ALWAYS-drawn labeled story container (incl. the empty
 // case) plus dashed no-arrow child-of connectors distinct from the solid blocked_by edges.
 //
-// public/app.js is a classic browser script (touches `document` at module load, no exports), so
-// we can't import it. We extract the PURE, DOM-free `graph-membership` helper block fenced with
-// `<test-extract:graph-membership>` and eval it in isolation — the same approach as
-// test/graph-rollup-completion.test.ts and test/state-meta-fallback.test.ts.
+// These helpers live in public/core/work-graph.js, which is DOM-free at module load, so we
+// import them directly and assert on the real exports. They used to be fenced by a
+// `<test-extract:graph-membership>` sentinel and eval'd out of the classic public/app.js script
+// with `new Function`, because that script could not be imported. That harness is gone — do not
+// reintroduce a sentinel. Same approach as test/state-meta-fallback.test.ts.
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-const harness = `
-${extract("graph-membership")}
-return { graphChildOf, storyMemberIds, storySubtaskTotal };
-`;
-const { graphChildOf, storyMemberIds, storySubtaskTotal } = new Function(harness)() as {
-  graphChildOf: (w: any) => string | undefined;
-  storyMemberIds: (storyId: string, ids: Iterable<string>, byId: Map<string, any>) => string[];
-  storySubtaskTotal: (counts: any) => number;
-};
+import { graphChildOf, storyMemberIds, storySubtaskTotal } from "../public/core/work-graph.js";
 
 // ---------- graphChildOf: canonical membership rule (parent_id wins over story_id) ----------
 

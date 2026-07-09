@@ -17,7 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.258] - 2026-07-09
+### Changed
+
+- Front-end module split (RFC Phase 2): extracted the leaves the three big views share out of
+  `public/app.js` into `public/core/action.js` (the `action()` button helper, which now takes
+  `render` from `core/nav.js` instead of closing over an app-level binding) and
+  `public/core/work-graph.js` (`pruneWorkCaches`, `isCompleteStatus`, `workListPath`,
+  `workLeaves`, `isHistoryItem`, `reverseDeps`, `gatedSubtree`, `graphLevels`, `graphChildOf`,
+  `storyMemberIds`, `storySubtaskTotal`). Pure move — no behavior change. Their tests now
+  `import` the real exports instead of scraping `<test-extract:>` sentinels out of `app.js`
+  and eval'ing them, so the `prune-caches`, `complete-status`, and `graph-membership` fences
+  are gone.
 
 ### Added
 
