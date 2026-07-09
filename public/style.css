@@ -39,7 +39,19 @@
   --rolled_back: #7c5e3b;  /* brown (terminal — a rollback's revert landed) */
   --failed: #8a1322;       /* red-800 (terminal — execution/dispatch/verify failure) */
   --aborted: #545a62;      /* gray-600 (neutral — deliberate operator cancel) */
-  /* Legacy aliases kept for backward-compat with any code paths still referencing them */
+  /* Legacy-NAMED aliases. The states they were named for are gone, but the RFC's claim that all
+     six are DEAD (rfc-frontend-launchpad.md §7.4) is REFUTED by grep: every one is still read by a
+     live `var(--x)` in this file, so none was deleted in Phase 2.
+       --rejected (17 refs) is the app's DANGER RED: .btn.danger, .btn.ghost.danger-outline,
+         .toast.err, .conn.down .led, .attention:hover, .icon-btn:hover, .modal .m-error.on,
+         .ci-badge.fail, .blocker-row.dead, .cto-card .meta.err.
+       --review (8 refs) is the PAUSE-banner orange: .pause-toggle.paused and the banner beside it.
+       --running (5 refs) is the in-flight blue: .ci-badge.running, .conf-badge.checking.
+     Renaming those three to say what they mean is a cleanup, not a deletion.
+       --finalizing / --queued / --awaiting (3 refs each) are read ONLY by status-keyed rules
+         (.chip.X / .tl-dot.X / .sb-fill.X). .tl-dot is keyed on a task_event's `to_status`, i.e. on
+         HISTORY rows, so proving those rules unreachable needs a DB check, not a grep. Deleting the
+         alias without them would silently blank the rule. Left for a cleanup with that evidence. */
   --finalizing: #4f46e5;   /* indigo-600 — old "finalizing" state (removed) */
   --queued: #6c727a;       /* gray-500 — old "queued"/"ready" state */
   --running: #425eff;      /* blue-500 — old "running" state */

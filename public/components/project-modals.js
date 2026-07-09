@@ -7,7 +7,8 @@
 // DOM-free at module load, like everything under components/: nothing here touches `document`
 // until a function is CALLED. Nothing here imports app.js — the projects views call IN.
 import { el } from "../core/dom.js";
-import { api, toast } from "../core/api.js";
+import { api } from "../core/api.js";
+import { toast } from "./toast.js";
 import { repoDisplay } from "../core/format.js";
 import { Button, action } from "./button.js";
 import { render } from "../core/nav.js";

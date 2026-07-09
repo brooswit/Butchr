@@ -23,11 +23,12 @@
 // views/metrics.js, views/diff.js and views/swimlanes.js.
 import { el } from "../core/dom.js";
 import { fmtDuration, projectTitle } from "../core/format.js";
-import { api, toast } from "../core/api.js";
+import { api } from "../core/api.js";
+import { toast } from "../components/toast.js";
 import { Button, action } from "../components/button.js";
 import { mount, render } from "../core/nav.js";
 import { pruneWorkCaches, workLeaves, workListPath } from "../core/work-graph.js";
-import { effStatus } from "../components/chips.js";
+import { effStatus } from "../components/chips-logic.js";
 import { openModal } from "../components/overlay.js";
 import { ctoPanel } from "../components/cto-panel.js";
 import { SWIM_DONE_EXPANDED, renderSwimlanes } from "./swimlanes.js";

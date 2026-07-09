@@ -11,7 +11,8 @@
 // DOM-free at module load, like everything under components/: nothing here touches `document`
 // until a function is CALLED.
 import { el } from "../core/dom.js";
-import { api, toast } from "../core/api.js";
+import { api } from "../core/api.js";
+import { toast } from "./toast.js";
 
 // Shared modal scaffold. Builds the backdrop + modal, wires Escape and
 // backdrop-click to close, and mounts it on document.body — the identical ~12

@@ -17,6 +17,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The front end's pure logic is split out of its DOM builders (RFC
+  `docs/rfc-frontend-launchpad.md`, Phase 2).** The real seam in `public/` is pure-logic vs
+  DOM-building, and it ran *through* five modules rather than between directories. Each now has a
+  DOM-free leaf beside it: `components/chips-logic.js` (`AWAITED_LABEL`, `feedbackStepLabel`,
+  `awaitedLabel`, `effStatus`, `KIND_VISUAL`, `kindVisual`), `views/swimlanes-logic.js`
+  (`storyLifecycle`, `storyProgress`, `orderLaneLeaves`, `swimEmphasis`, `laneTitle`),
+  `views/projects-logic.js` (`initiativeHeading`, `initiativeRollup`, `projectInitiativeRollup`,
+  plus `ceoStatusPill` / `ceoTerminalBtnState`, which are the same seam), `views/diff-logic.js`
+  (`parseDiff`, the inline review-comment store, `composeReviewNote`), and `views/metrics-logic.js`
+  (`rateSub`). Nothing is re-exported from the DOM half — a consumer that needs only the logic
+  imports the leaf, which is what keeps `el` out of its module graph.
+- **`core/` is finally framework-agnostic.** `toast` / `terminalToast` moved out of `core/api.js`
+  into the new `components/toast.js`. `core/api.js` now holds only the `api()` fetch wrapper and
+  imports nothing, so the `core/state-meta.js -> core/api.js -> core/dom.js` chain that dragged the
+  DOM layer into the two purest core leaves is severed. This is the ordering constraint that lets
+  `core/dom.js` die in Phase 4.
+- Pure refactor: no behaviour change, no pixel change, no new dependency. The test suite is green
+  with **zero rewritten assertions** — six test files re-point at the extracted leaves and nothing
+  else. The 6 legacy colour aliases in `public/style.css` were **kept**: contrary to RFC §7.4 they
+  are not dead — all six are still read by live `var(--x)` rules (`--rejected` alone has 17
+  references and is the app's danger red). `style.css` now records the evidence in place.
+
 ## [0.9.279] - 2026-07-09
 
 - **The webapp is a build artifact (RFC `docs/rfc-frontend-launchpad.md`, Phase 1).** `public/` is

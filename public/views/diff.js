@@ -1,75 +1,46 @@
-// The DIFF view — the unified-diff reader on a task's review surface: parsing, dependency-free
-// syntax highlighting, per-file collapse, and the inline review-comment editor. Extracted from
-// app.js (RFC Phase 2, story st-46f1e8d9 S5).
+// The DIFF view — the DOM half of the unified-diff reader on a task's review surface:
+// dependency-free syntax highlighting, per-file collapse, and the inline review-comment editor.
+// Extracted from app.js (RFC Phase 2, story st-46f1e8d9 S5).
 //
-// It imports only LEAVES — `core/dom.js` for `el` — and NOTHING else. In particular it does
-// NOT import core/nav.js: nothing here navigates or re-renders. (The `render` mentioned in the
-// comments below is the app's SSE re-render, which this module survives rather than triggers.)
-// It never imports app.js; see the header of core/nav.js for why that edge is fatal.
+// The parser, the inline-comment store, and the change-request note composer are DOM-free and live
+// in the leaf views/diff-logic.js, split out by the RFC Phase 2 horizontal cut (§0.1 #5). They are
+// NOT re-exported from here: views/task.js imports composeReviewNote from the leaf directly.
+//
+// It imports only LEAVES — `core/dom.js` for `el`, plus diff-logic.js — and NOTHING else. In
+// particular it does NOT import core/nav.js: nothing here navigates or re-renders. (The `render`
+// mentioned in the comments below is the app's SSE re-render, which this module survives rather
+// than triggers.) It never imports app.js; see the header of core/nav.js for why that edge is fatal.
 //
 // Everything here builds NODES, never markup strings: renderDiff() returns a DocumentFragment, so
 // escaping is STRUCTURAL (createTextNode cannot be forgotten the way esc() could) and no caller has
 // to trust a string. This matters more here than anywhere else — a diff body is arbitrary source
 // text, angle brackets and all.
 //
-// DOM-free at module load: the module-level state below is a Map, two Sets, and a null. `document`
-// is touched only inside a CALLED function (updateCommentSummary), so this module is importable
-// under a non-browser runner.
+// DOM-free at module load: the only module-level state left here is a null (pendingInlineRestore).
+// `document` is touched only inside a CALLED function (updateCommentSummary), so this module is
+// importable under a non-browser runner.
+//
+// `inlineComments` and `collapsedDiffFiles` are `export let` bindings in diff-logic.js that
+// resetInlineComments() REBINDS. Import them as NAMED BINDINGS and read them at CALL time — never
+// destructure one into a local const, which would snapshot the pre-reset Map and silently strand
+// every comment the reviewer writes on the next task.
 //
 // Called only by renderTask (views/task.js): renderDiff() builds the nodes, wireDiff() wires the
-// freshly-painted result, composeReviewNote() folds the inline comments into a change-request note.
-// setPendingInlineRestore() is the ONE inbound write — see the comment on pendingInlineRestore.
+// freshly-painted result, and diff-logic.js's composeReviewNote() folds the inline comments into a
+// change-request note. setPendingInlineRestore() is the ONE inbound write — see the comment on
+// pendingInlineRestore.
 //
 // PAINT AND WIRE ARE SPLIT ON PURPOSE. renderDiff() registers no listeners; wireDiff() queries the
 // LIVE box after the fragment is attached. A DocumentFragment's children are unreachable through
 // `box.querySelectorAll` until then, so the call site must replaceChildren() FIRST and wireDiff()
 // second. The split is also what lets the SSE restore path call wireDiff() on its own.
 import { el } from "../core/dom.js";
-
-// Parse a unified diff into per-file groups for a readable, GitHub-style view.
-// Each non-meta line also carries the source line numbers it maps to (oldNo on the
-// pre-image side, newNo on the post-image side), tracked from the hunk `@@` headers
-// — these drive the line-number gutter and the file:line context attached to inline
-// review comments. The "\ No newline at end of file" marker is a `meta` line with no
-// numbers (not commentable).
-function parseDiff(diff) {
-  const files = [];
-  let cur = null;
-  let oldNo = 0, newNo = 0;
-  const start = (header) => {
-    cur = { header, path: "", oldPath: "", add: 0, del: 0, binary: false, lines: [] };
-    files.push(cur);
-    oldNo = 0; newNo = 0;
-  };
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("diff --git")) {
-      const m = line.match(/ b\/(.+)$/);
-      start(line);
-      if (m) cur.path = m[1];
-      continue;
-    }
-    if (!cur) start(line); // diff without a "diff --git" preamble
-    if (line.startsWith("--- ")) { cur.oldPath = line.slice(4).replace(/^a\//, ""); continue; }
-    if (line.startsWith("+++ ")) { cur.path = line.slice(4).replace(/^b\//, "") || cur.path; continue; }
-    if (line.startsWith("index ") || line.startsWith("new file") ||
-        line.startsWith("deleted file") || line.startsWith("old mode") ||
-        line.startsWith("new mode") || line.startsWith("similarity") ||
-        line.startsWith("rename ")) continue;
-    if (line.startsWith("Binary files")) { cur.binary = true; continue; }
-    if (line.startsWith("@@")) {
-      // @@ -<oldStart>[,<oldLen>] +<newStart>[,<newLen>] @@ — reset both counters.
-      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) { oldNo = +m[1]; newNo = +m[2]; }
-      cur.lines.push({ t: "hunk", text: line });
-      continue;
-    }
-    if (line.startsWith("+")) { cur.add++; cur.lines.push({ t: "add", text: line, newNo }); newNo++; continue; }
-    if (line.startsWith("-")) { cur.del++; cur.lines.push({ t: "del", text: line, oldNo }); oldNo++; continue; }
-    if (line.startsWith("\\")) { cur.lines.push({ t: "meta", text: line }); continue; } // "No newline…"
-    if (line.length) { cur.lines.push({ t: "ctx", text: line, oldNo, newNo }); oldNo++; newNo++; }
-  }
-  return files;
-}
+import {
+  collapsedDiffFiles,
+  inlineComments,
+  parseDiff,
+  resetInlineComments,
+} from "./diff-logic.js";
 
 // ---------- dependency-free syntax highlighting ----------
 // A tiny per-line tokenizer for the diff view. No external lib: we scan the line
@@ -297,22 +268,6 @@ export function renderDiff(diff) {
   return frag;
 }
 
-// ---------- inline review comments ----------
-// Per-line review comments the reviewer attaches by clicking a diff line's gutter.
-// Kept at module scope (keyed by a stable path+side+line key) so they survive the
-// full re-render the app does on every SSE event AND the async diff re-fetch — the
-// diff is re-rendered with the same keys, and wireDiff re-paints the stored comments
-// onto it. Reset when a different task's diff is opened. On "Request change" they are
-// composed (with their file:line context) into the single change-request note sent
-// to /reject, so the resumed agent gets specific per-line feedback in its rework
-// prompt — no change to the reject payload shape (see composeReviewNote).
-let inlineComments = new Map(); // key -> { path, line, side, ctx, text }
-let inlineCommentsTaskId = null;
-// Diff-file collapse state — module-persisted (keyed by file path) so a collapsed
-// file stays collapsed across the full re-render the app does on every SSE event,
-// mirroring inlineComments above. Reset alongside inlineComments when a different
-// task's diff is opened, so a new task doesn't inherit the prior task's collapse set.
-let collapsedDiffFiles = new Set();
 // An open (uncommitted) inline-comment editor lives inside the async-fetched diff, so
 // it isn't in the DOM right after render(); captureUiState() stashes it here and
 // wireDiff() re-opens + refills it once the diff is painted. Null when none is open.
@@ -333,34 +288,6 @@ let pendingInlineRestore = null;
 // called by app.js's restoreUiState() on the SSE path. wireDiff() consumes and clears it.
 export function setPendingInlineRestore(v) {
   pendingInlineRestore = v;
-}
-
-function resetInlineComments(taskId) {
-  if (inlineCommentsTaskId !== taskId) {
-    inlineComments = new Map();
-    collapsedDiffFiles = new Set();
-    inlineCommentsTaskId = taskId;
-  }
-}
-
-// Compose the freeform note + any inline comments into one change-request note.
-// Inline comments are listed in file/line order under a header so the agent reads
-// them as a structured punch-list. Returns "" when there's nothing to send.
-export function composeReviewNote(freeform) {
-  const parts = [];
-  const ff = (freeform || "").trim();
-  if (ff) parts.push(ff);
-  if (inlineComments.size) {
-    const sorted = [...inlineComments.values()].sort((a, b) =>
-      a.path === b.path ? a.line - b.line : a.path < b.path ? -1 : 1);
-    const lines = ["Inline comments:"];
-    for (const c of sorted) {
-      const body = c.text.trim().split("\n").join("\n  "); // indent continuation lines
-      lines.push(`- ${c.ctx} — ${body}`);
-    }
-    parts.push(lines.join("\n"));
-  }
-  return parts.join("\n\n");
 }
 
 // Refresh the "N inline comment(s)" hint shown next to the review controls, if the

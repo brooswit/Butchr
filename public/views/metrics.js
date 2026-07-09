@@ -7,11 +7,15 @@
 //
 // DOM-free at module load: nothing here touches `document` until a function is CALLED, so
 // test/metrics-view.test.ts imports this module directly under bun test.
+//
+// Its one pure helper, `rateSub`, moved to the DOM-free leaf views/metrics-logic.js in the RFC
+// Phase 2 horizontal split (§0.1 #5). It is NOT re-exported from here.
 import { el } from "../core/dom.js";
 import { api } from "../core/api.js";
 import { fmtBytes, fmtDuration, fmtPct } from "../core/format.js";
 import { mount } from "../core/nav.js";
 import { chip } from "../components/chips.js";
+import { rateSub } from "./metrics-logic.js";
 
 // A single number card: big value, label, and an optional sub-line (e.g. raw
 // numerator/denominator behind a rate).
@@ -22,14 +26,6 @@ function metricCard(label, value, sub) {
     sub != null ? el("div", { class: "metric-sub" }, sub) : null,
   ]);
 }
-// "num/of" sub-line for a rate card (or "no data" when nothing has happened yet).
-// Exported ONLY because it is the one pure, DOM-free helper here — unit-tested in
-// test/metrics-view.test.ts. The others need a DOM (they call `el`) and are module-local.
-export function rateSub(r) {
-  if (!r || r.of === 0) return "no data yet";
-  return `${r.num} / ${r.of}`;
-}
-
 // Tiny inline bar sparkline for merged-per-day throughput. No chart lib: a row of
 // CSS-height bars, each titled with its date + count. Heights are scaled to the
 // busiest day in the window (a flat zero series renders as a baseline).

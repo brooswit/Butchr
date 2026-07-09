@@ -5,9 +5,11 @@
 // (REVAMP-4's repo/project, future agent perspectives) — falls back safely for an
 // unmapped kind instead of throwing.
 //
-// The chip/badge cluster now lives in public/components/chips.js, which is DOM-free at
-// module load (it imports only core/dom.js + core/state-meta.js, neither of which touches
-// `document` at load), so we IMPORT it directly and assert on the real exports. (This test
+// The chip/badge EMITTERS live in public/components/chips.js, which is DOM-free at module load
+// (it imports only core/dom.js + core/state-meta.js + components/chips-logic.js, none of which
+// touches `document` at load); the kind -> visual TABLE and its lookup live in the DOM-free leaf
+// public/components/chips-logic.js, split out by the RFC Phase 2 horizontal cut. We IMPORT both
+// directly and assert on the real exports. (This test
 // used to scrape a `<test-extract:kind-badge>` sentinel block out of the classic
 // public/app.js script and eval it with `new Function`, injecting its own stand-in `esc`;
 // that harness is gone along with the sentinel. Do not reintroduce one.)
@@ -23,7 +25,8 @@
 // is hand-rolled and why it must never go async). The assertions moved from substring-matching
 // HTML to STRUCTURE (className / textContent), which is what they were reaching for all along.
 import { expect, test } from "bun:test";
-import { KIND_VISUAL, kindBadge, kindVisual, taskChips } from "../public/components/chips.js";
+import { kindBadge, taskChips } from "../public/components/chips.js";
+import { KIND_VISUAL, kindVisual } from "../public/components/chips-logic.js";
 import { withDom } from "./dom-stub.ts";
 
 test("KIND_VISUAL maps the six known kinds (2 work-item + 4 agent)", () => {

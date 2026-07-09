@@ -18,6 +18,10 @@ import "@launchpad-ui/tokens/themes.css";
 // touches `document`, which is exactly why nothing under core/, components/, or views/ may
 // import it — see the header of core/nav.js.
 //
+// Since the RFC Phase 2 horizontal split, `core/api.js` is DOM-free OUTRIGHT: `toast` moved to
+// components/toast.js, so nothing under `core/` reaches `core/dom.js` any more, and each of the
+// five DOM-building modules that also held pure logic now has a `*-logic.js` leaf beside it.
+//
 // stateMetaLoaded is an `export let`:
 // applyStateMeta REASSIGNS it once /api/state-meta lands, and the ES live binding
 // propagates that new value here. Read it at CALL time — never destructure it into a
@@ -32,7 +36,8 @@ import { el } from "./core/dom.js";
 // fmtDuration went with the workspace view's activity pulse and fmtTime with the CTO panel; and
 // projectTitle / repoDisplay went with the projects views. All remain exported from format.js,
 // where views/workspace.js and views/projects.js import them.
-import { api, toast } from "./core/api.js";
+import { api } from "./core/api.js";
+import { toast } from "./components/toast.js";
 // FILTER_STATUSES is no longer imported here: its only consumer was dirCard's count-pill row,
 // which died with the unreachable dashboard surface. TERMINAL_STATUSES / statusLabel left with
 // the task view. All remain exported from state-meta.js.
@@ -45,11 +50,12 @@ import { loadStateMeta, stateMetaLoaded } from "./core/state-meta.js";
 // PROJECTS dialogs. Nothing under components/ imports THIS file — that cycle is the one thing
 // the split must never close.
 //
-// NOTHING from components/ is imported here any more. panel.js's cluster (block/blockerRow/
-// ciBadge/collapsible/conformanceBadge/listPanel/rollupPanel) went with the task view and
-// effStatus with the workspace view's queueLine; chips.js's chip/kindBadge, overlay.js's
-// openModal, and project-modals.js's openNewProjectModal/openLaunchModal/openAddWorkspaceModal
-// all went with the projects views, which import them directly.
+// The ONE thing imported from components/ here is toast.js's `toast`, which used to be reached
+// through core/api.js. panel.js's cluster (block/blockerRow/ciBadge/collapsible/conformanceBadge/
+// listPanel/rollupPanel) went with the task view and effStatus with the workspace view's queueLine;
+// chips.js's chip/kindBadge, overlay.js's openModal, and project-modals.js's openNewProjectModal/
+// openLaunchModal/openAddWorkspaceModal all went with the projects views, which import them
+// directly.
 // nav.js owns the `#app` mount point, hash navigation, and the re-render handle. The route
 // DISPATCHER still lives here (renderRoute, below); app.js registers it via setRenderer() so
 // that views can import `render` from a leaf instead of from this file. That inversion is what

@@ -14,7 +14,8 @@
 // or `localStorage` until a function is CALLED, so this module imports cleanly under a
 // non-browser test runner (test/cli-helpers.test.ts imports it directly).
 import { el } from "../core/dom.js";
-import { chip, effStatus } from "./chips.js";
+import { chip } from "./chips.js";
+import { effStatus } from "./chips-logic.js";
 
 // ---------- collapsible panel ----------
 // Shared scaffold for the caret (▾ open / ▸ closed) + clickable head + toggle-body

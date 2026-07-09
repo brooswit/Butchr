@@ -18,7 +18,7 @@
 // + bootstrap alone and that harness is gone along with the sentinel. Do not reintroduce one. Same
 // approach as test/kind-badge.test.ts / test/graph-rollup-completion.test.ts.)
 import { expect, test } from "bun:test";
-import { initiativeHeading, initiativeRollup, projectInitiativeRollup } from "../public/views/projects.js";
+import { initiativeHeading, initiativeRollup, projectInitiativeRollup } from "../public/views/projects-logic.js";
 
 // ---- initiativeHeading -----------------------------------------------------
 test("initiativeHeading: first child's brief, first line, clamped to 80 chars", () => {

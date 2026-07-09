@@ -20,7 +20,7 @@
 // a CALLED function (via `el`, and via toast()), so importing this module under a non-browser
 // test runner is safe. test/cli-helpers.test.ts leans on that property for a sibling.
 import { el } from "../core/dom.js";
-import { toast } from "../core/api.js";
+import { toast } from "./toast.js";
 import { render } from "../core/nav.js";
 
 // The disable/try/restore/toast dance every action button repeats: disable `btn` (when

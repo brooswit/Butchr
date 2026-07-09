@@ -8,7 +8,7 @@
 // sentinel block out of the classic public/app.js script and eval it with `new Function`; that
 // harness is gone along with the sentinel.) Do not reintroduce a sentinel here.
 import { expect, test } from "bun:test";
-import { laneTitle, orderLaneLeaves, swimEmphasis } from "../public/views/swimlanes.js";
+import { laneTitle, orderLaneLeaves, swimEmphasis } from "../public/views/swimlanes-logic.js";
 
 const mk = (items: Array<{ id: string; blocked_by?: string[] }>) =>
   new Map(items.map((w) => [w.id, w]));

@@ -1,6 +1,10 @@
-// The server-fetch wrapper and the transient toast surface. DOM-free at module load:
-// `toast` touches `document` only when CALLED.
-import { el } from "./dom.js";
+// The server-fetch wrapper. Framework-agnostic and DOM-FREE OUTRIGHT: this module imports nothing
+// and touches no `document`, so core/state-meta.js (and core/work-graph.js beneath it) can be
+// imported with no DOM at all.
+//
+// `toast` / `terminalToast` used to live here and built DOM via `el`, which made `core/` depend on
+// `core/dom.js` transitively through state-meta.js. They moved to components/toast.js in the RFC
+// Phase 2 horizontal split (RFC §0.1 #2, #3). Do not bring a DOM builder back into this file.
 
 export async function api(method, path, body) {
   const res = await fetch("/api" + path, {
@@ -13,20 +17,4 @@ export async function api(method, path, body) {
   try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
   if (!res.ok) throw new Error((data && data.error) || res.statusText);
   return data;
-}
-
-// Module-private: only toast() reads or clears it, so it is deliberately not exported.
-let toastTimer = null;
-export function toast(msg, isErr) {
-  const old = document.querySelector(".toast");
-  if (old) old.remove();
-  const t = el("div", { class: "toast" + (isErr ? " err" : "") }, msg);
-  document.body.appendChild(t);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
-}
-
-// The toast confirming a terminal attach, naming the emulator butchr launched.
-export function terminalToast(r) {
-  toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
 }

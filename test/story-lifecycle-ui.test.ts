@@ -3,19 +3,21 @@
 // StoryView already carries (the per-status `counts` rollup + leader{running,desired} + status),
 // with NO new backend field. This guards the derivation rule + the own-children progress rollup.
 //
-// These helpers now live in public/views/swimlanes.js (the Pipeline view owns them), which is
-// DOM-free at module load, so we IMPORT it directly and assert on the real exports. (This test used
-// to scrape a `<test-extract:story-lifecycle-ui>` sentinel block out of the classic public/app.js
-// script and eval it with `new Function` — stubbing esc/isCompleteStatus/storySubtaskTotal along
-// the way; that harness is gone along with the sentinel, so the real leaves run here.) Do not
-// reintroduce a sentinel here.
+// The PURE derivations live in public/views/swimlanes-logic.js — the DOM-free leaf of the RFC
+// Phase 2 horizontal split — and the node emitter that renders them in public/views/swimlanes.js
+// (the Pipeline view owns it), which is DOM-free at module load. We IMPORT both directly and assert
+// on the real exports. (This test used to scrape a `<test-extract:story-lifecycle-ui>` sentinel
+// block out of the classic public/app.js script and eval it with `new Function` — stubbing
+// esc/isCompleteStatus/storySubtaskTotal along the way; that harness is gone along with the
+// sentinel, so the real leaves run here.) Do not reintroduce a sentinel here.
 //
 // storyLifecycleChip now returns a NODE (or null), so its assertions run inside withDom() — the
 // zero-dependency DOM stub. It has no innerHTML, by design: assert on STRUCTURE (className /
 // getAttribute / textContent), never on serialized markup. storyLifecycle and storyProgress are
 // PURE and need no DOM at all.
 import { expect, test } from "bun:test";
-import { storyLifecycle, storyLifecycleChip, storyProgress } from "../public/views/swimlanes.js";
+import { storyLifecycle, storyProgress } from "../public/views/swimlanes-logic.js";
+import { storyLifecycleChip } from "../public/views/swimlanes.js";
 import { withDom } from "./dom-stub";
 
 const story = (o: any = {}) => ({ work_kind: "node", status: "open", counts: {}, leader: {}, ...o });

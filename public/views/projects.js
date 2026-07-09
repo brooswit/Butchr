@@ -3,18 +3,20 @@
 // file as router + bootstrap only.
 //
 // It owns both route entry points (`renderProjects`, `renderProjectDetail` — the module's whole
-// public surface) plus every helper they need: the overview's CEO pill and initiative-rollup line
-// (`ceoPill`, `projectInitiativesLine`, `projectInitiativeRollup`), the initiative derivations
-// shared by both surfaces (`initiativeHeading`, `initiativeRollup`), the managed CEO-agent card
-// (`ceoStatusPill`, `ceoNote`, `ceoTerminalBtnState`, `buildCeoCard`, `ceoPanel`), the detail
-// page's panels (`reposPanel`, `unregisterRepo`, `initiativesPanel`, `initiativeNode`), and the
-// Delete-project danger zone (`projectDangerZone`, `confirmDeleteProject`).
+// public surface) plus every DOM-building helper they need: the overview's CEO pill and
+// initiative-rollup line (`ceoPill`, `projectInitiativesLine`), the managed CEO-agent card
+// (`ceoNote`, `buildCeoCard`, `ceoPanel`), the detail page's panels (`reposPanel`,
+// `unregisterRepo`, `initiativesPanel`, `initiativeNode`), and the Delete-project danger zone
+// (`projectDangerZone`, `confirmDeleteProject`).
 //
-// The six PURE, DOM-free derivation helpers are also exported — not for another view, but because
-// test/projects-initiatives-ui.test.ts and test/projects-ceo-ui.test.ts import and assert on them
-// directly. They used to be fenced by `<test-extract:...>` sentinels and eval'd out of the classic
-// public/app.js script with `new Function`, because that script could not be imported. That harness
-// is gone; do not reintroduce a sentinel. Every other helper here stays module-private.
+// The five PURE, DOM-free derivations these surfaces read (`initiativeHeading`,
+// `initiativeRollup`, `projectInitiativeRollup`, `ceoStatusPill`, `ceoTerminalBtnState`) moved to
+// the leaf views/projects-logic.js in the RFC Phase 2 horizontal split (§0.1 #5), where
+// test/projects-initiatives-ui.test.ts and test/projects-ceo-ui.test.ts import them with no DOM at
+// all. They are NOT re-exported from here. `ceoNote` returns a NODE, so it stayed. Those helpers
+// used to be fenced by `<test-extract:...>` sentinels and eval'd out of the classic public/app.js
+// script with `new Function`, because that script could not be imported. That harness is gone; do
+// not reintroduce a sentinel. Every other helper here stays module-private.
 //
 // It imports only LEAVES — `core/` (dom, format, api, nav, action) and `components/` (chips,
 // overlay, project-modals). It NEVER imports app.js: that edge would drag app.js's `document`-
@@ -31,12 +33,20 @@
 // esc()/htmlOf()/`html:` escape hatches are DELETED (see test/no-opt-in-escaping.test.ts).
 import { el } from "../core/dom.js";
 import { projectTitle, repoDisplay } from "../core/format.js";
-import { api, terminalToast, toast } from "../core/api.js";
+import { api } from "../core/api.js";
+import { terminalToast, toast } from "../components/toast.js";
 import { Button } from "../components/button.js";
 import { mount, render } from "../core/nav.js";
 import { chip, kindBadge } from "../components/chips.js";
 import { openModal } from "../components/overlay.js";
 import { openAddWorkspaceModal, openLaunchModal, openNewProjectModal } from "../components/project-modals.js";
+import {
+  ceoStatusPill,
+  ceoTerminalBtnState,
+  initiativeHeading,
+  initiativeRollup,
+  projectInitiativeRollup,
+} from "./projects-logic.js";
 
 // ---------- projects overview (REVAMP-4 tier UI) ----------
 // The global PROJECTS overview: a CEO-tier project registers repos and coordinates
@@ -145,42 +155,6 @@ export async function renderProjects() {
 // The pure resolution helper (repoDisplay) lives in core/format.js — it is DOM-free and
 // shared, and is unit-tested there via a real import.
 
-// Pure, DOM-free initiative heading + rollup derivation, unit-tested in
-// test/projects-initiatives-ui.test.ts, which imports the three exports below directly.
-//
-// A cross-repo InitiativeView (GET /api/projects/:id/initiatives) has NO top-level brief — each
-// per-repo child story carries its own — so derive a compact panel heading from the FIRST child's
-// brief (first line, clamped). Falls back to the initiative id when no child has a brief, so the
-// row never renders blank.
-export function initiativeHeading(init) {
-  const kids = (init && init.children) || [];
-  const withBrief = kids.find((c) => c && c.brief && String(c.brief).trim());
-  const raw = withBrief ? String(withBrief.brief).trim() : "";
-  if (!raw) return "Initiative " + (String((init && init.initiative_id) || "").trim() || "—");
-  const oneLine = raw.split("\n")[0].trim();
-  return oneLine.length > 80 ? oneLine.slice(0, 77) + "…" : oneLine;
-}
-// The rollup fraction for an initiative's progress bar. LOCKED to the SERVER's done predicate
-// (rollupInitiatives in src/stories.ts): a child counts as done ONLY when status==='done'
-// (strictly — NOT merged/landed), so the bar reaches 100% EXACTLY when the server's
-// initiative.done is true, with no bar/boolean disagreement. Returns { done, total, pct }.
-export function initiativeRollup(init) {
-  const kids = (init && init.children) || [];
-  const total = kids.length;
-  const done = kids.filter((c) => c && c.status === "done").length;
-  return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
-}
-// The project-level "X/Y initiatives done" rollup for the overview card — counts DONE
-// initiatives using the server's authoritative `done` boolean on each InitiativeView. Only
-// cross-repo initiatives appear in the list (single-repo ones are ungrouped), so this counts
-// those. Returns { done, total, pct }.
-export function projectInitiativeRollup(inits) {
-  const list = Array.isArray(inits) ? inits : [];
-  const total = list.length;
-  const done = list.filter((i) => i && i.done).length;
-  return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
-}
-
 // ---------- managed CEO agent (PER-PROJECT, REVAMP-4 P3c) ----------
 // The tier-above analog of ctoPanel (components/cto-panel.js): a project node's managed CEO-agent card on
 // the project-detail view. Fed by GET /api/projects/:id/ceo → { enabled, overridden, globalGate,
@@ -188,26 +162,10 @@ export function projectInitiativeRollup(inits) {
 // global gate, so the pill/toggle-checked state read straight off it (never ceo_enabled alone,
 // which is the overview's coarser ceoPill). Mirrors ctoPanel: fetched async, mounted in place
 // via a slot replace, fail-soft on a status-probe hiccup.
-
-// Pure, DOM-free CEO status-pill + note derivation, unit-tested in test/projects-ceo-ui.test.ts
-// (the honest-gate matrix that feature #4 hinges on), which imports the three exports below directly.
 //
-// The status pill, derived from the RESOLVED fields: live wins (green), else enabled (blue),
-// else a disabled project that's merely INHERITING the default reads the neutral "CEO default"
-// (not "CEO disabled" — nothing was explicitly turned off), and an explicit-off reads "CEO
-// disabled". Returns { cls, label, title? }.
-export function ceoStatusPill(s) {
-  if (s.live) return { cls: "live", label: "CEO live" };
-  if (s.enabled) return { cls: "enabled", label: "CEO enabled" };
-  if (!s.overridden) {
-    return {
-      cls: "inactive",
-      label: "CEO default",
-      title: "Inherits the global CEO gate (BUTCHR_CEO_AGENT) — currently off",
-    };
-  }
-  return { cls: "disabled", label: "CEO disabled" };
-}
+// The card's pure derivations (ceoStatusPill, ceoTerminalBtnState) live in views/projects-logic.js
+// alongside the initiative* helpers — the DOM-free leaf of the RFC Phase 2 split. `ceoNote` returns
+// a NODE and therefore stays here.
 
 // The honest context note under the CEO card, CONDITIONAL on override-vs-inherit so it never
 // contradicts the runtime (isCeoEnabled: an explicit override WINS over the global gate, so an
@@ -245,23 +203,6 @@ export function ceoNote(s) {
     return el("div", { class: "ceo-note inherit" }, "Explicitly disabled for this project.");
   }
   return null;
-}
-
-// The "Open CEO terminal" button's enabled state + honest hint, derived only from the RESOLVED
-// {enabled, overridden, globalGate, live} fields. Unlike the CTO button (which HIDES when not
-// running), this stays visible but disables when there's no live pane and explains WHY — using
-// the same honest wording as ceoNote so the two never contradict. Returns { enabled, title }.
-export function ceoTerminalBtnState(s) {
-  if (s.live) return { enabled: true, title: "Attach a terminal to the live CEO agent" };
-  if (s.enabled) return { enabled: false, title: "CEO agent is starting… — no live pane to attach yet" };
-  if (s.overridden) return { enabled: false, title: "CEO is disabled for this project — enable it to attach a terminal" };
-  if (!s.globalGate) {
-    return {
-      enabled: false,
-      title: "The global CEO gate (BUTCHR_CEO_AGENT) is off — enable this project's CEO to attach a terminal",
-    };
-  }
-  return { enabled: false, title: "CEO agent isn't live — no terminal to attach" };
 }
 
 // Build the CEO card DOM from a fetched CeoStatus. Standalone (no closure over the fetch) so the

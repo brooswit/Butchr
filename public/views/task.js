@@ -40,18 +40,18 @@
 // clears it up front on every route change, and renderTask restarts it if the task is still live.
 import { el } from "../core/dom.js";
 import { fmtDuration, fmtTime } from "../core/format.js";
-import { api, terminalToast, toast } from "../core/api.js";
+import { api } from "../core/api.js";
+import { terminalToast, toast } from "../components/toast.js";
 // TERMINAL_STATUSES is an `export let` reassigned once /api/state-meta lands; the ES live binding
 // propagates the new value here. Read it at CALL time — never destructure it into a local const.
 import { TERMINAL_STATUSES, statusLabel } from "../core/state-meta.js";
 import {
   chip,
-  effStatus,
-  feedbackStepLabel,
   livenessChip,
   tagChips,
   taskChips,
 } from "../components/chips.js";
+import { effStatus, feedbackStepLabel } from "../components/chips-logic.js";
 import {
   block,
   blockerRow,
@@ -71,7 +71,8 @@ import {
 } from "../core/work-graph.js";
 // The diff reader (parse + highlight + inline review comments). renderTask is its only caller,
 // so this import moved here with the view.
-import { composeReviewNote, renderDiff, wireDiff } from "./diff.js";
+import { renderDiff, wireDiff } from "./diff.js";
+import { composeReviewNote } from "./diff-logic.js";
 
 // Fragment + text-node helpers, mirroring the pair in components/chips.js. Both touch `document`
 // only when CALLED (see the module-load note above).

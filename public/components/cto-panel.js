@@ -20,9 +20,10 @@
 // this file used to carry — one of the two rival async-action-button implementations named in D6.
 import { el } from "../core/dom.js";
 import { fmtTime } from "../core/format.js";
-import { api, terminalToast, toast } from "../core/api.js";
+import { api } from "../core/api.js";
+import { terminalToast, toast } from "./toast.js";
 import { Button } from "./button.js";
-import { kindVisual } from "./chips.js";
+import { kindVisual } from "./chips-logic.js";
 
 // The CTO agent's tri-state status, mapped from running/desired to a display label
 // and the matching cto-badge CSS class. Used by the workspace panel (its dashboard-card

@@ -5,9 +5,10 @@
 // isCeoEnabled makes an explicit override WIN over the global gate, so an explicit-ON CEO
 // runs REGARDLESS of the gate and must NEVER be labeled inert.
 //
-// All three helpers now live in public/views/projects.js, which is DOM-free at module load (it
-// touches `document` only inside a called function and imports only leaves), so we IMPORT it
-// directly and assert on the real exports. (This test used to scrape a
+// The two PURE helpers now live in public/views/projects-logic.js — the DOM-free leaf of the RFC
+// Phase 2 horizontal split — and ceoNote, which returns a NODE, in public/views/projects.js, which
+// is DOM-free at module load (it touches `document` only inside a called function and imports only
+// leaves). We IMPORT both directly and assert on the real exports. (This test used to scrape a
 // `// <test-extract:projects-ceo-status>` sentinel block out of the classic public/app.js script
 // and eval it with `new Function`, because that script could not be imported; app.js is now the
 // router + bootstrap alone and that harness is gone along with the sentinel. Do not reintroduce
@@ -30,7 +31,8 @@
 // deleted) and the DOM stub deliberately has no `innerHTML`.
 import { expect, test } from "bun:test";
 import { withDom } from "./dom-stub";
-import { ceoNote, ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects.js";
+import { ceoNote } from "../public/views/projects.js";
+import { ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects-logic.js";
 
 // The assertable surface of a note node: everything the old markup string exposed.
 // `null` (the no-note case) has no surface at all.

@@ -12,9 +12,13 @@
 // THESE IMPORTS THROW `ReferenceError: document is not defined`. This file is the tripwire.
 //
 // Note what it does NOT prove: that renderMetrics() actually runs. It builds DOM via `el` and
-// fetches over the network, so it is not exercised here. Only `rateSub` is pure and DOM-free.
+// fetches over the network, so it is not exercised here. Only `rateSub` is pure and DOM-free, and
+// since the RFC Phase 2 horizontal split it lives in the DOM-free leaf views/metrics-logic.js.
+// views/metrics.js is still imported FOR EFFECT — dropping it would quietly retire the tripwire
+// this whole file exists to be.
 import { expect, test } from "bun:test";
-import { rateSub } from "../public/views/metrics.js";
+import "../public/views/metrics.js";
+import { rateSub } from "../public/views/metrics-logic.js";
 import * as nav from "../public/core/nav.js";
 
 test("views/metrics.js and core/nav.js load with no DOM present", () => {
