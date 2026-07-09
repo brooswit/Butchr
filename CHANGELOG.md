@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.281] - 2026-07-09
+
 ### Added
 
 - **The React shell** (RFC `docs/rfc-frontend-launchpad.md` §10 Phase 3). `public/index.html` is now
