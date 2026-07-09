@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.278] - 2026-07-09
+
 - **butchr takes its first dependency, and `tsc` runs against `src/` for the first time
   (RFC `docs/rfc-frontend-launchpad.md`, Phase 1a).** `package.json` gains a `devDependencies`
   block — exact-pinned `typescript@5.9.3` and `bun-types@1.3.14`, no carets — and `bun.lock` is
