@@ -34,7 +34,11 @@ fi
 # `build:fe` now `rm -rf dist` first, which fixes the cause. This fixes the assertion, because an
 # assertion whose correctness depends on somebody else having cleaned up is not an assertion. The
 # entry HTML is the only thing that says which bytes the browser will load.
-mapfile -t REFS < <(grep -ohE '(src|href)="\./[^"]+"' "$DIST/index.html" | sed -E 's/^[a-z]+="\.\///; s/"$//')
+# Both `./name` and `/name` are accepted. `build:fe` passes `--public-path=/`, so bun emits
+# ABSOLUTE refs (a relative ref would resolve against the wrong base under serveStatic's SPA
+# fallback at `/task/<id>`); a plain `bun build` with no --public-path emits `./name`. Matching
+# only one form makes this script's own zero-glob guard fire on a perfectly good artifact.
+mapfile -t REFS < <(grep -ohE '(src|href)="\.?/[^"]+"' "$DIST/index.html" | sed -E 's/^[a-z]+="\.?\///; s/"$//')
 CSS=()
 for r in "${REFS[@]}"; do
   [ "${r##*.}" = "css" ] || continue
