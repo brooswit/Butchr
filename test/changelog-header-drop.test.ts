@@ -3,19 +3,27 @@
 // DELETES a released version header (`## [0.9.x]`) is always the merge rebase silently
 // dropping an already-released section and orphaning its bullets.
 //
-// These tests run the REAL `scripts/ci` text against REAL temp git repos, with the two `bun`
-// lines (build + test) stripped — otherwise the gate would recursively re-run the whole suite.
-// Everything below the strip is byte-identical to what ships, so the check under test is the
-// shipped one, not a re-implementation.
+// These tests run the REAL `scripts/ci` text against REAL temp git repos, with its three
+// top-level `bun` lines (backend build, FE whole-graph build, `bun test`) stripped — otherwise
+// the gate would recursively re-run the whole suite. Everything below the strip is
+// byte-identical to what ships, so the check under test is the shipped one, not a
+// re-implementation.
+//
+// The strip is `!/^bun\s/`, which matches only UNINDENTED lines. The FE per-file loop's
+// INDENTED `if ! bun build "$f"` is therefore NOT stripped and DOES execute here, once per
+// test. That cannot be avoided — dropping indented `bun` lines would leave `if ! ; then` and a
+// bash syntax error. So the fixture below deliberately carries a minimally-real
+// `public/app.js`: `scripts/ci` unconditionally asserts a non-empty `public/**/*.js` glob, and
+// a fixture with no `public/` would (correctly) fail that guard.
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO = join(import.meta.dir, "..");
 
-/** The shipped scripts/ci minus its `bun build` / `bun test` lines (see file header). */
+/** The shipped scripts/ci minus its top-level `bun build` / `bun test` lines (see file header). */
 function ciScriptWithoutBun(): string {
   return readFileSync(join(REPO, "scripts", "ci"), "utf8")
     .split("\n")
@@ -55,6 +63,11 @@ function mkRepo(branchFiles: Record<string, string>): string {
   writeFileSync(join(dir, "CHANGELOG.md"), CHANGELOG_ON_MAIN);
   writeFileSync(join(dir, "src.ts"), "export const a = 1;\n");
   writeFileSync(join(dir, "notes.md"), `A doc quoting a header:\n\n## [0.9.246] - 2026-07-09\n`);
+  // Satisfies the gate's FE guard (see file header). It belongs in the BASE commit, never in
+  // `branchFiles` — on the branch it would be a non-docs file in `git diff "$BASE"...HEAD` and
+  // would perturb the very CHANGELOG assertions these tests exist to make.
+  mkdirSync(join(dir, "public"), { recursive: true });
+  writeFileSync(join(dir, "public", "app.js"), "export const a = 1;\n");
   git(dir, ["add", "-A"]);
   git(dir, ["commit", "-q", "-m", "base"]);
 
