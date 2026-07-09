@@ -37,152 +37,34 @@
 import { el } from "../core/dom.js";
 import {
   collapsedDiffFiles,
+  highlightCode,
   inlineComments,
+  langForPath,
+  lineKey,
   parseDiff,
   resetInlineComments,
 } from "./diff-logic.js";
 
 // ---------- dependency-free syntax highlighting ----------
-// A tiny per-line tokenizer for the diff view. No external lib: we scan the line
-// char-by-char and wrap keywords/strings/comments/numbers in <span class="tok-*">.
-// It is intentionally line-local — a /* */ block comment that spans diff lines only
-// colors the portion on each line — which is good enough for review-time reading and
-// keeps the scanner stateless across the interleaved add/del/ctx lines of a hunk.
+// The SCANNERS moved to views/diff-logic.ts in RFC Phase 4b and now return token records
+// (`{cls, raw}[]`) rather than DOM. views/diff.tsx maps the same records to JSX, so the two
+// renderers cannot drift. What is left here is the ten lines that turn a record into a node.
 
-// Pick a highlight language from the file path. JSON rides the JS scanner (its
-// strings/numbers/true/false/null all tokenize correctly there). Returns null for
-// types we don't tokenize, so the text falls back to plain (escaped) rendering.
-function langForPath(path) {
-  const p = (path || "").toLowerCase();
-  if (/\.(tsx?|jsx?|mjs|cjs|json)$/.test(p)) return "js";
-  if (/\.css$/.test(p)) return "css";
-  return null;
-}
-
-const JS_KEYWORDS = new Set(
-  ("abstract,as,async,await,break,case,catch,class,const,continue,debugger,declare," +
-   "default,delete,do,else,enum,export,extends,false,finally,for,from,function,get," +
-   "if,implements,import,in,instanceof,interface,is,keyof,let,namespace,new,null,of," +
-   "override,private,protected,public,readonly,return,satisfies,set,static,super," +
-   "switch,this,throw,true,try,type,typeof,undefined,var,void,while,with,yield").split(","),
-);
-
-function tok(cls, raw) { return el("span", { class: `tok-${cls}` }, raw); }
-
-// A line builder for the scanners below. The string version concatenated `esc(c)` ONE CHARACTER AT
-// A TIME for every char the lexer didn't classify; translating that literally would mint a text node
-// per character, and a diff runs to thousands of lines. So unclassified chars accumulate in a plain
-// string `run`, flushed as a SINGLE text node just before each tok span and once at the end. Net:
-// one node per SEGMENT, exactly the granularity the string version rendered.
-function lineBuilder() {
+// A run of tokens → a DocumentFragment of text nodes and <span class="tok-*"> wrappers.
+//
+// An unclassified token (`cls: null`) becomes a BARE TEXT NODE, not a wrapper span. That is not
+// cosmetic: `.dl` is `white-space: pre`, the tokenizer already coalesces unclassified characters
+// into one record per SEGMENT, and test/diff-vanilla-view.test.ts asserts the node shape. A span
+// around every plain run would double the node count of a thousand-line diff for nothing.
+//
+// createTextNode is what makes the escaping STRUCTURAL: a `<` or `&` in the source lands in the DOM
+// as itself and can never be re-parsed as markup. There is no esc() left to forget.
+function tokenNodes(tokens) {
   const frag = document.createDocumentFragment();
-  let run = "";
-  return {
-    text(s) { run += s; },
-    tok(cls, raw) {
-      if (run) { frag.appendChild(document.createTextNode(run)); run = ""; }
-      frag.appendChild(tok(cls, raw));
-    },
-    done() {
-      if (run) { frag.appendChild(document.createTextNode(run)); run = ""; }
-      return frag;
-    },
-  };
-}
-
-// Scan a quoted string starting at i (text[i] is the quote). Returns the end index
-// (one past the closing quote, or end-of-line if unterminated). Honors backslash
-// escapes so an escaped quote doesn't close the string early.
-function scanString(text, i) {
-  const q = text[i], n = text.length;
-  let j = i + 1;
-  while (j < n && text[j] !== q) { if (text[j] === "\\") j++; j++; }
-  return Math.min(j + 1, n);
-}
-
-function highlightJs(text) {
-  const out = lineBuilder();
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    if (c === "/" && text[i + 1] === "/") { out.tok("c", text.slice(i)); break; }
-    if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      const stop = end === -1 ? n : end + 2;
-      out.tok("c", text.slice(i, stop)); i = stop; continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      const stop = scanString(text, i);
-      out.tok("s", text.slice(i, stop)); i = stop; continue;
-    }
-    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(text[i + 1] || ""))) {
-      let j = i + 1;
-      while (j < n && /[0-9a-fA-Fx._]/.test(text[j])) j++;
-      out.tok("n", text.slice(i, j)); i = j; continue;
-    }
-    if (/[A-Za-z_$]/.test(c)) {
-      let j = i + 1;
-      while (j < n && /[A-Za-z0-9_$]/.test(text[j])) j++;
-      const word = text.slice(i, j);
-      if (JS_KEYWORDS.has(word)) out.tok("k", word); else out.text(word);
-      i = j; continue;
-    }
-    out.text(c); i++;
+  for (const t of tokens) {
+    frag.appendChild(t.cls === null ? document.createTextNode(t.raw) : el("span", { class: `tok-${t.cls}` }, t.raw));
   }
-  return out.done();
-}
-
-function highlightCss(text) {
-  const out = lineBuilder();
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      const stop = end === -1 ? n : end + 2;
-      out.tok("c", text.slice(i, stop)); i = stop; continue;
-    }
-    if (c === '"' || c === "'") {
-      const stop = scanString(text, i);
-      out.tok("s", text.slice(i, stop)); i = stop; continue;
-    }
-    if (c === "@") { // at-rule (@media, @keyframes, …)
-      let j = i + 1;
-      while (j < n && /[A-Za-z-]/.test(text[j])) j++;
-      out.tok("k", text.slice(i, j)); i = j; continue;
-    }
-    if (c === "#") { // hex color (#fff / #ffffff / #ffffffff)
-      let j = i + 1;
-      while (j < n && /[0-9A-Fa-f]/.test(text[j])) j++;
-      const span = text.slice(i, j);
-      if (/^#([0-9A-Fa-f]{3,4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(span)) {
-        out.tok("n", span); i = j; continue;
-      }
-      out.text(c); i++; continue;
-    }
-    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(text[i + 1] || ""))) {
-      let j = i + 1;
-      while (j < n && /[0-9a-zA-Z%._-]/.test(text[j])) j++; // number + unit (px, em, %, …)
-      out.tok("n", text.slice(i, j)); i = j; continue;
-    }
-    out.text(c); i++;
-  }
-  return out.done();
-}
-
-// Highlight one line of code → a DocumentFragment of text nodes and <span class="tok-*"> wrappers.
-// Unknown languages (lang null) and any scanner failure fall back to ONE plain text node — which is
-// precisely where esc() stopped being needed: createTextNode escapes structurally, so a `<` or `&`
-// in the source lands in the DOM as itself and can never be re-parsed as markup.
-function highlightCode(text, lang) {
-  if (!text) return document.createDocumentFragment();
-  try {
-    if (lang === "js") return highlightJs(text);
-    if (lang === "css") return highlightCss(text);
-  } catch (e) { /* fall through to plain text */ }
-  return document.createTextNode(text);
+  return frag;
 }
 
 // Build one diff line row: the gutter number, the +/−/space sign, and the (possibly
@@ -199,17 +81,15 @@ function renderLine(l, name, lang) {
   }
   const sign = l.t === "add" ? "+" : l.t === "del" ? "−" : " ";
   const text = l.t === "add" || l.t === "del" ? l.text.slice(1) : l.text;
-  // Comment anchor: deletions reference the pre-image line, everything else
-  // the post-image line. The key (path + side + line) is stable across diff
-  // re-fetches, so stored inline comments re-attach after an SSE re-render.
-  const lineNo = l.t === "del" ? l.oldNo : l.newNo;
-  const side = l.t === "del" ? "o" : "n";
-  const key = `${name}␟${side}${lineNo}`;
-  const ctx = `${name}:${lineNo}`;
-  return el("div", { class: `dl ${l.t}`, "data-key": key, "data-ctx": ctx }, [
-    el("span", { class: "dl-num", title: `comment on ${ctx}` }, String(lineNo)),
+  // Comment anchor: deletions reference the pre-image line, everything else the post-image line.
+  // The key (path + side + line) is stable across diff re-fetches, so stored inline comments
+  // re-attach after an SSE re-render. Computed by diff-logic's lineKey() — the same call
+  // views/diff.tsx makes, which is why the two renderers key identically.
+  const anchor = lineKey(name, l);
+  return el("div", { class: `dl ${l.t}`, "data-key": anchor.key, "data-ctx": anchor.ctx }, [
+    el("span", { class: "dl-num", title: `comment on ${anchor.ctx}` }, String(anchor.lineNo)),
     el("span", { class: "dl-sign" }, sign),
-    el("span", { class: "dl-text" }, highlightCode(text, lang)),
+    el("span", { class: "dl-text" }, tokenNodes(highlightCode(text, lang))),
   ]);
 }
 

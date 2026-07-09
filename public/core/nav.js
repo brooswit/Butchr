@@ -19,8 +19,9 @@
 // never exist.
 //
 // This module is DOM-FREE at module load: `mount` resolves `#app` lazily inside the call,
-// so importing nav.js under a non-browser runner is safe. React renders `<main id="app">` with no
-// children of its own, so mount()'s `innerHTML = ""` can never destroy a React-owned node.
+// so importing nav.js under a non-browser runner is safe. mount()'s `innerHTML = ""` can never
+// destroy a React-owned node, because a vanilla route and a React route are never mounted together:
+// a vanilla route's element renders null, so React creates no children under `#app`. See bridge.tsx.
 
 // The registered route dispatcher (bridge.tsx's current view thunk). Set on every route change.
 let renderer = null;

@@ -17,6 +17,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RFC Phase 4b — `#/metrics` is a React view.** `public/views/metrics.tsx` replaces
+  `views/metrics.js` (deleted), and `App.tsx`'s `/metrics` route points at the component instead of
+  at the bridge. Every other route still renders `<VanillaView>`, which returns `null` and drives
+  `core/nav.js`'s `mount()` from an effect — so a view migrates independently and no new glue was
+  needed. The one structural change: `<Routes>` now renders INSIDE `<main id="app">` (it picks up
+  style.css's `main` rule for free), and `VanillaView` empties `#app` in a **layout-effect** cleanup
+  so an incoming React route's nodes are not appended below the outgoing vanilla page. A layout
+  cleanup runs during the deletion half of the commit, before the sibling placement; a passive one
+  would run after, and delete the page that just rendered.
+- **`public/views/diff.tsx` — the React diff reader, landed but not yet mounted.** The phase brief
+  called for pointing "the diff route" at it. **There is no diff route**: `renderDiff`'s only caller
+  is `renderTask` in the still-vanilla `views/task.js`, so the diff reader is a *component* of the
+  task view and nothing in `App.tsx` can route to it. It ships typechecked and covered by
+  `test/diff-view.test.ts` (a real DOM, comment editor and all), and `views/task.tsx` mounts it in
+  Phase 4c. Standing up a React root inside the vanilla task page to render it today was rejected:
+  `renderTask` rebuilds its diff box on every SSE event, which would tear the root down mid-edit.
+- **`public/components/chips.tsx`** — `StatusChip` only, for the metrics status bars. The status
+  chips stay CUSTOM (CTO decision 7): 14 status colours do not collapse into LaunchPad `Tag`'s 8
+  variants. Import it as `"./chips.tsx"` **with the extension** while the vanilla `chips.js` still
+  exists — `"./chips.js"` resolves to that one — hence `allowImportingTsExtensions` in
+  `tsconfig.public.json`.
+
+### Changed
+
+- **The diff syntax highlighter is unfused (RFC §1.1 row 17).** `langForPath`, `highlightCode` and
+  the new `lineKey` moved from `views/diff.js` into the DOM-free `views/diff-logic.ts` and now return
+  **token records** (`{cls, raw}[]`) and a **line anchor** instead of DOM. `views/diff.js` maps them
+  to text nodes and spans, `views/diff.tsx` maps them to JSX — one tokenizer, two renderers, no
+  drift while both exist. `views/diff.js` keeps shipping (and keeps its tests, renamed to
+  `test/diff-vanilla-view.test.ts`) until Phase 4c deletes it.
+- **A correction to the RFC, stated rather than worked around.** §7.2 and §1.1 row 18 call the
+  metrics view "the cleanest 1:1 mapping in the whole app" onto LaunchPad's `Table`/`Row`/`Cell`.
+  **There is no table** — `renderMetrics` built number cards, a CSS-height sparkline and proportional
+  status bars. `views/metrics.tsx` uses no LaunchPad component at all, only its tokens.
+
+### Fixed
+
+- **Every React `onChange` handler was dead under `bun test`, and so was every async state update.**
+  `react-dom` resolves `canUseDOM`, `isInputEventSupported` and `queueMicrotask` **at module init**.
+  bun hoists `@testing-library/react`'s CJS graph above any ESM side-effect import, so `react-dom`
+  always initialised before `test/dom-register.ts` could install happy-dom: it concluded the browser
+  had no `input` events, swapped `onChange` onto an IE8-era `propertychange` polyfill a modern DOM
+  can never trigger, and captured a `queueMicrotask` that never flushed. Rendering, `onClick` and
+  `onInput` all worked, so nothing went red — the failures surfaced as a controlled `<textarea>` that
+  ignored typing and a view stuck on `loading: true`. The new `test/dom-warmup.ts` preload step
+  evaluates `react-dom` once against a DOM (with bun's timers pinned back in place first) and then
+  removes the DOM, leaving `globalThis.document` undefined for the ~130 DOM-free test files.
+  `test/dom-env.test.ts` now guards both halves by name.
+- **`test/dom-register.ts`'s import was not enough on its own.** An ES module's side effect runs once
+  per process and `bun test` runs every file in one, so the SECOND React test file to run inherited
+  the first file's `afterAll(unregisterDom)` teardown and died in `render()`. Each React test file
+  now also calls `beforeAll(registerDom)`.
+
+### Removed
+
+- `public/views/metrics.js` — replaced by `views/metrics.tsx`; nothing imported it any more. Its
+  DOM-free-at-module-load tripwire and the `core/nav.js` export-surface guards moved verbatim from
+  `test/metrics-view.test.ts` to the new `test/vanilla-views-dom-free.test.ts`, which imports the
+  four views that are still vanilla. The tripwire is NOT retired — Phase 4e retires it with them.
+
 ## [0.9.284] - 2026-07-09
 
 ### Changed

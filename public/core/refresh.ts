@@ -25,13 +25,13 @@
 // sentinel fences, and test/app-restore-uistate.test.ts get deleted with the last vanilla view
 // (RFC §1.4, §9.4). They are all still here today; Phase 4e removes them.
 //
-// >>> THIS MODULE IS INERT IN PHASE 4a. NOTHING IMPORTS IT YET, AND THAT IS DELIBERATE. <<<
-// `bridge.tsx` still exports its OWN `refreshSoon()` — the one App.tsx imports — which re-runs the
-// vanilla renderer through `core/nav.js`. The two cannot be merged while a single view is still
-// vanilla: bridge's version must call `render()`, and this one must not touch the DOM at all. This
-// is the version the React views take as they land (4b–4d); bridge's dies with `core/nav.js` in 4e.
-// Until then, do not point App.tsx at this file — it would silently stop repainting the vanilla
-// views on SSE events, and no test would catch it.
+// >>> LIVE SINCE PHASE 4b, ALONGSIDE bridge.tsx's OWN `refreshSoon()` — NOT INSTEAD OF IT. <<<
+// The two cannot be merged while a single view is still vanilla: bridge's version must call
+// `render()` (which destroys and rebuilds `#app`), and this one must not touch the DOM at all.
+// App.tsx's SSE handler calls BOTH through a local wrapper, and only one of them ever has work to
+// do — the inactive world's target does not exist. Do not "simplify" App.tsx to call just this one:
+// it would silently stop repainting the vanilla views on SSE events, and no test would catch it.
+// bridge's half dies with `core/nav.js` in Phase 4e, and this becomes the only refresh signal.
 import { useSyncExternalStore } from "react";
 
 let version = 0;

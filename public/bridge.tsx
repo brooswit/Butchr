@@ -1,23 +1,32 @@
-// THE BRIDGE. One bridge, one phase. RFC Phase 4 DELETES this file.
+// THE BRIDGE. It shrinks with every migrated view. RFC Phase 4e DELETES this file.
 //
 // It hosts the still-vanilla view bodies inside the React shell, and it is written to be thrown
-// away: no abstraction, no generalization, no second consumer. Phase 4 rebuilds the six views in
-// .tsx, deletes core/nav.js and core/dom.js, deletes ui-state.js, and this module goes with them.
-// If you are tempted to make it nicer, don't — make Phase 4 land instead.
+// away: no abstraction, no generalization. Phase 4 rebuilds the remaining views in .tsx, deletes
+// core/nav.js and core/dom.js, deletes ui-state.js, and this module goes with them. If you are
+// tempted to make it nicer, don't — land the next view instead.
 //
 // HOW IT RECONCILES WITH `mount()` (RFC §6.2's hazard, head-on).
 // nav.js's mount() does `app.innerHTML = ""` then appendChild — a full destroy/rebuild of `#app` on
-// every SSE event. That is fatal to a React root living inside `#app`. The rule that makes the two
-// coexist is: **React renders `<main id="app" />` with NO children, ever.** React's reconciler only
-// touches children it created, so an element it renders empty is one whose childNodes it will never
-// diff. The vanilla views own everything under it; React owns the element itself.
+// every SSE event. That is fatal to React nodes living inside `#app`. The rule that makes the two
+// coexist is: **a vanilla route and a React route are never mounted at the same time.** Exactly one
+// route matches; a vanilla route's element renders `null`, so React creates no children under `#app`
+// and its reconciler never diffs the nodes mount() put there.
 //
 // The second half of that rule is that `<main id="app">` is rendered by the LAYOUT, not by a route.
 // A route element that rendered it would unmount it on every navigation, and refreshSoon() would
-// then mount() into a detached node. Route elements here render `null` and do their work in an
-// effect. That is the whole trick.
+// then mount() into a detached node.
+//
+// >>> AND THE THIRD HALF, NEW IN PHASE 4b, IS `useLayoutEffect`'s CLEANUP BELOW. <<<
+// Since 4b, `<Routes>` renders INSIDE `<main id="app">`, so navigating from a vanilla route to a
+// React one asks React to insert children into a container full of foreign nodes — it would append
+// AFTER them, and the stale page would sit above the new one forever. The fix is to empty `#app` as
+// the vanilla view leaves. It has to be a LAYOUT effect, not a passive one: a passive cleanup runs
+// after the commit, by which time React has already inserted the incoming route's DOM, and clearing
+// then would delete the page that just rendered. A layout-effect destroy runs while React processes
+// the deletion, which precedes the sibling placement in the same commit. That ordering is the whole
+// trick, and it is why the two hooks below are not the same hook.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { el } from "./core/dom.js";
 import { mount, render, setRenderer } from "./core/nav.js";
 import { useStateMetaVersion } from "./state-meta-store";
@@ -50,6 +59,16 @@ export function VanillaView({ id, run }: { id: string; run: () => Promise<unknow
   const runRef = useRef(run);
   runRef.current = run;
   const version = useStateMetaVersion();
+
+  // Hand `#app` back EMPTY when this view leaves, so an incoming React route's nodes are not
+  // appended below a corpse. Layout, not passive — see the header. Empty deps: this must fire on
+  // unmount only, never when `id` changes between two vanilla routes (mount() clears for that).
+  useLayoutEffect(() => {
+    return () => {
+      const app = document.getElementById("app");
+      if (app) app.innerHTML = "";
+    };
+  }, []);
 
   useEffect(() => {
     // Both poll timers are route-scoped and outlive their view's DOM: task.js's live-output poll and

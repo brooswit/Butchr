@@ -27,6 +27,14 @@
     // and checks its syntax and module resolution. What it drops, for orphans only, is the
     // bundler's missing-named-export check; reachable modules still get that from `build:fe`.
     "allowJs": true,
+    // Permits `import { StatusChip } from "../components/chips.tsx"` — the explicit extension.
+    // It is REQUIRED, not stylistic, and only while a `.js` and a `.tsx` share a basename:
+    // `components/chips.js` (vanilla, still rendering chips for four vanilla views) sits next to
+    // `components/chips.tsx` (React), and `"./chips.js"` resolves to the FIRST of those under both
+    // `tsc` and `bun build`. There is no extensionless or `.js`-suffixed specifier that reaches the
+    // `.tsx`. Legal here because `noEmit` is set — the flag is rejected when tsc emits.
+    // Phase 4d deletes chips.js and this can go with it.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     // Explicit, per RFC §2.4. Omitting it works only because bun's DEFAULT is the automatic
     // runtime; `tsc` needs it stated to typecheck JSX at all. Never set "react" (the classic

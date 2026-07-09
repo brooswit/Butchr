@@ -1,14 +1,21 @@
 // The React shell (RFC §10 Phase 3). It owns the chrome — topbar, pause banner, conn LED, theme
-// toggle, toast region, the hash router, and the SSE stream — and NOTHING inside `#app`, which the
-// still-vanilla views own through the bridge. Phase 4 moves the views in and deletes the bridge; this
-// file survives it.
+// toggle, toast region, the hash router, and the SSE stream.
 //
-// This is the ROLLBACK BOUNDARY. Phase 4 reverts to exactly this: a LaunchPad shell wrapping the old
-// view bodies, fully usable.
+// >>> PHASE 4b CHANGED WHAT LIVES INSIDE `<main id="app">`. <<< Through Phase 3, React rendered that
+// element with NO children ever, and the vanilla views owned everything under it through the bridge.
+// Now `<Routes>` renders INSIDE it, so a migrated route (today: `#/metrics`) paints React nodes there
+// and picks up style.css's `main { max-width: 1100px; … }` for free, while an un-migrated route still
+// renders `<VanillaView>`, which returns null and drives nav.js's mount() from an effect. React's
+// reconciler only touches children it created, so a route that renders null leaves the vanilla DOM
+// alone — the Phase-3 invariant, restated. What makes the OTHER direction safe (vanilla DOM sitting
+// in `#app` when a React route is placed) is VanillaView's layout-effect cleanup; see bridge.tsx.
+//
+// This is the ROLLBACK BOUNDARY for the un-migrated views. Reverting a migrated route means pointing
+// it back at its `<VanillaView>`, which is a two-line change per route until 4e deletes the bridge.
 //
 // NO <StrictMode>. Its development-only double-invoked effects would run every vanilla view render
 // twice (two fetches, two mount() calls) and open the EventSource twice. React's own guarantees are
-// what Phase 4 buys; until the views are React there is nothing here for StrictMode to find.
+// what Phase 4 buys; while any view is still vanilla there is nothing here for StrictMode to find.
 
 import { Alert, AlertText, Button, RouterProvider, ToastRegion, ToggleButton, toastQueue } from "@launchpad-ui/components";
 import { Icon } from "@launchpad-ui/icons";
@@ -16,15 +23,27 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { To } from "react-router";
 import { HashRouter, Link, Navigate, Route, Routes, useHref, useLocation, useNavigate, useParams } from "react-router";
 
-import { refreshSoon, VanillaView } from "./bridge";
+import { refreshSoon as refreshVanillaSoon, VanillaView } from "./bridge";
 import { setToastSink, toast } from "./components/toast.js";
 import { api } from "./core/api.js";
+import { refreshSoon as bumpReactSoon } from "./core/refresh.js";
 import type { Health, Project, Repo } from "./core/types.js";
 import { ensureStateMeta, isStateMetaLoaded } from "./state-meta-store";
-import { renderMetrics } from "./views/metrics.js";
+import { MetricsView } from "./views/metrics.js";
 import { renderProjectDetail, renderProjects } from "./views/projects.js";
 import { renderTask } from "./views/task.js";
 import { renderWorkspace } from "./views/workspace.js";
+
+/** THE SSE RE-RENDER, for BOTH worlds. Two debouncers, deliberately, because the two invalidation
+ *  mechanisms cannot be merged while a single view is still vanilla: `refreshVanillaSoon` re-runs
+ *  the mounted vanilla view through core/nav.js's render() (destroying and rebuilding `#app`), and
+ *  `bumpReactSoon` ticks core/refresh.ts's version so every React view's `useAsync` re-fetches
+ *  without touching the DOM. Only one of them ever has work to do — the inactive one's target does
+ *  not exist. Phase 4e deletes the vanilla half along with the bridge. */
+function refreshSoon(): void {
+  refreshVanillaSoon();
+  bumpReactSoon();
+}
 
 const BASE_TITLE = "butchr";
 const THEME_KEY = "butchr-theme";
@@ -281,10 +300,6 @@ async function projectIdForWorkspace(wid: string): Promise<string | null> {
   }
 }
 
-function MetricsRoute() {
-  return <VanillaView id="metrics" run={renderMetrics} />;
-}
-
 function ProjectsRoute() {
   return <VanillaView id="projects" run={renderProjects} />;
 }
@@ -415,24 +430,29 @@ function Shell() {
       <Topbar paused={paused} onTogglePause={togglePause} attention={attention} conn={conn} />
       {paused ? <PauseBanner onResume={togglePause} /> : null}
       {/*
-        THE BRIDGE CONTAINER. React renders this element and NEVER a child of it: the vanilla views
-        own everything inside, through nav.js's mount(). It lives in the layout, not in a route, so no
-        navigation can unmount it out from under an in-flight mount(). See bridge.tsx's header.
-        Phase 4 deletes the comment and the bridge; the element stays.
+        THE VIEW CONTAINER, shared by both worlds and styled by style.css's `main` rule.
+
+        It lives in the LAYOUT, not in a route, so no navigation can unmount it out from under an
+        in-flight mount(). A MIGRATED route (MetricsView) renders its nodes here as React children.
+        An UN-MIGRATED route renders <VanillaView>, which returns null and lets nav.js's mount()
+        appendChild into this element — nodes React did not create and therefore never diffs. The two
+        never coexist: exactly one route matches, and VanillaView empties `#app` on its way out.
+        Phase 4e deletes the bridge and this becomes an ordinary container.
       */}
-      <main id="app" />
-      <Routes>
-        <Route path="/" element={<Navigate to="/projects" replace />} />
-        <Route path="/metrics" element={<MetricsRoute />} />
-        <Route path="/projects" element={<ProjectsRoute />} />
-        <Route path="/projects/:projectId" element={<ProjectRoute />} />
-        <Route path="/projects/:projectId/workspaces/:workspaceId" element={<WorkspaceRoute />} />
-        <Route path="/workspace/:workspaceId" element={<LegacyWorkspaceRoute />} />
-        <Route path="/task/:taskId" element={<TaskRoute />} />
-        {/* An unknown hash is not an error: everything is reached project→workspace→work now, so it
-            lands on the Projects overview with the URL rewritten to match what is rendered. */}
-        <Route path="*" element={<Navigate to="/projects" replace />} />
-      </Routes>
+      <main id="app">
+        <Routes>
+          <Route path="/" element={<Navigate to="/projects" replace />} />
+          <Route path="/metrics" element={<MetricsView />} />
+          <Route path="/projects" element={<ProjectsRoute />} />
+          <Route path="/projects/:projectId" element={<ProjectRoute />} />
+          <Route path="/projects/:projectId/workspaces/:workspaceId" element={<WorkspaceRoute />} />
+          <Route path="/workspace/:workspaceId" element={<LegacyWorkspaceRoute />} />
+          <Route path="/task/:taskId" element={<TaskRoute />} />
+          {/* An unknown hash is not an error: everything is reached project→workspace→work now, so it
+              lands on the Projects overview with the URL rewritten to match what is rendered. */}
+          <Route path="*" element={<Navigate to="/projects" replace />} />
+        </Routes>
+      </main>
       <ToastRegion />
     </RouterProvider>
   );
