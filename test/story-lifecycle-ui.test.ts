@@ -3,42 +3,14 @@
 // StoryView already carries (the per-status `counts` rollup + leader{running,desired} + status),
 // with NO new backend field. This guards the derivation rule + the own-children progress rollup.
 //
-// public/app.js is a classic browser script (touches `document` at module load, no exports), so we
-// can't import it. We extract the PURE, DOM-free helper block fenced with
-// `// <test-extract:story-lifecycle-ui>` sentinels and eval it in isolation — the same approach as
-// test/kind-badge.test.ts / test/graph-rollup-completion.test.ts.
+// These helpers now live in public/views/swimlanes.js (the Pipeline view owns them), which is
+// DOM-free at module load, so we IMPORT it directly and assert on the real exports. (This test used
+// to scrape a `<test-extract:story-lifecycle-ui>` sentinel block out of the classic public/app.js
+// script and eval it with `new Function` — stubbing esc/isCompleteStatus/storySubtaskTotal along
+// the way; that harness is gone along with the sentinel, so the real leaves run here.) Do not
+// reintroduce a sentinel here.
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-/** Pull the source fenced by `// <test-extract:name>` ... `// </test-extract:name>`. The opening
- *  sentinel may share its `//` line with prose, so capture from the NEXT line. */
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-// The block references esc()/isCompleteStatus()/storySubtaskTotal() from elsewhere in app.js —
-// provide faithful stand-ins so the eval'd block is self-contained (mirrors kind-badge's esc stub).
-const harness = `
-function esc(s){ return String(s).replace(/[&<>"']/g, c => (
-  { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c])); }
-const COMPLETE = new Set(["merged","rolled_back","done"]);
-function isCompleteStatus(s){ return COMPLETE.has(s); }
-function storySubtaskTotal(counts){ const c = counts||{};
-  return Object.keys(c).reduce((n,k)=> (k==="idle"? n : n+(c[k]||0)), 0); }
-${extract("story-lifecycle-ui")}
-return { storyLifecycle, storyProgress, storyLifecycleChip };
-`;
-const { storyLifecycle, storyProgress, storyLifecycleChip } = new Function(harness)() as {
-  storyLifecycle: (s: any) => { key: string; glyph: string; cls: string } | null;
-  storyProgress: (counts: any) => { done: number; total: number };
-  storyLifecycleChip: (s: any) => string;
-};
+import { storyLifecycle, storyLifecycleChip, storyProgress } from "../public/views/swimlanes.js";
 
 const story = (o: any = {}) => ({ work_kind: "node", status: "open", counts: {}, leader: {}, ...o });
 
@@ -82,7 +54,7 @@ test("storyProgress: complete over total, idle excluded from total", () => {
   expect(storyProgress({})).toEqual({ done: 0, total: 0 });
 });
 
-// ── The shared chip: '' when null, otherwise a quiet outlined pill keyed by state ──
+// ── The lane-header chip: '' when null, otherwise a quiet outlined pill keyed by state ──
 test("storyLifecycleChip renders per-state class + is empty for non-open", () => {
   expect(storyLifecycleChip(story({ counts: { in_progress: 1 } }))).toContain("chip lc-working");
   expect(storyLifecycleChip(story({ counts: { blocked: 1 }, leader: { desired: true, running: false } }))).toContain("chip lc-stalled");

@@ -2,35 +2,13 @@
 // lane lays its subtasks left → right by longest blocked_by chain WITHIN the lane. orderLaneLeaves
 // is the PURE helper that computes that order (ties broken by original index for a stable layout).
 //
-// public/app.js is a classic browser script (touches `document` at module load, no exports), so we
-// can't import it. We extract the DOM-free `swimlane-order` fence and eval it in isolation — the
-// same approach as test/story-lifecycle-ui.test.ts. The block's one dependency, graphLevels, has
-// moved to public/core/work-graph.js: we IMPORT the real function and inject it into the eval'd
-// harness, so this test exercises the same graphLevels the app does. Once the swimlane view moves
-// to public/views/, this fence goes with it and the eval disappears entirely.
+// The swimlanes view now lives in public/views/swimlanes.js, which is DOM-free at module load, so
+// we IMPORT it directly and assert on the real exports — as does graphLevels, its one dependency,
+// from public/core/work-graph.js. (This test used to scrape a `<test-extract:swimlane-order>`
+// sentinel block out of the classic public/app.js script and eval it with `new Function`; that
+// harness is gone along with the sentinel.) Do not reintroduce a sentinel here.
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { graphLevels } from "../public/core/work-graph.js";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-const harness = `
-${extract("swimlane-order")}
-return { orderLaneLeaves, swimEmphasis, laneTitle };
-`;
-const { orderLaneLeaves, swimEmphasis, laneTitle } = new Function("graphLevels", harness)(graphLevels) as {
-  orderLaneLeaves: (memberIds: string[], byId: Map<string, any>) => string[];
-  swimEmphasis: (st: string) => string;
-  laneTitle: (brief: string | null | undefined, id: string, max?: number) => string;
-};
+import { laneTitle, orderLaneLeaves, swimEmphasis } from "../public/views/swimlanes.js";
 
 const mk = (items: Array<{ id: string; blocked_by?: string[] }>) =>
   new Map(items.map((w) => [w.id, w]));

@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **FE P2 (module split): the Pipeline swimlanes view moves out of `public/app.js`** into a new
+  ES module `public/views/swimlanes.js`. Pure move + rewire — no behavior change. The view now
+  owns `renderSwimlanes`, its `swim*` builders, the pure lane-ordering helpers
+  (`orderLaneLeaves` / `swimEmphasis` / `laneTitle`), the front-end-derived story lifecycle
+  (`storyLifecycle` / `storyProgress` / `storyLifecycleChip`), and the module-level
+  `SWIM_DONE_EXPANDED` set (still pruned by `renderWorkspace`). It imports only leaves —
+  `core/dom.js`, `core/work-graph.js`, `components/chips.js` — and never `app.js`.
+- **Two more `<test-extract:>` sentinels are gone.** `swimlanes.js` is DOM-free at module load, so
+  `test/swimlane-order.test.ts` and `test/story-lifecycle-ui.test.ts` now import the real exports
+  instead of scraping `public/app.js` and eval'ing the fenced source with `new Function`.
+
 ## [0.9.259] - 2026-07-09
 
 ### Changed
