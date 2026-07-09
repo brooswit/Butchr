@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.248] - 2026-07-09
+
 - fix: `serveStatic` returns a real 404 for a missing *file* (a basename containing `.`) instead of
   falling through to `index.html`; extensionless route-like paths keep the SPA fallback and the `..`
   403 guard is unchanged. A `200 text/html` answer to a missing `.js` is an opaque MIME error under
