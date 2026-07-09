@@ -160,13 +160,44 @@ around.**
 
 ## 0.2 Errata
 
-*(None yet. This section is reserved, per the prior RFC's discipline: when a
-claim in this document is later found wrong, it is corrected **in place** and the
-correction is recorded here with what it cost. The prior RFC's Errata found three
-of its own claims wrong — two counts and one framing — and the lesson it drew,
-that `grep 'style="'` is blind to `el(tag, {style: "…"})`, is the reason every
-count in this document was produced by reading the matches rather than counting
-them.)*
+*(This section is reserved, per the prior RFC's discipline: when a claim in this
+document is later found wrong, it is corrected **in place** and the correction is
+recorded here with what it cost. The prior RFC's Errata found three of its own
+claims wrong — two counts and one framing — and the lesson it drew, that
+`grep 'style="'` is blind to `el(tag, {style: "…"})`, is the reason every count in
+this document was produced by reading the matches rather than counting them.)*
+
+**E1 — §5.6 hazard 1 was wrong. `bun.lock` does NOT embed the root version.**
+The hazard was raised as `UNVERIFIED:` and guessed the wrong way. Phase 0 measured
+it: bun 1.3.11 records the root workspace's `name` but **not** its `version`, so a
+release bump of `package.json:version` leaves `bun.lock` byte-identical and
+`--frozen-lockfile` still passes. **Cost: none — it was caught before Phase 1.**
+The proposed mitigation ("the release step must run `bun install` and include
+`bun.lock` in the release commit") is **withdrawn**; the release step is unchanged.
+Corrected in place at §5.6. Evidence: §13.1.
+
+**E2 — §4.2's gate step 2, `bunx tsc --noEmit`, does not run.** Two independent
+defects, both found by running it. (a) `bunx tsc` executes `node_modules/.bin/tsc`,
+whose shebang is `#!/usr/bin/env node`; this host's `node` is **v12.22.9** and
+TypeScript 5.9's emitted code uses `??`, so it dies with `SyntaxError: Unexpected
+token '?'` before typechecking anything. `bunx --bun tsc` forces the bun runtime and
+works. (b) A bare `tsc --noEmit` reads only the root `tsconfig.json`, whose
+`include` is `["src"]` — it would **never look at `public/` at all**, silently
+typechecking half of what §5.5 promises. Corrected in place at §4.2. Evidence: §13.2.
+
+**E3 — §5.3's `devDependencies` list is incomplete.** `react@19.2.6` and
+`react-dom@19.2.6` ship **no `.d.ts` files**. With `"jsx": "react-jsx"`, `tsc`
+needs `react/jsx-runtime`'s types, so `@types/react` and `@types/react-dom` are
+**required for the gate to function** — without them `tsc` emits TS7016 and
+`bun build` still exits **0**. Corrected in place at §5.3. Evidence: §13.2.
+
+**E4 — §7.4's spacing assumption is refuted, and it gives Phase 5 real work.**
+The RFC deferred the `--space-1..6` → `--lp-spacing-*` alias to Phase 5 *"only if
+they align."* **They do not.** LaunchPad's spacing scale is a strict 4px grid
+(0/4/8/12/16/20/24/28/32 px); butchr's is `4/6/8/10/12/18 px`. Three of six tokens
+— `--space-2` (6px), `--space-4` (10px), `--space-6` (18px) — have **no LaunchPad
+equivalent at any tier**, and 7 of the 12 usage sites are on those three. Corrected
+in place at §7.4. Evidence: §13.3.
 
 ## 0.3 What survives from the superseded RFC
 
@@ -718,7 +749,18 @@ bun build src/index.ts --target bun --outfile /dev/null
 
 # 2. typecheck — bun build does ZERO type checking (see RFC §5.5). This is the
 #    step that makes adopting a *typed* component library worth anything.
-bunx tsc --noEmit
+#
+#    --bun is REQUIRED, not stylistic: `bunx tsc` runs node_modules/.bin/tsc, whose
+#    shebang is `#!/usr/bin/env node`. This host's node is v12 and TypeScript 5.9's
+#    emitted code uses `??`, so plain `bunx tsc` dies with a SyntaxError before it
+#    typechecks a single file. `--bun` forces the bun runtime. (Errata E2.)
+#
+#    BOTH configs, explicitly. A bare `tsc --noEmit` reads only ./tsconfig.json,
+#    whose include is ["src"] — it would never look at public/ at all. src/ and
+#    public/ CANNOT share one config: public/ needs lib DOM, and adding DOM to
+#    src/ breaks `for await (… of Bun.stdin.stream())` in channel.ts. (RFC §5.5.)
+bunx --bun tsc --noEmit -p tsconfig.json          # src/    — bun target, no DOM
+bunx --bun tsc --noEmit -p tsconfig.public.json   # public/ — browser target, JSX
 
 # 3. front-end bundle. --outdir, NEVER --outfile: CSS makes the build multi-output.
 FE_OUT="$(mktemp -d)"; trap 'rm -rf "$FE_OUT"' EXIT
@@ -740,6 +782,19 @@ run **before** the backend suite because they cost ~100 ms and the suite costs
 orders of magnitude more. That holds — a full production bundle is ~0.12 s. The
 typecheck moves ahead of the bundle because it is the step most likely to catch
 a real error and, unlike the bundle, it reads every file.
+
+⚠️ **Measured cost of step 2: ~10.6 s** (6.0 s for `src/`, 4.6 s for `public/`),
+not the ~100 ms the ordering rationale assumes. It is still far cheaper than
+`bun test ./test` and it stays where it is — but it is now the gate's second-most
+expensive step, and it is *two* processes, not one. (Evidence: §13.2.)
+
+🚨 **`tsc --noEmit -p tsconfig.json` does not pass on `main` today.** `src/` has
+**21 pre-existing type errors** (§13.2). They are real — `tasks.ts` annotates three
+signatures with a `TaskKind` it never imports; `dispatcher.ts:553` does the same
+with `SendInput`; `db.ts:2879` is a TS1117 duplicate key. `bun build` strips types
+without checking them, so nothing has ever run `tsc` against this repo. **Phase 1
+cannot add gate step 2 without first fixing all 21**, and that work is not in any
+phase's budget. See §13.2 for the full list and §10 Phase 1 for the re-scoping.
 
 ### 4.3 The three artifact assertions
 
@@ -867,11 +922,28 @@ library. §1.3 turns the first into an asset by actually adopting it.
   "@react-types/shared": "3.35.0"
 },
 "devDependencies": {
-  "typescript": "<latest 5.x, exact>",     // §5.5
+  "typescript": "5.9.3",                   // §5.5 — verified in Phase 0
+  "@types/react": "19.2.17",               // §5.5 — REQUIRED; react ships no .d.ts
+  "@types/react-dom": "19.2.3",            // §5.5 — REQUIRED; react-dom ships no .d.ts
   "happy-dom": "<latest, exact>",          // §9.3
   "@testing-library/react": "<latest, exact>"  // §9.3
 }
 ```
+
+⚠️ **`@types/react` and `@types/react-dom` are not optional, and Phase 0 added
+them to this list** (Errata E3). `react@19.2.6` and `react-dom@19.2.6` ship **zero
+`.d.ts` files**; with `"jsx": "react-jsx"` the compiler must resolve
+`react/jsx-runtime`'s types for *every* `.tsx` file. Omit them and `tsc` emits
+`TS7016: Could not find a declaration file for module 'react/jsx-runtime'` — while
+`bun build` exits **0** and produces a working bundle. That asymmetry is the whole
+thesis of §5.5 in miniature.
+
+They are `@types/*` packages, so `bun install` resolves them independently of
+`@launchpad-ui`'s exact-peer set; the versions above are what resolved against the
+pinned tree in Phase 0. `@types/bun` (or `bun-types`) is **already implied** by the
+existing `tsconfig.json`'s `"types": ["bun-types"]`, which has never been exercised
+because `typescript` was never installed — Phase 1 must add it too, or `tsc` reports
+`Cannot find name 'console'` on every `src/` file.
 
 Defence for **exact, no carets**:
 
@@ -946,11 +1018,65 @@ Note that `tsc` also **subsumes the orphan-module rule** the gate loses in §4.1
 `tsc --noEmit` typechecks every file matched by `tsconfig.json`'s `include`,
 reachable from an entry point or not. The gate ends up *stronger* than before.
 
-`UNVERIFIED:` the repo's existing `tsconfig.json` is tuned for `src/` with
-`verbatimModuleSyntax` and `allowImportingTsExtensions` (`CONTRIBUTING.md:627`).
-Whether one config can cover both `src/` (bun target, `.ts` extensions in
-imports) and `public/` (browser target, JSX) without a `references`/project split
-is **not verified**. Budget for a `tsconfig.public.json`. Logged in §11.
+**SETTLED IN PHASE 0 — a second config is REQUIRED. Budget for
+`tsconfig.public.json`.** (Full evidence: §13.2.)
+
+The blocker is not JSX and it is not `allowImportingTsExtensions`; both are
+harmless to the other tree. It is **`lib`**. `public/` needs `"DOM"` to see
+`document`. Adding `"DOM"` to the shared `lib` changes `src/`'s type universe in
+both directions:
+
+- It **breaks** `src/channel.ts:1410`, `for await (const chunk of Bun.stdin.stream())`
+  → `error TS2504: Type 'ReadableStream<Uint8Array<ArrayBuffer>>' must have a
+  '[Symbol.asyncIterator]()' method`. `lib.dom`'s `ReadableStream` is not
+  async-iterable; bun's is. Valid, shipping code stops typechecking.
+- It **masks** `src/mcp.ts:175` (`body = await req.json()` → `unknown` under
+  bun-types, `any` under `lib.dom`'s `Request`). An error silently disappears.
+
+A shared config is therefore not merely inelegant — it is *wrong in both
+directions*. The two-config split is also a **positive**: with `"types": []` in
+`tsconfig.public.json`, `Bun.file(…)` in a browser module is a compile error
+(`TS2868`); with no `"DOM"` in the root config, `document.title` in `src/` is a
+compile error (`TS2584`). Each tree is confined to its own globals, which is
+exactly what `test/metrics-view.test.ts`'s `document`-undefined tripwire (§9.2)
+asserts at runtime today — now enforced statically, and about to lose its runtime
+form when that tripwire is deleted in Phase 4.
+
+The verified `tsconfig.public.json`:
+
+```jsonc
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext", "module": "ESNext", "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": [],                 // no bun globals in browser code
+    "noEmit": true, "strict": true, "skipLibCheck": true,
+    "allowJs": true,             // Phases 1-3: public/ is still 19 .js modules
+    "esModuleInterop": true,
+    "jsx": "react-jsx"           // explicit, per §2.4
+  },
+  "include": ["public"]
+}
+```
+
+Two properties of it were verified rather than assumed:
+
+1. **Side-effect CSS imports need no declaration file.** `import
+   "@launchpad-ui/tokens/index.css";` (§2.5) and `import "./style.css";` both
+   typecheck clean with **no** `declare module "*.css"` shim. TS only demands a
+   declaration when you import a *binding* from the module. **Do not add a
+   `declarations.d.ts`** — it is the obvious-looking move and it is unnecessary.
+2. **The orphan-module claim below holds.** An orphan `public/views/foo.tsx` with
+   a type error fails `tsc`; an orphan `public/views/foo.js` with a *syntax* error
+   also fails it. (Caveat: under `allowJs` without `checkJs`, an orphan `.js` with
+   a *type* error does not — so during Phases 1–3, while `public/` is still
+   vanilla, `tsc` is exactly as strong as the gate rule it replaces, no stronger.
+   From Phase 4 it is strictly stronger.)
+
+And the §5.5 thesis itself was confirmed end-to-end: `<Icon name="pencil" />`
+fails with `TS2322: Type '"pencil"' is not assignable to … 318 more … | undefined`,
+while `bun build` accepts it and renders an empty 20×20 box.
 
 ### 5.6 The lockfile, `node_modules`, and the versioned-releases rule
 
@@ -963,26 +1089,31 @@ is **not verified**. Budget for a `tsconfig.public.json`. Logged in §11.
 
 **Interaction with the versioned-releases rule and `release_mode`:** butchr's
 release step bumps `package.json`'s `version` and stamps `CHANGELOG.md`. That
-step now touches a file that **also** carries a `dependencies` block, and whose
-sibling `bun.lock` embeds the version.
+step now touches a file that **also** carries a `dependencies` block.
 
-Two concrete hazards, and the mitigations:
+1. ~~**`bun.lock` records the workspace version.**~~ **REFUTED IN PHASE 0
+   (Errata E1). `bun.lock` does not embed the root `version`, and the release step
+   needs no change.** bun 1.3.11 writes the root workspace as
+   `"workspaces": { "": { "name": "butchr", "dependencies": {…} } }` — `name` and
+   `dependencies`, and **no `version` key**. Verified by generating a lockfile,
+   bumping `package.json` from `0.9.275` → `0.9.276`, and re-running `bun install`:
+   the lockfile is **byte-identical** and `bun install --frozen-lockfile`
+   subsequently exits **0**. **`--frozen-lockfile` in the gate is therefore safe
+   (§4.4 stands), and the release step must NOT be changed.** Evidence: §13.1.
 
-1. **`bun.lock` records the workspace version.** If the release bump edits
-   `package.json:version` without regenerating `bun.lock`, `--frozen-lockfile`
-   in the gate will fail on the *next* branch — a self-inflicted red build.
-   **Recommendation: the release step must run `bun install` (which rewrites the
-   lockfile's version field) and include `bun.lock` in the release commit.**
-   `UNVERIFIED:` whether bun 1.3.11's `bun.lock` actually embeds the root
-   `version`. **This must be checked before Phase 1 lands** — it is a five-second
-   `grep` against a real `bun.lock`, and it decides whether the release step
-   changes at all.
+   *(A `bun.lock` **does** record the root `name`. Renaming the package — which
+   butchr's release step never does — would dirty it.)*
 2. **`bun.lock` is now rebase-race surface.** The existing rebase-race rule
    guards `CHANGELOG.md` against a diff that *deletes* a `## [x.y.z]` header. A
    concurrent dependency change plus a release bump can conflict in `bun.lock`
    the same way. **Recommendation: no new gate rule yet** — a lockfile conflict
    surfaces as a git conflict, not a silent drop, and `--frozen-lockfile` catches
    a mis-resolved one. Revisit if it bites.
+
+   Phase 0 narrows this risk further: because the release bump does not touch
+   `bun.lock` at all (hazard 1), the *only* thing that writes it is a deliberate
+   dependency change. Two branches both changing dependencies is rare and conflicts
+   loudly.
 
 ---
 
@@ -1240,14 +1371,56 @@ fixes it, with a comment pointing at §5.4.** The same applies to
   `el(x, {style: …})` / `{class: …}` usage in JS, the Errata #1 lesson — **read
   the matches rather than counting them**, and remove if dead.
 
-**Spacing.** The prior RFC's `--space-1..6` (`style.css:91-96` = 4/6/8/10/12/18
-px) survives. LaunchPad ships `--lp-spacing-100 … --lp-spacing-900` (confirmed in
-`tokens/dist/index.css`). `UNVERIFIED:` the pixel value of each `--lp-spacing-*`
-step — I read the names, not the values. **Recommendation: map `--space-*` onto
-the nearest `--lp-spacing-*` in Phase 5, only after diffing the actual pixel
-values.** A blind remap silently reflows 413 usage sites. If the scales do not
-align, keep `--space-*` as butchr's scale and say so; the prior RFC's Errata
-exists because someone trusted a count they had not read.
+**Spacing — SETTLED IN PHASE 0. The scales DO NOT ALIGN.** (Errata E4; evidence
+§13.3.)
+
+The RFC guessed that a Phase 5 alias would be mechanical. It is not. LaunchPad's
+spacing is a **strict 4px grid**; butchr's is not:
+
+| butchr | px | LaunchPad equivalent | verdict |
+|---|---|---|---|
+| `--space-1` | 4px | `--lp-spacing-200` (4px) | ✅ exact |
+| `--space-2` | **6px** | — *(4px or 8px)* | ❌ **no equivalent** |
+| `--space-3` | 8px | `--lp-spacing-300` (8px) | ✅ exact |
+| `--space-4` | **10px** | — *(8px or 12px)* | ❌ **no equivalent** |
+| `--space-5` | 12px | `--lp-spacing-400` (12px) | ✅ exact |
+| `--space-6` | **18px** | — *(16px or 20px)* | ❌ **no equivalent** |
+
+The full LaunchPad scale, resolved to real pixels in Chrome (each
+`--lp-spacing-*` is an indirection to a `--lp-size-*`, which is a `rem` value;
+`rem` here is the browser default 16px because butchr's only `font-size: 14px` is
+on `body`, not `html`):
+
+| token | via | value |
+|---|---|---|
+| `--lp-spacing-100` | `--lp-size-0` | **0px** |
+| `--lp-spacing-200` | `--lp-size-4` | **4px** |
+| `--lp-spacing-300` | `--lp-size-8` | **8px** |
+| `--lp-spacing-400` | `--lp-size-12` | **12px** |
+| `--lp-spacing-500` | `--lp-size-16` | **16px** |
+| `--lp-spacing-600` | `--lp-size-20` | **20px** |
+| `--lp-spacing-700` | `--lp-size-24` | **24px** |
+| `--lp-spacing-800` | `--lp-size-28` | **28px** |
+| `--lp-spacing-900` | `--lp-size-32` | **32px** |
+
+**Recommendation: keep `--space-*` as butchr's own scale. Do NOT alias it.** Per
+the RFC's own instruction — *"If the scales do not align, keep `--space-*` as
+butchr's scale and say so"* — this is that saying-so.
+
+The good news is that the blast radius the RFC feared does not exist. **The
+spacing tokens have 12 usage sites, not 413** — the 413 figure counts *all*
+`var(--…)` usages, overwhelmingly colours. Read, not counted, they are
+`style.css:867, 870, 875, 879, 884, 888 (×2), 895, 897, 1234, 1238, 1247`, and
+**zero** JS references in either the `el(x, {style: …})` or `{class: …}` form. Of
+the 12, **7 sit on the three off-grid tokens** (`--space-2` ×1, `--space-4` ×2,
+`--space-6` ×4).
+
+So Phase 5 has a **real but small** decision, and it is a *design* decision, not a
+mechanical one: snapping 6→4/8, 10→8/12, 18→16/20 moves real pixels on 7 rules.
+The three aligned tokens (`--space-1/3/5`) *could* be aliased for free, but
+aliasing half a scale is worse than aliasing none — it leaves a reader unable to
+tell which tokens are live references and which are literals. **Keep all six
+literal.**
 
 ### 7.5 Dark mode: **the contracts are already identical.** A real win.
 
@@ -1578,27 +1751,48 @@ Each phase is **independently landable**, has its own gate, and has a **real
 rollback** (`dist/` is gitignored, so `git revert` + rebuild restores the prior
 UI byte-for-byte).
 
-### Phase 0 — pre-flight (no code)
+### Phase 0 — pre-flight (no code) — ✅ **DONE**
 
-- **Verify** whether `bun.lock` embeds the root `package.json` version (§5.6
-  hazard 1). One `grep`. Decides whether the release step changes.
-- **Verify** whether one `tsconfig.json` can cover `src/` (bun target,
-  `allowImportingTsExtensions`) and `public/` (browser, JSX) — or whether a
-  `tsconfig.public.json` is needed (§5.5).
-- **Read the pixel values** of `--lp-spacing-100…900` and diff them against
-  `--space-1..6` (§7.4).
+- ~~**Verify** whether `bun.lock` embeds the root `package.json` version~~ →
+  **it does not; the release step is unchanged** (Errata E1, §13.1).
+- ~~**Verify** whether one `tsconfig.json` can cover `src/` and `public/`~~ →
+  **it cannot; `tsconfig.public.json` is required** (§5.5, §13.2).
+- ~~**Read the pixel values** of `--lp-spacing-100…900`~~ → **the scales do not
+  align; keep `--space-*` literal** (Errata E4, §13.3).
+
+Results, with commands and real output: **§13**. Three unbudgeted findings came out
+of it — §13.4 — of which **one blocks Phase 1 as written** (`src/` does not
+typecheck).
 
 **Gate:** none (no code). **Rollback:** n/a.
 
 ### Phase 1 — the toolchain, with **zero FE code change**
 
-- Add the 15 exact dependencies + 3 devDependencies; commit `bun.lock`.
+🚨 **Re-scoped by Phase 0.** As written, this phase adds `tsc --noEmit` to the gate
+and the gate goes red on `main`: `src/` carries **21 pre-existing type errors**
+(§13.2). The typecheck step cannot land until they are fixed, and fixing them is
+real backend work touching `db.ts`, `tasks.ts`, `dispatcher.ts`, `channel.ts`,
+`stories.ts`, `exec.ts`, `herdr.ts`, `mcp.ts`, `workspace-agent.ts`,
+`startup-confirm.ts`. **The leader must decide** between (a) a Phase 1a that fixes
+the 21 first, (b) landing gate step 2 as `public/`-only and deferring `src/`, or
+(c) folding the fixes into Phase 1 and accepting a much larger diff. This RFC
+recommends **(a)** — a separate, purely-backend, reviewable phase, because mixing
+21 type fixes into the toolchain diff destroys the "deliberately boring" property
+that is the whole point of Phase 1.
+
+- Add the 15 exact dependencies + **5** devDependencies (§5.3 — `typescript`,
+  `@types/react`, `@types/react-dom`, `happy-dom`, `@testing-library/react`, plus
+  `@types/bun`/`bun-types` which `tsconfig.json` already names but was never
+  installed); commit `bun.lock`.
 - `.gitignore`: `node_modules/`, `dist/`.
+- **Add `tsconfig.public.json`** (§5.5). The root `tsconfig.json` is unchanged.
 - Add `scripts/inline-sprite`, `scripts/assert-fe-artifact`.
 - Rewrite `scripts/ci` per §4.2 — **including replacing `--outfile /dev/null` with
-  `--outdir`**, which is required before any CSS enters the graph.
+  `--outdir`**, which is required before any CSS enters the graph, and using
+  **`bunx --bun tsc -p <each config>`**, not `bunx tsc` (Errata E2).
 - `build:fe` bundles the **existing vanilla `public/app.js`**; `PUBLIC_DIR` → `dist/`.
 - **Rewrite `CONTRIBUTING.md` §4 and lines 31–32** per §8. *Same commit.*
+- **Do NOT change the release step** — Errata E1 withdrew that requirement.
 
 **Operator sees:** nothing. Identical pixels, identical behaviour.
 **Gate:** full `scripts/ci`; `test/serve-static.test.ts` updated per §9.6.
@@ -1665,8 +1859,11 @@ dashboard. **This is the reason Phase 3 exists as a boundary.**
 - **Verify dark mode in a real browser** (spike `UNVERIFIED:` #13).
 - **Verify `Modal`/`DialogTrigger` open state and keyboard a11y** (spike
   `UNVERIFIED:` #12 — "I rendered the trigger; I never clicked it").
-- Map `--space-*` → `--lp-spacing-*` **only if** Phase 0's pixel diff says they
-  align.
+- ~~Map `--space-*` → `--lp-spacing-*` **only if** Phase 0's pixel diff says they
+  align.~~ **Phase 0 says they do not align** (Errata E4, §13.3). The alias task is
+  **cancelled**; `--space-1..6` stays literal. What remains is an optional
+  *design* call — whether to snap `--space-2/4/6` (6/10/18px) onto LaunchPad's 4px
+  grid, moving pixels on **7 CSS rules**. Cheap either way; not required for parity.
 - Measure the real bundle with the full component surface; consider `--splitting`
   (spike `UNVERIFIED:` #11).
 
@@ -1700,11 +1897,12 @@ carried forward as **open questions, not settled facts.**
    `tokens@0.16.0` never defines (§5.4). Cosmetic today. It is evidence the two
    packages are more tightly coupled than their version numbers admit, and it is
    why `--muted` must stay a literal.
-6. ⚠️ **Typechecker configuration.** Whether one `tsconfig.json` covers both
-   `src/` (`verbatimModuleSyntax`, `allowImportingTsExtensions`) and `public/`
-   (browser, `"jsx": "react-jsx"`) is unverified. Phase 0 answers it. A
-   `"jsx": "react"` typo silently emits `React.createElement` into files that
-   never import React — **exit 0, throws at runtime** (spike §3).
+6. ✅ **Typechecker configuration — RESOLVED by Phase 0.** One config cannot cover
+   both trees; `tsconfig.public.json` is required (§5.5, §13.2). *A new, larger
+   risk replaced it:* **`src/` has 21 pre-existing type errors** and `tsc` has
+   never run against this repo, so gate step 2 red-builds `main` on day one
+   (§13.2, §13.4). See Phase 1's re-scoping. The `"jsx": "react"` typo hazard is
+   unchanged and still real — **exit 0, throws at runtime** (spike §3).
 7. ⚠️ **happy-dom vs React Aria.** Overlay positioning reads layout geometry,
    which no headless DOM implements faithfully. Modal/Popover/Tooltip tests may
    need a real browser or may simply be untestable at the unit level. jsdom has
@@ -1736,9 +1934,24 @@ carried forward as **open questions, not settled facts.**
 15. ⚠️ **No bun flag found to emit fonts as files rather than base64.** Mooted by
     §2.7's recommendation not to import `fonts.css` at all.
 16. **`bun.lock` as new rebase-race surface.** §5.6 hazard 2. No new gate rule
-    proposed; a lockfile conflict is a git conflict, not a silent drop.
+    proposed; a lockfile conflict is a git conflict, not a silent drop. **Phase 0
+    shrank this:** the release bump does not touch `bun.lock` at all (Errata E1), so
+    only a deliberate dependency change writes it.
 17. **`dist/` must exist before `Bun.serve` binds** (§3.1). A missing `dist/`
     means a blank dashboard. Boot should refuse, or log loudly — not 404 quietly.
+18. 🚨 **`src/` does not typecheck** (21 errors, §13.2). **New, and the largest
+    thing Phase 0 found.** It is not a migration risk so much as a pre-existing
+    debt the migration is about to expose: adopting `tsc` as a gate step means
+    adopting `tsc`'s verdict on code nobody has ever typechecked. Three of the 21
+    are references to names that do not exist in scope (`TaskKind` ×3,
+    `SendInput` ×1) and one is a duplicate object key (`db.ts:2879`) — i.e. the
+    typechecker is already earning its keep before a line of React is written.
+19. **A poisoned `~/.bun/install/cache` yields silently-empty packages.** Observed
+    once during Phase 0: `bun-types` installed with every file at **0 bytes**,
+    producing 399 bogus `tsc` errors. `bun install --frozen-lockfile` does **not**
+    catch it (the lockfile is correct; the cache is not). `rm -rf` of the cache
+    entry fixed it. Not worth a gate rule; worth knowing before someone spends an
+    hour on it.
 
 **No PRODUCT FORK found.** `@launchpad-ui` is public, Apache-2.0, installable
 without auth (the spike verified this clean-room, with a scrubbed environment and
@@ -1772,3 +1985,362 @@ real tokens, which is what `style.css` was already imitating by hand.
    first dependency.
 9. **Note** that `dist/` is gitignored and `bun run build:fe` becomes a
    prerequisite of `bun start` (§3.1).
+
+---
+
+## 13. PHASE 0 RESULTS
+
+**Status: complete.** Three questions asked, three answered empirically. **Two of
+the three came back the opposite of what the RFC guessed**, and the work surfaced a
+fourth thing nobody asked about that **blocks Phase 1 as written** (§13.4).
+
+Environment: `bun 1.3.11`, `typescript 5.9.3`, Linux. All installs were performed in
+a scratch directory **outside the repository**; the repo remains dependency-free and
+this phase changed exactly one file — this one.
+
+| # | Question | RFC's guess | Answer | Consequence |
+|---|---|---|---|---|
+| 1 | Does `bun.lock` embed the root `version`? | "probably — mitigate" | **NO** | `--frozen-lockfile` is safe; **release step unchanged** |
+| 2 | Can one `tsconfig.json` cover `src/` + `public/`? | "unverified — budget for two" | **NO — two required** | Phase 1 adds `tsconfig.public.json` |
+| 3 | Do `--lp-spacing-*` and `--space-1..6` align? | "defer to Phase 5 if they align" | **NO — 3 of 6 have no equivalent** | **Phase 5's alias task is cancelled** |
+
+---
+
+### 13.1 `bun.lock` does **not** embed the root `package.json` version
+
+**Verdict: §5.6 hazard 1 is REFUTED. The release step must not change.**
+
+Method: generate a real lockfile in a scratch dir, bump `version` exactly the way
+butchr's release step does, re-install, diff.
+
+```console
+$ cat package.json
+{ "name": "butchr", "version": "0.9.275", "type": "module",
+  "dependencies": { "@launchpad-ui/components": "0.21.0", "@launchpad-ui/icons": "0.26.0",
+                    "@launchpad-ui/tokens": "0.16.0", "react": "19.2.6", "react-dom": "19.2.6" } }
+
+$ bun install
+31 packages installed [840.00ms]
+
+$ head -16 bun.lock
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "butchr",
+      "dependencies": {
+        "@launchpad-ui/components": "0.21.0",
+        …
+      },
+    },
+  },
+  "packages": { … }
+
+$ grep -c '0\.9\.275' bun.lock
+0
+```
+
+The root workspace entry carries **`name` and `dependencies`. There is no
+`version` key.** Then the actual experiment:
+
+```console
+$ cp bun.lock lock.a
+$ sed -i 's/"version": "0.9.275"/"version": "0.9.276"/' package.json
+$ bun install
+Checked 31 installs across 32 packages (no changes) [3.00ms]
+
+$ diff lock.a bun.lock && echo "LOCKFILE IDENTICAL AFTER VERSION BUMP"
+LOCKFILE IDENTICAL AFTER VERSION BUMP
+
+$ bun install --frozen-lockfile; echo "exit=$?"
+exit=0
+```
+
+Reproduced identically on a one-dependency tree. **Conclusions:**
+
+1. `bun install --frozen-lockfile` in `scripts/ci` is **safe on every post-release
+   branch**. §4.4 stands as written.
+2. The RFC's recommendation that *"the release step must run `bun install` … and
+   include `bun.lock` in the release commit"* is **withdrawn**. Adding it would
+   have been a pointless write to a file on every release, and would have *created*
+   the rebase-race surface §5.6 hazard 2 worries about.
+3. Caveat worth stating: the lockfile **does** record the root `name`. Renaming the
+   package would dirty it. butchr's release step never renames, so this is inert.
+
+---
+
+### 13.2 One `tsconfig.json` **cannot** cover both trees
+
+**Verdict: §5.5's `UNVERIFIED:` is settled — `tsconfig.public.json` is required.**
+Two other things fell out, and one of them is worse than the question asked.
+
+Method: copy the **real** `src/` and `public/` into a scratch dir (`diff -r`
+confirmed byte-identical to the repo), install `typescript`, React 19, and the
+pinned `@launchpad-ui` set, and run `tsc` under varying configs against a
+representative `public/main.tsx` (token CSS imports, a LaunchPad `Button`,
+`createRoot`, `document.getElementById`).
+
+**First, a hazard in the gate command itself (Errata E2).**
+
+```console
+$ bunx tsc --noEmit
+node_modules/typescript/lib/_tsc.js:92
+  for (let i = startIndex ?? 0; i < array.length; i++) {
+                           ^
+SyntaxError: Unexpected token '?'
+    at wrapSafe (internal/modules/cjs/loader.js:915:16)
+
+$ node --version
+v12.22.9
+$ head -1 node_modules/.bin/tsc
+#!/usr/bin/env node
+
+$ bunx --bun tsc --version
+Version 5.9.3
+```
+
+`bunx tsc` honours the shebang and hands the script to this host's ancient `node`.
+**The gate must say `bunx --bun tsc`.** `bun run tsc` fails the same way.
+
+**Second: `lib: ["DOM"]` is the irreconcilable conflict.**
+
+`public/` needs `DOM` (`error TS2584: Cannot find name 'document'`). Adding `DOM`
+to a shared `lib` changes `src/`'s meaning **in both directions**:
+
+```console
+# with lib: ["ESNext"]           →  src/ 21 errors, public/ 1 error (document)
+# with lib: ["ESNext","DOM"]     →  src/ 21 errors, public/ 0 errors
+#                                   …but NOT THE SAME 21:
+$ diff <(tsc -p no-dom.json) <(tsc -p with-dom.json)
+> src/channel.ts(1410,31): error TS2504: Type 'ReadableStream<Uint8Array<ArrayBuffer>>'
+    must have a '[Symbol.asyncIterator]()' method that returns an async iterator.
+< src/mcp.ts(175,5): error TS2322: Type 'unknown' is not assignable to type
+    'JsonRpcMessage | JsonRpcMessage[]'.
+```
+
+- **Breaks real code.** `src/channel.ts:1410` is `for await (const chunk of
+  Bun.stdin.stream())`. Bun's `ReadableStream` is async-iterable; `lib.dom`'s is
+  not. Shipping, working code stops typechecking.
+- **Masks a real error.** `src/mcp.ts:175` is `body = await req.json()`. Under
+  `bun-types` that is `unknown` (correctly rejected under `strict`); under
+  `lib.dom`'s `Request` it is `any`, and the error silently disappears.
+
+A shared config is wrong in both directions, so the split is not a stylistic
+preference. The verified `tsconfig.public.json` is reproduced in **§5.5**; against
+the real `public/` (all 19 legacy `.js` modules plus `main.tsx`) it reports
+**0 errors, exit 0**.
+
+The split is also a *feature*. Each tree is confined to its own globals:
+
+```console
+# public/, types: []          →  Bun.file("/etc/passwd")
+public/probe.tsx(1,18): error TS2868: Cannot find name 'Bun'.
+# src/, no DOM in lib         →  document.title
+src/probe.ts(1,18): error TS2584: Cannot find name 'document'.
+```
+
+**Sub-findings, all verified, all cheap to get wrong:**
+
+- **Side-effect CSS imports need no `declare module "*.css"`.** Both
+  `import "@launchpad-ui/tokens/index.css";` and `import "./local.css";`
+  typecheck clean. TS only demands a declaration for a *binding* import
+  (`import styles from "./local.css"` → `TS2307`). **Do not add a
+  `declarations.d.ts`.** (Controls run: injecting a deliberate `TS2322` into the
+  same files proved `tsc` was really checking them, and `--listFiles` confirmed
+  they were in the program.)
+- **`@types/react` + `@types/react-dom` are mandatory** (Errata E3). `react@19.2.6`
+  and `react-dom@19.2.6` ship **no `.d.ts`**. Without them:
+  `TS7016: Could not find a declaration file for module 'react/jsx-runtime'` —
+  while `bun build public/main.tsx` exits **0**. Versions that resolved against the
+  pinned tree: `@types/react@19.2.17`, `@types/react-dom@19.2.3`.
+- **§4.1's orphan-module claim CONFIRMED, with one caveat.** An orphan
+  `public/views/foo.tsx` with a type error fails `tsc` (`TS2322`); an orphan
+  `public/views/foo.js` with a *syntax* error also fails (`TS1005`). But under
+  `allowJs` **without `checkJs`**, an orphan `.js` with a *type* error passes. So
+  during Phases 1–3, while `public/` is still vanilla, `tsc` is exactly as strong
+  as the gate rule it replaces — **not stronger**. From Phase 4 (all `.tsx`) it is
+  strictly stronger, as claimed.
+- **§5.5's thesis confirmed end-to-end.** The spike's own `icon="pencil"` bug:
+
+  ```console
+  public/icontest.tsx(2,24): error TS2322: Type '"pencil"' is not assignable to type
+    '"article" | "code" | … | 318 more … | undefined'.
+  ```
+
+  `bun build` accepts it and renders an empty 20×20 box. The typechecker is the
+  only thing that catches it.
+- **Cost of gate step 2: ~10.6 s** (`src/` 6.01 s, `public/` 4.62 s), not the
+  ~100 ms §4.2's ordering rationale assumes. Still trivial beside `bun test ./test`.
+- **`types: ["bun-types"]` and `types: ["bun"]` behave identically** (both resolve
+  to `bun-types@1.3.14`). The existing root `tsconfig.json` needs no change here —
+  but note it has **never been executed**, because `typescript` was never installed.
+
+`UNVERIFIED:` I did not test `tsc --build` with project `references` as an
+alternative to two invocations. Two `-p` invocations work, cost 10.6 s, and are
+what §4.2 now specifies; `references` would be an optimisation, not a fix, since
+the `lib` conflict is what forces two configs either way.
+
+---
+
+### 13.3 `--lp-spacing-*` vs `--space-1..6`: **they do not align**
+
+**Verdict: §7.4's deferral condition fails. Phase 5's alias task is cancelled.**
+
+`--lp-spacing-*` is a double indirection — spacing → size → `rem` — so reading the
+names is not enough, and the RFC's `UNVERIFIED:` note was right to insist on
+values.
+
+```console
+$ grep -oE '\-\-lp-spacing-[a-z0-9-]+:[^;]*;' node_modules/@launchpad-ui/tokens/dist/index.css
+--lp-spacing-100: var(--lp-size-0);      --lp-spacing-600: var(--lp-size-20);
+--lp-spacing-200: var(--lp-size-4);      --lp-spacing-700: var(--lp-size-24);
+--lp-spacing-300: var(--lp-size-8);      --lp-spacing-800: var(--lp-size-28);
+--lp-spacing-400: var(--lp-size-12);     --lp-spacing-900: var(--lp-size-32);
+--lp-spacing-500: var(--lp-size-16);
+```
+
+Rather than trust the arithmetic, the values were resolved in **real headless
+Chrome**, in a document carrying butchr's own `body { font-size: 14px }`, by
+setting `width: var(--lp-spacing-N)` and reading `getComputedStyle`:
+
+```console
+$ google-chrome --headless --dump-dom file://…/probe.html
+--lp-spacing-100 = 0px      --lp-spacing-500 = 16px     --lp-spacing-900 = 32px
+--lp-spacing-200 = 4px      --lp-spacing-600 = 20px     ROOT_FONT_SIZE = 16px
+--lp-spacing-300 = 8px      --lp-spacing-700 = 24px     BODY_FONT_SIZE = 14px
+--lp-spacing-400 = 12px     --lp-spacing-800 = 28px
+```
+
+The `rem` basis is **16px, not 14px**: butchr's only `font-size: 14px` is on `body`
+(`style.css:150-157`), and `rem` resolves against `html`. There is no
+`html`/`:root` `font-size` anywhere in `style.css`, and no `rem`/`em`/`%` root
+font-size at all — so the browser default stands. Had the `14px` been on `html`,
+every LaunchPad spacing value would have been 12.5% smaller and the table below
+would be different. This was worth checking.
+
+**The diff** (butchr's scale is `style.css:91-96`):
+
+| butchr | px | LaunchPad | verdict |
+|---|---|---|---|
+| `--space-1` | 4 | `--lp-spacing-200` = 4px | ✅ exact |
+| `--space-2` | **6** | *nothing at 6px* | ❌ off-grid |
+| `--space-3` | 8 | `--lp-spacing-300` = 8px | ✅ exact |
+| `--space-4` | **10** | *nothing at 10px* | ❌ off-grid |
+| `--space-5` | 12 | `--lp-spacing-400` = 12px | ✅ exact |
+| `--space-6` | **18** | *nothing at 18px* | ❌ off-grid |
+
+LaunchPad's scale is a **strict 4px grid**. butchr's three even-but-not-multiple-of-4
+values (6, 10, 18) have no equivalent **at any tier** — they are not "a tier off,"
+they are between tiers.
+
+**Blast radius is far smaller than §7.4 feared.** The RFC warned a blind remap
+"silently reflows 413 usage sites." That 413 is the count of *all* `var(--…)`
+usages in `style.css`, overwhelmingly colours. The spacing tokens have **12**
+usages, and — per the repo's own `fe-grep-blind-to-el-props` lesson — I grepped
+**both** the CSS form and the `el(x, {style: …})` / `{class: …}` JS forms, and
+**read** the matches rather than counting them:
+
+```console
+$ grep -nE 'var\(\s*--space-' public/style.css        # 12 matches, 11 lines
+867: label.field { margin-bottom: var(--space-5); }
+870: label.field.tight { margin-bottom: var(--space-2); }      ← off-grid
+875: .field-row { gap: var(--space-3); }
+879: .row { gap: var(--space-4); }                             ← off-grid
+884: .stacked { margin-top: var(--space-6); }                  ← off-grid
+888:   padding: var(--space-6); margin-bottom: var(--space-6); ← off-grid ×2
+895: .lede { margin: 0 0 var(--space-4); }                     ← off-grid
+897: .panel-actions { margin-top: var(--space-5); }
+1234: .cto-card { margin-bottom: var(--space-6); }             ← off-grid
+1238: .cto-card .meta { margin-top: var(--space-1); }
+1247: .cto-controls { gap: var(--space-3); }
+
+$ grep -rn -- '--space-' public/*.js public/*/*.js
+(no matches — zero JS references, in either form)
+```
+
+**7 of the 12 usages sit on the three off-grid tokens.**
+
+**Recommendation: keep all six `--space-*` literal.** The RFC pre-authorised this
+outcome — *"If the scales do not align, keep `--space-*` as butchr's scale and say
+so."* Aliasing only the three that happen to match would be worse than aliasing
+none: a reader could no longer tell which tokens are live references to LaunchPad
+and which are butchr literals. Snapping 6→4/8, 10→8/12, 18→16/20 is a **design**
+decision affecting 7 CSS rules; it is cheap, it is optional, and it is not needed
+for parity. It stays in Phase 5 as a judgment call, not a mapping chore.
+
+---
+
+### 13.4 Three things Phase 0 was not asked about, and one of them blocks Phase 1
+
+Reported because the brief asked for an honest negative over a confident guess.
+
+1. 🚨 **`src/` does not typecheck — 21 errors.** `bun build` strips types without
+   checking them and `typescript` has never been installed, so `tsc --noEmit` has
+   **never run against this repository**. The moment §4.2's gate step 2 lands, the
+   gate goes red on `main`. Verified against a byte-identical copy of the real
+   `src/` (`diff -r` clean) using the repo's **own, unmodified** `tsconfig.json`.
+   These are not lint nits; several are references to names that are not in scope:
+
+   ```
+   src/channel.ts(559,568,583,723): TS2322  ×4  Record<string,string|number> vs optional key
+   src/db.ts(2879,5):               TS1117      duplicate property `kind` in one object literal
+   src/dispatcher.ts(201,3):        TS2740      WorkspaceRow missing 6 properties
+   src/dispatcher.ts(553,31):       TS2304      Cannot find name 'SendInput'   ← never imported
+   src/dispatcher.ts(753,45):       TS2345      string|null vs string|undefined
+   src/exec.ts(238,239):            TS2345  ×2  ReadableStream variance
+   src/herdr.ts(314,23):            TS2677      type predicate not assignable to its parameter
+   src/mcp.ts(175,5):               TS2322      await req.json() is `unknown` under strict
+   src/startup-confirm.ts(65,5):    TS2322      { enter: true } vs SendInput
+   src/stories.ts(301,34):          TS2339      'initiative_id' does not exist on TaskRow
+   src/stories.ts(1067,5):          TS2322      "work"|"ceo" not in "cto"|"story"|"user"
+   src/tasks.ts(886,935):           TS2345  ×2  object literal vs TaskListView
+   src/tasks.ts(1041,1941,2005):    TS2304  ×3  Cannot find name 'TaskKind'   ← never imported
+   src/workspace-agent.ts(612,26):  TS2322      optional key vs Record<string,string>
+   ```
+
+   Spot-checked against the real source: `src/tasks.ts` annotates three signatures
+   with `TaskKind` and its import list (`tasks.ts:19`) pulls `TaskRow`, `TaskStatus`,
+   `WorkspaceRow`, `WorkspaceAgentRow` from `./db.ts` — **not `TaskKind`**.
+   `src/dispatcher.ts:553` types a callback parameter as `SendInput`, which
+   `herdr.ts:21` exports and `dispatcher.ts` never imports. `src/db.ts:2879` sets
+   `kind` twice in one literal, with a comment explaining that the second should
+   win — which is exactly what `TS1117` forbids.
+
+   **This is arguably the strongest evidence in the whole RFC for §5.5**: a
+   typechecker found four scope errors and a duplicate key before React existed.
+   But it is also **unbudgeted work that gates Phase 1**, and it is backend work,
+   not front-end. See Phase 1's re-scoping note; the recommendation is a Phase 1a.
+
+2. **`bunx tsc` is not a working command on this host.** See §13.2 / Errata E2. The
+   gate must use `bunx --bun tsc`, and must pass `-p` twice.
+
+3. **A poisoned bun cache produces silently-empty type packages.** Midway through
+   §13.2, `bun-types@1.3.14` installed with **every file at 0 bytes** (`index.d.ts`,
+   `globals.d.ts`, `package.json` — all empty), yielding 399 spurious errors like
+   `Cannot find name 'console'`. `bun install --frozen-lockfile` does **not** detect
+   it: the lockfile is correct, the *cache* is corrupt. `rm -rf ~/.bun/install/cache/bun-types*`
+   plus a reinstall restored a 1,306-byte `index.d.ts`. Logged as risk 19. This was
+   an environment fault, **not** a finding about bun-types — recorded only so the
+   next agent does not spend an hour on it.
+
+---
+
+### 13.5 Scope note
+
+Two things this phase deliberately did **not** do:
+
+- **No repo state changed but this file.** No dependency added, no `package.json`
+  touched, no `scripts/ci`, `public/`, or `src/` edit. Every install went to a
+  scratch directory outside the repository. `git status` shows one modified file.
+  Docs-only, so no `CHANGELOG.md` entry (`scripts/ci`'s changelog rule exempts
+  `^docs/`, verified by reading the rule).
+- **The RFC's own status line was left alone.** Line 3 still reads
+  *"Status: DRAFT — awaiting CTO sign-off"*, while this subtask's brief states the
+  RFC is CTO-signed-off with all nine §12 decisions approved. **The document and
+  the brief disagree.** Following the house rule that the artifact wins over the
+  prompt, I did not silently "fix" the header to match the brief — flipping a
+  sign-off marker is the leader's call, not a build agent's. **Leader: please
+  update line 3.** Note also that Errata E1–E4 touch decisions **2** (the
+  dependency list grows by two `@types/*`) and **3** (`tsc` as a gate step is now
+  known to red-build `main`), so the sign-off may warrant a second look regardless.
