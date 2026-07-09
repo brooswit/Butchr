@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Front-end Phase 4: the Pipeline (swimlanes) view is fully node-built.**
+  `public/views/swimlanes.js` — the codebase's densest `innerHTML` cluster — now builds every
+  element with `el()`/`svg()` instead of template literals: its 11 `esc()` calls, all seven el()
+  `{html:}` bridges and its one `htmlOf()` caller are gone (the bare `wrap.innerHTML = ""` repaint
+  clear stays; it escapes nothing). `storyLifecycleChip(story)` returns a NODE, or `null` (was
+  `""`) when a story has no lifecycle to show; its leading space is now the lane header's own text
+  node. `swimUngroupedLane` drops its hand-rolled kind-badge markup for the shared `kindBadge()`
+  emitter — same `kind-badge kind-unknown` classes and `• UNGROUPED` label, tooltip now the
+  emitter's `UNGROUPED`. The pure helpers (`storyLifecycle`, `storyProgress`, `orderLaneLeaves`,
+  `swimEmphasis`, `laneTitle`) keep their exact names and return types. Rendered DOM is otherwise
+  unchanged — every class, `title`, `href`, `aria-*`, glyph and inter-element space is preserved.
+  `test/story-lifecycle-ui.test.ts` asserts the chip's structure under `withDom()`.
+
 ## [0.9.267] - 2026-07-09
 
 ### Changed

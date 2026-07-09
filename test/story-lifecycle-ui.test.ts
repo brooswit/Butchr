@@ -9,8 +9,14 @@
 // script and eval it with `new Function` — stubbing esc/isCompleteStatus/storySubtaskTotal along
 // the way; that harness is gone along with the sentinel, so the real leaves run here.) Do not
 // reintroduce a sentinel here.
+//
+// storyLifecycleChip now returns a NODE (or null), so its assertions run inside withDom() — the
+// zero-dependency DOM stub. It has no innerHTML, by design: assert on STRUCTURE (className /
+// getAttribute / textContent), never on serialized markup. storyLifecycle and storyProgress are
+// PURE and need no DOM at all.
 import { expect, test } from "bun:test";
 import { storyLifecycle, storyLifecycleChip, storyProgress } from "../public/views/swimlanes.js";
+import { withDom } from "./dom-stub";
 
 const story = (o: any = {}) => ({ work_kind: "node", status: "open", counts: {}, leader: {}, ...o });
 
@@ -54,9 +60,18 @@ test("storyProgress: complete over total, idle excluded from total", () => {
   expect(storyProgress({})).toEqual({ done: 0, total: 0 });
 });
 
-// ── The lane-header chip: '' when null, otherwise a quiet outlined pill keyed by state ──
-test("storyLifecycleChip renders per-state class + is empty for non-open", () => {
-  expect(storyLifecycleChip(story({ counts: { in_progress: 1 } }))).toContain("chip lc-working");
-  expect(storyLifecycleChip(story({ counts: { blocked: 1 }, leader: { desired: true, running: false } }))).toContain("chip lc-stalled");
-  expect(storyLifecycleChip(story({ status: "done", counts: { in_progress: 1 } }))).toBe("");
+// ── The lane-header chip: null when there's no lifecycle, otherwise a quiet outlined pill ──
+test("storyLifecycleChip renders per-state class + is null for non-open", () => {
+  withDom(() => {
+    const working = storyLifecycleChip(story({ counts: { in_progress: 1 } }))!;
+    expect(working.className).toBe("chip lc-working");
+    expect(working.textContent).toBe("▶ working");
+    expect(working.getAttribute("title")).toBe("story lifecycle — working");
+
+    const stalled = storyLifecycleChip(story({ counts: { blocked: 1 }, leader: { desired: true, running: false } }))!;
+    expect(stalled.className).toBe("chip lc-stalled");
+    expect(stalled.textContent).toBe("⚠ stalled");
+
+    expect(storyLifecycleChip(story({ status: "done", counts: { in_progress: 1 } }))).toBeNull();
+  });
 });

@@ -17,9 +17,16 @@
 // be fenced by `<test-extract:...>` sentinels and eval'd out of the classic app.js script with
 // `new Function`, because a classic script could not be imported. That harness is gone — do not
 // reintroduce a sentinel here.
-// `htmlOf` is the TRANSITIONAL bridge letting the innerHTML templates below consume the
-// now-node-returning kindBadge. A later subtask converts those templates and drops it.
-import { el, esc, htmlOf, svg } from "../core/dom.js";
+//
+// This view is fully NODE-BUILT: no esc(), no el() `html:` bridge, no htmlOf(). Every text child
+// goes through el()'s createTextNode, so escaping is structural rather than the author's job. The
+// one remaining `innerHTML` touch is `wrap.innerHTML = ""` in renderSwimlanes — a repaint CLEAR,
+// which escapes nothing. Do not reintroduce a template literal here.
+//
+// ⚠ The literal SPACES passed as string children below (" " between two inline elements) are REAL
+// text nodes and are the rendered gap between them. They came over verbatim from the template
+// literals this file used to build. Do not "tidy" them away.
+import { el, svg } from "../core/dom.js";
 import { effStatus, kindBadge } from "../components/chips.js";
 import {
   graphChildOf,
@@ -72,13 +79,17 @@ export function storyProgress(counts) {
   const done = Object.keys(c).reduce((n, k) => (isCompleteStatus(k) ? n + (c[k] || 0) : n), 0);
   return { done, total: storySubtaskTotal(c) };
 }
-// The lifecycle CHIP (HTML string) for a story's lane header — '' when there's no lifecycle to show.
-// Subtle by design (see .chip.lc-*): it must not compete with the colored status chip or the S1 kind
-// badge.
+// The lifecycle CHIP (a NODE) for a story's lane header — null when there's no lifecycle to show;
+// the one call site guards, and el() skips a null child anyway. Subtle by design (see .chip.lc-*):
+// it must not compete with the colored status chip or the S1 kind badge.
+//
+// It used to return an HTML string that began with a literal " " — the gap between it and the
+// status chip before it. That space is now the caller's, emitted as its own text child.
 export function storyLifecycleChip(story) {
   const lc = storyLifecycle(story);
-  if (!lc) return "";
-  return ` <span class="chip lc-${esc(lc.cls)}" title="story lifecycle — ${esc(lc.key)}">${esc(lc.glyph)} ${esc(lc.key)}</span>`;
+  if (!lc) return null;
+  return el("span", { class: "chip lc-" + lc.cls, title: "story lifecycle — " + lc.key },
+    lc.glyph + " " + lc.key);
 }
 
 // ---------- pipeline swimlanes (workspace "Pipeline" view) ----------
@@ -154,25 +165,28 @@ function swimConn() {
 function swimStep(leaf, memberSet, byId) {
   const st = effStatus(leaf);
   const emph = swimEmphasis(st);
-  const dot = st === "in_progress" ? '<span class="swim-dot" aria-hidden="true"></span>' : "";
+  const dot = st === "in_progress" ? el("span", { class: "swim-dot", "aria-hidden": "true" }) : null;
   const foreign = (leaf.blocked_by || []).filter((b) => !memberSet.has(b) && byId.has(b));
+  // The parts run together with NO separator — the template literal this replaced joined them on "".
   const parts = [
-    `<div class="swim-step-top"><span class="chip ${esc(st)}">${dot}${esc(st)}</span>` +
-      (emph === "attn" ? '<span class="swim-needs">needs you</span>' : "") + `</div>`,
-    `<span class="swim-sid">${esc(leaf.id)}</span>`,
+    el("div", { class: "swim-step-top" }, [
+      el("span", { class: "chip " + st }, [dot, st]),
+      emph === "attn" ? el("span", { class: "swim-needs" }, "needs you") : null,
+    ]),
+    el("span", { class: "swim-sid" }, leaf.id),
   ];
   // A LEAF's description lives in `summary` (its `brief` is always null); it's null until the
   // agent writes one, so a not-yet-run subtask is honestly id-only.
-  if (leaf.summary && leaf.summary !== leaf.id) parts.push(`<span class="swim-sum">${esc(leaf.summary)}</span>`);
+  if (leaf.summary && leaf.summary !== leaf.id) parts.push(el("span", { class: "swim-sum" }, leaf.summary));
   if (foreign.length) {
-    parts.push(`<span class="swim-xdep" title="blocked by work in another lane">⤴ blocked by ${esc(foreign.join(", "))}</span>`);
+    parts.push(el("span", { class: "swim-xdep", title: "blocked by work in another lane" },
+      "⤴ blocked by " + foreign.join(", ")));
   }
   return el("a", {
     class: "swim-step is-" + emph,
-    href: "#/task/" + esc(leaf.id),
+    href: "#/task/" + leaf.id,
     "aria-label": `subtask ${leaf.id} — ${st}`,
-    html: parts.join(""),
-  });
+  }, parts);
 }
 
 // One story LANE: header (kind badge · title · id · status + lifecycle chips · progress) over a
@@ -182,19 +196,28 @@ function swimStep(leaf, memberSet, byId) {
 function swimLane(story, byId, allIds, repaint) {
   const st = effStatus(story);
   const p = storyProgress(story.counts);
-  const progHtml = p.total
-    ? `<span class="swim-track"><i style="width:${Math.round((100 * p.done) / p.total)}%"></i></span>` +
-      `<span class="swim-prog-txt">${p.done} / ${p.total} done</span>`
-    : `<span class="swim-prog-txt">not started</span>`;
+  const prog = p.total
+    ? [
+        el("span", { class: "swim-track" }, [el("i", { style: `width:${Math.round((100 * p.done) / p.total)}%` })]),
+        el("span", { class: "swim-prog-txt" }, `${p.done} / ${p.total} done`),
+      ]
+    : [el("span", { class: "swim-prog-txt" }, "not started")];
   // Compact one-line title (clamped) for display; the FULL brief goes in the tooltip.
   const title = laneTitle(story.brief, story.id);
   const fullTitle = story.brief || story.id;
-  const hd = el("div", { class: "swim-hd", html:
-    `<span class="swim-kind">${htmlOf(kindBadge("node"))}</span>` +
-    `<span class="swim-title" title="${esc(fullTitle)}">${esc(title)}</span>` +
-    `<span class="swim-laneid">${esc(story.id)}</span>` +
-    `<div class="swim-meta"><span class="chip ${esc(st)}">${esc(st)}</span>${storyLifecycleChip(story)}` +
-    `<div class="swim-prog">${progHtml}</div></div>` });
+  // The lifecycle chip's leading SPACE is a real text node — the gap after the status chip. It
+  // belongs to this call site now that storyLifecycleChip returns a bare node (or null).
+  const lc = storyLifecycleChip(story);
+  const hd = el("div", { class: "swim-hd" }, [
+    el("span", { class: "swim-kind" }, [kindBadge("node")]),
+    el("span", { class: "swim-title", title: fullTitle }, title),
+    el("span", { class: "swim-laneid" }, story.id),
+    el("div", { class: "swim-meta" }, [
+      el("span", { class: "chip " + st }, st),
+      ...(lc ? [" ", lc] : []),
+      el("div", { class: "swim-prog" }, prog),
+    ]),
+  ]);
 
   const members = storyMemberIds(story.id, allIds, byId);
   const memberSet = new Set(members);
@@ -210,8 +233,10 @@ function swimLane(story, byId, allIds, repaint) {
     const msg = childless
       ? "No subtasks yet — parked until the leader decomposes it."
       : "No active subtasks — all work is finished or waiting.";
-    lane.appendChild(el("div", { class: "swim-empty", html:
-      `<span class="chip lc-parked">⏸ parked</span><span class="swim-empty-txt">${esc(msg)}</span>` }));
+    lane.appendChild(el("div", { class: "swim-empty" }, [
+      el("span", { class: "chip lc-parked" }, "⏸ parked"),
+      el("span", { class: "swim-empty-txt" }, msg),
+    ]));
   } else {
     const ordered = orderLaneLeaves(active, byId);
     const pipe = el("div", { class: "swim-pipe" });
@@ -237,12 +262,17 @@ function swimDoneRow(storyId, done, byId, memberSet, repaint) {
     else SWIM_DONE_EXPANDED.add(storyId);
     repaint();
   };
+  // NOT a `Button`: this is a `div[role=button]` styled by .swim-done-row (a quiet inline caret
+  // row), not a `.btn`. Adopting the shared Button would swap the tag and the whole class contract.
+  // `onclick`/`onkeydown` stay FUNCTION props — el() attaches a function prop as a listener.
   const row = el("div", {
     class: "swim-done-row", role: "button", tabindex: "0", "aria-expanded": open ? "true" : "false",
-    html: `<span class="swim-done-caret">${open ? "▾" : "▸"}</span> ${done.length} done`,
     onclick: toggle,
     onkeydown: (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); } },
-  });
+  }, [
+    el("span", { class: "swim-done-caret" }, open ? "▾" : "▸"),
+    ` ${done.length} done`, // the leading space is the gap after the caret
+  ]);
   wrap.appendChild(row);
   if (open) {
     const pipe = el("div", { class: "swim-pipe swim-done-pipe" });
@@ -261,10 +291,16 @@ function swimDoneRow(storyId, done, byId, memberSet, repaint) {
 function swimUngroupedLane(leaves, byId) {
   const ids = leaves.map((w) => w.id);
   const memberSet = new Set(ids);
-  const hd = el("div", { class: "swim-hd", html:
-    `<span class="swim-kind"><span class="kind-badge kind-unknown" title="ungrouped">• UNGROUPED</span></span>` +
-    `<span class="swim-title">Ungrouped work</span>` +
-    `<span class="swim-laneid">no owning story</span>` });
+  // The badge is now the SHARED kindBadge(), not hand-rolled markup: kindVisual("ungrouped") hits
+  // its unmapped-kind fallback and yields exactly the classes this lane already used
+  // (`kind-badge kind-unknown`) and the same "• UNGROUPED" glyph+label. Only the tooltip changes —
+  // `title="ungrouped"` becomes the emitter's own `title="UNGROUPED"` — which is the hand-rolled
+  // copy's drift from every other badge in the app, not a property worth preserving.
+  const hd = el("div", { class: "swim-hd" }, [
+    el("span", { class: "swim-kind" }, [kindBadge("ungrouped")]),
+    el("span", { class: "swim-title" }, "Ungrouped work"),
+    el("span", { class: "swim-laneid" }, "no owning story"),
+  ]);
   const lane = el("div", { class: "swim-lane swim-lane-ungrouped" }, [hd]);
   const pipe = el("div", { class: "swim-pipe" });
   orderLaneLeaves(ids, byId).forEach((id, i) => {
@@ -285,8 +321,10 @@ function swimLegend() {
     ["merged", "done"],
     ["lc-parked", "parked"],
   ];
-  return el("div", { class: "swim-legend", html: items.map(([cls, txt]) =>
-    `<span><i class="swim-ldot ${esc(cls)}"></i> ${esc(txt)}</span>`).join("") });
+  // No separator BETWEEN the items (the template joined on ""), but each carries the literal space
+  // between its swatch and its label.
+  return el("div", { class: "swim-legend" }, items.map(([cls, txt]) =>
+    el("span", {}, [el("i", { class: "swim-ldot " + cls }), " ", txt])));
 }
 
 // The Pipeline view entry point (the sole workspace-body work view). Builds into a wrapper it can
@@ -311,9 +349,11 @@ function buildSwimlanes(work, wrap, repaint) {
   const ungrouped = list.filter((w) =>
     w.work_kind === "leaf" && !isHistoryItem(w) && !ownedByPresentStory(w));
 
-  wrap.appendChild(el("div", { class: "swim-caption", html:
-    "<b>Work pipeline.</b> Each story is a lane; its subtasks run left → right in the order they " +
-    "unblock. The item that needs you is the only thing lit; finished work collapses away." }));
+  wrap.appendChild(el("div", { class: "swim-caption" }, [
+    el("b", {}, "Work pipeline."),
+    " Each story is a lane; its subtasks run left → right in the order they " +
+    "unblock. The item that needs you is the only thing lit; finished work collapses away.",
+  ]));
   wrap.appendChild(swimLegend());
 
   if (stories.length === 0 && ungrouped.length === 0) {
