@@ -322,11 +322,9 @@ export async function reconcileRunningTasks(
       // while butchr was offline. Rescue it to in_review for a human. Close its (now
       // husk) tab defensively BY NAME.
       await harness.teardownTask(row.id);
-      const snapshot = readRunLogSnapshot(row.id);
       markInReview(
         row.id,
-        `[butchr] moved to review automatically: the agent ended while butchr ` +
-          `was offline. Output captured as-is.\n\n${snapshot}`,
+        `[butchr] moved to review automatically: the agent ended while butchr was offline.`,
       );
       rescued++;
       console.log(`[butchr] rescued task ${row.id} → in_review (agent gone while offline)`);
@@ -1253,10 +1251,13 @@ function spawnWatcher(
       return;
     }
 
-    let snapshot = "";
+    // The agent's raw run log. Read ONLY to answer "did it produce any output at all?"
+    // for the exec-failure short-circuit below — it is no longer persisted anywhere (the
+    // agent's output is served from the on-disk session transcript; see markInReview).
+    let runLog = "";
     if (existsSync(logFile)) {
       try {
-        snapshot = sanitizeTypescript(readFileSync(logFile, "utf8"));
+        runLog = sanitizeTypescript(readFileSync(logFile, "utf8"));
       } catch {
         /* best effort */
       }
@@ -1276,7 +1277,7 @@ function spawnWatcher(
       } catch {
         /* best effort */
       }
-      if (isExecFailure(code, snapshot.length > 0)) {
+      if (isExecFailure(code, runLog.length > 0)) {
         // Last-moment abort wins (mirrors the markReview path below).
         if (consumeAbort(taskId)) return;
         // markDispatchFailure tears down the herdr tab/pane and increments the
@@ -1320,10 +1321,10 @@ function spawnWatcher(
       reason =
         "the agent never registered with herdr (it failed to start)";
     }
-    snapshot =
-      `[butchr] moved to review automatically: ${reason}. ` +
-      `Output captured as-is.\n\n` +
-      snapshot;
+    // The RESCUE NOTE — butchr's own words about why it force-moved the task. Recorded as
+    // the status-transition note (see markInReview), NOT spliced onto the agent's output:
+    // that output is read from the session transcript, which outlives the worktree.
+    const rescueNote = `[butchr] moved to review automatically: ${reason}.`;
 
     // The process is gone; close the whole tab defensively BY NAME in case a husk pane
     // remains, so the dead task's tab doesn't linger.
@@ -1335,7 +1336,7 @@ function spawnWatcher(
 
     // RESCUE: the build (in_progress) agent ended without submitting → move the task
     // to in_review for a human to inspect (approval then merges mechanically).
-    markInReview(taskId, snapshot);
+    markInReview(taskId, rescueNote);
     watching.delete(taskId);
     console.log(`[butchr] task ${taskId} → in_review (${reason})`);
   })();

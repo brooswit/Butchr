@@ -1790,6 +1790,24 @@ function renderTimeline(events) {
   return panel;
 }
 
+// The RESCUE NOTE for a task butchr force-moved to review, or null. butchr stamps its
+// reason ("[butchr] moved to review automatically: ...") as the note of the transition
+// INTO `in_review` (tasks.markInReview); an agent that submitted normally leaves a
+// different note, so the prefix is what distinguishes a rescue. Only meaningful while the
+// task still sits in review — once it merges or is re-worked, the Timeline keeps the
+// history and the dedicated panel would be stale. Returns the LATEST such note (a task can
+// be rescued, re-dispatched, and rescued again).
+function rescueNote(events, status) {
+  if (status !== "in_review" || !Array.isArray(events)) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.to_status === "in_review" && typeof ev.note === "string") {
+      return ev.note.startsWith("[butchr] moved to review automatically") ? ev.note : null;
+    }
+  }
+  return null;
+}
+
 // Human label for a task's model: the requested model, and (when known and
 // different) the model it actually ran under per the session transcript. An unset
 // request shows "default", annotated with what the default resolved to if captured.
@@ -2223,11 +2241,14 @@ async function renderTask(id) {
   // agent summary (from request_review)
   if (t.summary) block("Agent summary", t.summary, wrap);
 
-  // output snapshot — the agent's last captured output (its final build output on a
-  // merged task, or the rescue snapshot otherwise).
-  if (t.output_snapshot) {
-    block(t.status === "merged" ? "Agent output" : "Agent output (snapshot)", t.output_snapshot, wrap);
-  }
+  // WHY BUTCHR INTERVENED — for a task butchr FORCE-moved to review (the agent died, ran
+  // away, or blew the resume cap), surface its own account of why. This is butchr's text,
+  // not the agent's, so the session transcript below cannot carry it; it is persisted as the
+  // transition's `task_events.note` and also appears on the Timeline. Rendered from the
+  // already-fetched `events` — no extra route, no extra column. Omitted entirely for a task
+  // that reached review normally (no rescue note ⇒ no panel).
+  const rescue = rescueNote(events, t.status);
+  if (rescue) block("Why butchr moved this to review", rescue, wrap);
 
   // agent transcript — a readable, lazily-fetched view of what the session's agent
   // actually did (prose, thinking, tool calls + truncated results). Collapsible and

@@ -210,8 +210,15 @@ describe("watchdog rescue → in_review", () => {
 
     const row = dbRow(id);
     expect(row.status).toBe("in_review"); // surfaced to a human, NOT aborted/killed
-    expect(row.output_snapshot).toContain("stuck/runaway");
     expect(row.has_agent).toBe(0); // agent torn down (no longer live)
+    // The rescue REASON is butchr's own words (the agent never wrote them, so the session
+    // transcript cannot carry them). It is durably recorded as the transition's audit-event
+    // note — which the webapp renders on the Timeline and in the "Why butchr moved this to
+    // review" panel — NOT in the retired output_snapshot column (story st-b8c9249e).
+    const events = dbMod.listTaskEvents(id);
+    const rescue = events.find((e) => e.to_status === "in_review");
+    expect(rescue?.note).toContain("stuck/runaway");
+    expect(row.output_snapshot).toBeNull(); // nothing writes the dead column
     // task.md reflects the transition too.
     expect(taskmdMod.readTaskMd(REPO_ROOT, id).meta.status).toBe("in_review");
   });

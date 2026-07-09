@@ -17,6 +17,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`tasks.output_snapshot` is retired — butchr no longer stores the agent's run-log blob.**
+  The column was a display-only copy of the agent's terminal output: unbounded (up to ~2 MB per
+  task) and, measured on the live database, **54 MB of 78 MB (69%)**. The agent's output is now
+  read from the on-disk session transcript (`GET /api/work/:id/transcript`, from
+  `~/.claude/projects/<session>.jsonl`), which is richer, structured, and — verified empirically
+  against merged tasks whose worktrees were already gone — outlives the worktree, because
+  `session_id` is preserved across merge/teardown and `findTranscript` locates the file by
+  scanning the projects root rather than by the worktree path.
+  - All write sites are detached: the merge/landed path, the merge auto-revert (`revert_reason` /
+    `last_dispatch_error` still carry the failing gate output), `parkExitingAgent`, and the
+    resume-cap rescue. The list/detail view projections no longer name the column, and the
+    webapp's "Agent output (snapshot)" block is gone.
+  - `readRunLogSnapshot` **survives** — it still backs `readRunLogTail`, which produces the
+    `idle_context` the idle/classifier logic depends on. Only its snapshot-feeding callers went.
+  - The COLUMN stays physically present but dead; dropping it is batched into the later cleanup
+    alongside the inert `gate_cmd` / `changelog_path` columns.
+
+### Changed
+
+- **Rescue reasons are now recorded as status-transition notes instead of output snapshots.**
+  `output_snapshot` also held butchr's own account of *why* it force-moved a task to review
+  ("stuck/runaway", "the agent ended while butchr was offline", "resume cap exceeded"). Those are
+  butchr's words, not the agent's, so the session transcript cannot carry them. `markInReview` now
+  takes a `reason` and persists it as the transition's `task_events.note`, which the webapp
+  renders on the task Timeline and in a new **"Why butchr moved this to review"** detail panel
+  (shown only for a genuinely rescued task in review). `.tl-note` gained `white-space: pre-wrap`
+  so multi-line notes keep their line breaks.
+
+### Fixed
+
+- **A bare `bun test` / `./scripts/ci` run can no longer touch the operator's live database.**
+  Several test files reach `src/db.ts` — which runs migrations at import — through a static import
+  without setting `BUTCHR_DB`, so they opened the real `~/.local/share/butchr/butchr.db`. Harmless
+  while every migration was additive; not harmless now that one is a destructive `UPDATE`. The
+  `[test]` preload (`test/test-setup.ts`) defaults `BUTCHR_DB` to a throwaway temp database.
+
+### Migration
+
+- An **idempotent** boot migration NULLs the dead column
+  (`UPDATE tasks SET output_snapshot = NULL WHERE output_snapshot IS NOT NULL`). It is guarded on
+  the column existing (it is a baseline-only column, so a sufficiently old database never grew
+  one) and is safe mid-run, since no code path reads it. **No `VACUUM` runs at boot or in the
+  gate** — the freed pages return to SQLite's freelist, and the file shrinks only when an operator
+  runs `VACUUM` manually.
+
 ## [0.9.245] - 2026-07-08
 
 ### Changed

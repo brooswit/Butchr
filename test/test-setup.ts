@@ -1,3 +1,7 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 // Test-suite preload (wired via `bunfig.toml` → `[test] preload`). Runs ONCE before any
 // test file is imported, so it can set process.env defaults that `src/config.ts` reads via
 // `envInt(...)` at its first import.
@@ -22,3 +26,15 @@
 process.env.BUTCHR_CTO_PROMPT_POLL_MS ??= "0";
 process.env.BUTCHR_CTO_PROMPT_MAX_POLLS ??= "3";
 process.env.BUTCHR_CTO_PROMPT_QUIET_POLLS ??= "1";
+
+// LIVE-DB GUARD. `src/db.ts` runs its migrations at IMPORT time, and several test files
+// (e.g. channel.test.ts, disk.test.ts, metrics.test.ts) reach it through a STATIC import
+// without setting `BUTCHR_DB` first — so with no default they open the operator's real
+// `~/.local/share/butchr/butchr.db`. That was survivable while the migrations were
+// additive (CREATE IF NOT EXISTS / ensureColumn), but the `output_snapshot` null-migration
+// is a DESTRUCTIVE `UPDATE`: a bare `bun test` (or `./scripts/ci`) would wipe the live
+// column. Default the path to a throwaway temp db BEFORE any test file — hence any
+// `src/config.ts` — is imported. Files that set their own `BUTCHR_DB` still win (they
+// assign before their own dynamic `import("../src/db.ts")`); this only covers the ones
+// that never set it at all. Test-only: the `[test]` preload never runs in production.
+process.env.BUTCHR_DB ??= join(mkdtempSync(join(tmpdir(), "butchr-test-db-")), "test.db");

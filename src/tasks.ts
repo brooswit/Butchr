@@ -42,7 +42,7 @@ import {
   workspaceReleaseMode,
   workspaceVersionFile,
 } from "./workspaces.ts";
-import { readRunLogSnapshot, signalAbort } from "./dispatcher.ts";
+import { signalAbort } from "./dispatcher.ts";
 import { sleep } from "./exec.ts";
 import { harness } from "./harness.ts";
 import { claudeAlive } from "./liveness.ts";
@@ -547,12 +547,13 @@ export function wouldCreateCycle(taskId: string, newBlockers: string[]): boolean
   return false;
 }
 
-// PERF (story st-718bd185): the three DETAIL-ONLY blob columns the LIST query must NEVER
-// read off disk. Unlike LIST_VIEW_OMIT (which strips them POST-load, so SQLite still
-// materializes every ~2 MB output_snapshot on each /api/work call — the real 2.7 s cost),
-// these names are excluded from the SELECT column list itself so the blobs are never read.
-// Mirrors LIST_VIEW_OMIT exactly (kept in sync: same three columns).
-const LIST_QUERY_OMIT = new Set(["output_snapshot", "last_dispatch_error", "revert_reason"]);
+// PERF (story st-718bd185): the DETAIL-ONLY columns the LIST query must NEVER read off
+// disk. Unlike LIST_VIEW_OMIT (which strips them POST-load, so SQLite still materializes
+// them on each /api/work call), these names are excluded from the SELECT column list
+// itself so they are never read. Mirrors LIST_VIEW_OMIT exactly (kept in sync).
+// (`output_snapshot` used to head this list; story st-b8c9249e stopped storing it — the
+// column is dead-but-present, so there is no longer a blob to keep out of the query.)
+const LIST_QUERY_OMIT = new Set(["last_dispatch_error", "revert_reason"]);
 
 // The cached, PRAGMA-derived LIGHT column list for the LIST query: every `tasks` column
 // EXCEPT the LIST_QUERY_OMIT blobs, quoted + comma-joined for a `SELECT <cols> FROM tasks`.
@@ -588,10 +589,10 @@ export function listTasks(workspaceId: string): TaskRow[] {
   // REVAMP-4 S0a: was `work_kind != 'node'`; narrowed to `= 'leaf'` (a pure identity when only
   // leaf/node exist) so the new CONTAINER nodes ('repo'/'project') are ALSO excluded — a repo
   // node (id == its directory id) must never surface in the task list, the same as a story node.
-  // PERF (story st-718bd185): SELECT a LIGHT column list (every column EXCEPT the three
-  // detail-only blobs — see lightTaskColumns / LIST_QUERY_OMIT) so SQLite never reads or
-  // materializes the ~2 MB output_snapshot per task. The DETAIL path (getTask, SELECT *)
-  // still carries the blobs. The omitted columns come back `undefined` on these rows — the
+  // PERF (story st-718bd185): SELECT a LIGHT column list (every column EXCEPT the
+  // detail-only text columns — see lightTaskColumns / LIST_QUERY_OMIT) so SQLite never reads
+  // or materializes them per task. The DETAIL path (getTask, SELECT *) still carries them.
+  // The omitted columns come back `undefined` on these rows — the
   // list projection (listRowForView) never reads them, and its `delete` of the same names is
   // now a harmless no-op (defense-in-depth).
   return db
@@ -762,14 +763,14 @@ function rowForView(row: TaskRow): TaskRow {
   return r as TaskRow;
 }
 
-// PERF (story st-337b45bc): three columns are DETAIL-ONLY — `output_snapshot` (the full agent
-// transcript, up to ~2 MB/task and 97%+ of a bulk /api/work payload) plus the singleton
-// `last_dispatch_error` / `revert_reason` error blobs. The LIST views (taskListView / allTasksView)
-// don't need them — the dashboard swimlanes render none of them; only the per-task DETAIL render
-// (GET /api/work/:id → taskView) reads them (app.js). So the list projection strips them here while
-// the SHARED rowForView (and thus taskView / workView) stays byte-identical, keeping GET /api/work
-// small/fast. Mirrors the FOLD_VIEW_OMIT pattern above.
-const LIST_VIEW_OMIT = ["output_snapshot", "last_dispatch_error", "revert_reason"] as const;
+// PERF (story st-337b45bc): the singleton `last_dispatch_error` / `revert_reason` error blobs
+// are DETAIL-ONLY. The LIST views (taskListView / allTasksView) don't need them — the dashboard
+// swimlanes render neither; only the per-task DETAIL render (GET /api/work/:id → taskView) reads
+// them (app.js). So the list projection strips them here while the SHARED rowForView (and thus
+// taskView / workView) stays byte-identical, keeping GET /api/work small/fast. Mirrors the
+// FOLD_VIEW_OMIT pattern above. (`output_snapshot` was the heaviest member — up to ~2 MB/task —
+// until story st-b8c9249e stopped storing it; the dead column needs no stripping.)
+const LIST_VIEW_OMIT = ["last_dispatch_error", "revert_reason"] as const;
 function listRowForView(row: TaskRow): TaskRow {
   const r = rowForView(row) as Record<string, unknown>;
   for (const k of LIST_VIEW_OMIT) delete r[k];
@@ -831,9 +832,9 @@ export function taskView(id: string): TaskView | null {
 // estimate recompute) that the full taskView would do.
 export type TaskListView = Omit<
   TaskView,
-  // The task.md-derived + per-row-estimate fields the list never reads, PLUS the three
+  // The task.md-derived + per-row-estimate fields the list never reads, PLUS the
   // DETAIL-ONLY columns the list projection strips for payload size (see LIST_VIEW_OMIT).
-  "prompt" | "context" | "review_notes" | "estimate" | "output_snapshot" | "last_dispatch_error" | "revert_reason"
+  "prompt" | "context" | "review_notes" | "estimate" | "last_dispatch_error" | "revert_reason"
 >;
 
 /**
@@ -1665,8 +1666,8 @@ export async function mergeWorkBranch(workId: string): Promise<WorkMergeOutcome>
  * capture the session's token usage FIRST — it reads the transcript while the
  * session id + worktree are still in hand and MUST precede the worktree discard
  * (see captureSessionUsage) — then tear down the herdr tab/pane and `git.cleanup`
- * the worktree + branch. The caller keeps any readRunLogSnapshot read (the run log
- * lives outside the worktree).
+ * the worktree + branch. The agent's output survives this: the session transcript
+ * lives under ~/.claude/projects, outside the worktree.
  *
  *  - `background: true` runs the teardown fire-and-forget (each step swallows its
  *    own error so a teardown failure can't strand the call OR skip the cleanup) and
@@ -1712,8 +1713,7 @@ function isKeep(v: unknown): v is { __keep: true; value: string | number | null 
  * `col=COALESCE(?, col)` (OVERWRITE the column ONLY when the supplied value is non-NULL,
  * else leave it untouched) — the MIRROR-IMAGE of keep()'s `col=COALESCE(col, ?)`
  * stick-to-first. Used for "overwrite-if-supplied" columns: grounding_fp (re-stamped on
- * each launch that passes a fingerprint, kept across a launch that doesn't) and
- * output_snapshot (replaced when a fresh snapshot was captured, kept otherwise).
+ * each launch that passes a fingerprint, kept across a launch that doesn't).
  */
 function setIfPresent(
   value: string | number | null,
@@ -2507,7 +2507,6 @@ export async function setBlockedBy(
   setStatus(id, "blocked", {
     note: "blocked on new dependencies (operator)",
     set: {
-      output_snapshot: null,
       conflict: 0,
       idle: 0,
       needs_user_input: 0,
@@ -2662,7 +2661,6 @@ async function requestChanges(
     note: eventNote,
     set: {
       review_note: note,
-      output_snapshot: null,
       summary: null,
       conflict: 0,
       idle: 0,
@@ -3047,7 +3045,6 @@ async function recordLanded(
   merge: { baseSha?: string | null; mergedSha?: string | null; version?: string | null },
 ): Promise<ApproveOutcome> {
   const id = row.id;
-  const snapshot = readRunLogSnapshot(id);
   // Close the agent's dedicated tab (best-effort — usually already gone since the agent exited
   // after request_review) and discard the worktree + branch (already landed). Awaited so the
   // landed write below only runs after teardown — a teardown failure propagates, as before.
@@ -3064,7 +3061,6 @@ async function recordLanded(
         conflict: 0,
         idle: 0,
         needs_user_input: 0,
-        output_snapshot: snapshot || null,
         merge_base_sha: merge.baseSha ?? null,
         merged_sha: merge.mergedSha ?? null,
         // In release_mode, the version butchr assigned + stamped at this merge (NULL otherwise,
@@ -3402,7 +3398,6 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
   // git.cleanup) so the work survives for inspection / a fixup re-run, and store
   // the failing build/test output in `revert_reason` (surfaced by the webapp).
   if (gate.reverted) {
-    const snapshot = readRunLogSnapshot(id);
     await herdr.teardownTask(id);
     const reason = gate.verify?.output?.trim() || "(no verify output captured)";
     console.error(
@@ -3410,10 +3405,10 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
         `${mctx.targetBranch} branch; ${mctx.targetBranch} restored to ${gate.priorTip ?? "(unknown)"}.\n${reason}`,
     );
     // Pure DRY collapse of the UPDATE→event→task.md mirror→emit tail into setStatus
-    // (this transition already mirrored task.md, so it's not a desync fix). output_snapshot
-    // is overwrite-if-supplied (COALESCE(?, col) → setIfPresent), distinct from
-    // completed_at's stamp-once (COALESCE(col, ?) → keep). The idle=0 clear auto-wipes
-    // idle_context inside setStatus, matching the explicit clear.
+    // (this transition already mirrored task.md, so it's not a desync fix). completed_at is
+    // stamp-once (COALESCE(col, ?) → keep). The idle=0 clear auto-wipes idle_context inside
+    // setStatus, matching the explicit clear. The failing gate output lives in
+    // `revert_reason` / `last_dispatch_error` (both surfaced by the webapp).
     if (
       !setStatus(id, "failed", {
         from: inflight,
@@ -3422,7 +3417,6 @@ export async function finalizeMerge(id: string): Promise<ApproveOutcome> {
           conflict: 0,
           idle: 0,
           needs_user_input: 0,
-          output_snapshot: setIfPresent(snapshot || null),
           revert_reason: reason,
           last_dispatch_error: reason,
           completed_at: keep(nowIso()),
@@ -3555,7 +3549,6 @@ export async function abortTask(id: string): Promise<TaskView> {
       idle: 0,
       needs_user_input: 0,
       review_note: null,
-      output_snapshot: null,
       completed_at: nowIso(),
     },
   });
@@ -4198,19 +4191,22 @@ function autoCommitOnReview(id: string, workspaceId: string): void {
 /**
  * Shared preamble for the three "the agent is EXITING — park its task" transitions
  * (markInReview's dead-agent rescue, markReviewFromAgent's request_review, and
- * markNeedsInfoFromAgent's raise). They all: bail on a missing/terminal task; capture
- * the run-log snapshot (the diagnostic the reviewer/answerer reads once the live pane is
- * gone); COMMIT-ON-REVIEW the worktree iff still genuinely `in_progress` (so the diff
+ * markNeedsInfoFromAgent's raise). They all: bail on a missing/terminal task;
+ * COMMIT-ON-REVIEW the worktree iff still genuinely `in_progress` (so the diff
  * survives the worktree being torn down); flip the status via setStatus from
  * `['in_progress', to]` (the genuine transition OR a status-unchanged duplicate call),
  * clearing the pane + idle; then capture session usage. When `opts.gates` is set AND the
  * task was genuinely `in_progress` (not a duplicate already-parked call), it ALSO fires
  * the footprint + CI + conformance trio — fire-and-forget, review never blocks on them.
  *
+ * The agent's OUTPUT is not captured here: once the live pane is gone the reviewer /
+ * answerer reads it from the on-disk session transcript (GET /api/work/:id/transcript),
+ * which is richer than the old run-log snapshot and outlives the worktree.
+ *
  * Per-caller differences are carried in `extraSet` (e.g. completed_at stamp-once vs
  * plain, the `summary`/`question` column, resume_attempts reset) and `opts`
- * (note, gates, a caller-supplied snapshot, a narrower `from`). Returns the same
- * "ok"/"terminal"/"notfound" the agent-tool callers surface; markInReview ignores it.
+ * (note, gates, a narrower `from`). Returns the same "ok"/"terminal"/"notfound" the
+ * agent-tool callers surface; markInReview ignores it.
  */
 function parkExitingAgent(
   id: string,
@@ -4219,18 +4215,12 @@ function parkExitingAgent(
   opts: {
     note: string;
     gates?: boolean;
-    snapshot?: string;
     from?: TaskStatus | TaskStatus[];
   },
 ): "ok" | "terminal" | "notfound" {
   const row = getTask(id);
   if (!row) return "notfound";
   if (isTerminal(row.status)) return "terminal";
-
-  // Capture the agent's terminal output (unless the caller already has one): once the
-  // agent exits there is no live pane, so this snapshot + the git diff is what review /
-  // the answerer is conducted against.
-  const snapshot = opts.snapshot ?? readRunLogSnapshot(id);
 
   // COMMIT-ON-REVIEW (FIRST): the agent is told it need not commit — butchr captures its
   // worktree. On the genuine in_progress transition, commit that diff onto the branch NOW
@@ -4248,7 +4238,6 @@ function parkExitingAgent(
       set: {
         idle: 0,
         needs_user_input: 0,
-        output_snapshot: snapshot || null,
         ...extraSet,
       },
     })
@@ -4276,17 +4265,23 @@ function parkExitingAgent(
  * the live path is markReviewFromAgent). Guarded on the build phase being live
  * (in_progress) so a task aborted while its agent was finishing isn't resurrected. The
  * caller tears the agent down BY NAME; setStatus's exit rule clears has_agent.
+ *
+ * `reason` is butchr's OWN account of why it intervened ("stuck/runaway", "the agent
+ * ended while butchr was offline", "resume cap exceeded") — words the agent never wrote,
+ * so the session transcript cannot carry them. It is persisted as this transition's
+ * `task_events.note`, which the webapp renders on the task's Timeline and (for these
+ * `[butchr] moved to review automatically` rescues) in a dedicated detail-view panel.
+ * The agent's own output is NOT stored: it is served from the on-disk transcript.
  */
-export function markInReview(id: string, snapshot: string): void {
-  // Rescue from in_progress ONLY (narrower than the request_review path's array `from`),
-  // using the caller-supplied snapshot. completed_at is stamped plain (not keep) and
-  // output_snapshot written raw, preserving this path's exact columns. Return ignored.
+export function markInReview(id: string, reason: string): void {
+  // Rescue from in_progress ONLY (narrower than the request_review path's array `from`).
+  // completed_at is stamped plain (not keep), preserving this path's exact columns.
+  // Return ignored.
   parkExitingAgent(
     id,
     "in_review",
     {
       completed_at: nowIso(),
-      output_snapshot: snapshot,
       // Reaching review IS progress — clear the auto-resume streak.
       resume_attempts: 0,
       // A fresh review cycle starts the major double-confirm streak at 0 (re-review reset).
@@ -4295,7 +4290,7 @@ export function markInReview(id: string, snapshot: string): void {
       // starts back at the CTO (design §4a).
       escalated_to_user: 0,
     },
-    { note: "agent finished — submitted for review", gates: true, snapshot, from: "in_progress" },
+    { note: reason, gates: true, from: "in_progress" },
   );
 }
 
@@ -4457,7 +4452,6 @@ async function resumeWithAnswer(
     set: {
       answer,
       question: null,
-      output_snapshot: null,
       idle: 0,
       needs_user_input: 0,
       dispatch_attempts: 0,
@@ -5283,9 +5277,7 @@ export async function requeueForResume(
         ? `Auto-resume is disabled (BUTCHR_MAX_RESUME_ATTEMPTS<=0).`
         : `butchr already auto-resumed it ${prior} time(s) without the agent reaching ` +
           `review (cap ${config.maxResumeAttempts}); stopping the resume loop so a ` +
-          `human can inspect it.`) +
-      `\n\n` +
-      readRunLogSnapshot(id);
+          `human can inspect it.`);
     // markInReview resets resume_attempts to 0 (a human now owns it).
     markInReview(id, note);
     console.warn(
@@ -5314,7 +5306,6 @@ export async function requeueForResume(
             `(attempt ${attempts}/${config.maxResumeAttempts})`
         : `auto-resume via --resume (${reason}); attempt ${attempts}/${config.maxResumeAttempts}`,
       set: {
-        output_snapshot: null,
         idle: 0,
         needs_user_input: 0,
         conflict: 0,

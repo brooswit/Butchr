@@ -999,6 +999,29 @@ ensureColumn("tasks", "ask_responder", "TEXT");
 // 71MB DB — a trivial one-time startup migration.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id, work_kind, status);`);
 
+// RECLAIM the dead `output_snapshot` blob (story st-b8c9249e). The column was a display-only
+// copy of the agent's run log — up to ~2 MB/task, and 54 MB of a measured 78 MB live db. Nothing
+// writes it and nothing reads it any more: the agent's output is served from the on-disk session
+// transcript (GET /api/work/:id/transcript), which is richer and outlives the worktree, while
+// butchr's own RESCUE NOTES now live in `task_events.note` (see tasks.markInReview). The COLUMN
+// itself stays physically present — dropping it is batched into the later operator-present cleanup
+// alongside the inert gate_cmd / changelog_path columns — so this only NULLs the payload.
+//
+// IDEMPOTENT (the `IS NOT NULL` guard makes the second boot match 0 rows) and safe MID-RUN: no
+// code path reads the column, so a concurrent request cannot observe the change. NO VACUUM here —
+// the freed pages return to SQLite's freelist and the file shrinks only on a manual, operator-run
+// VACUUM. Running one at boot would rewrite the whole db (multi-second stall, 2x disk) on a path
+// that must stay fast.
+//
+// PRAGMA-GUARDED because `output_snapshot` is a BASELINE-only column (it lives in the
+// `CREATE TABLE tasks` above and was never back-filled by ensureColumn). A db old enough to
+// predate it — the legacy fixtures in test/db-migrations*.test.ts boot exactly that — skips the
+// baseline CREATE (IF NOT EXISTS) and so never grows the column; an unguarded UPDATE would throw
+// `no such column` and crash-loop the server on startup.
+if (columnExists(db, "tasks", "output_snapshot")) {
+  db.exec(`UPDATE tasks SET output_snapshot = NULL WHERE output_snapshot IS NOT NULL;`);
+}
+
 // PER-PROJECT CEO-AGENT ENABLE (REVAMP-4 Phase 3 / P3c — story st-1a82a2e1). The CEO analog of
 // `directory.cto_enabled`, but keyed on the PROJECT NODE's OWN `tasks` row (a work_kind='project'
 // node — there is no `directory` sidecar for a project). Read ONLY for that project node (every

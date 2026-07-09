@@ -214,22 +214,21 @@ describe("listWork unifies leaves + nodes, each tagged work_kind, with filters",
     expect(q.find((w) => w.id === node.id)).toBeDefined();
   });
 
-  // PERF (story st-337b45bc): the LIST projection strips the three DETAIL-ONLY columns
-  // (output_snapshot — up to ~2 MB/task — plus last_dispatch_error / revert_reason) so GET
+  // PERF (story st-337b45bc): the LIST projection strips the DETAIL-ONLY columns so GET
   // /api/work stays small/fast, while the per-task DETAIL view (taskView / workView) keeps them.
-  test("LIST omits detail-only output_snapshot/last_dispatch_error/revert_reason; DETAIL keeps them", async () => {
+  // `output_snapshot` was the heaviest of them until story st-b8c9249e stopped storing it.
+  test("LIST omits detail-only last_dispatch_error/revert_reason; DETAIL keeps them", async () => {
     const node = workApi.createWork(WS, "listwork-strip story");
     const leaf = await workApi.createWorkChild(node.id, { prompt: "listwork strip leaf" });
 
     // Seed NON-NULL values so the assertions would FAIL if any field leaked into a list row.
-    const SNAPSHOT = "x".repeat(1024); // stand-in for a big agent transcript
     const DISPATCH_ERR = "spawn failed after 5 attempts";
     const REVERT = "post-merge verify red";
     dbMod.db
-      .query(`UPDATE tasks SET output_snapshot=?, last_dispatch_error=?, revert_reason=? WHERE id=?`)
-      .run(SNAPSHOT, DISPATCH_ERR, REVERT, leaf.id);
+      .query(`UPDATE tasks SET last_dispatch_error=?, revert_reason=? WHERE id=?`)
+      .run(DISPATCH_ERR, REVERT, leaf.id);
 
-    const DETAIL_ONLY = ["output_snapshot", "last_dispatch_error", "revert_reason"] as const;
+    const DETAIL_ONLY = ["last_dispatch_error", "revert_reason"] as const;
 
     // (a) EVERY list surface — listWork(), allTasksView(), per-workspace taskListView() — must
     //     NOT carry the three keys at all (data-level key-absence, not a size check).
@@ -244,11 +243,9 @@ describe("listWork unifies leaves + nodes, each tagged work_kind, with filters",
 
     // (b) the DETAIL path — taskView() and workView() — DOES surface the same fields.
     const detail = tasksMod.taskView(leaf.id)!;
-    expect(detail.output_snapshot).toBe(SNAPSHOT);
     expect(detail.last_dispatch_error).toBe(DISPATCH_ERR);
     expect(detail.revert_reason).toBe(REVERT);
     const wv = (await workApi.workView(leaf.id)) as any;
-    expect(wv.output_snapshot).toBe(SNAPSHOT);
     expect(wv.last_dispatch_error).toBe(DISPATCH_ERR);
     expect(wv.revert_reason).toBe(REVERT);
   });
