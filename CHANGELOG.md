@@ -17,6 +17,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **butchr takes its first dependency, and `tsc` runs against `src/` for the first time
+  (RFC `docs/rfc-frontend-launchpad.md`, Phase 1a).** `package.json` gains a `devDependencies`
+  block — exact-pinned `typescript@5.9.3` and `bun-types@1.3.14`, no carets — and `bun.lock` is
+  committed. `scripts/ci` now runs `bun install --frozen-lockfile` (the gate executes in a git
+  worktree with no `node_modules`) and `bunx --bun tsc --noEmit -p tsconfig.json` over `src/`.
+  The `--bun` flag is load-bearing: bare `bunx tsc` honours a `#!/usr/bin/env node` shebang and
+  dies on this host's node v12 before typechecking anything. `public/` is not yet typechecked.
+- **21 pre-existing type errors in `src/` are fixed.** `bun build` strips types without checking
+  them, so nothing had ever typechecked this repo. Most were latent bugs the compiler surfaced:
+  - `src/tasks.ts` annotated three signatures with `TaskKind` and `src/dispatcher.ts` one callback
+    parameter with `SendInput`, neither of which the file imported.
+  - `src/db.ts`'s `saveWorkspaceAgentRow` set `kind` twice in one object literal (TS1117); the
+    resolved value now appears exactly once, after the patch spread, where it was meant to win.
+  - `TaskRow` never declared the `initiative_id` column that `stories.ts` reads and writes.
+  - `events.ts`'s `story.attention` event omitted the `ceo` target that `channel.ts` has been
+    routing to a project bridge since REVAMP-4 P3f.
+  - `startup-confirm.ts`'s `enter-to-confirm` rule emitted `{ enter: true }`, which is not a
+    `SendInput`; it is now the equivalent `{ text: "", enter: true }`.
+  - `exec.ts`'s `run()` typed its subprocess by `Bun.spawn`'s generic default, widening
+    `stdout`/`stderr` to `number | ReadableStream | undefined`; it is now pinned to the stdio it
+    actually requests.
+  - `dispatcher.ts`'s `dirOf` claimed to return a full `WorkspaceRow` while the dispatch query
+    selects six fewer columns; it returns the honest `DispatchWorkspace` projection.
+- **`GET /api/work` now ships a parsed `allowlist` array on task rows.** `allTasksView` omitted
+  the `parseAllowlist` call its per-workspace sibling makes, so the cross-workspace list alone
+  leaked the column's raw JSON *text* (`"[\"src/**\"]"`) where every other view ships `["src/**"]`.
+  The list projection's type also no longer claims the derived `story_id` / `project_id` /
+  `liveness` fields it has never computed — the raw `parent_id` it does ship is what the dashboard
+  and channel routing read.
+- **`CONTRIBUTING.md` §4 is rewritten** from "the zero-dependency rule" to "the dependency rule":
+  the server's zero-runtime-dependency constraint is unchanged, the front end is exempted by CEO
+  ratification, and the `tsc` gate step and exact-pin rule are documented as live.
+
 ## [0.9.277] - 2026-07-09
 
 ## [0.9.276] - 2026-07-09

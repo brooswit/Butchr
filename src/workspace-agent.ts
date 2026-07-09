@@ -609,7 +609,10 @@ export const SUPERVISOR_KINDS: Record<WorkspaceAgentRow["kind"], SupervisorKind>
     enabled: (row) => isCtoEnabled(row.directory_id ?? ""),
     agentName: (row) => `${config.ctoAgentName}-${row.directory_id ?? ""}`,
     agentCmd: () => config.ctoAgentCmd,
-    channelEnv: (row) => (row.directory_id ? { BUTCHR_CHANNEL_WORKSPACE: row.directory_id } : {}),
+    // Annotated: without it the ternary infers `{…} | { BUTCHR_CHANNEL_WORKSPACE?: undefined }`,
+    // whose optional key is not assignable to the declared `Record<string, string>`.
+    channelEnv: (row): Record<string, string> =>
+      row.directory_id ? { BUTCHR_CHANNEL_WORKSPACE: row.directory_id } : {},
     buildBrief: () => CTO_WORKSPACE_BRIEF,
   },
   leader: {

@@ -2316,6 +2316,12 @@ export type TaskRow = {
   // NULL inherit config.ceoAgentEnabled. NULL for every non-project row (the CEO analog of
   // directory.cto_enabled). Read only via workspaces.isCeoEnabled; never surfaced on any view.
   ceo_enabled: number | null;
+  // CROSS-REPO INITIATIVE grouping key (see the initiative_id ensureColumn above): the shared
+  // `ini-` id stamped on every child STORY NODE of one cross-repo initiative, NULL on every other
+  // row. Read by stories.acceptDirective (which inherits it onto each story it creates) and by the
+  // completion rollup. The column has existed since REVAMP-4 P3e; this row type simply never
+  // declared it, so `directive.initiative_id` was a TS2339 until `tsc` first ran (RFC §13.4).
+  initiative_id: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -2858,7 +2864,6 @@ export function saveWorkspaceAgentRow(
   const next: WorkspaceAgentRow = {
     id,
     name: cur?.name ?? null,
-    kind,
     directory_id: cur?.directory_id ?? null,
     work_id: cur?.work_id ?? null,
     session_id: cur?.session_id ?? null,
@@ -2875,7 +2880,11 @@ export function saveWorkspaceAgentRow(
     created_at: cur?.created_at ?? nowIso(),
     updated_at: cur?.updated_at ?? null,
     ...patch,
-    // `id`/`kind` are resolved above; keep them authoritative over a stray patch spread.
+    // `kind` is resolved above (patch.kind ?? cur.kind); assigning it AFTER the spread keeps it
+    // authoritative over a stray patch value. It appears exactly once — a second, pre-spread
+    // `kind` would be a TS1117 duplicate key and, being overwritten, would say nothing. (`id` is
+    // likewise resolved above and needs no re-assert: `patch` is Omit<…, "id">, so it cannot
+    // carry one.)
     kind,
   };
   db.query(

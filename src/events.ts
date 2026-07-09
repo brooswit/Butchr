@@ -65,7 +65,11 @@ export type ButchrEvent =
       type: "story.attention";
       story_id: string;
       workspace_id: string;
-      target: "story" | "cto" | "user";
+      // `ceo` is a LIVE target (REVAMP-4 P3f): channel.consumeStoryAttention parses story|cto|ceo
+      // and routes a `ceo` ask to its owning project bridge, and channel.resyncAttention feeds one
+      // on reconnect. The union simply never listed it — nothing typechecked this file until
+      // `tsc` first ran (RFC §13.4). A `user` target is owned by no bridge and is dropped.
+      target: "story" | "cto" | "ceo" | "user";
       reason:
         | "completion-review"
         | "complete"

@@ -549,8 +549,11 @@ export class AttentionBridge {
     // the project mirror (REVAMP-4 P3b): present ONLY on a CEO-owned (project-direct) item — and
     // story_id/project_id are mutually exclusive (a project parent nulls story_id in taskView), so
     // a story item carries story_id, a project item carries project_id, a standalone carries neither.
-    const storyMeta = storyId ? { story_id: storyId } : {};
-    const projectMeta = projectId ? { project_id: projectId } : {};
+    // Typed as an explicit Record so the empty branch widens to "no keys" rather than to an
+    // OPTIONAL `story_id?: string` — an optional key's `undefined` is not assignable to `meta`'s
+    // `string | number` index signature, which is what the spread below feeds.
+    const storyMeta: Record<string, string> = storyId ? { story_id: storyId } : {};
+    const projectMeta: Record<string, string> = projectId ? { project_id: projectId } : {};
     if (surface === "idle") {
       const ctx = tidy(t.idle_context);
       const content = `[${id}] ${label} — ${IDLE_PHRASE}` + (ctx ? `: ${ctx}` : "");
@@ -716,8 +719,11 @@ export class AttentionBridge {
     const detail = tidy(e.detail);
     const content =
       `[${id}] ${label} — ${INSTRUCTION_UPDATED_PHRASE}` + (detail ? `: ${detail}` : "");
-    const storyMeta = storyId ? { story_id: storyId } : {};
-    const projectMeta = projectId ? { project_id: projectId } : {};
+    // Typed as an explicit Record so the empty branch widens to "no keys" rather than to an
+    // OPTIONAL `story_id?: string` — an optional key's `undefined` is not assignable to `meta`'s
+    // `string | number` index signature, which is what the spread below feeds.
+    const storyMeta: Record<string, string> = storyId ? { story_id: storyId } : {};
+    const projectMeta: Record<string, string> = projectId ? { project_id: projectId } : {};
     return {
       content,
       meta: {

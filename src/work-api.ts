@@ -50,7 +50,7 @@ import {
   taskView,
   updateTask,
 } from "./tasks.ts";
-import type { ApproveOutcome, TaskListView, TaskReadiness, TaskView } from "./tasks.ts";
+import type { AllTasksListView, ApproveOutcome, TaskReadiness, TaskView } from "./tasks.ts";
 import {
   acceptDirective,
   allStoryViews,
@@ -157,7 +157,7 @@ export async function workView(id: string): Promise<WorkView> {
  *  The `work_kind` discriminator is named distinctly from a task row's own `kind`
  *  ('task'/'rollback') column so the spread preserves both. */
 export type WorkListItem =
-  | (TaskListView & { work_kind: "leaf" })
+  | (AllTasksListView & { work_kind: "leaf" })
   | (StoryView & { work_kind: "node" });
 
 /**

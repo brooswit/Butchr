@@ -62,7 +62,11 @@ export const STARTUP_CONFIRM_RULES: ConfirmRule[] = [
   {
     name: "enter-to-confirm",
     test: /press\s+enter\s+to\s+(confirm|continue|proceed)|enter\s+to\s+(confirm|continue)/i,
-    response: { enter: true },
+    // `SendInput`'s text variant requires `text`; a bare `{ enter: true }` inhabits neither arm of
+    // the union. The empty string IS the lone-Enter spelling: herdr.send guards the text hop with
+    // `if (input.text)`, so "" sends no `agent send` and only the Enter keystroke — byte-for-byte
+    // what the bare object did.
+    response: { text: "", enter: true },
   },
 ];
 

@@ -16,7 +16,7 @@ import {
   recordTaskEvent,
   storyStatusOf,
 } from "./db.ts";
-import type { TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.ts";
+import type { TaskKind, TaskRow, TaskStatus, WorkspaceRow, WorkspaceAgentRow } from "./db.ts";
 // RECURSIVE PARENT-CHAIN RESPONDER (story st-540ba705, step 6a). pendingResponder now
 // delegates the LIVE feedback routing to work.ts's recursive resolver over `parent_id`
 // (see pendingResponder). This is a RUNTIME-ONLY circular import — work.ts imports the
@@ -830,12 +830,33 @@ export function taskView(id: string): TaskView | null {
 // runtime row plus parsed blocked_by and the server-computed
 // blocker status, so this skips reading every task.md from disk (and the per-row
 // estimate recompute) that the full taskView would do.
+// `story_id` / `project_id` are in the omit list because the list projection has NEVER emitted
+// them: both are DERIVED (isTopLevelWork / projectParentOf — a getTask per row), and taskView pays
+// that only for the one task it renders. The list ships the raw `parent_id` instead, which is what
+// the dashboard's graphChildOf() and channel.ts's routing already read. The type claimed otherwise
+// until `tsc` first ran (RFC §13.4); this states what the code does rather than growing the hot
+// /api/work payload with two per-row queries (story st-337b45bc trimmed it for exactly that reason).
 export type TaskListView = Omit<
   TaskView,
   // The task.md-derived + per-row-estimate fields the list never reads, PLUS the
   // DETAIL-ONLY columns the list projection strips for payload size (see LIST_VIEW_OMIT).
-  "prompt" | "context" | "review_notes" | "estimate" | "last_dispatch_error" | "revert_reason"
+  | "prompt"
+  | "context"
+  | "review_notes"
+  | "estimate"
+  | "last_dispatch_error"
+  | "revert_reason"
+  // Derived-per-row, never computed by either list. See above.
+  | "story_id"
+  | "project_id"
 >;
+
+// The CROSS-WORKSPACE list projection (allTasksView → GET /api/work). Identical to the
+// per-workspace TaskListView except that it does not compute `liveness`: livenessView calls
+// claudeAlive() — a /proc scan — for every idle `in_progress` row, and nothing reads liveness off
+// a list row (only the task DETAIL view renders the chip). Paying it once per row on the unified
+// work list is the kind of per-row probe story st-31340d12 removed from this exact endpoint.
+export type AllTasksListView = Omit<TaskListView, "liveness">;
 
 /**
  * The full searchable text for a task, for server-side `?q=` full-text search: its
@@ -919,14 +940,14 @@ export function taskListView(workspaceId: string, q?: string): TaskListView[] {
  */
 export function allTasksView(
   opts: { status?: string; workspace?: string; q?: string } = {},
-): TaskListView[] {
+): AllTasksListView[] {
   const needle = (opts.q ?? "").trim();
   const workspaces = opts.workspace
     ? (getWorkspace(opts.workspace) ? [getWorkspace(opts.workspace)!] : [])
     : db
         .query<WorkspaceRow, []>(`SELECT * FROM workspaces ORDER BY created_at ASC`)
         .all();
-  const out: TaskListView[] = [];
+  const out: AllTasksListView[] = [];
   for (const ws of workspaces) {
     for (const row of listTasks(ws.id)) {
       if (opts.status && row.status !== opts.status) continue;
@@ -936,6 +957,12 @@ export function allTasksView(
         ...listRowForView(row),
         blocked_by,
         tags: parseTags(row.tags),
+        // BEHAVIOUR FIX: this line was missing, so the cross-workspace list alone let the raw
+        // JSON *text* of the allowlist column ride out on the `...listRowForView(row)` spread —
+        // `"[\"src/**\"]"` where taskListView and taskView both ship `["src/**"]`. The type said
+        // string[]; the wire said string. Nothing read it (the dashboard guards with
+        // Array.isArray), which is why it survived until `tsc` first ran.
+        allowlist: parseAllowlist(row.allowlist),
         blockerStates: blockerStatesOf(blocked_by),
         deadBlockers: deadBlockerIds(blocked_by),
         pending_responder: pendingResponder(row),

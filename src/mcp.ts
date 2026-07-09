@@ -170,17 +170,25 @@ export async function handleMcp(req: Request, taskId: string): Promise<Response>
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  let body: JsonRpcMessage | JsonRpcMessage[];
+  // `req.json()` is `unknown` under strict + bun-types: the wire is untrusted JSON, so the shape
+  // is NARROWED below rather than asserted. (Under lib.dom's Request it would be `any` and this
+  // would silently typecheck — see RFC §5.5 on why src/ must not pull in DOM.)
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return rpcError(null, -32700, "parse error");
   }
 
+  // Exactly the old `m && m.method` truthiness test, hoisted into a type guard so the switch
+  // below reads a typed `method`. A body with a falsy/absent `method` still 202s, as before.
+  const isMessage = (m: unknown): m is JsonRpcMessage =>
+    !!m && typeof m === "object" && !!(m as JsonRpcMessage).method;
+
   // Claude Code sends one message per request; tolerate a batch defensively by
   // handling the first request-bearing message (notifications get 202).
-  const msg = Array.isArray(body) ? body.find((m) => m && m.method) : body;
-  if (!msg || !msg.method) return new Response(null, { status: 202 });
+  const msg = Array.isArray(body) ? body.find(isMessage) : isMessage(body) ? body : undefined;
+  if (!msg) return new Response(null, { status: 202 });
 
   switch (msg.method) {
     case "initialize":

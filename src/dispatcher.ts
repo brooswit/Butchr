@@ -25,6 +25,7 @@ import * as git from "./git.ts";
 import { harness } from "./harness.ts";
 import { CHANNEL_SERVER_NAME } from "./channel.ts";
 import { startAgentInFreshTab } from "./herdr.ts";
+import type { SendInput } from "./herdr.ts";
 import { autoConfirmStartupPrompts, classifyStartupScreen } from "./startup-confirm.ts";
 import type { AutoConfirmResult, ConfirmRule } from "./startup-confirm.ts";
 import { claudeAlive } from "./liveness.ts";
@@ -194,10 +195,20 @@ type QueuedRow = TaskRow & {
   dir_id: string;
 };
 
+// The workspace columns the dispatch/heal/watch paths actually read off a workspace — and
+// exactly the set the dispatch query joins in. A full WorkspaceRow satisfies it, so every
+// existing caller passing one still type-checks; the join, which never selects `gate_cmd`,
+// `version_file`, `changelog_path`, `cto_enabled`, `release_mode` or `branch_isolation`, now
+// says so instead of claiming a WorkspaceRow it cannot produce.
+export type DispatchWorkspace = Pick<
+  WorkspaceRow,
+  "id" | "path" | "label" | "herdr_workspace" | "herdr_pane" | "created_at"
+>;
+
 // Project the workspace columns the dispatch query joins in (aliased `dir_id`) back
-// into a WorkspaceRow — the shape the dispatch/heal/watch paths take. Used wherever a
+// into a DispatchWorkspace — the shape the dispatch/heal/watch paths take. Used wherever a
 // QueuedRow needs its workspace peeled out.
-function dirOf(row: QueuedRow): WorkspaceRow {
+function dirOf(row: QueuedRow): DispatchWorkspace {
   return {
     id: row.dir_id,
     path: row.path,
@@ -449,7 +460,7 @@ async function tick(): Promise<void> {
 // recreate, mirror the new id onto the in-memory WorkspaceRow and log it. The reuse
 // path — and any concurrent awaiter that didn't own the create (created=false) — leave
 // both untouched, as before.
-async function ensureWorkspace(dir: WorkspaceRow): Promise<string | undefined> {
+async function ensureWorkspace(dir: DispatchWorkspace): Promise<string | undefined> {
   const label = dir.label ?? dir.path.split("/").pop() ?? dir.path;
   const { workspaceId, created } = await ensureHerdrWorkspace(dir.id, dir.path, label);
   if (created) {
@@ -756,7 +767,7 @@ export function resolveLaunchCommand(
   return { isResume, sessionId, agentCmd, lostContext };
 }
 
-export async function dispatch(dir: WorkspaceRow, task: TaskRow): Promise<void> {
+export async function dispatch(dir: DispatchWorkspace, task: TaskRow): Promise<void> {
   // Hoisted out of the try so the catch (below) can report whether a RESUME
   // (rework re-launch) failed, not just a fresh dispatch — see fix #2.
   let isResume = false;
@@ -1116,7 +1127,7 @@ export function isExecFailure(exitCode: string, hasOutput: boolean): boolean {
 }
 
 function spawnWatcher(
-  _dir: WorkspaceRow,
+  _dir: DispatchWorkspace,
   taskId: string,
   _paneId: string,
   logFile: string,

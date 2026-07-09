@@ -307,7 +307,12 @@ describe("broadened rule table (enter-to-confirm + folder-trust variants)", () =
   test("a bare 'Press Enter to confirm' is auto-confirmed with a lone Enter", () => {
     const rule = detectStartupPrompt("Press Enter to confirm");
     expect(rule?.name).toBe("enter-to-confirm");
-    expect(rule?.response).toEqual({ enter: true });
+    // The empty `text` is the LONE-ENTER spelling, not an oversight: a bare `{ enter: true }`
+    // inhabits neither arm of the SendInput union, and herdr.send guards its text hop with
+    // `if (input.text)` — so "" sends no keystrokes before the Enter. Asserting it explicitly
+    // pins the "no text is typed" half of "a lone Enter", which the old `{ enter: true }`
+    // expectation only implied.
+    expect(rule?.response).toEqual({ text: "", enter: true });
   });
 
   test("a 'trust this workspace' variant is caught by folder-trust", () => {

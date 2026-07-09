@@ -1060,11 +1060,17 @@ export function escalateStoryAsk(id: string): StoryRow {
   }
   // B.5b (st-78a8b4e7): write the story NODE row directly (the `stories` mirror is gone).
   db.query(`UPDATE tasks SET ask_responder=? WHERE id=? AND work_kind='node'`).run(next.kind, id);
+  // A WorkResponder's `work` rung — "a story NODE; the workspace EXECUTING it responds (the leader,
+  // the recursive form of today's 'story')" (work.ts) — is spelled `story` on the wire, which is the
+  // target channel.ts routes to the leader bridge. Every other rung name is already the wire name.
+  // Unreachable today (a story node's parent is a repo, so the chain above `cto` holds no `work`
+  // rung), but the `work` → `story` translation is what the surrounding code means.
+  const target = next.kind === "work" ? "story" : next.kind;
   publish({
     type: "story.attention",
     story_id: id,
     workspace_id: story.workspace_id,
-    target: next.kind,
+    target,
     reason: "ask",
     detail: story.pending_ask,
     // A `ceo` rung carries (a) the owning PROJECT node id so the project/CEO bridge can route it

@@ -28,8 +28,11 @@ repositories: **workspaces are git repositories, tasks are git worktrees.** It h
 the full lifecycle from task creation through review and merge, delegating all
 terminal/agent session management to **[herdr](https://github.com/)**.
 
-- **Stack:** Bun · SQLite (`bun:sqlite`) · herdr · git — **zero npm dependencies.**
-- **Webapp:** vanilla JS single-page app, no framework, no build step.
+- **Stack:** Bun · SQLite (`bun:sqlite`) · herdr · git.
+- **Webapp:** vanilla JS single-page app, no framework, no build step — being migrated to
+  React 19 + [LaunchDarkly LaunchPad](https://launchpad.launchdarkly.com/) (`@launchpad-ui`),
+  bundled by `bun build` (`docs/rfc-frontend-launchpad.md`). The server has **zero runtime npm
+  dependencies**; every dependency is front-end or build/test tooling.
 
 **Core concepts:**
 
@@ -602,22 +605,100 @@ where `{{CMD}}` is the shell-quoted attach command) to use a specific emulator,
 
 ---
 
-## 4. The zero-dependency rule
+## 4. The dependency rule
 
-**butchr ships with zero npm/runtime dependencies, and that is a hard
-constraint.** There is no `dependencies` / `devDependencies` block in
-`package.json` and no `node_modules` — everything is built on the Bun standard
-library (`Bun.serve`, `Bun.spawn`, `bun:sqlite`, `fetch`, `node:fs`/`node:path`/
-`node:os`) plus the external `git` and `herdr` binaries. The webapp under
-`public/` is vanilla JS — no framework, no build step.
+**butchr's *server* ships with zero runtime npm dependencies, and that remains a
+hard constraint.** `src/` is built entirely on the Bun standard library
+(`Bun.serve`, `Bun.spawn`, `bun:sqlite`, `fetch`, `node:fs`/`node:path`/
+`node:os`) plus the external `git` and `herdr` binaries. **Do not add a runtime
+dependency to `src/` without explicit CTO approval** (raise it via the butchr
+`raise` tool if you're an agent, or open it as a question first). If you think
+you need a library, first check whether the Bun stdlib already covers it — it
+usually does (the MCP transport, the SSE stream, the operator CLI, and the log
+rotator are all hand-rolled for exactly this reason).
 
-**Do not add an npm dependency without explicit approval from the CTO** (raise it
-via the butchr `raise` tool if you're an agent, or open it as a question first). This
-keeps install/boot trivial (just Bun + the repo), keeps the supply-chain surface
-at zero, and keeps the supervised/systemd deploy a single `bun run`. If you
-think you need a library, first check whether the Bun stdlib already covers it —
-it usually does (the MCP transport, the SSE stream, the operator CLI, and the
-log rotator are all hand-rolled for exactly this reason).
+**The front end is different, by CEO ratification (2026-07-09, story
+st-95b7d87c).** The webapp under `public/` is migrating to **React 19 +
+`@launchpad-ui`, bundled by `bun build`**. The zero-npm-dependency and
+no-build-step rules **no longer apply to the front end**, and
+`docs/rfc-frontend-launchpad.md` — which supersedes
+`docs/rfc-frontend-design-system.md` — is the standard.
+
+**Where the migration actually stands.** `package.json` now carries a
+`devDependencies` block — butchr's first — holding exactly `typescript` and
+`bun-types`. No `react`, no `@launchpad-ui`, no bundler output: `public/` is
+still vanilla JS served raw, and the toolchain rules in §4.2 arrive with it (RFC
+Phase 1). §4.1 and §4.3 below are **live today**.
+
+### 4.1 `bun build` does not typecheck. `tsc` does.
+
+`bun build` will happily compile `const n: number = "a string"`, a bogus
+component prop, and a nonexistent `<Icon name="pencil">` (there is no `pencil`;
+it is `edit`) — all exit 0. `bunx --bun tsc --noEmit -p tsconfig.json` is a
+**required gate step**; `scripts/ci` runs it over `src/`. Do not remove it:
+without it, adopting a typed component library buys the `.d.ts` files and none of
+their protection. The first run of it found **21 real errors** in `src/`,
+including three annotations naming a type the file never imported.
+
+Two mechanics are not optional, both learned the hard way (RFC Errata E2):
+
+- **`bunx --bun tsc`, never bare `bunx tsc`.** The latter honours
+  `node_modules/.bin/tsc`'s `#!/usr/bin/env node` shebang and hands the script to
+  the host `node`, which on this host is v12 and dies on `??` before typechecking
+  anything.
+- **`src/` and `public/` cannot share one `tsconfig.json`.** `public/` needs
+  `lib: ["DOM"]`; adding `DOM` to `src/` *breaks* `channel.ts`'s `for await (…
+  of Bun.stdin.stream())` and silently *masks* `mcp.ts`'s `await req.json()`.
+  The root config's `include` stays `["src"]`; `public/` gets its own config when
+  it needs one.
+
+### 4.2 The toolchain, and the four things that fail silently
+
+**Not live yet — this is the contract RFC Phase 1 lands.** `bun build` is the
+*only* bundler. No webpack, no vite, no rollup, no loader, no plugin. Four rules
+are **not optional**, because each failure exits 0, boots, and is still wrong.
+`scripts/ci` will assert all of them; do not remove those assertions.
+
+1. **`--outdir`, never `--outfile`.** LaunchPad's JS imports its own CSS, so
+   every build is multi-output and `--outfile` errors.
+2. **`--production`.** Otherwise you ship React's development bundle — 1.61 MB
+   instead of 0.46 MB, with dev-mode checks running in the operator's browser.
+3. **Import both token stylesheets** — `@launchpad-ui/tokens/index.css` **and**
+   `@launchpad-ui/tokens/themes.css` — from the entry module. The component CSS
+   defines almost none of the `--lp-*` variables it uses; without these the app
+   renders unstyled. Note `@launchpad-ui/tokens/style.css` **does not exist**
+   (only `components` and `icons` expose `./style.css`). Do not guess the path.
+4. **Inline `@launchpad-ui/icons`' `sprite.svg` into `<body>`.** `Icon` emits
+   `<use href="#lp-icon-…">`, a document-local reference. Without the sprite,
+   every icon renders blank while keeping its 20×20 layout box — no test catches
+   it.
+
+### 4.3 Dependencies are pinned EXACTLY. No carets.
+
+`@launchpad-ui/components` pins its peers to exact versions, including
+`react@19.2.6`. A caret anywhere produces a permanently peer-warned tree whose
+runtime behaviour is unverified, so **every entry in `package.json` is an exact
+pin** — that rule is in force now, on the two devDependencies that exist.
+`bun.lock` is **committed** (it is text, not binary); `node_modules/` and
+`dist/` are **gitignored**; the gate runs `bun install --frozen-lockfile`, which
+it must, because butchr runs `scripts/ci` in a fresh git worktree that has no
+`node_modules`.
+
+`bun.lock` does **not** record the root `package.json` version, so butchr's
+release-time version bump leaves it byte-identical and `--frozen-lockfile` still
+passes. The release step needs no knowledge of it.
+
+**Bumping `@launchpad-ui` will be a task, not a chore.** It moves several pins in
+lockstep and can change the token surface — re-run the gate's artifact assertions
+and check dark mode in a real browser.
+
+### 4.4 Escaping is still structural
+
+The `esc()` / `{html:}` escape hatches were deleted (story st-82c11fd1) and must
+not return; `test/no-opt-in-escaping.test.ts` enforces their absence. JSX escapes
+every interpolated string by construction, so when the React migration lands the
+**equivalent footgun is `dangerouslySetInnerHTML`** and that test becomes
+`no-dangerous-html.test.ts`. Same rule, new spelling.
 
 ---
 

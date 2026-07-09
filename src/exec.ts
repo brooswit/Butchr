@@ -14,7 +14,7 @@ export function shellQuote(s: string): string {
  * yields an empty flag. (The model was validated at task creation and ends up
  * single-quote escaped when the whole agentCmd is wrapped for `script -c`.)
  */
-export function modelFlag(model?: string): string {
+export function modelFlag(model?: string | null): string {
   const m = model?.trim();
   return m ? `--model ${m}` : "";
 }
@@ -187,7 +187,10 @@ export async function run(
   // gate treats it as RED (a loud misconfig signal) — fulfilling runGate's documented
   // "a spawn failure comes back as ok:false" contract. Only the spawn itself is guarded;
   // once the child is live, the collect/await path below is unchanged.
-  let proc: ReturnType<typeof Bun.spawn>;
+  // Pinned to the stdio the spawn below actually requests. `ReturnType<typeof Bun.spawn>` falls
+  // back to the generic default, where `stdout`/`stderr` widen to `number | ReadableStream |
+  // undefined` — a shape readBoundedTail cannot take and, worse, one that hides which pipes exist.
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn(cmd, {
       cwd: opts.cwd,

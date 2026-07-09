@@ -1,7 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# deps. butchr runs this script in the task's git WORKTREE, which has no node_modules, so the
+# typecheck below would otherwise have nothing to run. --frozen-lockfile makes a lockfile that
+# disagrees with package.json a RED BUILD rather than a silent resolve against a tree nobody has
+# run (RFC §4.4). It is safe on every post-release branch: bun.lock does NOT record the root
+# package.json `version`, so butchr's release bump leaves the lockfile byte-identical and this
+# still exits 0 (RFC Errata E1, re-verified against the real lockfile in this commit).
+bun install --frozen-lockfile
 # build + test (byte-exact replica of the retired gate_cmd)
 bun build src/index.ts --target bun --outfile /dev/null
+# typecheck. `bun build` above performs ZERO type checking — it strips the annotations and emits.
+# Nothing had ever run `tsc` against this repo, and `src/` had 21 real type errors when it first
+# did (RFC §13.4). This is the step that makes the types mean anything.
+#
+#   --bun is REQUIRED, not stylistic. `bunx tsc` execs node_modules/.bin/tsc, whose shebang is
+#   `#!/usr/bin/env node`; this host's node is v12.22.9 and TypeScript 5.9's emitted code uses
+#   `??`, so plain `bunx tsc` dies with `SyntaxError: Unexpected token '?'` before it typechecks a
+#   single file. `--bun` forces the bun runtime. (RFC Errata E2, re-verified on this host.)
+#
+#   -p is explicit. A bare `tsc` reads ./tsconfig.json, whose `include` is ["src"] — the same
+#   config this names. Saying so keeps the scope legible now that public/ is about to grow its own
+#   config (RFC §5.5: src/ and public/ CANNOT share one — public/ needs `lib: DOM`, and DOM in
+#   src/ breaks `for await (… of Bun.stdin.stream())` in channel.ts and masks mcp.ts's
+#   `await req.json()`). public/ is NOT typechecked yet; RFC Phase 1 adds tsconfig.public.json.
+#
+# ~6.5s, so it is the gate's second-most expensive step after the test suite. It sits ahead of the
+# front-end rules per RFC §4.2: it is the step most likely to catch a real error, and unlike any
+# bundle it reads EVERY file matched by `include` — reachable from an entry point or not, which is
+# the src/ analog of the orphan-module rule below.
+bunx --bun tsc --noEmit -p tsconfig.json
 # front-end rules run BEFORE the backend suite: they cost ~100ms, the suite costs orders of
 # magnitude more, and a broken FE import should fail the gate in under a second.
 # fe rule 1: whole-graph build from the real entry point. index.html loads /app.js as a

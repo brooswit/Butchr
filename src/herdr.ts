@@ -304,14 +304,20 @@ export async function paneList(workspaceId?: string): Promise<PaneInfo[]> {
   const r = await herdrSoft(args);
   if (!r) return [];
   const panes: any[] = r.panes ?? [];
+  // Annotate the MAP, not the filter: mapping to an all-`any`, all-REQUIRED literal made the
+  // downstream `p is PaneInfo` predicate illegal (PaneInfo's terminalId/tabId/workspaceId are
+  // optional, so it is not assignable to the parameter it claims to narrow — TS2677). With the
+  // map already producing PaneInfo, the filter is a plain drop of pane-id-less rows.
   return panes
-    .map((p) => ({
-      paneId: p.pane_id,
-      terminalId: p.terminal_id,
-      tabId: p.tab_id,
-      workspaceId: p.workspace_id,
-    }))
-    .filter((p): p is PaneInfo => !!p.paneId);
+    .map(
+      (p): PaneInfo => ({
+        paneId: p.pane_id,
+        terminalId: p.terminal_id,
+        tabId: p.tab_id,
+        workspaceId: p.workspace_id,
+      }),
+    )
+    .filter((p) => !!p.paneId);
 }
 
 /**

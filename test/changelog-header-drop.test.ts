@@ -3,18 +3,24 @@
 // DELETES a released version header (`## [0.9.x]`) is always the merge rebase silently
 // dropping an already-released section and orphaning its bullets.
 //
-// These tests run the REAL `scripts/ci` text against REAL temp git repos, with its three
-// top-level `bun` lines (backend build, FE whole-graph build, `bun test`) stripped — otherwise
-// the gate would recursively re-run the whole suite. Everything below the strip is
+// These tests run the REAL `scripts/ci` text against REAL temp git repos, with its top-level
+// `bun`/`bunx` lines (install, backend build, typecheck, FE whole-graph build, `bun test`)
+// stripped — otherwise the gate would install a node_modules, typecheck a `src/` the fixture
+// does not have, and recursively re-run the whole suite. Everything below the strip is
 // byte-identical to what ships, so the check under test is the shipped one, not a
 // re-implementation.
 //
-// The strip is `!/^bun\s/`, which matches only UNINDENTED lines. The FE per-file loop's
+// The strip is `!/^bunx?\s/`, which matches only UNINDENTED lines. The FE per-file loop's
 // INDENTED `if ! bun build "$f"` is therefore NOT stripped and DOES execute here, once per
 // test. That cannot be avoided — dropping indented `bun` lines would leave `if ! ; then` and a
 // bash syntax error. So the fixture below deliberately carries a minimally-real
 // `public/app.js`: `scripts/ci` unconditionally asserts a non-empty `public/**/*.js` glob, and
 // a fixture with no `public/` would (correctly) fail that guard.
+//
+// `bunx?` (not a bare `bun`) is load-bearing: the typecheck step is spelled `bunx --bun tsc`,
+// and `^bun\s` does not match `bunx `. A new top-level gate step invoked by any OTHER command
+// will silently execute here — that is the standing hazard of a harness that re-runs the gate's
+// own source, and the reason this comment names the pattern.
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,11 +29,11 @@ import { join } from "node:path";
 
 const REPO = join(import.meta.dir, "..");
 
-/** The shipped scripts/ci minus its top-level `bun build` / `bun test` lines (see file header). */
+/** The shipped scripts/ci minus its top-level `bun`/`bunx` lines (see file header). */
 function ciScriptWithoutBun(): string {
   return readFileSync(join(REPO, "scripts", "ci"), "utf8")
     .split("\n")
-    .filter((l) => !/^bun\s/.test(l))
+    .filter((l) => !/^bunx?\s/.test(l))
     .join("\n");
 }
 
