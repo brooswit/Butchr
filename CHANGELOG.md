@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Front-end Phase 4 (RFC §5): `public/views/task.js` builds DOM, not HTML strings — the last
+  conversion.** The task detail's thirteen `innerHTML` templates (needs-your-input card, timeline,
+  transcript row, crumbs + header, metadata grid, the two aborted panels, the major-version confirm
+  banner, the awaiting-who banner, and all five feedback surfaces) are now `el()` trees, driving the
+  module's 33 `esc()` calls, its `htmlOf()` bridges and its `{html:}` bridges to zero;
+  `components/panel.js`'s `listPanel({chainLine})` takes a node instead of markup, retiring the last
+  `html:` bridge in `components/`. The three markup-returning label helpers (`tokensLabel`,
+  `fmtEstimate`, `fmtChain`) return `DocumentFragment`s — `fmtChain` still returns `null` (never an
+  empty fragment) for the absent case, because `listPanel` guards on truthiness and an empty fragment
+  is truthy. Every control is now built, held as a local reference, and wired on that node: the
+  post-mount `document.getElementById` wiring for `#abort` / `#rollback` / `#requeue` is gone, which
+  also retires a latent bug where the three distinct `#requeue` buttons were disambiguated only by
+  document order. `esc()`, `htmlOf()` and `el()`'s `{html:}` branch now have ZERO callers repo-wide.
+
 ## [0.9.271] - 2026-07-09
 
 - **Front-end Phase 4 (RFC §5): `public/views/diff.js` builds DOM, not HTML strings.** `renderDiff()`

@@ -172,10 +172,16 @@ export function blockerRow(id, status, { dead = false } = {}) {
 // rollup): a ".panel" (distinguished by `cls`) with a margin-collapsed h2 heading, an
 // optional chain-estimate line, optional `lead` nodes (the rollup's summary/bar), and
 // a ".blockers" list of `rows`.
+//
+// `chainLine` is a NODE (views/task.js's fmtChain returns a DocumentFragment) — the last
+// `html:` bridge in components/ is gone. ⚠ The `if (chainLine)` guard below is an ABSENCE check,
+// and a DocumentFragment is ALWAYS TRUTHY even when empty: fmtChain must keep returning `null`
+// (never an empty fragment) for the no-chain case, or this paints a stray empty `.chain-est`.
+// Appending also CONSUMES a fragment, so `chainLine` must be freshly built per call.
 export function listPanel(heading, rows, { chainLine, cls = "", lead } = {}) {
   const panel = el("div", { class: "panel" + (cls ? " " + cls : "") });
   panel.appendChild(el("h2", { class: "panel-title" }, heading));
-  if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
+  if (chainLine) panel.appendChild(el("div", { class: "chain-est" }, chainLine));
   for (const node of [].concat(lead || [])) panel.appendChild(node);
   panel.appendChild(el("div", { class: "blockers" }, rows));
   return panel;
