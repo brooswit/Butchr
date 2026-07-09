@@ -54,6 +54,8 @@ import {
   restartCtoAgent,
   startCtoAgent,
   stopCtoAgent,
+  storyAgentName,
+  storyAgentStatus,
 } from "./workspace-agent.ts";
 import { publish, subscribe } from "./events.ts";
 import type { ButchrEvent } from "./events.ts";
@@ -72,11 +74,15 @@ import { assertCreationAllowed, attentionList, getTask, statsRollup, strandedTot
 // DIRECTIVE into a member repo (createProjectInitiative) for its CTO to accept & decompose, or FAN one
 // initiative into MULTIPLE member repos with a completion rollup (createCrossRepoInitiative /
 // listProjectInitiatives / getProjectInitiative). See stories.ts.
+// `getStory` is the leader-terminal route's NODE guard: getStoryRow queries
+// `WHERE id=? AND work_kind='node'`, so it returns null for a leaf AND for an unknown id —
+// one guard, one 404.
 import {
   acceptInitiativeReview,
   createCrossRepoInitiative,
   createProjectInitiative,
   getProjectInitiative,
+  getStory,
   listProjectInitiatives,
   reviewProjectInitiative,
 } from "./stories.ts";
@@ -1253,6 +1259,35 @@ route("POST", "/api/projects/:id/ceo/terminal", async (_req, p) => {
     throw new HttpError(409, `CEO agent has no live pane (${why})`);
   }
   return attachAgentTerminal(ceoAgentName(p.id!));
+});
+// Open a GUI terminal attached to a story's managed LEADER agent's live pane — the leader analog of
+// the CTO/CEO terminal routes above. Reuses the SAME pane-attach machinery. 409 if the leader has no
+// live pane, with an HONEST reason off the same StoryAgentStatus fields the swimlane lane header
+// reads (torn down / starting-or-crashed).
+route("POST", "/api/work/:id/leader/terminal", async (_req, p) => {
+  // Resolve the NODE first: storyAgentStatus does NOT throw for a non-story — for a leaf or a
+  // bogus id it returns {desired:false, running:false, …}, so gating on it first would emit a 409
+  // where a 404 belongs. getStoryRow queries `WHERE id=? AND work_kind='node'`, so this one guard
+  // answers 404 for BOTH a leaf and an unknown id.
+  //
+  // DELIBERATE divergence from the sibling assertWorkLeaf(), which answers 409 on a wrong-kind id:
+  // a LEAF has no leader, so it has no `leader/terminal` sub-resource AT ALL — 404, mirroring the
+  // CEO route. (A leaf's own build-agent terminal is POST /api/work/:id/terminal.) Not an
+  // oversight; do not "fix" this into a 409.
+  if (!getStory(p.id!)) throw new HttpError(404, `story not found: ${p.id}`);
+  const s = await storyAgentStatus(p.id!);
+  if (!s.running) {
+    // `lastError` can be STALE from an earlier restart while the leader is genuinely starting right
+    // now, so do not assert a crash the fields cannot prove — name both possibilities and show the
+    // error as evidence, not as a verdict.
+    const why = !s.desired
+      ? "torn down or never launched"
+      : s.lastError
+        ? `starting, or it crashed — last error: ${s.lastError}`
+        : "starting — no live pane yet";
+    throw new HttpError(409, `leader agent has no live pane (${why})`);
+  }
+  return attachAgentTerminal(storyAgentName(p.id!));
 });
 
 // A missing dist/index.html means "you did not build", not "the operator typed a bad URL".

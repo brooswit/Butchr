@@ -89,3 +89,27 @@ export function laneTitle(brief, id, max = 70) {
   if (!first) return id;
   return first.length > max ? first.slice(0, max).trimEnd() + "…" : first;
 }
+
+// The lane header's "Open Leader terminal" button state + honest hint, derived only from the
+// StoryAgentStatus the StoryView already carries (`story.leader` = {desired, running, lastError, …}
+// — no extra fetch). Modelled on ceoTerminalBtnState (views/projects-logic.js): the button stays
+// VISIBLE but disables when there's no live pane, and says WHY. Hiding it would be worse exactly
+// where it matters most — a ⚠ stalled lane (leader DESIRED yet DOWN) is when an operator most wants
+// to attach, and a vanished control hides the diagnosis; keeping it also holds the lane's controls
+// positionally stable across SSE repaints. Titles mirror the route's 409 reasons so the two never
+// contradict. `lastError` can be STALE from an earlier restart while the leader is genuinely
+// starting now, so it is shown as EVIDENCE, never as a verdict of "crashed". Returns
+// { enabled, title }. Pure: tolerates a missing/undefined leader.
+export function leaderTerminalBtnState(leader) {
+  const s = leader || {};
+  if (s.running) return { enabled: true, title: "Attach a terminal to the live leader agent" };
+  if (s.desired) {
+    return {
+      enabled: false,
+      title: s.lastError
+        ? `Leader agent has no live pane (starting, or it crashed) — last error: ${s.lastError}`
+        : "Leader agent is starting… — no live pane to attach yet",
+    };
+  }
+  return { enabled: false, title: "Leader agent isn't running — torn down or never launched" };
+}

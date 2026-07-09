@@ -6,10 +6,13 @@
 // orderLaneLeaves / swimEmphasis / laneTitle) live in the DOM-free leaf views/swimlanes-logic.js,
 // split out by the RFC Phase 2 horizontal cut (§0.1 #5). They are NOT re-exported from here.
 //
-// It imports only LEAVES — `core/` (dom, work-graph) and `components/chips.js` — never app.js. The
-// `views/ -> app.js` edge must never exist: app.js's boot touches `document` at load, so that edge
-// would drag a DOM into every view's module graph and break `bun test`. See the header of
-// core/nav.js. This view needs no state from app.js: renderSwimlanes takes `work` as an argument
+// It imports only LEAVES — `core/` (dom, work-graph, api), `components/chips.js`, and (for the lane
+// header's "Open Leader terminal" control) `components/button.js` + `components/toast.js` — never
+// app.js. The `views/ -> app.js` edge must never exist: app.js's boot touches `document` at load, so
+// that edge would drag a DOM into every view's module graph and break `bun test`. See the header of
+// core/nav.js. The widened set stays leaf-only and DOM-free AT LOAD: core/api.js imports nothing,
+// and button.js -> toast.js -> core/nav.js touches `document`/`location` only inside CALLED
+// functions. This view needs no state from app.js: renderSwimlanes takes `work` as an argument
 // and buildSwimlanes takes the `repaint` callback, so the dependency stays inverted.
 //
 // DOM-free at module load: SWIM_DONE_EXPANDED is a Set, and `document` is touched only inside a
@@ -37,8 +40,12 @@ import {
   storyMemberIds,
   storySubtaskTotal,
 } from "../core/work-graph.js";
+import { Button } from "../components/button.js";
+import { terminalToast } from "../components/toast.js";
+import { api } from "../core/api.js";
 import {
   laneTitle,
+  leaderTerminalBtnState,
   orderLaneLeaves,
   storyLifecycle,
   storyProgress,
@@ -117,6 +124,37 @@ function swimStep(leaf, memberSet, byId) {
   }, parts);
 }
 
+// "Open Leader terminal" → POST /api/work/:id/leader/terminal (the story-leader analog of the
+// CTO/CEO terminal routes, same attach payload). Gated by the PURE leaderTerminalBtnState, which
+// reads `story.leader` — the StoryAgentStatus the NodeWorkView already carries off GET /api/work,
+// so no extra fetch. Enabled only when the leader is live; otherwise it stays VISIBLE but disabled
+// with an honest title (see that helper for why we disable rather than hide). The listener is
+// attached ONLY when enabled.
+//
+// Routed through Button's `onAction` (= action()): disable → await → toast the error and re-enable
+// on failure. The two non-default flags are load-bearing, exactly as on the CEO button:
+//   restoreOnSuccess — re-enable on BOTH paths.
+//   onDone: no-op    — action()'s DEFAULT onDone is render(). Attaching a terminal does not
+//                      navigate; a bare Button() would re-render the view out from under it.
+// terminalToast(r) fires inside the fn, so no `success` string is passed.
+function leaderTerminalBtn(story) {
+  const term = leaderTerminalBtnState(story.leader);
+  return Button({
+    label: "⌗ Open Leader terminal",
+    class: "ghost xs",
+    title: term.title,
+    disabled: !term.enabled,
+    onAction: term.enabled
+      ? async () => {
+        const r = await api("POST", "/work/" + encodeURIComponent(story.id) + "/leader/terminal");
+        terminalToast(r);
+      }
+      : undefined,
+    restoreOnSuccess: true,
+    onDone: () => {},
+  });
+}
+
 // One story LANE: header (kind badge · title · id · status + lifecycle chips · progress) over a
 // horizontally-scrollable pipeline of its ACTIVE subtasks. A childless / all-finished story shows a
 // compact parked empty-row INSIDE the lane (never a bare box). Finished subtasks collapse behind a
@@ -143,6 +181,8 @@ function swimLane(story, byId, allIds, repaint) {
     el("div", { class: "swim-meta" }, [
       el("span", { class: "chip " + st }, st),
       ...(lc ? [" ", lc] : []),
+      " ",
+      leaderTerminalBtn(story),
       el("div", { class: "swim-prog" }, prog),
     ]),
   ]);

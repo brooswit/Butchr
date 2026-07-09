@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **"Open Leader terminal" on a story lane.** A story's managed LEADER agent is now reachable from
+  the dashboard exactly like the CTO and CEO agents. New `POST /api/work/:id/leader/terminal`
+  reuses the shared pane-attach machinery (`attachAgentTerminal(storyAgentName(id))`); it answers
+  404 when the id is not a story node — a LEAF has no leader sub-resource at all (its own
+  build-agent terminal is `POST /api/work/:id/terminal`) — and 409 with an HONEST, case-naming
+  reason when the leader has no live pane (torn down / never launched vs. starting-or-crashed, with
+  `lastError` shown as evidence rather than as a verdict). The button renders in the swimlane lane
+  header, gated by the pure DOM-free `leaderTerminalBtnState` and fed by the `leader` status the
+  work view already carries, so no extra fetch. It stays visible-but-disabled with an honest title
+  when the leader isn't live: a stalled lane is exactly where an operator wants to attach, and a
+  vanished control would hide the diagnosis.
+
 ## [0.9.281] - 2026-07-09
 
 ### Added
