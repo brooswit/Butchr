@@ -570,8 +570,43 @@ export type DiffStat = {
   changedLines: number;
 };
 
-/** Parse `git diff --numstat` output, accumulating files + line totals into `acc`. */
-function accumulateNumstat(
+/**
+ * Reduce a `git diff --numstat` path field to the file's DESTINATION path.
+ *
+ * For a rename-detected pair (>50% similarity) numstat spells ONE path holding BOTH
+ * names, in either of two shapes:
+ *
+ *   compressed  `public/core/{format.js => format.ts}`   `dir/{a => b}/file.ts`   `dir/{ => sub}/f.ts`
+ *   bare        `old/a.js => new/b.ts`
+ *
+ * `git diff --name-only` prints only `public/core/format.ts` for the same file, so a raw
+ * numstat path can never compare equal to it. The phantom-release guard compares exactly
+ * those two captures (`code_files` vs `netCode`), so every rename read as a DROPPED file and
+ * refused the merge; estimate.classifyPathType likewise saw no matching extension. Normalizing
+ * here makes the two captures agree BY CONSTRUCTION, at the single point where the raw form
+ * enters butchr. Non-rename paths pass through untouched.
+ */
+export function numstatDestination(path: string): string {
+  // Compressed: <prefix>{<old> => <new>}<suffix>. Either side may be empty
+  // (`dir/{ => sub}/f.ts`, `dir/{sub => }/f.ts`), which can leave a doubled slash.
+  const compressed = path.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
+  if (compressed) {
+    return `${compressed[1]}${compressed[3]}${compressed[4]}`.replace(/\/{2,}/g, "/");
+  }
+  // Bare: <old> => <new>.
+  const bare = path.match(/^(.+) => (.+)$/);
+  if (bare) return bare[2]!;
+  return path;
+}
+
+/**
+ * Parse `git diff --numstat` output, accumulating files + line totals into `acc`.
+ *
+ * Rename paths are normalized to their destination (see numstatDestination). This does NOT
+ * perturb `changedLines`: numstat's `+`/`-` on a rename line is already the content delta of
+ * the single resulting file, not a count of the source.
+ */
+export function accumulateNumstat(
   output: string,
   files: Set<string>,
   counts: { lines: number },
@@ -585,7 +620,7 @@ function accumulateNumstat(
     const added = m[1] === "-" ? 0 : parseInt(m[1]!, 10);
     const deleted = m[2] === "-" ? 0 : parseInt(m[2]!, 10);
     counts.lines += added + deleted;
-    files.add(m[3]!);
+    files.add(numstatDestination(m[3]!));
   }
 }
 

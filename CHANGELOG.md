@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Phantom-release guard no longer false-positives on renamed files.** The guard compares a
+  task's durable `code_files` footprint (`git diff --numstat`, via `git.diffStat`) against the
+  rebased tip's net diff (`git diff --name-only`, via `git.changedCodeFiles`). numstat spells a
+  rename-detected file as `public/core/{format.js => format.ts}` while name-only prints only
+  `public/core/format.ts`, so **every** rename-detected file was reported as DROPPED, the merge
+  was refused, and re-submitting bounced forever. `git.accumulateNumstat` now normalizes a
+  rename path to its DESTINATION (both the compressed `dir/{a => b}/f` and bare `a => b` shapes),
+  so the two captures agree by construction. Line counts are unaffected — numstat's `+`/`-` on a
+  rename line is already the content delta. The guard's three defense layers are unchanged and
+  still catch a real dropped file (story st-3988b68e).
+- **`estimate.classifyPathType` no longer misclassifies a rename.** Same root cause: fed the raw
+  brace form, a path ends in `}` so the extension rules (`/\.md$/`, `LICENSE`) never matched and a
+  docs-only rename was labelled `core` — a *code* task, which feeds the phantom guard's belt layer
+  and auto-merge's risk classification. Fixed by the same normalization upstream.
+
 ## [0.9.282] - 2026-07-09
 
 ### Added

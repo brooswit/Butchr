@@ -80,6 +80,23 @@ describe("classifyPathType", () => {
     expect(classifyPathType(["CONTRIBUTING.md", "src/a.ts"])).toBe("mixed");
     expect(classifyPathType([])).toBe("core");
   });
+
+  // classifyPathType is fed the task's `code_files` footprint, which comes from
+  // `git diff --numstat` — so a rename USED to arrive as git's raw `{old => new}` brace form.
+  // The DIRECTORY rules (public/, docs/) happen to survive that spelling, but the EXTENSION
+  // rules do not: the path ends in `}`, so `/\.md$/` never matches and a docs-only rename was
+  // classified `core` — i.e. a CODE task, which feeds the phantom guard's BELT layer and
+  // auto-merge risk. git.accumulateNumstat now normalizes to the destination before we see it;
+  // that normalization is proven against real git in test/phantom-release-guard.test.ts, which
+  // also asserts the accumulateNumstat → classifyPathType coupling end-to-end. Here we only pin
+  // the classifier's contract on both spellings, keeping this suite git-free (see header).
+  test("a renamed path classifies by its DESTINATION, not git's raw brace form", () => {
+    expect(classifyPathType(["{guide.md => manual.md}"])).toBe("core"); // the bug: `.md$` can't match
+    expect(classifyPathType(["manual.md"])).toBe("docs"); // …normalized, it's docs
+
+    expect(classifyPathType(["public/core/format.ts"])).toBe("webapp");
+    expect(classifyPathType(["src/b.ts"])).toBe("core");
+  });
 });
 
 describe("computeEstimateStats — P50/P90 buckets", () => {

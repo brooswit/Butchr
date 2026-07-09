@@ -19,7 +19,7 @@
 //     lands (or doesn't) on main. Mirrors test/finalize-release-integrity.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -216,6 +216,180 @@ describe("detectPhantomDrop — each layer fires (or not) in isolation", () => {
   test("NO false block — code that SURVIVED the rebase is not flagged", () => {
     const v = gitMod.detectPhantomDrop({
       preRebaseCode: ["src/x.ts"], originalCodeFiles: ["src/x.ts"], netCode: ["src/x.ts"],
+      releaseMode: true, isRollback: false, isCodeTask: true,
+    });
+    expect(v).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// RENAME NORMALIZATION. The guard compares two captures of the same branch: `code_files`
+// (diffStat → `git diff --numstat`) against `netCode` (changedCodeFiles → `git diff --name-only`).
+// numstat spells a rename-detected file as `dir/{old.js => new.ts}`; name-only prints only
+// `dir/new.ts`. Unnormalized, EVERY rename read as a dropped file and refused the merge forever.
+// accumulateNumstat now stores the destination, so the two captures agree by construction.
+// ---------------------------------------------------------------------------------------------
+
+describe("accumulateNumstat — rename paths normalize to the destination", () => {
+  function parse(output: string) {
+    const files = new Set<string>();
+    const counts = { lines: 0 };
+    gitMod.accumulateNumstat(output, files, counts);
+    return { files: [...files], lines: counts.lines };
+  }
+
+  test("compressed rename with a common PREFIX keeps the prefix and the new basename", () => {
+    const r = parse("16\t13\tpublic/core/{format.js => format.ts}");
+    expect(r.files).toEqual(["public/core/format.ts"]);
+    expect(r.lines).toBe(29); // unchanged: numstat's +/- on a rename is already the content delta
+  });
+
+  test("compressed rename of a middle DIRECTORY keeps the trailing suffix", () => {
+    const r = parse("3\t1\tdir/{a => b}/file.ts");
+    expect(r.files).toEqual(["dir/b/file.ts"]);
+    expect(r.lines).toBe(4);
+  });
+
+  test("compressed rename with an EMPTY side does not leave a doubled slash", () => {
+    expect(parse("1\t0\tdir/{ => sub}/f.ts").files).toEqual(["dir/sub/f.ts"]);
+    expect(parse("0\t1\tdir/{sub => }/f.ts").files).toEqual(["dir/f.ts"]);
+  });
+
+  test("bare rename (no common prefix or suffix) yields only the destination", () => {
+    const r = parse("5\t4\told/a.js => new/b.ts");
+    expect(r.files).toEqual(["new/b.ts"]);
+    expect(r.lines).toBe(9);
+  });
+
+  test("a normal path passes through untouched", () => {
+    const r = parse("7\t2\tsrc/git.ts");
+    expect(r.files).toEqual(["src/git.ts"]);
+    expect(r.lines).toBe(9);
+  });
+
+  test("a BINARY line (`-\\t-\\tpath`) counts zero lines and still records the file", () => {
+    const r = parse("-\t-\tpublic/logo.png");
+    expect(r.files).toEqual(["public/logo.png"]);
+    expect(r.lines).toBe(0);
+  });
+
+  test("a binary RENAME normalizes too, still counting zero lines", () => {
+    const r = parse("-\t-\tpublic/{old.png => new.png}");
+    expect(r.files).toEqual(["public/new.png"]);
+    expect(r.lines).toBe(0);
+  });
+
+  test("mixed output accumulates every shape into one deduped set + line total", () => {
+    const r = parse(
+      ["16\t13\tpublic/core/{format.js => format.ts}", "7\t2\tsrc/git.ts", "-\t-\tlogo.png", ""].join("\n"),
+    );
+    expect(r.files.sort()).toEqual(["logo.png", "public/core/format.ts", "src/git.ts"]);
+    expect(r.lines).toBe(38);
+  });
+
+  // The QUIETER second bug, same root cause: estimate.classifyPathType is fed this same
+  // `code_files` set. A raw brace path ends in `}`, so the EXTENSION rules never match and a
+  // docs-only rename was labelled `core` — a CODE task, which feeds the guard's BELT layer and
+  // auto-merge's risk classification. Normalizing upstream fixes it with no change to estimate.ts.
+  test("the normalized set classifies correctly — a docs-only rename is NOT a code task", async () => {
+    const { classifyPathType } = await import("../src/estimate.ts");
+    expect(classifyPathType(parse("2\t1\t{guide.md => manual.md}").files)).toBe("docs");
+    expect(classifyPathType(["{guide.md => manual.md}"])).toBe("core"); // the bug, pinned
+    expect(classifyPathType(parse("16\t13\tpublic/core/{format.js => format.ts}").files)).toBe("webapp");
+  });
+});
+
+describe("detectPhantomDrop — a renamed file is NOT a dropped file", () => {
+  const RENAMED = "public/core/format.ts";
+
+  test("the durable footprint of a rename matches the rebased net diff — merges", () => {
+    // originalCodeFiles as accumulateNumstat now records it (destination), netCode as
+    // changedCodeFiles reports it. Pre-fix, code_files held `public/core/{format.js => format.ts}`
+    // and this returned a spurious drop, bouncing the task forever.
+    const v = gitMod.detectPhantomDrop({
+      preRebaseCode: [RENAMED], originalCodeFiles: [RENAMED], netCode: [RENAMED],
+      releaseMode: true, isRollback: false, isCodeTask: true,
+    });
+    expect(v).toBeNull();
+  });
+
+  test("the RAW brace form would have false-positived — proving what the fix removes", () => {
+    const v = gitMod.detectPhantomDrop({
+      preRebaseCode: [], originalCodeFiles: ["public/core/{format.js => format.ts}"],
+      netCode: [RENAMED], releaseMode: true, isRollback: false, isCodeTask: true,
+    });
+    expect(v).not.toBeNull(); // the bug, pinned: the un-normalized spelling never matches
+  });
+
+  test("NOT VACUOUS — a genuinely dropped file alongside a surviving rename still fires", () => {
+    const v = gitMod.detectPhantomDrop({
+      preRebaseCode: [], originalCodeFiles: [RENAMED, "src/real-fix.ts"], netCode: [RENAMED],
+      releaseMode: true, isRollback: false, isCodeTask: true,
+    });
+    expect(v).not.toBeNull();
+    expect(v!.missing).toEqual(["src/real-fix.ts"]); // the rename is not blamed
+  });
+
+  test("NOT VACUOUS — a rebase that drops the renamed file itself still fires", () => {
+    const v = gitMod.detectPhantomDrop({
+      preRebaseCode: [], originalCodeFiles: [RENAMED], netCode: [],
+      releaseMode: true, isRollback: false, isCodeTask: true,
+    });
+    expect(v).not.toBeNull();
+    expect(v!.missing).toEqual([RENAMED]);
+  });
+});
+
+// REAL GIT, in a throwaway repo: prove diffStat and changedCodeFiles agree on a
+// rename-detected branch — the exact `p4a-salvage` shape this hotfix unblocks.
+describe("diffStat vs changedCodeFiles agree on a REAL rename-bearing branch", () => {
+  let RENAME_REPO: string;
+  const BRANCH = "rename-fixture";
+  const BODY = Array.from({ length: 40 }, (_, i) => `export const v${i} = ${i};`).join("\n") + "\n";
+
+  beforeAll(() => {
+    RENAME_REPO = mkdtempSync(join(tmpdir(), "butchr-rename-"));
+    const gg = (args: string[]) => execFileSync("git", ["-C", RENAME_REPO, ...args], { stdio: "ignore" });
+    execFileSync("git", ["init", "-q", "-b", "main", RENAME_REPO], { stdio: "ignore" });
+    gg(["config", "user.email", "test@butchr.local"]);
+    gg(["config", "user.name", "butchr test"]);
+    // A root-level rename spells BARE (`a => b`); one under a shared directory spells
+    // COMPRESSED (`dir/{a => b}`). Cover both shapes git actually emits.
+    mkdirSync(join(RENAME_REPO, "public", "core"), { recursive: true });
+    writeFileSync(join(RENAME_REPO, "format.js"), BODY);
+    writeFileSync(join(RENAME_REPO, "public/core/state.js"), BODY);
+    gg(["add", "-A"]);
+    gg(["commit", "-q", "-m", "init"]);
+    gg(["checkout", "-q", "-b", BRANCH]);
+    gg(["mv", "format.js", "format.ts"]);
+    gg(["mv", "public/core/state.js", "public/core/state.ts"]);
+    // Small edits so each stays >50% similar: git rename-DETECTS them (a heavy rewrite is delete+add).
+    writeFileSync(join(RENAME_REPO, "format.ts"), BODY + "export const added = true;\n");
+    writeFileSync(join(RENAME_REPO, "public/core/state.ts"), BODY + "export const added = true;\n");
+    gg(["add", "-A"]);
+    gg(["commit", "-q", "-m", "rename js->ts"]);
+    gg(["checkout", "-q", "main"]);
+  });
+  afterAll(() => rmSync(RENAME_REPO, { recursive: true, force: true }));
+
+  test("git really rename-detects the fixture, in BOTH spellings (else this proves nothing)", () => {
+    const raw = execFileSync("git", ["-C", RENAME_REPO, "diff", "--numstat", `main...${BRANCH}`], {
+      encoding: "utf8",
+    });
+    expect(raw).toContain("format.js => format.ts"); // bare
+    expect(raw).toContain("public/core/{state.js => state.ts}"); // compressed
+  });
+
+  test("the two captures agree, and the guard does NOT fire", async () => {
+    const stat = await gitMod.diffStat(RENAME_REPO, BRANCH, "main");
+    const net = await gitMod.changedCodeFiles(RENAME_REPO, "main", BRANCH);
+    const expected = ["format.ts", "public/core/state.ts"];
+    expect(stat.files.sort()).toEqual(expected);
+    expect(net.sort()).toEqual(expected);
+    expect(stat.changedLines).toBe(2); // content delta only — the renames themselves cost nothing
+
+    const v = gitMod.detectPhantomDrop({
+      preRebaseCode: net, originalCodeFiles: stat.files, netCode: net,
       releaseMode: true, isRollback: false, isCodeTask: true,
     });
     expect(v).toBeNull();
