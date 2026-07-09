@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `scripts/ci` now FAILS a diff that deletes a released version header from `CHANGELOG.md`. This
+  repo is high-velocity `release_mode`: every branch adds to `[Unreleased]` and the merge gate
+  rebases onto main, and when two tasks race the rebase can silently drop an already-released
+  header — orphaning that release's bullets under `[Unreleased]` (it ate the `0.9.246` header once
+  already). A branch only ever ADDS to `[Unreleased]`, so a removed `## [<digit>…]` line is always
+  the race. The gate greps the changelog diff (`^-## \[[0-9]`, scoped with an explicit
+  `-- CHANGELOG.md` pathspec so docs that quote changelog headers can't trip it) against the same
+  `$BASE` the changelog-updated check already resolves, and on a hit exits 1 printing the offending
+  header line(s) verbatim, so the reviewer sees exactly which release was orphaned. Ordinary
+  `[Unreleased]` bullet edits — added or removed — still pass, as does an added version header.
+  Previously this was caught only when a human happened to eyeball `git diff main...HEAD --
+  CHANGELOG.md`. Covered by `test/changelog-header-drop.test.ts`, which runs the real `scripts/ci`
+  (minus its two `bun` lines) against temp git repos in both directions.
+
 ## [0.9.250] - 2026-07-09
 
 - `docs/rfc-frontend-design-system.md` — ERRATA. Three factual claims in the signed-off RFC were
