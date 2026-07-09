@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.271] - 2026-07-09
+
 - **Front-end Phase 4 (RFC §5): `public/views/diff.js` builds DOM, not HTML strings.** `renderDiff()`
   returns a `DocumentFragment` (the summary plus one card per file) instead of a markup string, and
   the dependency-free syntax highlighter emits text nodes and `<span class="tok-*">` elements rather
