@@ -17,6 +17,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Front-end module split (RFC Phase 2, step 5): the diff view moves to
+  `public/views/diff.js`.** The 392-line diff cluster — `parseDiff`, the dependency-free
+  syntax highlighter (`langForPath` / `highlightJs` / `highlightCss` / `highlightCode` and
+  their scanners), `renderDiff`, and the whole inline review-comment surface
+  (`inlineComments`, `collapsedDiffFiles`, `openCommentEditor`, `renderCommentRow`,
+  `wireDiff`, `composeReviewNote`) — leaves `public/app.js` verbatim. Of its 21 symbols only
+  **four** are exported: `renderDiff`, `wireDiff`, `composeReviewNote`, and
+  `setPendingInlineRestore`; the other 17 become module-private. `app.js` drops 393 lines
+  (3,594 → 3,201). The module imports only `core/dom.js` (`el`, `esc`) — it touches no router
+  and no API, and is DOM-free at module load, so it is importable under `bun test`.
+
+- **`pendingInlineRestore` is now owned by the module that consumes it.** An open (uncommitted)
+  inline-comment editor lives inside the *asynchronously fetched* diff, so `captureUiState()`
+  stashes it before an SSE re-render and `wireDiff()` re-opens it once the diff is painted —
+  an async handoff that cannot be reduced to a parameter. The cell moves into `views/diff.js`
+  and `app.js`'s `restoreUiState()` writes it through a new exported `setPendingInlineRestore()`
+  setter, because an imported ES binding is read-only and could not be assigned across the
+  boundary. The edge is `app.js -> views/diff.js`, the same direction `app.js` already imports
+  `views/metrics.js`; no `core/ -> views/` inversion is introduced and no module writes another
+  module's imported binding.
+
+### Fixed
+
+- **`test/app-restore-uistate.test.ts` now actually tests the inline-comment handoff.** The
+  harness has always exposed `getInline()`, but **no test asserted it** — so the `snap.inline`
+  hand-off, inside the one file guarding the SSE-re-render UI-state hack, was uncovered. Three
+  tests are added: the full capture→restore round-trip (the editor is captured by its diff-line
+  `data-key` and skipped by the generic restore-key pass), that restore *clears* the cell when no
+  editor is open (a stale value would re-open an editor the operator had closed), and that an
+  editor with no anchoring diff-line key is not captured. The three pre-existing tests are
+  unchanged.
+
 ## [0.9.255] - 2026-07-09
 
 ### Changed

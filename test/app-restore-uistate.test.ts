@@ -9,7 +9,10 @@
 // helper blocks fenced with `<test-extract:...>` sentinels and eval them — but these helpers
 // touch document/window, so we hand the eval'd harness a minimal hand-rolled fake DOM and
 // exercise the REAL capture/restore logic against it. The only module-level dependency is
-// `pendingInlineRestore` (restoreUiState assigns it), declared as a local in the harness.
+// `setPendingInlineRestore` — restoreUiState hands an open inline-comment editor to the diff
+// view through it (the real one lives in public/views/diff.js, which owns that cell; an
+// imported binding is read-only, so app.js writes it via the setter). The harness stands in a
+// local cell + setter of the same shape and reads it back through getInline().
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -58,20 +61,31 @@ function makeNode(key: string, value = "", selStart: number | null = null, selEn
   return n;
 }
 
+/** A fake open inline-comment editor: the `.dlc-input` textarea inside a `.dl-comment-edit` wrap
+ *  whose previous sibling is the diff line it annotates (that line's `data-key` is the anchor
+ *  captureUiState records). Mirrors the DOM openCommentEditor builds in public/views/diff.js. */
+function makeInlineEditor(lineKey: string, value: string, selStart: number, selEnd: number) {
+  const dl = { dataset: { key: lineKey } };
+  const wrap = { previousElementSibling: dl };
+  return { value, selectionStart: selStart, selectionEnd: selEnd, closest: (_sel: string) => wrap };
+}
+
 /** Build the eval'd harness over a settable DOM. `setDom(nodes, active)` swaps the live node
  *  set (keyed by restore-key) — capture reads one DOM, then a "render" swaps to another that
- *  restore reads, exactly like the SSE path. The inline-comment editor is always absent here. */
+ *  restore reads, exactly like the SSE path. `setInlineEditor` opens/closes the inline-comment
+ *  editor that captureUiState stashes and (in the real app) wireDiff re-opens. */
 function makeHarness() {
   let nodes: Record<string, FakeNode> = {};
   let active: FakeNode | null = null;
+  let inlineEditor: ReturnType<typeof makeInlineEditor> | null = null;
 
   const KEY_SEL = /^\[data-restore-key="(.+)"\]$/;
   const fakeDocument = {
     querySelectorAll(sel: string): FakeNode[] {
       return sel === "[data-restore-key]" ? Object.values(nodes) : [];
     },
-    querySelector(sel: string): FakeNode | null {
-      if (sel === ".dl-comment-edit .dlc-input") return null; // no open inline editor in these tests
+    querySelector(sel: string): any {
+      if (sel === ".dl-comment-edit .dlc-input") return inlineEditor;
       const m = sel.match(KEY_SEL);
       if (m) return nodes[m[1]] || null;
       return null;
@@ -91,6 +105,7 @@ function makeHarness() {
 
   const body = `
     let pendingInlineRestore = null;
+    const setPendingInlineRestore = (v) => { pendingInlineRestore = v; };
     ${extract("capture-ui-state")}
     ${extract("restore-ui-state")}
     ${extract("apply-input-restore")}
@@ -108,6 +123,9 @@ function makeHarness() {
     setDom(next: Record<string, FakeNode>, activeNode: FakeNode | null = null) {
       nodes = next;
       active = activeNode;
+    },
+    setInlineEditor(ed: ReturnType<typeof makeInlineEditor> | null) {
+      inlineEditor = ed;
     },
     fakeWindow,
     scrolls,
@@ -161,4 +179,54 @@ test("no-clobber: a captured value never overwrites a non-empty re-rendered fiel
 
   expect(rerendered.value).toBe("server-provided");
   expect(rerendered._selRange).toEqual([]); // caret untouched when value not restored
+});
+
+// (d) INLINE-COMMENT HANDOFF: the one cross-module cell. An open inline-comment editor lives
+// inside the ASYNC-fetched diff, so it cannot be restored inline — captureUiState stashes it and
+// restoreUiState hands it to views/diff.js via setPendingInlineRestore(), which wireDiff() later
+// drains once the diff's line rows exist. Before the module split this cell was a bare `let` in
+// app.js and NOTHING asserted the handoff; it is the sole guard on the SSE-re-render hack, so it
+// is covered here in both directions.
+test("inline handoff: an open comment editor is captured by its diff-line key and handed to the diff view", () => {
+  const h = makeHarness();
+  // A typed-in generic field AND an open inline-comment editor, together, mid-render.
+  const answer = makeNode("answer", "note", 4, 4);
+  const skipped = makeNode("inline-comment", "should-not-be-captured-generically");
+  h.setDom({ answer, "inline-comment": skipped }, null);
+  h.setInlineEditor(makeInlineEditor("src/app.ts␟n42", "needs a guard", 3, 8));
+
+  const snap = h.captureUiState();
+  // The editor is captured SEPARATELY (by diff-line key), and skipped by the generic pass —
+  // otherwise restore would try to re-apply it by restore-key into a diff that isn't painted yet.
+  expect(snap.inline).toEqual({ key: "src/app.ts␟n42", value: "needs a guard", selStart: 3, selEnd: 8 });
+  expect(snap.values.has("inline-comment")).toBe(false);
+  expect(snap.values.has("answer")).toBe(true);
+
+  // The SSE render tears the diff down; restore hands the editor off for wireDiff to re-open.
+  h.setDom({ answer: makeNode("answer", "") }, null);
+  h.setInlineEditor(null);
+  h.restoreUiState(snap);
+  expect(h.getInline()).toEqual({ key: "src/app.ts␟n42", value: "needs a guard", selStart: 3, selEnd: 8 });
+});
+
+// (e) NO OPEN EDITOR: restore must CLEAR the cell, not leave a stale editor pending. wireDiff only
+// drains a truthy value, so a leftover would re-open an editor the operator had already closed.
+test("inline handoff: with no editor open, restore clears the pending cell to null", () => {
+  const h = makeHarness();
+  h.setDom({ answer: makeNode("answer", "x", 0, 1) }, null);
+  const snap = h.captureUiState();
+  expect(snap.inline).toBe(null);
+
+  h.setDom({ answer: makeNode("answer", "") }, null);
+  h.restoreUiState(snap);
+  expect(h.getInline()).toBe(null);
+});
+
+// (f) UNANCHORED EDITOR: an editor whose diff line carries no data-key (nothing to re-attach to)
+// is NOT captured — capturing it would hand wireDiff a keyless restore it can never place.
+test("inline handoff: an editor with no anchoring diff-line key is not captured", () => {
+  const h = makeHarness();
+  h.setDom({}, null);
+  h.setInlineEditor(makeInlineEditor("", "orphan", 0, 0));
+  expect(h.captureUiState().inline).toBe(null);
 });
