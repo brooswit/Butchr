@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Front-end modularization (RFC Phase 2, step 3): extracted the PANEL and OVERLAY
+  component clusters out of `public/app.js` into `public/components/panel.js`
+  (`collapsible`, `ciBadge`, `conformanceBadge`, `block`, `blockerRow`, `listPanel`,
+  `rollupPanel`) and `public/components/overlay.js` (`openModal`, `openPicker`).
+  Pure relocation — no behavior change, no visual change. `app.js` drops to 3,722 lines.
+  `ciBadge` sits in `panel.js` rather than `chips.js` because it calls `collapsible()`.
+- `action()` deliberately stays in `app.js`: its `onDone` defaults to `render()`, so
+  moving it to `components/` would close a `components/` → `app.js` import cycle. It is
+  a Button concern (RFC D6) and moves once Phase 4 introduces the Button component.
+- `test/cli-helpers.test.ts` now imports the real `ciBadge` export from
+  `components/panel.js` instead of grepping `public/app.js` by path for
+  `"function ciBadge("` — a source scrape that broke on the move and only ever proved a
+  string was present.
+
 ## [0.9.253] - 2026-07-09
 
 ### Changed

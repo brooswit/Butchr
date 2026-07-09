@@ -20,7 +20,11 @@ import {
   statusLabel,
 } from "./core/state-meta.js";
 // `components/` holds the presentational leaves — DOM-free at load, importing only from
-// `core/`. chips.js owns the CHIP + BADGE cluster (status/kind/tag/liveness pills).
+// `core/` and from each other. chips.js owns the CHIP + BADGE cluster (status/kind/tag/
+// liveness pills); panel.js the collapsible scaffold + the containers and gate badges built
+// on it; overlay.js the modal scaffold + the directory picker. Nothing under components/
+// imports THIS file — that cycle is the one thing the split must never close, which is why
+// action() (whose onDone defaults to render) stays below rather than moving to overlay.js.
 import {
   chip,
   effStatus,
@@ -30,6 +34,16 @@ import {
   tagChips,
   taskChips,
 } from "./components/chips.js";
+import {
+  block,
+  blockerRow,
+  ciBadge,
+  collapsible,
+  conformanceBadge,
+  listPanel,
+  rollupPanel,
+} from "./components/panel.js";
+import { openModal, openPicker } from "./components/overlay.js";
 
 const app = document.getElementById("app");
 
@@ -39,64 +53,6 @@ const app = document.getElementById("app");
 // attach would succeed. (Agents are addressed BY NAME; no pane id is stored.)
 function isLive(t) {
   return !!t.has_agent;
-}
-
-// ---------- collapsible panel ----------
-// Shared scaffold for the caret (▾ open / ▸ closed) + clickable head + toggle-body
-// pattern behind the Finished, CI-output, transcript, and live-output panels —
-// the one thing those four copied identically: the caret glyph, the open/closed
-// CSS-class flip, and (optionally) persisting the choice to localStorage. Each
-// panel keeps its own `body` node and its own body-fill / lazy-load / poll logic,
-// plugged in via `onToggle(open)` (fired on every user toggle) and re-applied by
-// the caller after construction.
-//
-// State is one CSS class on the panel. By default that class is `collapsed` and is
-// present when CLOSED (the panel convention); set `stateMeansOpen` for the inverted
-// Finished section, whose `open` class is present when OPEN. `meta` is the trailing
-// hint/count span. Returns { panel, head, caret, setOpen }; `setOpen(next, persist?)`
-// flips state programmatically.
-//
-// The diff-file cards deliberately do NOT use this: their caret is a static glyph
-// rotated by CSS (`.diff-file.collapsed .caret`), not flipped in JS, so routing
-// them through here would require a style.css change.
-function collapsible({
-  title = "",
-  titleClass,
-  meta,
-  metaClass,
-  body,
-  open = false,
-  panelClass = "",
-  headClass = "",
-  stateClass = "collapsed",
-  stateMeansOpen = false,
-  persistKey,
-  onToggle,
-} = {}) {
-  let isOpen = open;
-  const caret = el("span", { class: "caret" }, isOpen ? "▾" : "▸");
-  const headKids = [caret];
-  if (title) headKids.push(el("span", titleClass ? { class: titleClass } : {}, title));
-  if (meta != null) headKids.push(el("span", metaClass ? { class: metaClass } : {}, meta));
-  const head = el("button", { class: headClass, type: "button" }, headKids);
-  const panel = el("div", { class: panelClass }, body ? [head, body] : [head]);
-
-  const apply = () => {
-    panel.classList.toggle(stateClass, stateMeansOpen ? isOpen : !isOpen);
-    caret.textContent = isOpen ? "▾" : "▸";
-  };
-  apply();
-
-  const setOpen = (next, persist = true) => {
-    isOpen = next;
-    apply();
-    if (persist && persistKey) {
-      try { localStorage.setItem(persistKey, next ? "1" : "0"); } catch (e) { /* ignore */ }
-    }
-    if (onToggle) onToggle(next);
-  };
-  head.addEventListener("click", () => setOpen(!isOpen));
-  return { panel, head, caret, setOpen };
 }
 
 // Open a GUI terminal attached to a running task's live agent pane. Routed through
@@ -246,36 +202,6 @@ async function ctoPanel(dirId) {
   return card;
 }
 
-// Shared modal scaffold. Builds the backdrop + modal, wires Escape and
-// backdrop-click to close, and mounts it on document.body — the identical ~12
-// lines every modal otherwise hand-rolls. Pass `title` for the standard head
-// (title + ✕ close button) and `body`/`footer` nodes for static content; or omit
-// them and paint into the returned `modal` element yourself (the picker rebuilds
-// its own head/list/foot on each navigation). Returns { close, backdrop, modal }.
-function openModal({ title, body, footer } = {}) {
-  const backdrop = el("div", { class: "modal-backdrop" });
-  const modal = el("div", { class: "modal" });
-  backdrop.appendChild(modal);
-  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
-  function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
-  function onKey(e) { if (e.key === "Escape") close(); }
-  document.addEventListener("keydown", onKey);
-
-  if (title != null) {
-    const head = el("div", { class: "m-head" });
-    head.appendChild(el("h3", {}, title));
-    const x = el("button", { class: "btn ghost" }, "✕");
-    x.addEventListener("click", close);
-    head.appendChild(x);
-    modal.appendChild(head);
-  }
-  if (body) modal.appendChild(body);
-  if (footer) modal.appendChild(footer);
-
-  document.body.appendChild(backdrop);
-  return { close, backdrop, modal };
-}
-
 // Owns the disable/try/restore/toast dance every action button repeats: disable
 // `btn` (when present), run `fn` (typically an api() call), and on success toast
 // `success` (a string, or a fn of fn's result) then run `onDone` (defaults to
@@ -284,6 +210,12 @@ function openModal({ title, body, footer } = {}) {
 // inside `fn` themselves and pass no `success`. `btn` is optional — a caller with
 // no button to disable (e.g. a term-link) passes none. Any pre-flight confirm()
 // must run before calling action(), so a cancel never disables the button.
+//
+// This stays in app.js rather than moving to components/overlay.js with the modals:
+// `onDone` DEFAULTS to render(), so the body closes over an app-level binding, and a
+// components/ module that reached for it would import app.js — the one cycle the
+// module split must not close. It is a BUTTON concern regardless (RFC D6: the missing
+// Button component), and belongs in components/button.js once Phase 4 lands it.
 async function action(btn, fn, { success, onDone } = {}) {
   if (btn) btn.disabled = true;
   try {
@@ -294,86 +226,6 @@ async function action(btn, fn, { success, onDone } = {}) {
     toast(e.message, true);
     if (btn) btn.disabled = false;
   }
-}
-
-// ---------- workspace picker modal ----------
-// onSelect(path, register): register=false fills the field; true registers now.
-function openPicker(onSelect) {
-  let cur = null;
-
-  // No title/body/footer: the picker repaints its own head/list/foot on each
-  // navigation, so it just borrows openModal's backdrop/Escape/close scaffold.
-  const { close, modal } = openModal();
-
-  async function load(path) {
-    let data;
-    try {
-      data = await api("GET", "/fs" + (path ? "?path=" + encodeURIComponent(path) : ""));
-    } catch (e) { toast(e.message, true); return; }
-    cur = data;
-    paint();
-  }
-
-  function paint() {
-    modal.innerHTML = "";
-    const head = el("div", { class: "m-head" });
-    head.appendChild(el("h3", {}, "Choose a git repository"));
-    const homeBtn = el("button", { class: "btn ghost" }, "Home");
-    homeBtn.addEventListener("click", () => load(cur.home));
-    const x = el("button", { class: "btn ghost" }, "✕");
-    x.addEventListener("click", close);
-    head.appendChild(homeBtn);
-    head.appendChild(x);
-    modal.appendChild(head);
-
-    modal.appendChild(el("div", { class: "m-path" }, cur.path));
-
-    const list = el("div", { class: "m-list" });
-    if (cur.parent) {
-      const up = el("div", { class: "fs-row up" }, [
-        el("span", { class: "ic" }, "↑"),
-        el("span", { class: "nm" }, ".. (up)"),
-      ]);
-      up.addEventListener("click", () => load(cur.parent));
-      list.appendChild(up);
-    }
-    if (cur.entries.length === 0) {
-      list.appendChild(el("div", { class: "muted m-empty" }, "(no subfolders)"));
-    }
-    for (const e of cur.entries) {
-      const row = el("div", { class: "fs-row" });
-      row.appendChild(el("span", { class: "ic" }, e.isGitRepo ? "◆" : "▸"));
-      row.appendChild(el("span", { class: "nm" }, e.name));
-      if (e.isGitRepo) {
-        const badge = el("span", { class: "git-badge" }, "git");
-        row.appendChild(badge);
-        const reg = el("button", { class: "btn" }, "Register");
-        reg.addEventListener("click", (ev) => { ev.stopPropagation(); onSelect(e.path, true); close(); });
-        row.appendChild(reg);
-      }
-      row.addEventListener("click", () => load(e.path));
-      list.appendChild(row);
-    }
-    modal.appendChild(list);
-
-    const foot = el("div", { class: "m-foot" });
-    if (cur.isGitRepo) {
-      foot.appendChild(el("span", { class: "hint" }, "This folder is a git repository."));
-      const reg = el("button", { class: "btn success" }, "Register this folder");
-      reg.addEventListener("click", () => { onSelect(cur.path, true); close(); });
-      foot.appendChild(reg);
-    } else {
-      foot.appendChild(el("span", { class: "hint" }, "Open a folder, or pick its path."));
-      const use = el("button", { class: "btn ghost" }, "Use this path");
-      use.addEventListener("click", () => { onSelect(cur.path, false); close(); });
-      foot.appendChild(use);
-    }
-    modal.appendChild(foot);
-  }
-
-  // Start from the add-workspace modal's path field if it's open with a value, else home.
-  const seed = (document.getElementById("aw-path") || {}).value || "";
-  load(seed.trim() || null);
 }
 
 // ---------- router ----------
@@ -1343,79 +1195,6 @@ function buildSwimlanes(work, wrap, repaint) {
   wrap.appendChild(lanes);
 }
 
-// CI GATE badge for the review panel. ci_status: 'running' shows a spinner;
-// 'pass'/'fail' show a green/red badge whose label is the first line of ci_summary
-// ("build + N tests" / "build failed" / "K test failures"); anything else (null)
-// is a neutral "not run". The rest of ci_summary (the output tail) is offered as a
-// collapsible detail under the badge so a reviewer can see why CI failed.
-function ciBadge(t) {
-  const status = t.ci_status || null;
-  const summary = t.ci_summary || "";
-  const nl = summary.indexOf("\n");
-  const label = (nl === -1 ? summary : summary.slice(0, nl)).trim();
-  const detail = nl === -1 ? "" : summary.slice(nl).trim();
-
-  const wrap = el("div", { class: "ci-gate" });
-  let badge;
-  if (status === "running") {
-    badge = el("span", { class: "ci-badge running" }, [
-      el("span", { class: "ci-spinner" }),
-      el("span", {}, "CI running…"),
-    ]);
-  } else if (status === "pass") {
-    badge = el("span", { class: "ci-badge pass" }, "✓ " + (label || "build + tests"));
-  } else if (status === "fail") {
-    badge = el("span", { class: "ci-badge fail" }, "✗ " + (label || "build failed"));
-  } else {
-    badge = el("span", { class: "ci-badge none" }, "CI not run");
-  }
-  wrap.appendChild(badge);
-
-  // Collapsible output tail (only when CI has settled with detail to show).
-  if (detail && status !== "running") {
-    const pre = el("pre", { class: "block ci-detail-body" }, detail);
-    const { panel } = collapsible({
-      title: "output",
-      body: pre,
-      open: false,
-      panelClass: "ci-detail",
-      headClass: "ci-detail-toggle",
-    });
-    wrap.appendChild(panel);
-  }
-  return wrap;
-}
-
-// SPEC-CONFORMANCE badge for the review panel, shown next to the CI badge.
-// conformance_status: 'checking' shows a spinner; 'pass' shows a green "conforms";
-// 'concern' shows an amber "concern: <reason>" (the reviewer's reason in
-// conformance_summary); null/absent renders nothing (best-effort — it may not run).
-// Whereas CI proves the change builds + tests pass, this judges whether the diff
-// actually did what the task asked — an orthogonal, advisory signal.
-function conformanceBadge(t) {
-  const status = t.conformance_status || null;
-  if (!status) return null; // not run / couldn't run — show nothing
-  const reason = (t.conformance_summary || "").trim();
-  let badge;
-  if (status === "checking") {
-    badge = el("span", { class: "conf-badge checking" }, [
-      el("span", { class: "ci-spinner" }),
-      el("span", {}, "conformance…"),
-    ]);
-  } else if (status === "pass") {
-    badge = el("span", { class: "conf-badge pass", title: reason || "conforms" }, "✓ conforms");
-  } else {
-    // 'concern' — amber, with the reviewer's reason inline (truncated) + full on hover.
-    const short = reason.length > 140 ? reason.slice(0, 140) + "…" : reason;
-    badge = el(
-      "span",
-      { class: "conf-badge concern", title: reason || "concern" },
-      "⚠ concern" + (short ? ": " + short : ""),
-    );
-  }
-  return el("span", { class: "conf-gate" }, [badge]);
-}
-
 // ---------- task detail / review ----------
 // Compact vertical AUDIT TIMELINE of a task's status transitions (oldest → newest):
 // one row per change with the transition (from → to chips) and the short note that
@@ -1650,65 +1429,6 @@ function dependentRollup(rootId, tasks) {
   // count under-reported any subtree containing one (mirrors the graph sub-bar; see isCompleteStatus).
   const merged = subtree.filter((t) => isCompleteStatus(t.status)).length;
   return { direct, total: subtree.length, merged };
-}
-
-// Append a heading + monospace block pair to `parent`. el() escapes a text child,
-// so callers pass the RAW string (no esc()/innerHTML) — the recurring "<h2> + <pre
-// class=block>" pair in the task detail (prompt, review notes, summary, output, …).
-function block(heading, text, parent) {
-  parent.appendChild(el("h2", {}, heading));
-  parent.appendChild(el("pre", { class: "block" }, text));
-}
-
-// One ".blocker-row": the id (linked to its task) plus an optional status chip, with
-// a "dead" flag (terminal blocker that will never merge) adding the class + warning.
-// Pass a falsy `status` to omit the chip (an id-only row).
-function blockerRow(id, status, { dead = false } = {}) {
-  const row = el("div", { class: "blocker-row" + (dead ? " dead" : "") });
-  row.innerHTML = `<a class="bk-id" href="#/task/${esc(id)}">${esc(id)}</a>`
-    + (status ? chip(status) : "")
-    + (dead ? '<span class="bk-dead">will never merge — edit blocked_by to proceed</span>' : "");
-  return row;
-}
-
-// The shared scaffold behind the task-detail dependency panels (blocked-by,
-// rollup): a ".panel" (distinguished by `cls`) with a margin-collapsed h2 heading, an
-// optional chain-estimate line, optional `lead` nodes (the rollup's summary/bar), and
-// a ".blockers" list of `rows`.
-function listPanel(heading, rows, { chainLine, cls = "", lead } = {}) {
-  const panel = el("div", { class: "panel" + (cls ? " " + cls : "") });
-  panel.appendChild(el("h2", { class: "panel-title" }, heading));
-  if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
-  for (const node of [].concat(lead || [])) panel.appendChild(node);
-  panel.appendChild(el("div", { class: "blockers" }, rows));
-  return panel;
-}
-
-// Render the sub-task progress rollup panel: "N/M merged", a progress bar, and the
-// direct dependents with their live statuses (so the gated sub-tree's progress reads
-// at a glance). Live-updates for free — the task page re-renders on every SSE event.
-// Returns null when there's nothing to roll up.
-function rollupPanel(rollup) {
-  if (!rollup) return null;
-  const { direct, total, merged } = rollup;
-  const pct = total ? Math.round((merged / total) * 100) : 0;
-  const lead = [
-    el("div", { class: "rollup-summary" }, [
-      el("span", { class: "rollup-frac" }, `${merged}/${total} merged`),
-      el("span", { class: "rollup-pct muted" }, `${pct}%`),
-    ]),
-    el("div", { class: "rollup-bar", role: "progressbar",
-      "aria-valuenow": String(merged), "aria-valuemin": "0", "aria-valuemax": String(total) }, [
-      el("div", { class: "rollup-bar-fill", style: `width:${pct}%` }),
-    ]),
-  ];
-  const nested = total - direct.length;
-  if (nested > 0) {
-    lead.push(el("div", { class: "rollup-nested muted" },
-      `${direct.length} direct · +${nested} nested sub-task${nested === 1 ? "" : "s"}`));
-  }
-  const rows = direct.map((c) => blockerRow(c.id, effStatus(c)));
-  return listPanel("Sub-task progress", rows, { cls: "rollup-panel", lead });
 }
 
 async function renderTask(id) {

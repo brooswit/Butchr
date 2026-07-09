@@ -6,9 +6,15 @@
 // id-taking command, run with no id, must fail with the SAME standardized
 // `butchr: <cmd>: missing <id>` message and exit 1 — proving they all funnel through
 // the one helper. The id-missing guard runs BEFORE any API call, so no server is
-// needed. The rename is asserted by reading the source (a cross-surface grep trap:
-// public/app.js has an unrelated DOM ciBadge that must NOT be touched here).
+// needed. The rename is asserted by reading the CLI source (a cross-surface grep trap:
+// the front-end has an unrelated DOM ciBadge that must NOT be touched here).
 import { expect, test } from "bun:test";
+// The front-end ciBadge — the OTHER thing named ciBadge, which the rename must leave alone.
+// It moved out of public/app.js into public/components/panel.js with the Phase 2 module
+// split, so this guard imports the real export instead of grepping app.js by path: a path
+// scrape re-breaks on every move and proves nothing beyond "a string is present".
+// panel.js is DOM-free at module load, so importing it here is safe under bun test.
+import { ciBadge } from "../public/components/panel.js";
 import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -129,14 +135,13 @@ test("new --bump major is accepted by parsing (fails later, not on the flag)", (
   expect(stderr).not.toContain("standalone task creation is disabled");
 });
 
-test("ciBadge is renamed to ciCell in bin/butchr (and app.js is untouched)", () => {
+test("ciBadge is renamed to ciCell in bin/butchr (and the front-end helper is untouched)", () => {
   const cli = readFileSync(CLI, "utf8");
   // The CLI's CI helper is now ciCell; the old name must be gone here.
   expect(cli).not.toContain("ciBadge");
   expect(cli).toContain("function ciCell(");
-  // The unrelated DOM helper in public/app.js keeps its name — not our file to edit.
-  const app = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-  expect(app).toContain("function ciBadge(");
+  // The unrelated DOM helper keeps its name — not our surface to rename.
+  expect(typeof ciBadge).toBe("function");
 });
 
 // F1 — a bare negative integer is reachable as a POSITIONAL, not rejected as an
