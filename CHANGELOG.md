@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.273] - 2026-07-09
+
 - **Opt-in escaping is removed as a CATEGORY (RFC §5, Phase 4 complete).** `esc()`, `el()`'s
   `{html:}` prop, and the transitional `htmlOf()` bridge are deleted from `public/core/dom.js`.
   Agent-authored text — task titles, tags, transcripts, diff bodies — is now auto-escaped
