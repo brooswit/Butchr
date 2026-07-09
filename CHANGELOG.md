@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.258] - 2026-07-09
+
 ### Added
 
 - `scripts/ci` now validates the front-end, which it previously never parsed at all — a broken
