@@ -37,14 +37,35 @@ import { expect, test } from "bun:test";
 import { Glob } from "bun";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const transpiler = new Bun.Transpiler({ loader: "js" });
 
-/** Every public/**\/*.js, with comments removed. Repo-relative path -> stripped source. */
-const sources: Array<{ file: string; src: string }> = [...new Glob("**/*.js").scanSync(`${ROOT}public`)]
+// One transpiler per loader: `.tsx` will not parse as `js`, and `.ts` will not parse as `js` once a
+// type annotation appears. All three exist under public/ from RFC Phase 4a onward.
+const TRANSPILERS: Record<string, Bun.Transpiler> = {
+  js: new Bun.Transpiler({ loader: "js" }),
+  ts: new Bun.Transpiler({ loader: "ts" }),
+  tsx: new Bun.Transpiler({ loader: "tsx" }),
+};
+
+/**
+ * Every public/**\/*.{js,ts,tsx}, with comments removed. Repo-relative path -> stripped source.
+ *
+ * THE GLOB COVERS `.ts`/`.tsx`, NOT JUST `.js`, AND THAT IS LOAD-BEARING. It matched only `**​/*.js`
+ * until RFC Phase 4a, which was already one hole (Phase 3 added `.tsx` this guard never saw) and
+ * would have become a second: 4a ports ten modules from `.js` to `.ts`, and a `.js`-only glob would
+ * have let every one of them slip out of coverage SILENTLY, still green, still "passing". That is
+ * precisely the vacuous-guard rot the next test exists to catch, arriving through the back door.
+ *
+ * React re-opens the hole under a new name: `dangerouslySetInnerHTML` is `{html:}` with a longer
+ * spelling, and test (a)'s blanket `html:` ban does not match it. Test (e) bans it by name.
+ */
+const sources: Array<{ file: string; src: string }> = [...new Glob("**/*.{js,ts,tsx}").scanSync(`${ROOT}public`)]
   .sort()
   .map((rel) => {
     const file = `public/${rel}`;
     const raw = require("node:fs").readFileSync(`${ROOT}${file}`, "utf8");
+    const ext = rel.slice(rel.lastIndexOf(".") + 1);
+    const transpiler = TRANSPILERS[ext];
+    if (!transpiler) throw new Error(`no transpiler for ${file} — extend TRANSPILERS`);
     return { file, src: transpiler.transformSync(raw) };
   });
 
@@ -108,4 +129,19 @@ test("(d) no raw `innerHTML =` writes under public/ except a bare clear", () => 
     }
   }
   expect(offenders, "A raw innerHTML write re-opens the hole `{html:}` used to be. Build the content with el() (its text children are escaped via createTextNode); to empty a container use replaceChildren(), or the bare `innerHTML = \"\"` clear.").toEqual([]);
+});
+
+// (e) THE REACT-SHAPED HOLE. `dangerouslySetInnerHTML={{__html: …}}` is exactly `el(tag, {html: …})`
+// with a longer name and a warning label, and NONE of (a)–(d) catches it: it is not an `html:` key,
+// not an `esc()` call, and not a `.innerHTML =` write. It appears the moment somebody wants to
+// render a diff, a brief, or a transcript as markup — which is every view Phases 4b–4d migrate.
+//
+// Escaping stays STRUCTURAL under React for the same reason it is structural under el(): JSX renders
+// a string child as a text node, so a `<` or `&` in agent-authored text reaches the DOM as itself.
+// There is nothing to opt into, and this is what keeps it that way. Zero offenders today.
+test("(e) no `dangerouslySetInnerHTML` under public/ — React's spelling of the same hole", () => {
+  const offenders = sources
+    .filter(({ src }) => /\bdangerouslySetInnerHTML\b/.test(src))
+    .map(({ file }) => file);
+  expect(offenders, "dangerouslySetInnerHTML re-introduces opt-in escaping (story st-82c11fd1 deleted it in every other spelling). Render the value as a JSX text child — it is escaped structurally — or build the nodes explicitly.").toEqual([]);
 });

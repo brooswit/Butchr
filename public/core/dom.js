@@ -11,7 +11,7 @@
 //
 // Do not reintroduce them, and do not reach for `node.innerHTML = …` to get around this: that
 // is the same hole by another name. Build with el(); to empty a container use replaceChildren().
-// test/no-opt-in-escaping.test.ts enforces all of the above across public/**/*.js.
+// test/no-opt-in-escaping.test.ts enforces all of the above across public/**/*.{js,ts,tsx}.
 
 // ---------- tiny helpers ----------
 export function el(tag, attrs = {}, children = []) {

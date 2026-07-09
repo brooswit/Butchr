@@ -19,6 +19,7 @@ import { HashRouter, Link, Navigate, Route, Routes, useHref, useLocation, useNav
 import { refreshSoon, VanillaView } from "./bridge";
 import { setToastSink, toast } from "./components/toast.js";
 import { api } from "./core/api.js";
+import type { Health, Project, Repo } from "./core/types.js";
 import { ensureStateMeta, isStateMetaLoaded } from "./state-meta-store";
 import { renderMetrics } from "./views/metrics.js";
 import { renderProjectDetail, renderProjects } from "./views/projects.js";
@@ -80,9 +81,9 @@ function useHealth() {
   const previous = useRef<Attention | null>(null);
 
   const refresh = useCallback(async () => {
-    let health;
+    let health: Health;
     try {
-      health = await api("GET", "/health");
+      health = await api<Health>("GET", "/health");
     } catch {
       return;
     }
@@ -263,11 +264,11 @@ function PauseBanner({ onResume }: { onResume: () => void }) {
  *  any error (best-effort; never throws). */
 async function projectIdForWorkspace(wid: string): Promise<string | null> {
   try {
-    const projects = await api("GET", "/projects");
+    const projects = await api<Project[]>("GET", "/projects");
     const matches = await Promise.all(
       (projects || []).map(async (p: { id: string }) => {
         try {
-          const repos = await api("GET", "/projects/" + encodeURIComponent(p.id) + "/repos");
+          const repos = await api<Repo[]>("GET", "/projects/" + encodeURIComponent(p.id) + "/repos");
           return Array.isArray(repos) && repos.some((r) => r && r.id === wid) ? p.id : null;
         } catch {
           return null;
@@ -351,7 +352,7 @@ function Shell() {
     try {
       // Resume when currently paused, otherwise pause. The button + banner reflect the authoritative
       // `paused` the endpoint returns, not an optimistic flip.
-      const r = await api("POST", paused ? "/resume" : "/pause");
+      const r = await api<{ paused?: boolean }>("POST", paused ? "/resume" : "/pause");
       const next = !!(r && r.paused);
       setPaused(next);
       toast(next ? "dispatch paused — new tasks won't start" : "dispatch resumed");
