@@ -32,7 +32,7 @@ import { ensureStateMeta, isStateMetaLoaded } from "./state-meta-store";
 import { MetricsView } from "./views/metrics.js";
 import { renderProjectDetail, renderProjects } from "./views/projects.js";
 import { renderTask } from "./views/task.js";
-import { renderWorkspace } from "./views/workspace.js";
+import { WorkspaceView } from "./views/workspace.tsx";
 
 /** THE SSE RE-RENDER, for BOTH worlds. Two debouncers, deliberately, because the two invalidation
  *  mechanisms cannot be merged while a single view is still vanilla: `refreshVanillaSoon` re-runs
@@ -311,7 +311,11 @@ function ProjectRoute() {
 
 function WorkspaceRoute() {
   const { projectId = "", workspaceId = "" } = useParams();
-  return <VanillaView id={`workspace:${projectId}:${workspaceId}`} run={() => renderWorkspace(workspaceId, projectId)} />;
+  // MIGRATED (Phase 4c). `key` forces a remount when the route params change: WorkspaceView holds
+  // per-lane "N done" expansion state, and carrying one workspace's expanded piles into another
+  // workspace's lanes would be wrong. Without it React reuses the component instance across a
+  // params-only navigation.
+  return <WorkspaceView key={`${projectId}:${workspaceId}`} workspaceId={workspaceId} projectId={projectId} />;
 }
 
 function TaskRoute() {
@@ -345,7 +349,7 @@ function LegacyWorkspaceRoute() {
   }, [workspaceId, navigate]);
 
   if (!flat) return null;
-  return <VanillaView id={`workspace::${workspaceId}`} run={() => renderWorkspace(workspaceId, undefined)} />;
+  return <WorkspaceView key={workspaceId} workspaceId={workspaceId} />;
 }
 
 // ---------- shell ----------

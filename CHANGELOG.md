@@ -17,6 +17,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RFC Phase 4c — the WORKSPACE page and the PIPELINE (swimlanes) are React views.**
+  `public/views/workspace.tsx` and `public/views/swimlanes.tsx` replace `views/workspace.js` and
+  `views/swimlanes.js` (both deleted), and `App.tsx`'s `/projects/:pid/workspaces/:wid` +
+  `/workspace/:wid` routes point at the component instead of at `<VanillaView>`. `views/projects.js`,
+  `views/task.js` and `views/diff.js` are still vanilla and still reach `#app` through `bridge.tsx`;
+  the bridge shrinks by one poll timer and Phase 4e deletes it. Three components come across with the
+  views: `components/cto-panel.tsx` (replacing `cto-panel.js`, deleted), and the NEW
+  `components/button.tsx` (`useAction` + `ActionButton` — the vanilla `action()` dance as a hook) and
+  `components/overlay.tsx` (`ModalShell` + `ModalError`, i.e. `ModalOverlay`+`Modal`+`Dialog`, which
+  bring the focus trap the hand-rolled `openModal` never had). `components/chips.tsx` gains
+  `KindBadge`. `components/chips.js`, `button.js` and `overlay.js` stay for the three vanilla views
+  until 4d. From LaunchPad: `Breadcrumbs`/`Breadcrumb` (through the shell's `RouterProvider`, so the
+  crumbs navigate the hash router), `TextField`/`Label`/`TextArea` for the New-story brief, and
+  `Button` throughout. Two `--lp-*`-neutral CSS rules are added for semantics LaunchPad lacks
+  (`.btn-outline`, an outlined destructive; `.modal-wrap`, which stops `Modal`+`Dialog` painting two
+  nested cards) plus `.modal .field` rules, because LaunchPad's `TextField` renders a `<div>` and
+  style.css's `label.field` is tag-qualified.
+
+### Fixed
+
+- **The Pipeline's "Open Leader terminal" control is restored.** The abandoned Phase-4 branch dropped
+  `leaderTerminalBtn` from the swimlanes lane header entirely, while `leaderTerminalBtnState` (the
+  pure gate behind it, asserted on all four branches by `test/swimlane-leader-terminal-btn.test.ts`)
+  stayed in `views/swimlanes-logic.ts`. The button is back, wired to the same pure state, and its
+  honest "why is this disabled" hint now sits on a wrapper `<span title>` rather than the button —
+  both because LaunchPad's `ButtonProps` has no `title`, and because browsers suppress hover events
+  on a disabled `<button>`, so the tooltip that mattered most was the one least likely to appear.
+
+### Removed
+
+- **The live ACTIVITY PULSE, which has been dead since the st-ef0e7690 dead-code sweep.**
+  `activityTimer`, `activityCache`, `applyPulse`, `tickPulseElapsed`, `pollActivity`, `startActivity`
+  and `stopActivity` are gone from the workspace view, and `bridge.tsx` no longer calls
+  `stopActivity`. The sweep deleted `pulseMarkup()` — the sole producer of the `.pulse[data-id]` node
+  — and kept the consumer, so `startActivity()`'s opening `if (!document.querySelector(".pulse[data-id]")) return;`
+  had made the timer a no-op ever since. `GET /api/work/:id/activity` and `src/transcript.ts` are
+  UNTOUCHED (`test/activity.test.ts` covers them server-side); reviving the pulse means rendering the
+  node again, which is a product decision, not a port. `pruneWorkCaches` (`core/work-graph.ts`) loses
+  its last production caller as a result — it bounded that cache and the swimlanes' module-level
+  `SWIM_DONE_EXPANDED` Set, which is per-lane component state now. It is pure, exported and covered by
+  `test/graph-rollup-completion.test.ts`, so it stays; deleting it is st-ef0e7690's call.
+
+### Changed
+
+- **`test/story-lifecycle-ui.test.ts`'s DOM half moves to `@testing-library/react`.** Its pure half
+  (`storyLifecycle` / `storyProgress`, off the unchanged `views/swimlanes-logic.ts`) keeps its
+  assertions character-for-character, as do `test/swimlane-order.test.ts` and
+  `test/swimlane-leader-terminal-btn.test.ts`, which never imported the view module at all — the RFC
+  Phase 2 horizontal split is what let the view change paradigm without moving a single logic test.
+  `test/vanilla-views-dom-free.test.ts` drops `swimlanes.js` + `workspace.js` from its tripwire list
+  (three views left). NEW `test/swimlanes-view.test.ts` renders the Pipeline for the first time: lane
+  header, left→right `blocked_by` order, the emphasis classes, both empty states, the cross-lane
+  blocker badge, the done-pile toggle's click AND Enter/Space contract, the ungrouped catch-all, and
+  the leader-terminal gate. Until now the view had NO DOM coverage — `renderSwimlanes` built nodes
+  with `el()` and nothing rendered them.
+
 ## [0.9.285] - 2026-07-09
 
 ### Added

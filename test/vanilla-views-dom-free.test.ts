@@ -15,11 +15,12 @@
 // rests on — test/kind-badge.test.ts, test/cli-helpers.test.ts and test/state-meta-fallback.test.ts
 // all import `public/*.js` directly under a runner with no browser.
 //
-// The four views below are the ones that are STILL VANILLA at Phase 4b. views/metrics.js is gone
-// (views/metrics.tsx replaced it); views/diff.js is here because renderTask still calls it. As each
-// migrates, drop it from this list. When the list is empty, delete this file, delete `unregisterDom`
-// from every React test's `afterAll`, and move `registerDom()` into test/test-setup.ts's preload —
-// that is Phase 4e, and this comment is the checklist.
+// The three views below are the ones that are STILL VANILLA at Phase 4c. views/metrics.js is gone
+// (views/metrics.tsx replaced it, 4b); views/swimlanes.js and views/workspace.js are gone too
+// (views/swimlanes.tsx + views/workspace.tsx replaced them, 4c). views/diff.js is here because
+// renderTask still calls it. As each migrates, drop it from this list. When the list is empty, delete
+// this file, delete `unregisterDom` from every React test's `afterAll`, and move `registerDom()` into
+// test/test-setup.ts's preload — that is Phase 4e, and this comment is the checklist.
 //
 // >>> DO NOT ADD A REACT IMPORT TO THIS FILE. <<< @testing-library/react and public/*.tsx both want
 // a `document` at import time; either one would make the tripwire assert against a DOM it installed
@@ -27,13 +28,11 @@
 import { expect, test } from "bun:test";
 import "../public/views/diff.js";
 import "../public/views/projects.js";
-import "../public/views/swimlanes.js";
 import "../public/views/task.js";
-import "../public/views/workspace.js";
 import * as nav from "../public/core/nav.js";
 
 test("the still-vanilla views and core/nav.js load with no DOM present", () => {
-  // A DOM-free load is the tripwire: reaching this line means neither the four views nor anything in
+  // A DOM-free load is the tripwire: reaching this line means neither the three views nor anything in
   // their import graphs touched `document` at module scope. A React test file that forgot its
   // `afterAll(unregisterDom)` also fails HERE, naming the property it broke.
   expect(typeof globalThis.document).toBe("undefined");

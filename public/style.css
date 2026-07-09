@@ -257,6 +257,15 @@ main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 80px; }
 h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
 h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .crumbs { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+/* LAUNCHPAD'S `Breadcrumbs` SHIPS NO SEPARATOR. Verified in a real browser, not assumed: its `<li>`s
+   render with `::before`/`::after` both computing to `content: none`, so the migrated crumbs read
+   "ProjectsDefault projectbutchr" until this rule puts the divider back. The vanilla emitted a literal
+   " / " text node between crumbs; this reproduces it — including the two spaces, as symmetric margins.
+   `.crumbs` is an `<ol>` now (LaunchPad's), so also neutralise the UA list margin/padding that the old
+   `<div>` never had. Applies to every `.crumbs` in the app, vanilla or React: the vanilla crumbs are
+   `<a>`/`<span>` children with no `<li>`, so `li + li` simply never matches there. */
+.crumbs { margin-block-start: 0; padding-inline-start: 0; list-style: none; }
+.crumbs li + li::before { content: "/"; margin: 0 5px; color: var(--muted); }
 .crumbs a { color: var(--muted); }
 .crumbs a:hover { color: var(--text); text-decoration: underline; }
 /* Breadcrumb links are real <a href> (keyboard-focusable); give them a visible focus ring
@@ -744,6 +753,10 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .swim-laneid { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .swim-meta { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Tooltip host for the lane's "Open Leader terminal" control — LaunchPad's Button takes no `title`,
+   so the hint (and the reason it is disabled) lives on this wrapper. It must not become a block-level
+   flex item and push the button's baseline. See views/swimlanes.tsx's LeaderTerminalBtn. */
+.swim-leader-btn { display: inline-flex; }
 .swim-prog { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .swim-track { width: 96px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; display: inline-block; }
 .swim-track i { display: block; height: 100%; background: var(--merged); }
@@ -833,6 +846,29 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .btn.ghost.danger-outline { border-color: var(--rejected); color: var(--rejected); }
 .btn.ghost.danger-outline:hover { background: var(--rejected); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* THE ONE SEMANTIC LAUNCHPAD'S `Button` DOES NOT HAVE (components/button.tsx's variant map).
+   LaunchPad ships default | primary | destructive | minimal | picker; its `destructive` is FILLED
+   red, and there is no outline treatment. butchr's `.btn.ghost.danger-outline` (above) is an
+   outlined red — the CTO panel's Stop control. So `kind="danger-outline"` renders
+   `variant="destructive"` plus this ADDITIVE class, which overrides only background/border/colour
+   and leaves LaunchPad's geometry, focus ring and hover/press `data-*` attributes intact.
+   style.css is imported LAST (main.tsx), so it wins the specificity tie.
+
+   `[class]` doubles the specificity (0,2,0) so it beats LaunchPad's own single-class rule without
+   `!important`. `data-hovered`/`data-pressed` are react-aria's, not CSS `:hover` — the component
+   drives them from its press interactions, and a `:hover` rule here would miss keyboard-driven
+   presses entirely. */
+.btn-outline[class] {
+  background: transparent;
+  border: 1px solid var(--rejected);
+  color: var(--rejected);
+}
+.btn-outline[class][data-hovered],
+.btn-outline[class][data-pressed] {
+  background: var(--rejected);
+  color: #fff;
+}
 
 /* Project detail Delete-project danger zone: a subtle separated region at the foot of
    the view. Theme-aware via vars; no animation (nothing for prefers-reduced-motion). */
@@ -1042,6 +1078,28 @@ pre.block {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg);
   width: min(640px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
   box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+/* TWO CLASSES, ONE BOX (components/overlay.tsx). LaunchPad's `Modal` is the positioned element and
+   carries its own surface — background, border, radius, shadow, width; butchr's `.modal` chrome sits
+   on the `Dialog` INSIDE it. Left alone the two paint nested cards, so `.modal-wrap` strips the outer
+   one back to a bare positioning box. `[class]` doubles specificity to beat LaunchPad's own rule. */
+.modal-wrap[class] {
+  background: none; border: none; border-radius: 0; box-shadow: none;
+  padding: 0; width: auto; max-width: none; max-height: none;
+}
+/* `label.field` (below) is a TAG-qualified selector, and LaunchPad's `TextField` renders a `<div>`,
+   not a `<label>` — its `<Label>` child is the label element. So the React modals need the same two
+   rules keyed on the class alone. Scoped to `.modal` so the vanilla `label.field` surfaces that are
+   still mounted elsewhere keep resolving through exactly the rules they always did. Phase 4d, which
+   migrates the last modal, can drop the `label` qualifier and delete these. */
+.modal .field { display: block; margin-bottom: var(--space-5); }
+.modal .field .lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+/* LaunchPad's `TextArea` brings a single-class rule, which outranks style.css's bare `textarea`
+   element selector no matter which sheet loads last. Re-assert butchr's monospace brief box. */
+.modal .field textarea[class] {
+  width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px 10px;
+  resize: vertical; min-height: 90px; font-family: var(--mono); font-size: 13px;
 }
 .modal .m-head {
   padding: 14px 16px; border-bottom: 1px solid var(--border);

@@ -32,7 +32,6 @@ import { mount, render, setRenderer } from "./core/nav.js";
 import { useStateMetaVersion } from "./state-meta-store";
 import { captureUiState, restoreUiState } from "./ui-state.js";
 import { stopLiveOutput } from "./views/task.js";
-import { stopActivity } from "./views/workspace.js";
 
 /** The currently-mounted view's render thunk, or null between routes. This is the cell nav.js's
  *  `render()` delegates into — the same inversion app.js's `setRenderer(renderRoute)` performed, for
@@ -71,12 +70,12 @@ export function VanillaView({ id, run }: { id: string; run: () => Promise<unknow
   }, []);
 
   useEffect(() => {
-    // Both poll timers are route-scoped and outlive their view's DOM: task.js's live-output poll and
-    // workspace.js's activity pulse. Stop them before every render, exactly as the vanilla
-    // renderRoute did; each view restarts its own after mount().
+    // ONE route-scoped poll timer is left: task.js's live-output poll, which outlives its view's DOM.
+    // Stop it before every render, exactly as the vanilla renderRoute did; the view restarts it after
+    // mount(). workspace.js's `stopActivity` was the other one — Phase 4c migrated that view, and the
+    // activity pulse it drove had had no `.pulse` node to find since the st-ef0e7690 dead-code sweep.
     const fn = async () => {
       stopLiveOutput();
-      stopActivity();
       try {
         await runRef.current();
       } catch (e) {
@@ -91,7 +90,6 @@ export function VanillaView({ id, run }: { id: string; run: () => Promise<unknow
     return () => {
       if (currentRender === fn) currentRender = null;
       stopLiveOutput();
-      stopActivity();
     };
   }, [id, version]);
 

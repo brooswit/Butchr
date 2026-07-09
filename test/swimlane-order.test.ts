@@ -2,11 +2,16 @@
 // lane lays its subtasks left → right by longest blocked_by chain WITHIN the lane. orderLaneLeaves
 // is the PURE helper that computes that order (ties broken by original index for a stable layout).
 //
-// The swimlanes view now lives in public/views/swimlanes.js, which is DOM-free at module load, so
-// we IMPORT it directly and assert on the real exports — as does graphLevels, its one dependency,
-// from public/core/work-graph.js. (This test used to scrape a `<test-extract:swimlane-order>`
-// sentinel block out of the classic public/app.js script and eval it with `new Function`; that
-// harness is gone along with the sentinel.) Do not reintroduce a sentinel here.
+// orderLaneLeaves lives in public/views/swimlanes-logic.ts — the DOM-free leaf of the RFC Phase 2
+// horizontal split — so we IMPORT it directly and assert on the real export, as does graphLevels,
+// its one dependency, from public/core/work-graph.js. NOTHING HERE CHANGED when Phase 4c rewrote the
+// view in React (public/views/swimlanes.js → .tsx): this file never touched the view module, only
+// the logic leaf beside it. That is exactly what the horizontal split was for. The lane's rendered
+// ORDER is covered against the real component in test/swimlanes-view.test.ts.
+//
+// (This test used to scrape a `<test-extract:swimlane-order>` sentinel block out of the classic
+// public/app.js script and eval it with `new Function`; that harness is gone along with the
+// sentinel.) Do not reintroduce a sentinel here.
 import { expect, test } from "bun:test";
 import { laneTitle, orderLaneLeaves, swimEmphasis } from "../public/views/swimlanes-logic.js";
 

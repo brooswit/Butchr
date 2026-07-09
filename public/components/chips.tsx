@@ -1,5 +1,6 @@
 // The CHIP + BADGE cluster, in React. Grows one component per phase as the views that need it land;
-// Phase 4b needs exactly one, the status pill, for views/metrics.tsx's status breakdown bars.
+// Phase 4b needed exactly one, the status pill, for views/metrics.tsx's status breakdown bars.
+// Phase 4c adds the kind badge, for the swimlanes' lane headers and the CTO panel's title.
 //
 // >>> IMPORT THIS AS `"./chips.tsx"`, WITH THE EXTENSION. <<< The vanilla `components/chips.js` is
 // still here — four vanilla views render chips through it — so `"./chips.js"` resolves to THAT file,
@@ -24,9 +25,30 @@
 // module const), and a component that shows a chip must list `useStateMetaVersion()` among its deps
 // so React learns the tables were rebuilt — see views/metrics.tsx.
 import { statusLabel } from "../core/state-meta.js";
+import { kindVisual } from "./chips-logic.js";
 
 /** The status pill. `?? ""` keeps a null status from writing the literal string "undefined" into
  *  the class list — what the old `esc()` used to absorb. */
 export function StatusChip({ status }: { status: string | null | undefined }) {
   return <span className={"chip " + (status ?? "")}>{statusLabel(status)}</span>;
+}
+
+/**
+ * The shared kind-badge — an outlined pill (glyph + label) for a work-item or agent kind.
+ *
+ * `kindVisual` is the pure, DOM-free lookup behind the vanilla `chips.js`'s `kindBadge()`, and it
+ * has an unmapped-kind FALLBACK: an unknown kind (the swimlanes' synthetic `"ungrouped"` lane, say)
+ * yields `kind-unknown` plus an upper-cased label, which is precisely the markup that lane used to
+ * hand-roll. Do not add a special case for it.
+ *
+ * The literal space between glyph and label is a real text node — the rendered gap. JSX collapses
+ * `{v.glyph} {v.label}` to exactly that, so it survives a formatter.
+ */
+export function KindBadge({ kind }: { kind: string | null | undefined }) {
+  const v = kindVisual(kind);
+  return (
+    <span className={"kind-badge kind-" + v.cls} title={v.label}>
+      {v.glyph} {v.label}
+    </span>
+  );
 }

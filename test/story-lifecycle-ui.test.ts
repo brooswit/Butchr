@@ -3,22 +3,32 @@
 // StoryView already carries (the per-status `counts` rollup + leader{running,desired} + status),
 // with NO new backend field. This guards the derivation rule + the own-children progress rollup.
 //
-// The PURE derivations live in public/views/swimlanes-logic.js — the DOM-free leaf of the RFC
-// Phase 2 horizontal split — and the node emitter that renders them in public/views/swimlanes.js
-// (the Pipeline view owns it), which is DOM-free at module load. We IMPORT both directly and assert
-// on the real exports. (This test used to scrape a `<test-extract:story-lifecycle-ui>` sentinel
-// block out of the classic public/app.js script and eval it with `new Function` — stubbing
-// esc/isCompleteStatus/storySubtaskTotal along the way; that harness is gone along with the
-// sentinel, so the real leaves run here.) Do not reintroduce a sentinel here.
+// The PURE derivations live in public/views/swimlanes-logic.ts — the DOM-free leaf of the RFC
+// Phase 2 horizontal split — and they are UNCHANGED by the Phase 4c React migration, so the
+// assertions below are character-for-character what they were. That is the point of the split: a
+// view can be rewritten in another paradigm and its logic tests never move.
 //
-// storyLifecycleChip now returns a NODE (or null), so its assertions run inside withDom() — the
-// zero-dependency DOM stub. It has no innerHTML, by design: assert on STRUCTURE (className /
-// getAttribute / textContent), never on serialized markup. storyLifecycle and storyProgress are
-// PURE and need no DOM at all.
-import { expect, test } from "bun:test";
+// What DID move is the node emitter. `storyLifecycleChip(story)` returned a DOM node built by
+// `el()` and was asserted under `withDom()`, the zero-dependency stub. It is now the React component
+// `<StoryLifecycleChip story={…} />` in public/views/swimlanes.tsx, so its half of this file runs
+// through @testing-library/react against a real (happy-dom) DOM. The assertions are the same three
+// properties — class, text, title — plus the null case; only the way the node is obtained changed.
+//
+// (This test used to scrape a `<test-extract:story-lifecycle-ui>` sentinel block out of the classic
+// public/app.js script and eval it with `new Function`, stubbing esc/isCompleteStatus/
+// storySubtaskTotal along the way. That harness is long gone. Do not reintroduce a sentinel.)
+import "./dom-register.ts"; // must precede every React import — installs `document`
+import { cleanup, render } from "@testing-library/react";
+import { createElement } from "react";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { registerDom, unregisterDom } from "./dom-env.ts";
 import { storyLifecycle, storyProgress } from "../public/views/swimlanes-logic.js";
-import { storyLifecycleChip } from "../public/views/swimlanes.js";
-import { withDom } from "./dom-stub";
+import { StoryLifecycleChip } from "../public/views/swimlanes.tsx";
+
+// This FILE's DOM — the side-effect import above only covered the first React file the runner
+// reached. `registerDom` is idempotent. See test/dom-register.ts.
+beforeAll(registerDom);
+afterEach(cleanup);
 
 const story = (o: any = {}) => ({ work_kind: "node", status: "open", counts: {}, leader: {}, ...o });
 
@@ -63,17 +73,32 @@ test("storyProgress: complete over total, idle excluded from total", () => {
 });
 
 // ── The lane-header chip: null when there's no lifecycle, otherwise a quiet outlined pill ──
-test("storyLifecycleChip renders per-state class + is null for non-open", () => {
-  withDom(() => {
-    const working = storyLifecycleChip(story({ counts: { in_progress: 1 } }))!;
-    expect(working.className).toBe("chip lc-working");
-    expect(working.textContent).toBe("▶ working");
-    expect(working.getAttribute("title")).toBe("story lifecycle — working");
-
-    const stalled = storyLifecycleChip(story({ counts: { blocked: 1 }, leader: { desired: true, running: false } }))!;
-    expect(stalled.className).toBe("chip lc-stalled");
-    expect(stalled.textContent).toBe("⚠ stalled");
-
-    expect(storyLifecycleChip(story({ status: "done", counts: { in_progress: 1 } }))).toBeNull();
-  });
+// Queries come from `render()`, NEVER from `screen` — see test/dom-register.ts for why `screen` is
+// permanently poisoned under bun's module ordering.
+test("StoryLifecycleChip renders per-state class, glyph and title", () => {
+  const { container } = render(createElement(StoryLifecycleChip, { story: story({ counts: { in_progress: 1 } }) }));
+  const working = container.querySelector("span")!;
+  expect(working.className).toBe("chip lc-working");
+  expect(working.textContent).toBe("▶ working");
+  expect(working.getAttribute("title")).toBe("story lifecycle — working");
 });
+
+test("StoryLifecycleChip renders the stalled state", () => {
+  const s = story({ counts: { blocked: 1 }, leader: { desired: true, running: false } });
+  const { container } = render(createElement(StoryLifecycleChip, { story: s }));
+  const stalled = container.querySelector("span")!;
+  expect(stalled.className).toBe("chip lc-stalled");
+  expect(stalled.textContent).toBe("⚠ stalled");
+});
+
+test("StoryLifecycleChip renders NOTHING for a story with no lifecycle", () => {
+  const s = story({ status: "done", counts: { in_progress: 1 } });
+  const { container } = render(createElement(StoryLifecycleChip, { story: s }));
+  // A null-returning component contributes no nodes at all — the old emitter's `null` return.
+  expect(container.innerHTML).toBe("");
+});
+
+// `bun test` runs every file in one process, so a DOM left standing here is a DOM standing in
+// test/vanilla-views-dom-free.test.ts, whose tripwire would then fail for a reason that names
+// neither happy-dom nor this file. Restore unconditionally, even if a test above threw.
+afterAll(unregisterDom);
