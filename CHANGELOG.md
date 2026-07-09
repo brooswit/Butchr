@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.288] - 2026-07-09
+
 ### Removed
 
 - **RFC front-end Phase 4e — the vanilla front end is deleted.** Every route has rendered React
