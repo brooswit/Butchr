@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.267] - 2026-07-09
+
 ### Changed
 - **Front-end Phase 4 (RFC §5): the chip/badge cluster returns NODES, not HTML strings.**
   `chip`, `kindBadge`, `taskChips`, `tagChips`, `responderChip` and `livenessChip` in
