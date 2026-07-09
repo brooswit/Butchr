@@ -1,13 +1,21 @@
 // The PURE half of the Pipeline (swimlanes) view — the story-lifecycle derivation, the story
-// progress rollup, the intra-lane ordering, the card-emphasis bucket, and the lane title. Split out
-// of views/swimlanes.js by the RFC Phase 2 horizontal cut (RFC §0.1 #5).
+// progress rollup, the intra-lane ordering, the card-emphasis bucket, the lane title, and the lane
+// header's leader-terminal button state. Split out of views/swimlanes.js by the RFC Phase 2
+// horizontal cut (RFC §0.1 #5).
 //
 // DOM-free OUTRIGHT, not merely at module load: nothing here touches `document` even when called.
-// Its one import is core/work-graph.js, which is itself pure. test/swimlane-order.test.ts and the
-// pure half of test/story-lifecycle-ui.test.ts import this leaf directly, with no DOM stub.
+// Its one value import is core/work-graph.ts, which is itself pure. test/swimlane-order.test.ts,
+// test/swimlane-leader-terminal-btn.test.ts and the pure half of test/story-lifecycle-ui.test.ts
+// import this leaf directly, with no DOM stub.
 //
 // The node emitter that renders this logic (storyLifecycleChip) stays in views/swimlanes.js.
+//
+// >>> ALL SIX EXPORTS SURVIVE THE PORT. <<< The abandoned Phase-4 branch dropped
+// `leaderTerminalBtnState` from this module. It is not dead: views/swimlanes.js calls it, and
+// test/swimlane-leader-terminal-btn.test.ts imports it by name and asserts on all four of its
+// branches. Deleting it turns that file red. It stays.
 import { graphLevels, isCompleteStatus, storySubtaskTotal } from "../core/work-graph.js";
+import type { LeaderStatus, StatusCounts, WorkItem } from "../core/types.js";
 
 // Story lifecycle — a SECONDARY, purely front-end-DERIVED signal (story st-f4858e23 ask #4) so a
 // story container doesn't just read "OPEN". Derived from data every StoryView already carries —
@@ -18,15 +26,16 @@ import { graphLevels, isCompleteStatus, storySubtaskTotal } from "../core/work-g
 //   ▶ working — subtasks in flight, or the leader is up driving actionable work
 //   ⏸ parked  — open but nothing in flight (just-created, or all children finished-yet-open)
 //   ⚠ stalled — work remains but the leader that should drive it is DESIRED yet DOWN (nothing moving)
-const LIFECYCLE = {
+export type Lifecycle = { key: "working" | "parked" | "stalled"; glyph: string; cls: string };
+const LIFECYCLE: Record<Lifecycle["key"], Lifecycle> = {
   working: { key: "working", glyph: "▶", cls: "working" },
   parked:  { key: "parked",  glyph: "⏸", cls: "parked"  },
   stalled: { key: "stalled", glyph: "⚠", cls: "stalled" },
 };
-export function storyLifecycle(story) {
+export function storyLifecycle(story: WorkItem | null | undefined): Lifecycle | null {
   if (!story || story.work_kind !== "node" || story.status !== "open") return null;
-  const c = story.counts || {};
-  const leader = story.leader || {};
+  const c: StatusCounts = story.counts || {};
+  const leader: LeaderStatus = story.leader || {};
   const moving = (c.in_progress || 0) + (c.in_review || 0); // work actively in flight
   // All non-finished children. `idle` is peeled OUT of in_progress into its own bucket, so it can't
   // double-count moving; even if it did, remaining is only ever tested > 0, so the tip is harmless.
@@ -40,8 +49,8 @@ export function storyLifecycle(story) {
 // isCompleteStatus) over the TRUE total (storySubtaskTotal, which drops the idle
 // pseudo-bucket). Distinct from the graph's dependency-subtree bar (gatedSubtree). total is 0 for a
 // childless story, so callers gate the "d/t done" render on total > 0.
-export function storyProgress(counts) {
-  const c = counts || {};
+export function storyProgress(counts: StatusCounts | null | undefined): { done: number; total: number } {
+  const c: StatusCounts = counts || {};
   const done = Object.keys(c).reduce((n, k) => (isCompleteStatus(k) ? n + (c[k] || 0) : n), 0);
   return { done, total: storySubtaskTotal(c) };
 }
@@ -52,9 +61,9 @@ export function storyProgress(counts) {
 // renders. Cross-story blockers are ignored for ordering — only blocked_by edges BETWEEN the passed
 // member ids count, so a foreign blocker never shifts a lane's columns. Pure: no DOM, no globals
 // beyond graphLevels.
-export function orderLaneLeaves(memberIds, byId) {
+export function orderLaneLeaves(memberIds: string[], byId: Map<string, WorkItem>): string[] {
   const idSet = new Set(memberIds);
-  const edges = [];
+  const edges: Array<{ from: string; to: string }> = [];
   for (const id of memberIds) {
     const w = byId.get(id);
     if (!w) continue;
@@ -64,7 +73,7 @@ export function orderLaneLeaves(memberIds, byId) {
   }
   const level = graphLevels(idSet, edges);
   const idx = new Map(memberIds.map((id, i) => [id, i]));
-  return [...memberIds].sort((a, b) => (level[a] - level[b]) || (idx.get(a) - idx.get(b)));
+  return [...memberIds].sort((a, b) => (level[a] - level[b]) || (idx.get(a)! - idx.get(b)!));
 }
 // Semantic EMPHASIS bucket for a subtask's CARD (not its pill color). The pill keeps its real
 // .chip.<status> color — the one shared status vocabulary; this only decides which card is visually
@@ -72,7 +81,8 @@ export function orderLaneLeaves(memberIds, byId) {
 // human prompt) gets a bright ring, an in-flight item a gentle accent (in_progress also gets a
 // pulsing dot, gated by prefers-reduced-motion in CSS), a not-yet-its-turn item is dimmed, and
 // everything terminal/quiet is neutral. Pure string → string.
-export function swimEmphasis(st) {
+export type Emphasis = "attn" | "active" | "blocked" | "done";
+export function swimEmphasis(st: string): Emphasis {
   if (st === "needs_info" || st === "needs_user_input") return "attn";
   if (st === "in_progress" || st === "idle") return "active";
   if (st === "blocked" || st === "inactive" || st === "merge_blocked") return "blocked";
@@ -84,7 +94,7 @@ export function swimEmphasis(st) {
 // so the header never becomes a wall of text; the full brief still lives in the header tooltip. The
 // CSS belt on .swim-title (nowrap + ellipsis) is the second line of defence. Falls back to the id.
 // Pure string → string.
-export function laneTitle(brief, id, max = 70) {
+export function laneTitle(brief: string | null | undefined, id: string, max = 70): string {
   const first = String(brief || "").split("\n").map((l) => l.trim()).find((l) => l.length > 0);
   if (!first) return id;
   return first.length > max ? first.slice(0, max).trimEnd() + "…" : first;
@@ -92,16 +102,16 @@ export function laneTitle(brief, id, max = 70) {
 
 // The lane header's "Open Leader terminal" button state + honest hint, derived only from the
 // StoryAgentStatus the StoryView already carries (`story.leader` = {desired, running, lastError, …}
-// — no extra fetch). Modelled on ceoTerminalBtnState (views/projects-logic.js): the button stays
+// — no extra fetch). Modelled on ceoTerminalBtnState (views/projects-logic.ts): the button stays
 // VISIBLE but disables when there's no live pane, and says WHY. Hiding it would be worse exactly
 // where it matters most — a ⚠ stalled lane (leader DESIRED yet DOWN) is when an operator most wants
 // to attach, and a vanished control hides the diagnosis; keeping it also holds the lane's controls
 // positionally stable across SSE repaints. Titles mirror the route's 409 reasons so the two never
 // contradict. `lastError` can be STALE from an earlier restart while the leader is genuinely
-// starting now, so it is shown as EVIDENCE, never as a verdict of "crashed". Returns
-// { enabled, title }. Pure: tolerates a missing/undefined leader.
-export function leaderTerminalBtnState(leader) {
-  const s = leader || {};
+// starting now, so it is shown as EVIDENCE, never as a verdict of "crashed". Pure: tolerates a
+// missing/undefined leader.
+export function leaderTerminalBtnState(leader: LeaderStatus | null | undefined): { enabled: boolean; title: string } {
+  const s: LeaderStatus = leader || {};
   if (s.running) return { enabled: true, title: "Attach a terminal to the live leader agent" };
   if (s.desired) {
     return {

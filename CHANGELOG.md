@@ -17,6 +17,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **RFC Phase 4a — the ten DOM-free front-end modules are now TypeScript, and the `.js` originals
+  are deleted.** `core/{api,format,state-meta,work-graph}`, `components/{toast,chips-logic}` and
+  `views/{diff-logic,metrics-logic,projects-logic,swimlanes-logic}` are ported with **zero logic
+  change and an unchanged export surface**; no duplicate `.js`/`.ts` pair survives. No importer was
+  re-pointed and none needed to be: `tsc` REJECTS a `.ts` import specifier (TS5097
+  `allowImportingTsExtensions`), while bun resolves `./api.js` → `api.ts` at runtime, under
+  `bun build`, and through a dynamic `import()`. A `.js` specifier is the one spelling every tool in
+  this repo agrees on — which is what Phase 3 already wrote — so the still-vanilla `views/*.js`,
+  `components/*.js` and the twelve tests that import them are untouched.
+- **`core/api.ts` is generic (`api<T>`) and stays framework-agnostic** — it still imports nothing.
+  Its failure path reproduces `(data && data.error) || res.statusText` exactly rather than narrowing
+  `error` to `string`, which would have silently swallowed a non-string error body. `App.tsx`'s four
+  call sites now name their payload types instead of resolving to `any`.
+- **The opt-in-escaping guard no longer goes blind as modules become TypeScript.**
+  `test/no-opt-in-escaping.test.ts` globbed `public/**/*.js`, so it had never seen Phase 3's `.tsx`
+  and would have silently dropped all ten modules this phase ports — passing green over shrinking
+  coverage. It now scans `**/*.{js,ts,tsx}` (33 files, up from 15), and a new assertion (e) bans
+  `dangerouslySetInnerHTML`, which is `el(tag, {html:})` under a longer name and which none of
+  assertions (a)–(d) could match.
+
+### Added
+
+- **A real DOM for the test suite, opt-in per file** (`test/dom-env.ts`, `test/dom-register.ts`),
+  behind the four exact-pinned devDependencies CTO decision 4 approved: `happy-dom@20.10.6`,
+  `@happy-dom/global-registrator@20.10.6`, `@testing-library/react@16.3.2`,
+  `@testing-library/dom@10.4.1`. Three findings are baked in, each measured rather than assumed:
+  `GlobalRegistrator.register()` overwrites bun's `fetch`/`Response`/`Request`/… with a node:http
+  browser fetch that cannot read a `Bun.serve()` response, so `registerDom()` hands the network back
+  (six server test files depend on this); registration is **not** done from `bunfig.toml`'s preload,
+  because that would permanently define `globalThis.document` and `test/metrics-view.test.ts`'s
+  `document`-undefined tripwire — which the vanilla views still rely on, and which Phase 4e retires —
+  could never pass again; and `@testing-library/dom` binds `screen` at module-eval under a CJS graph
+  bun hoists above the ESM registration, so tests must use the queries `render()` returns, never
+  `screen`. `test/dom-env.test.ts` proves all of it, including the `unregisterDom()` restore that
+  lets a React test file and the tripwire coexist in one `bun test` process.
+- **`core/types.ts`** — the front end's structural, deliberately partial view of the `/api/*` wire
+  shapes, so a typecheck over the views is a typecheck over something. It restates rather than
+  imports `src/`'s types on purpose: `tsconfig.public.json` sets `"types": []` so `Bun.file(…)` in a
+  browser module stays a compile error.
+- **`core/refresh.ts`, `core/use-async.ts`, `views/task-logic.ts`** — the foundation Phases 4b–4d
+  build on, landed early and **imported by nothing yet**. `bridge.tsx` still owns the live
+  `refreshSoon()` that repaints the vanilla views, and `views/task.js` still owns the copies of the
+  six helpers `task-logic.ts` transcribes; each pair converges when its view turns React.
+
 ## [0.9.283] - 2026-07-09
 
 ### Fixed
