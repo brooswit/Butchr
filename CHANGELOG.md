@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.268] - 2026-07-09
+
 ### Changed
 - **Front-end Phase 4: the Pipeline (swimlanes) view is fully node-built.**
   `public/views/swimlanes.js` — the codebase's densest `innerHTML` cluster — now builds every
