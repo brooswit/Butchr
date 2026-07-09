@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Front-end modernization P2 (module split), tranche 3 — the PROJECTS modals.** Extracted
+  `openNewProjectModal`, `openLaunchModal`, and `openAddWorkspaceModal` out of `public/app.js`
+  into a new `public/components/project-modals.js`, together with the create modal's private
+  `rememberCreatedProject` / `CREATED_PROJECTS_KEY` localStorage fallback (its only caller).
+  Everything shared is imported rather than duplicated (`el`/`esc`, `api`/`toast`, `repoDisplay`,
+  `action`, `render`, `openModal`/`openPicker`). `app.js` keeps the three call sites unchanged and
+  drops its now-unused `openPicker` import. No behavior change; `app.js` is 1334 → 1036 lines.
+
+### Fixed
+- **Add-workspace modal threw a `ReferenceError` on open.** Its Enter-to-submit wiring iterated
+  `[pathEl, labelEl, gateEl]`, but `gateEl` was left undeclared when the `gate_cmd` input was
+  retired. Reading it threw before either keydown listener was attached and before the path field
+  was focused, so the modal opened with no autofocus, no Enter-to-submit, and a console error.
+  The stale binding is gone.
+
 ## [0.9.263] - 2026-07-09
 
 ### Changed
