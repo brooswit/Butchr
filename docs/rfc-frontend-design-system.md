@@ -75,7 +75,7 @@ The real defects are different, and none of them is solved by a framework:
 | D1 | `app.js` is **one 4,379-line classic script** — no modules, so no file boundaries exist to hang components on. `renderTask` alone is ~565 lines | `index.html:63` loads `<script src="/app.js">` (not `type="module"`) |
 | D2 | **Two incompatible authoring models** that cannot compose: **14 helpers return HTML strings**, ~22 return **DOM nodes** | `kindBadge`→string (`app.js:287`) vs `metricCard`→`el()` (`app.js:3091`) |
 | D3 | The string path makes escaping **opt-in**: **126 hand-written `esc()` calls** guard agent-authored text | 40 `.innerHTML =` + 16 `{html:}` = **56 raw-markup injection sites** |
-| D4 | Tokens cover color/radius/font but **not spacing or typography scale** — which is exactly why the 52 inline styles exist | `:root` has `--radius-sm/md/lg` but no `--space-*` |
+| D4 | Tokens cover color/radius/font but **not spacing or typography scale** — which is exactly why the 49 static inline styles exist | `:root` has `--radius-sm/md/lg` but no `--space-*` |
 | D5 | SSE does a **wholesale re-render**; a bespoke `captureUiState`/`restoreUiState` hack exists solely to stop it eating scroll, focus, and half-typed text | `app.js:4262` → `refreshSoon()` → `mount()` clears `innerHTML` |
 | D6 | **No `Button` component at all** — ~56 hand-built buttons, and *two rival* async-action-button implementations | `ctoPanel`'s local `btn()` (`app.js:562-570`) duplicates the generic `action()` (`app.js:645-655`) |
 
@@ -277,8 +277,8 @@ families (`--font --mono`). **Missing: a spacing scale and a type scale.** Add:
 --space-4: 10px; --space-5: 12px; --space-6: 18px;
 ```
 
-These six values are not invented — they are the *observed* margins in the 52
-inline styles (`4px 6px 8px 10px 12px 18px`, from `grep -oE '[0-9]+px'`).
+These six values are not invented — they are the *observed* margins in the 49
+static inline styles (`4px 6px 8px 10px 12px 18px`, from `grep -oE '[0-9]+px'`).
 Introducing them lets all 49 non-dynamic inline styles become classes and
 **deletes the inline-style category** (the 3 progress-bar `width:${pct}%` sites
 must stay inline — they are genuinely dynamic, and that is correct).
