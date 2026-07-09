@@ -2,6 +2,35 @@
 set -euo pipefail
 # build + test (byte-exact replica of the retired gate_cmd)
 bun build src/index.ts --target bun --outfile /dev/null
+# front-end rules run BEFORE the backend suite: they cost ~100ms, the suite costs orders of
+# magnitude more, and a broken FE import should fail the gate in under a second.
+# fe rule 1: whole-graph build from the real entry point. index.html loads /app.js as a
+# module, so this resolves every import reachable from it. The bundler IS the import/export
+# check — it already flags a missing named export, an unresolvable path, and a syntax error,
+# each with a precise message. Bare command: `set -e` aborts here and bun's stderr passes
+# through untouched (it names the file and the unresolved symbol).
+bun build public/app.js --target browser --outfile /dev/null
+# fe rule 2: parse EVERY module on disk, not just the reachable ones. Rule 1 is blind to a
+# file nothing imports yet — an orphan `public/views/foo.js` full of syntax errors exits 0.
+# A not-yet-wired module is the normal intermediate state of a module split, so that is
+# exactly the gap that matters. A glob matching zero files must FAIL, never silently pass.
+mapfile -d '' -t FE_FILES < <(find public -name '*.js' -print0)
+if [ "${#FE_FILES[@]}" -eq 0 ] || [ ! -f public/app.js ]; then
+  echo "FRONT-END: found no public/**/*.js (or public/app.js is missing) — the gate cannot vouch for a tree it never parsed" >&2
+  exit 1
+fi
+# `if !` keeps `set -e` from aborting the loop, so a first failure never hides the rest.
+FE_FAILED=()
+for f in "${FE_FILES[@]}"; do
+  if ! bun build "$f" --target browser --outfile /dev/null; then FE_FAILED+=("$f"); fi
+done
+if [ "${#FE_FAILED[@]}" -gt 0 ]; then
+  {
+    echo "FRONT-END: ${#FE_FAILED[@]} of ${#FE_FILES[@]} module(s) failed to parse/resolve:"
+    printf '    %s\n' "${FE_FAILED[@]}"
+  } >&2
+  exit 1
+fi
 bun test ./test
 # changelog rule: a CODE change must update CHANGELOG.md (docs-only diffs EXEMPT)
 BASE="${BUTCHR_BASE_REF:-}"

@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/ci` now validates the front-end, which it previously never parsed at all — a broken
+  `public/*.js` could ship a blank dashboard through a GREEN gate. Two checks run before the
+  backend test suite (they cost ~100ms; failing fast beats failing after the full run):
+  a whole-graph `bun build` from the real entry point `public/app.js`, which resolves every
+  reachable import; and a per-file parse of every `public/**/*.js` on disk, which catches the
+  orphan module the graph build is blind to — the normal intermediate state of a module split.
+  The per-file loop reports every failing path, not just the first, and a glob matching zero
+  files fails the gate rather than passing it.
+
 ## [0.9.257] - 2026-07-09
 
 ### Removed
