@@ -30,10 +30,11 @@ terminal/agent session management to **[herdr](https://github.com/)**.
 
 - **Stack:** Bun · SQLite (`bun:sqlite`) · herdr · git.
 - **Webapp:** a single-page app under `public/`, **bundled by `bun build` into `dist/`**, which is
-  what the server serves. Still vanilla JS today; migrating to React 19 +
-  [LaunchDarkly LaunchPad](https://launchpad.launchdarkly.com/) (`@launchpad-ui`) —
-  `docs/rfc-frontend-launchpad.md` is the standard. The server has **zero runtime npm
-  dependencies**; every dependency is front-end or build/test tooling.
+  what the server serves. **React 19 + TypeScript + [LaunchDarkly LaunchPad](https://launchpad.launchdarkly.com/)
+  (`@launchpad-ui`)**, hash-routed with `react-router`, SSE-driven —
+  `docs/rfc-frontend-launchpad.md` is the standard. The vanilla front end it replaced was deleted in
+  RFC Phase 4e; `public/` is `.ts` and `.tsx` end to end, with no fallback renderer. The server has
+  **zero runtime npm dependencies**; every dependency is front-end or build/test tooling.
 - **Build before you serve:** `bun run build:fe`. `bun start`, `scripts/supervise.sh`, the systemd
   unit, and `scripts/ci` all do it for you; `dist/` is gitignored, so a fresh clone has none.
 
@@ -627,11 +628,16 @@ no-build-step rules **no longer apply to the front end**, and
 `docs/rfc-frontend-launchpad.md` — which supersedes
 `docs/rfc-frontend-design-system.md` — is the standard.
 
-**Where the migration actually stands.** `package.json` now carries a
-`devDependencies` block — butchr's first — holding exactly `typescript` and
-`bun-types`. No `react`, no `@launchpad-ui`, no bundler output: `public/` is
-still vanilla JS served raw, and the toolchain rules in §4.2 arrive with it (RFC
-Phase 1). §4.1 and §4.3 below are **live today**.
+**Where the migration actually stands.** Done. `package.json` carries `react`,
+`react-dom`, `react-router` and the three `@launchpad-ui` packages as runtime
+dependencies, plus `typescript`, `bun-types`, `happy-dom` and
+`@testing-library/react` as devDependencies. `public/` is React and TypeScript
+throughout, built by `bun run build:fe` into the gitignored `dist/` the server
+serves. RFC Phase 4e deleted the last vanilla module (`bridge.tsx`,
+`core/nav.js`, `core/dom.js`, `ui-state.js`, and every vanilla view and
+component), so there is **no fallback renderer and no one-revert rollback** —
+the tag `p3-rollback-boundary` marks the last commit where there was. Everything
+in §4.1–§4.4 is live today.
 
 ### 4.1 `bun build` does not typecheck. `tsc` does.
 
@@ -698,10 +704,13 @@ and check dark mode in a real browser.
 ### 4.4 Escaping is still structural
 
 The `esc()` / `{html:}` escape hatches were deleted (story st-82c11fd1) and must
-not return; `test/no-opt-in-escaping.test.ts` enforces their absence. JSX escapes
-every interpolated string by construction, so when the React migration lands the
-**equivalent footgun is `dangerouslySetInnerHTML`** and that test becomes
-`no-dangerous-html.test.ts`. Same rule, new spelling.
+not return. JSX escapes every interpolated string by construction — a `<` or `&`
+in agent-authored text reaches the DOM through a text node, as itself — so the
+**equivalent footgun is `dangerouslySetInnerHTML`**, and RFC Phase 4e renamed the
+guard to `test/no-dangerous-html.test.ts` accordingly. Same rule, new spelling.
+It bans `dangerouslySetInnerHTML`, its `{__html:}` payload, raw `innerHTML`
+writes and hand-rolled `esc()`/`htmlOf()` across every `.ts`/`.tsx` under
+`public/`, and it fails loudly if its glob ever matches nothing.
 
 ---
 
@@ -736,8 +745,18 @@ src/
   expand.ts       brief → task-prompt expander
   server.ts       REST + SSE + MCP + static file serving (the route table)
 public/
-  index.html / style.css / app.js   vanilla webapp
+  index.html      the entry document (bun rewrites its <script> into dist/)
+  main.tsx        entry module — token CSS, then <App/>, then style.css (order matters)
+  App.tsx         the shell: topbar, pause banner, conn LED, theme, hash router, SSE
+  style.css       butchr's own rules, re-based on LaunchPad's --lp-* tokens
+  core/           framework-agnostic leaves (api, types, format, work-graph, use-async)
+  components/     shared UI (chips, panels, overlays, buttons, toast)
+  views/          one module per route, each split <view>.tsx + <view>-logic.ts
 ```
+
+Every view is `<view>.tsx` (renders) plus `<view>-logic.ts` (pure, DOM-free,
+separately tested). Keep that seam: it is what let the front end be rewritten in
+another paradigm without moving a single logic test.
 
 - Prefer explicit, descriptive names and a comment block at the top of each
   module explaining its role. Comments explain **why**, not what.
@@ -836,9 +855,14 @@ it in [§3](#3-operations-runbook).
 (or `workspaces`) line in `src/db.ts` next to the others, nullable or with a
 `DEFAULT` (see §5). Surface it through `taskView` if the API should expose it.
 
-**A webapp view.** Edit `public/app.js` / `index.html` / `style.css` — vanilla
-JS, hash-routed, SSE-driven, no framework or build step. Consume the existing
-REST + `/api/events` SSE contract; if you need new data, add the route first.
+**A webapp view.** Add `public/views/<name>.tsx` (+ a DOM-free
+`<name>-logic.ts` for anything worth testing on its own), then point a `<Route>`
+at it in `public/App.tsx`. React 19, hash-routed via `react-router`, SSE-driven;
+`bun run build:fe` to see it. Use LaunchPad components where they exist (RFC
+§7.2) and butchr's own CSS where they do not — LaunchPad has no Card, Panel,
+Chip, Badge, Stack, Grid or Box. Status chips and task cards stay custom (CTO
+decision 7). Consume the existing REST + `/api/events` SSE contract; if you need
+new data, add the route first.
 
 ---
 

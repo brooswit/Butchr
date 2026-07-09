@@ -21,21 +21,15 @@
 // module state shared across the whole `bun test` process and break test/state-meta-fallback.test.ts's
 // pre-load assertions. The live-binding guard for TaskChips -> AGENT_TYPE lives there instead,
 // alongside the applyStateMeta call it needs.
-import "./dom-register.ts"; // must precede every React import — installs `document`
 import { cleanup, render } from "@testing-library/react";
 import { createElement } from "react";
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterEach, expect, test } from "bun:test";
 import { KindBadge, TaskChips } from "../public/components/chips.tsx";
 import { KIND_VISUAL, kindVisual } from "../public/components/chips-logic.js";
 
-beforeAll(registerDom);
 afterEach(cleanup);
-// Not optional: `test/vanilla-views-dom-free.test.ts` asserts `globalThis.document` is undefined, and
-// `bun test` runs every file in one process. A DOM left standing here is a DOM standing there.
-afterAll(unregisterDom);
 
-// Queries come from `render()`, NEVER from `screen` — see test/dom-register.ts.
+// Queries come from `render()`, NEVER from `screen` — see test/test-setup.ts.
 /** The single `<span class="kind-badge …">` a `<KindBadge/>` renders. */
 const badge = (kind: unknown) => render(createElement(KindBadge, { kind: kind as never })).container.children[0];
 /** `<TaskChips/>` renders a fragment; its FIRST element is always the kind badge. */

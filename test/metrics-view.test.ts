@@ -5,11 +5,12 @@
 // views/metrics.js could not be rendered without a browser:
 //
 //   1. THE TRIPWIRE — `typeof globalThis.document === "undefined"`, proving no module under
-//      `public/` touches `document` at MODULE LOAD. It cannot live here any more: this file installs
-//      a DOM on purpose. It moved VERBATIM to test/vanilla-views-dom-free.test.ts, which imports the
-//      four views that are still vanilla (and so still depend on the property) plus core/nav.js.
-//      The property is NOT retired — Phase 4e retires it, with the last vanilla view.
-//   2. THE core/nav.js EXPORT-SURFACE GUARDS — moved to the same file, for the same reason.
+//      `public/` touches `document` at MODULE LOAD. It moved VERBATIM to
+//      test/vanilla-views-dom-free.test.ts, and Phase 4e RETIRED it there along with the last
+//      vanilla view. React breaks that property by construction, and the DOM now lives in the suite
+//      preload. What replaces it: happy-dom + @testing-library/react actually RENDER these modules,
+//      so a free identifier left by a botched extraction is a red test, not a blank dashboard.
+//   2. THE core/nav.js EXPORT-SURFACE GUARDS — deleted with core/nav.js itself.
 //   3. `rateSub`'s unit tests — the DOM-free half (views/metrics-logic.ts). They stayed, character
 //      for character. Re-pointed, not rewritten.
 //
@@ -18,20 +19,13 @@
 //
 // `api()` is stubbed by replacing `globalThis.fetch`, not by mocking the module: `core/api.ts` is a
 // twenty-line wrapper over `fetch("/api" + path)`, so intercepting there exercises the wrapper's own
-// JSON/error handling on the way through. Assign AFTER `./dom-register.ts` — registerDom() restores
-// bun's native fetch as its last act, and would overwrite a stub installed before it.
-import "./dom-register.ts"; // must precede every React import — installs `document`
+// JSON/error handling on the way through. The captured `nativeFetch` below is bun's — the suite
+// preload's `registerDom()` restores it as its last act, long before this module is evaluated.
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { createElement } from "react";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { MetricsView } from "../public/views/metrics.js";
 import { rateSub } from "../public/views/metrics-logic.js";
-
-// The import above only installs a DOM for the FIRST React file `bun test` reaches — a module's side
-// effect runs once per process, and the previous React file's `afterAll` tore it down. See
-// test/dom-register.ts. `registerDom` is idempotent, so this is free when it is already up.
-beforeAll(registerDom);
 
 const nativeFetch = globalThis.fetch;
 
@@ -86,7 +80,7 @@ afterEach(() => {
   globalThis.fetch = nativeFetch;
 });
 
-// Queries come from `render()`, NEVER from `screen` — see test/dom-register.ts for why `screen` is
+// Queries come from `render()`, NEVER from `screen` — see test/test-setup.ts for why `screen` is
 // permanently poisoned under bun's module ordering.
 const mount = () => render(createElement(MetricsView));
 
@@ -209,10 +203,9 @@ test("rateSub says 'no data yet' when nothing has happened", () => {
   expect(rateSub({ rate: null, num: 0, of: 0 })).toBe("no data yet");
 });
 
-// `bun test` runs every file in one process, so a DOM left standing here is a DOM standing in
-// test/vanilla-views-dom-free.test.ts, whose tripwire would then fail for a reason that names
-// neither happy-dom nor this file. Restore unconditionally, even if a test above threw.
-afterAll(async () => {
+// The DOM is the suite's now (installed once in test/test-setup.ts) and this file must not touch it.
+// `fetch` is still ours to put back: `bun test` runs every file in one process, so a stub left
+// standing here is a stub standing in the next file. Restore unconditionally, even if a test threw.
+afterAll(() => {
   globalThis.fetch = nativeFetch;
-  await unregisterDom();
 });

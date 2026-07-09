@@ -11,9 +11,9 @@
 // it ran out of clock before this one. So this is a fresh port of `public/views/task.js`, whose 13
 // former innerHTML templates were already `el()` trees. `views/task-logic.ts` — landed early as
 // "the 4d foundation", with its own header noting that until 4d "the two ARE duplicates" — is
-// finally imported here rather than re-derived. `views/task.js` keeps its private copies and keeps
-// shipping until Phase 4e deletes it; `test/output-snapshot-retired.test.ts` still scrapes THAT
-// file's `rescueNote` as source text, so it must not be touched.
+// imported here rather than re-derived. Phase 4e deleted `views/task.js` and its duplicate copies,
+// and re-pointed `test/output-snapshot-retired.test.ts` at task-logic.ts's real `rescueNote` export
+// instead of scraping that file's source text.
 //
 // ---------------------------------------------------------------------------------------------
 // WHAT THE REWRITE DELETED HERE, NAMED. Each of these was module-level state whose only purpose was
@@ -48,8 +48,7 @@
 // focus and scroll back. Every textarea below is a CONTROLLED input on state that React never
 // unmounts, so the whole harness is subsumed. RFC §1.4's "targeted re-render" comes free.
 // I typed into the review note, drove an SSE refresh, and watched the text survive — see the task
-// summary. The harness and `test/app-restore-uistate.test.ts` are still on disk; Phase 4e sweeps
-// them.
+// summary. Phase 4e deleted the harness and `test/app-restore-uistate.test.ts` with it.
 import { Button } from "@launchpad-ui/components";
 import type { ReactNode } from "react";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";

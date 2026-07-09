@@ -17,6 +17,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **RFC front-end Phase 4e — the vanilla front end is deleted.** Every route has rendered React
+  since Phase 4d; this removes the code it replaced. Gone: `public/bridge.tsx`, `public/core/nav.js`,
+  `public/core/dom.js` (`el()` / `svg()`), `public/ui-state.js`, the five vanilla
+  `components/*.js` (button, chips, overlay, panel, project-modals) and the three vanilla
+  `views/*.js` (diff, projects, task). `public/` is now `.ts` and `.tsx` end to end — 15 of each —
+  and nothing references `setRenderer`, `mount`, `render`, `el` or `svg`. **There is no fallback
+  renderer and no one-revert rollback:** the tag `p3-rollback-boundary` marks the last commit where
+  a route could be pointed back at a vanilla view.
+- **`components/toast.ts` no longer imports `core/dom.js`.** This was the LAST edge keeping the
+  vanilla layer in the shipped bundle: every route was already React, yet `el()` still shipped
+  because `toast()` fell back to a hand-rolled `.toast` div. It is now a direct adapter onto
+  LaunchPad's `toastQueue`, and `App.tsx`'s `setToastSink(...)` indirection is deleted with it.
+  Toast timeouts are unchanged (8s error / 5s success — the Phase-3 shell sink's values).
+- **The `document`-undefined tripwire is retired**, together with `test/dom-stub.ts`
+  (CTO decision 4). `test/vanilla-views-dom-free.test.ts`, `test/app-restore-uistate.test.ts` (and
+  its three `<test-extract:>` sentinel blocks — the last sentinel scraper in the repo) and
+  `test/diff-vanilla-view.test.ts` are deleted.
+
+  **What protection is given up, stated plainly.** The tripwire asserted `typeof globalThis.document
+  === "undefined"`, proving that no module under `public/` touched `document` at MODULE LOAD. That
+  property caught a free identifier left behind by a botched extraction — a runtime `ReferenceError`,
+  i.e. a blank dashboard that ships green — which `bun build` cannot see. React breaks the property
+  by construction, so it cannot be kept. **What replaces it:** happy-dom + `@testing-library/react`
+  now actually RENDER the modules the tripwire only IMPORTED. A free identifier is a red test rather
+  than a blank page, and the coverage is strictly larger — the tripwire proved the views *loaded*;
+  the render tests prove they *paint*. `tsc -p tsconfig.public.json` additionally typechecks every
+  file, orphan or not, which the tripwire never did.
+- **`test/no-opt-in-escaping.test.ts` → `test/no-dangerous-html.test.ts`** (RFC §9.5). Escaping stays
+  STRUCTURAL, now by JSX rather than by `createTextNode`. The guard bans `dangerouslySetInnerHTML`
+  and its `{__html:}` payload (React's spelling of the deleted `{html:}` hole), raw `innerHTML`
+  writes except a bare clear, and hand-rolled `esc()`/`htmlOf()` — across every `.js`/`.ts`/`.tsx`
+  under `public/`. A glob matching zero files FAILS rather than passing vacuously, and a new
+  assertion pins `public/` as TypeScript-only so a revert of the vanilla tree trips loudly.
+
+### Changed
+
+- **The test DOM is installed once, from the suite preload** (RFC §9.3), instead of per-file. With
+  the tripwire gone, `test/test-setup.ts` calls `registerDom()` and leaves it standing;
+  `test/dom-warmup.ts` and `test/dom-register.ts` are deleted, and eight React test files drop their
+  `import "./dom-register.ts"` / `beforeAll(registerDom)` / `afterAll(unregisterDom)` ceremony.
+  `unregisterDom` is deleted outright rather than moved: destroying the window after react-dom has
+  captured its `queueMicrotask` makes every later async state update vanish silently (measured — it
+  cost seven metrics-view tests and produced no error message).
+- **`test/output-snapshot-retired.test.ts` imports `rescueNote` instead of scraping it.** It read
+  `public/views/task.js` as text and `new Function()`'d a regex-captured body; the function has been
+  an export of the DOM-free `views/task-logic.ts` since Phase 4a. Its front-end sweep also globbed
+  `public/**/*.js`, which now matches zero files — caught by its own non-empty assertion.
+- `CONTRIBUTING.md` describes the React front end it actually has, and `tsconfig.public.json` drops
+  `allowJs` (there is no JavaScript left under `public/` to allow).
+
 ## [0.9.287] - 2026-07-09
 
 ### Changed

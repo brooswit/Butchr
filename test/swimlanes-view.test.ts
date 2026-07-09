@@ -13,16 +13,13 @@
 // A `<Link>` needs a router, so every render is wrapped in a `MemoryRouter`. `RouterProvider` (the
 // react-aria one, in App.tsx) is NOT needed here: it only teaches LaunchPad's own Link/Breadcrumbs to
 // navigate, and the steps use react-router's Link directly.
-import "./dom-register.ts"; // must precede every React import — installs `document`
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router";
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import { applyStateMeta } from "../public/core/state-meta.js";
 import { Swimlanes } from "../public/views/swimlanes.tsx";
 
-beforeAll(registerDom);
 afterEach(cleanup);
 
 // `TERMINAL_STATUSES` is an `export let` that starts EMPTY — `isHistoryItem` reads it, so without
@@ -38,7 +35,7 @@ const node = (id: string, o: Item = {}): Item => ({ id, work_kind: "node", statu
 // The rule lives in core/work-graph.ts and the views never re-derive it.
 const leaf = (id: string, o: Item = {}): Item => ({ id, work_kind: "leaf", status: "inactive", parent_id: "s1", ...o });
 
-// Queries come from `render()`, NEVER from `screen` — see test/dom-register.ts.
+// Queries come from `render()`, NEVER from `screen` — see test/test-setup.ts.
 const mount = (work: Item[]) =>
   render(createElement(MemoryRouter, null, createElement(Swimlanes, { work: work as never })));
 
@@ -242,5 +239,3 @@ test("history stories are not lanes; a non-open story gets no lifecycle chip", (
   expect(gone.container.querySelectorAll(".swim-lane").length).toBe(1);
   expect(gone.container.querySelector(".swim-laneid")!.textContent).toBe("s2");
 });
-
-afterAll(unregisterDom);

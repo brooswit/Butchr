@@ -9,12 +9,13 @@
 // needed. The rename is asserted by reading the CLI source (a cross-surface grep trap:
 // the front-end has an unrelated DOM ciBadge that must NOT be touched here).
 import { expect, test } from "bun:test";
-// The front-end ciBadge — the OTHER thing named ciBadge, which the rename must leave alone.
-// It moved out of public/app.js into public/components/panel.js with the Phase 2 module
-// split, so this guard imports the real export instead of grepping app.js by path: a path
-// scrape re-breaks on every move and proves nothing beyond "a string is present".
-// panel.js is DOM-free at module load, so importing it here is safe under bun test.
-import { ciBadge } from "../public/components/panel.js";
+// The front-end CI badge — the OTHER thing that was named ciBadge, which the rename must leave
+// alone. It moved out of public/app.js into public/components/panel.js with the Phase 2 module
+// split, and RFC Phase 4 rewrote that module as React: the vanilla `ciBadge()` node emitter is now
+// the `<CiBadge/>` component in public/components/panel.tsx. This guard imports the real export
+// instead of grepping by path — a path scrape re-breaks on every move and proves nothing beyond
+// "a string is present". The suite preload installs a DOM, so importing a .tsx here is safe.
+import { CiBadge } from "../public/components/panel.tsx";
 import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -140,8 +141,9 @@ test("ciBadge is renamed to ciCell in bin/butchr (and the front-end helper is un
   // The CLI's CI helper is now ciCell; the old name must be gone here.
   expect(cli).not.toContain("ciBadge");
   expect(cli).toContain("function ciCell(");
-  // The unrelated DOM helper keeps its name — not our surface to rename.
-  expect(typeof ciBadge).toBe("function");
+  // The unrelated front-end helper still exists and is still the front end's to name. It answers to
+  // `CiBadge` since the React migration; what this pins is that the CLI rename never reached across.
+  expect(typeof CiBadge).toBe("function");
 });
 
 // F1 — a bare negative integer is reachable as a POSITIONAL, not rejected as an

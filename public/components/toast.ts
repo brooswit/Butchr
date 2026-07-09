@@ -1,54 +1,34 @@
 // The transient TOAST surface — the one-line banner that confirms an action or reports an error.
 //
-// It lived in core/api.js until the RFC Phase 2 horizontal split. `toast` builds and appends DOM
-// nodes, so its presence there was the single reason `core/` was NOT framework-agnostic: the chain
-// core/state-meta -> core/api -> core/dom.js dragged the DOM layer into the two purest core
-// leaves. Moving it here severs that edge — core/api.ts now holds only the `api()` fetch wrapper,
-// and core/dom.js is reachable only from components/ and views/ (RFC §0.1 #2, #3).
+// >>> THE PHASE-3 SINK IS GONE, AND WITH IT THE LAST IMPORT OF core/dom.js. <<<
+// Through Phase 4d this module carried a `setToastSink()` indirection and a hand-rolled `.toast`
+// div built with `el()`. Both halves of that justification were true then and are false now:
 //
-// DOM-free at module load, like everything under components/: `document` is touched only INSIDE a
-// called function.
+//   • "Seven vanilla views still call toast(), and importing @launchpad-ui here would drag React
+//     into the module graph of every views/*.js" — there are no vanilla views. Every caller is a
+//     .tsx module that already imports @launchpad-ui.
+//   • "…and of the six tests that import those views directly with no DOM" — those tests have a
+//     real DOM now (test/dom-env.ts installs happy-dom from the suite preload).
 //
-// >>> THE PHASE-3 SINK STAYS, AND THIS IS PHASE 4a's ONE DELIBERATE DEPARTURE FROM THE SALVAGE. <<<
-// The abandoned Phase-4 branch rewrote this module into a two-line adapter over @launchpad-ui's
-// `toastQueue`, deleting `setToastSink` and the vanilla fallback. That is the correct END state and
-// it is WRONG NOW: this slice is a type port with zero UI change, and every reason the sink exists
-// is still true.
+// So this is what RFC §7.2 said it should be all along: a two-line adapter onto LaunchPad's
+// `toastQueue`, which the shell's `<ToastRegion/>` renders. The hand-rolled `toastTimer` goes with
+// it — `toastQueue.add`'s `timeout` owns that now.
 //
-//   • Seven vanilla views still call `toast()`, and App.tsx still calls `setToastSink(...)` at mount
-//     and `setToastSink(null)` at unmount. Deleting the export breaks the build outright.
-//   • Importing @launchpad-ui here would drag React and a CSS import into the module graph of every
-//     `views/*.js` — and of the six tests that import those views directly with no DOM.
-//
-// The sink dies in Phase 4e, with the last vanilla view. Until then: null sink = the vanilla
-// `.toast` div, which is what `bun test` sees and what a bridge-less page falls back to.
-import { el } from "../core/dom.js";
+// WORTH KNOWING: this module was the SOLE surviving importer of `public/core/dom.js`. Every route
+// was already React, yet `el()` still shipped in the production bundle through this one edge —
+// which is why "is the vanilla front end dead?" answered *no* to the bundler long after it answered
+// *yes* to the router. Severing it is what let Phase 4e delete core/dom.js.
+import { toastQueue } from "@launchpad-ui/components";
 import type { TerminalResult } from "../core/types.js";
 
-/** `(msg, isErr) => void`, or null for the vanilla `.toast` div. Set by App.tsx's shell. */
-export type ToastSink = ((msg: string, isErr: boolean) => void) | null;
+// The two timeouts are the Phase-3 shell sink's, preserved: an error stays up longer because it is
+// the one you may need to read twice. (The vanilla div used 6s/3s; the sink used 8s/5s. The sink's
+// values win — they are what the operator has actually been living with since Phase 3 landed.)
+const ERROR_MS = 8000;
+const SUCCESS_MS = 5000;
 
-let sink: ToastSink = null;
-export function setToastSink(fn: ToastSink): void {
-  sink = fn;
-}
-
-// Module-private: only toast() reads or clears it, so it is deliberately not exported.
-let toastTimer: ReturnType<typeof setTimeout> | undefined;
 export function toast(msg: string, isErr?: boolean): void {
-  if (sink) {
-    sink(msg, !!isErr);
-    return;
-  }
-  const old = document.querySelector(".toast");
-  if (old) old.remove();
-  // `[msg]`, not `msg`. Identical at runtime — el() normalises its children with `[].concat(children)`,
-  // and `[].concat("x")` is `["x"]` — but el()'s `children = []` default makes tsc infer `any[]`, and a
-  // bare string is now a type error where the untyped .js caller was silently fine.
-  const t = el("div", { class: "toast" + (isErr ? " err" : "") }, [msg]);
-  document.body.appendChild(t);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
+  toastQueue.add({ title: msg, status: isErr ? "error" : "success" }, { timeout: isErr ? ERROR_MS : SUCCESS_MS });
 }
 
 /** The toast confirming a terminal attach, naming the emulator butchr launched. */

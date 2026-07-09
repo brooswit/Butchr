@@ -22,16 +22,15 @@
 // every event, which is why `captureUiState`/`restoreUiState` had to exist to put the operator's
 // typed text, caret, focus and scroll back. React reconciles instead — a controlled input that is
 // never unmounted keeps all four for free — so those 61 lines, their three `<test-extract:>`
-// sentinel fences, and test/app-restore-uistate.test.ts get deleted with the last vanilla view
-// (RFC §1.4, §9.4). They are all still here today; Phase 4e removes them.
+// sentinel fences (the last sentinel scrapes in the repo) and test/app-restore-uistate.test.ts were
+// deleted with the last vanilla view in Phase 4e (RFC §1.4, §9.4).
 //
-// >>> LIVE SINCE PHASE 4b, ALONGSIDE bridge.tsx's OWN `refreshSoon()` — NOT INSTEAD OF IT. <<<
-// The two cannot be merged while a single view is still vanilla: bridge's version must call
-// `render()` (which destroys and rebuilds `#app`), and this one must not touch the DOM at all.
-// App.tsx's SSE handler calls BOTH through a local wrapper, and only one of them ever has work to
-// do — the inactive world's target does not exist. Do not "simplify" App.tsx to call just this one:
-// it would silently stop repainting the vanilla views on SSE events, and no test would catch it.
-// bridge's half dies with `core/nav.js` in Phase 4e, and this becomes the only refresh signal.
+// >>> THIS IS NOW THE ONLY REFRESH SIGNAL. <<< From Phase 4b through 4d it ran ALONGSIDE bridge.tsx's
+// own `refreshSoon()`, not instead of it: the bridge's version had to call `render()` (which
+// destroyed and rebuilt `#app`) while this one must not touch the DOM at all, and App.tsx's SSE
+// handler called BOTH through a local wrapper because only one of them ever had work to do. Phase 4e
+// deleted `core/nav.js` and the bridge, so the wrapper is gone and App.tsx imports `refreshSoon`
+// from here directly.
 import { useSyncExternalStore } from "react";
 
 let version = 0;

@@ -6,39 +6,57 @@ import { join } from "node:path";
 // test file is imported, so it can set process.env defaults that `src/config.ts` reads via
 // `envInt(...)` at its first import.
 //
-// >>> THE DOM IS NOT INSTALLED HERE — IT IS INSTALLED, USED ONCE, AND REMOVED. <<<
-// RFC §9.3 calls for happy-dom to be registered from this preload and left standing. It cannot be,
-// yet. A preload is process-global across all ~130 files, so registering here would permanently
-// define `globalThis.document` — and `test/vanilla-views-dom-free.test.ts` asserts that it is
-// `undefined`, the tripwire proving no module under `public/` touches `document` at MODULE LOAD. The
-// vanilla views still rely on that guard; Phase 4e retires it along with them.
+// >>> THE DOM IS INSTALLED HERE, ONCE, AND LEFT STANDING (RFC §9.3). <<<
+// This is what §9.3 asked for from the start, and Phase 4e is the first phase that can do it.
+// Through 4d it was impossible: a preload is process-global across all ~150 files, so registering
+// here permanently defines `globalThis.document` — and `test/vanilla-views-dom-free.test.ts`
+// asserted that it was `undefined`, the tripwire proving no module under `public/` touched
+// `document` at MODULE LOAD. That tripwire existed to protect the vanilla views. They are deleted,
+// so it is deleted (CTO decision 4 approved retiring it together with test/dom-stub.ts), and the
+// DOM can finally just be here.
 //
-// What the preload MUST still do is evaluate `react-dom` while a DOM exists, because react-dom
-// caches `canUseDOM` / `isInputEventSupported` / `queueMicrotask` at module init and silently
-// disables every `onChange` handler AND every async state update in the process if it initialises
-// without one. No test file can do this — bun hoists @testing-library/react's CJS graph above any
-// ESM side-effect import. See test/dom-warmup.ts; it leaves `globalThis.document` undefined again.
+// THREE FILES COLLAPSED INTO THESE FOUR LINES. `test/dom-warmup.ts` registered a DOM, forced
+// react-dom to evaluate against it, and tore it down again — an elaborate dance whose ONLY purpose
+// was to leave `globalThis.document` undefined for the tripwire while still letting react-dom cache
+// `canUseDOM` / `isInputEventSupported` / `queueMicrotask` as true. `test/dom-register.ts` existed
+// so a React test file could install a `document` before ES-module hoisting evaluated
+// @testing-library/react's CJS graph. A DOM that is simply always present needs neither: react-dom
+// evaluates against a window that is never destroyed, so its cached flags and its cached microtask
+// queue both stay valid for the life of the process. That is why the warmup's timer-shuffling is
+// gone rather than moved.
 //
 // BEST-EFFORT, AND ONLY FOR ONE REASON. test/gate-sibling-worktree.test.ts copies bunfig.toml and
 // THIS FILE into a synthetic repo under `os.tmpdir()` and runs a bare `bun test` there, to prove
 // `[test] root` scopes discovery. That temp dir has no `node_modules`, so `@happy-dom/…` cannot
 // resolve and an unguarded import would fail the preload — turning a test about test DISCOVERY red
 // for a reason about the DOM. A module-resolution failure is therefore swallowed; anything else
-// still throws. Nothing is silently degraded by this: a warmup that did not run makes
-// test/dom-env.test.ts's two react-dom guards fail loudly, in the repo, by name.
+// still throws. Nothing is silently degraded: a registration that did not happen makes
+// test/dom-env.test.ts's four guards fail loudly, in the repo, by name.
 try {
-  await import("./dom-warmup.ts");
+  const { registerDom } = await import("./dom-env.ts");
+  registerDom();
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!/Cannot find (module|package)/i.test(msg)) throw e;
 }
 
-// Beyond the warmup, a test opts IN to a DOM per file, and restores on the way out:
-//     import "./dom-register.ts";  // first, before any React import
-//     import { registerDom, unregisterDom } from "./dom-env.ts";
-//     beforeAll(registerDom); afterAll(unregisterDom);
-// See test/dom-env.ts for the full rationale (it also hands bun's `fetch` back after registering,
-// without which six server test files go red), and test/dom-env.test.ts for the proof it round-trips.
+// `registerDom` hands bun's `fetch` back immediately after happy-dom overwrites it — without that,
+// the six test files that issue a real `fetch` against a real `Bun.serve()` origin go red with a
+// `NetworkError` naming neither happy-dom nor this file. See test/dom-env.ts for the full rationale
+// and test/dom-env.test.ts for the proof, which now covers the whole suite rather than one file.
+//
+// A React test file no longer opts in to anything, and no longer tears anything down. It renders.
+// There is deliberately no `unregisterDom`: destroying the window after react-dom has captured its
+// microtask queue makes every later async state update vanish, silently. dom-env.ts spells it out.
+//
+// >>> DO NOT USE `screen` FROM @testing-library/react. USE THE QUERIES `render()` RETURNS. <<<
+// Measured, not guessed, and STILL TRUE with the DOM in the preload. `@testing-library/dom`'s
+// screen.js binds `screen` AT MODULE EVAL to `document.body`. Under bun that CJS graph is hoisted
+// above ESM imports — but the preload runs before every import, so `screen` now binds to a real
+// body. It binds to the body of THIS preload's window, which is the same window every test renders
+// into, so it happens to work; it is still the wrong habit, because `render()`'s returned queries
+// scope to the rendered container and `screen` does not. test/dom-env.test.ts is the reference for
+// how a React test in this suite is shaped.
 //
 // WHY THIS EXISTS — detached startup-auto-confirm probes must not bleed across test files.
 // The launch auto-confirm (`autoConfirmStartupPrompts`) is FIRE-AND-FORGET on both the build

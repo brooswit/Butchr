@@ -11,11 +11,9 @@
 // >>> PHASE 4d MOVED THE CHIP HALF OFF `dom-stub.ts` AND ONTO `@testing-library/react`. <<<
 // `taskChips()` returned a DocumentFragment and ran inside `withDom()`. It is `<TaskChips/>` now, so
 // the live-binding guard below renders it into a real happy-dom DOM. What is asserted is unchanged.
-import "./dom-register.ts"; // must precede every React import — installs `document`
 import { cleanup, render } from "@testing-library/react";
 import { createElement } from "react";
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterEach, expect, test } from "bun:test";
 import { ALL_STATUSES, STATE_META, isTerminal } from "../src/db.ts";
 import { DEFAULT_STATE_META, statusSetsFrom } from "../public/core/state-meta.js";
 // STATIC, top-level import — ON PURPOSE, AND IT IS THE WHOLE POINT OF THE LAST TEST IN THIS FILE.
@@ -25,11 +23,7 @@ import { DEFAULT_STATE_META, statusSetsFrom } from "../public/core/state-meta.js
 // `const {AGENT_TYPE} = ...` snapshot regression in chips.tsx would sail straight through.
 import { TaskChips } from "../public/components/chips.tsx";
 
-beforeAll(registerDom);
 afterEach(cleanup);
-// Not optional: `test/vanilla-views-dom-free.test.ts` asserts `globalThis.document` is undefined, and
-// `bun test` runs every file in one process.
-afterAll(unregisterDom);
 
 // The cases that stand in for a FAILED / empty /api/state-meta response. loadStateMeta()
 // passes DEFAULT_STATE_META on the catch path; statusSetsFrom also falls back internally
@@ -82,12 +76,12 @@ test("client DEFAULT_STATE_META mirrors the server's canonical status sets (src/
 //      core/api.ts beneath it) and the import at the top of this file throws, failing every test
 //      in it loudly.
 //
-//      >>> THIS FILE NOW REGISTERS A DOM, SO READ (1) CAREFULLY. <<< It no longer proves that
-//      state-meta loads with NO `document` present — `dom-register.ts` installed one before any of
-//      these imports evaluated. What it still proves is that the TABLES START EMPTY, i.e. that
-//      nothing in this import graph populates them at load. The DOM-free-at-load property itself is
-//      owned by `test/vanilla-views-dom-free.test.ts`, which asserts `globalThis.document ===
-//      undefined` and is why the `afterAll(unregisterDom)` above is mandatory.
+//      >>> A DOM IS ALWAYS PRESENT NOW, SO READ (1) CAREFULLY. <<< It does not prove that
+//      state-meta loads with NO `document` — the suite preload installs one before any import in
+//      this file evaluates. What it still proves, and all it ever proved here, is that the TABLES
+//      START EMPTY: nothing in this import graph populates them at load. The DOM-free-at-load
+//      property was owned by `test/vanilla-views-dom-free.test.ts`, which Phase 4e RETIRED along
+//      with the vanilla views it guarded — React breaks that property by construction.
 //
 //  (2) applyStateMeta's REASSIGNMENT propagates to importers via the ES live binding. This is
 //      what lets a component import the tables as named bindings; if it broke, every status chip

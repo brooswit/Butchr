@@ -2,16 +2,14 @@
 // @testing-library/react against a real (happy-dom) DOM.
 //
 // >>> IT IS NOT MOUNTED IN THE APP YET, AND THESE TESTS ARE THE ONLY THING EXERCISING IT. <<<
-// The brief said to "point the `#/metrics` and diff routes at real React elements". There is no diff
-// route: `renderDiff`'s only caller is `renderTask` in the still-vanilla views/task.js, so the diff
-// reader is a COMPONENT of the task view and nothing in App.tsx can point at it. views/task.tsx
-// (Phase 4c) is what mounts this. Until then the vanilla views/diff.js still ships and keeps its own
-// coverage in test/diff-vanilla-view.test.ts — and both renderers call ONE tokenizer and ONE line
-// anchor in views/diff-logic.ts, which is what stops them drifting while both exist.
+// There is no diff ROUTE: the diff reader is a COMPONENT of the task view, mounted by views/task.tsx
+// (Phase 4c). Its vanilla twin views/diff.js — and that twin's coverage in
+// test/diff-vanilla-view.test.ts — were deleted in Phase 4e. `views/diff-logic.ts` still owns the
+// one tokenizer and the one line anchor; nothing else ever re-derived them.
 //
 // The load-bearing test here is "unknown language": escaping is STRUCTURAL. A `<` or `&` reaches the
 // DOM as a JSX string child, so it cannot be re-parsed as markup and no future edit can forget to
-// call esc(). The vanilla file proved the same property through createTextNode.
+// call esc(). The deleted vanilla file proved the same property through createTextNode.
 //
 // Two rendered-whitespace facts are asserted because style.css makes them load-bearing:
 //   - `.fstat` is an inline span (no flex), so the single space between its +N and −M IS rendered.
@@ -19,18 +17,11 @@
 //
 // The PURE half's assertions (`parseDiff`, `composeReviewNote`) are not re-tested here; they belong
 // to views/diff-logic.ts and are covered where they always were.
-import "./dom-register.ts"; // must precede every React import — installs `document`
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { createElement } from "react";
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterEach, expect, test } from "bun:test";
 import { DiffView } from "../public/views/diff.tsx";
 import type { InlineComment } from "../public/views/diff-logic.js";
-
-// The import above only installs a DOM for the FIRST React file `bun test` reaches — a module's side
-// effect runs once per process, and another React file's `afterAll` may have torn it down before
-// this one runs. See test/dom-register.ts. `registerDom` is idempotent.
-beforeAll(registerDom);
 
 const TEXT_NODE = 3;
 
@@ -276,5 +267,3 @@ test("a new taskId resets the per-file collapse state", () => {
   rerender(createElement(DiffView, props));
   expect(container.querySelector(".diff-file")!.className).not.toContain("collapsed");
 });
-
-afterAll(unregisterDom);

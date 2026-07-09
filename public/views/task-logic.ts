@@ -11,15 +11,15 @@
 // behaviour, so that views/task.tsx can import them instead of re-deriving them. Until 4d lands,
 // the two ARE duplicates — if you fix a bug in one, fix it in the other, and prefer landing 4d.
 //
-// `rescueNote` IS ALSO A SOURCE-SCRAPE TARGET, AND THE SCRAPE IS STILL ARMED.
-// `test/output-snapshot-retired.test.ts` reads `public/views/task.js` as TEXT, matches that file's
-// copy with `/function rescueNote\(events, status\) \{[\s\S]*?\n\}/`, and `new Function()`s the
-// captured string. It reads task.js, NOT this file, so this transcription cannot disturb it — but
-// that is also why views/task.js must not be touched before 4d retires the harness. When 4d points
-// the test at this module, the regex and the `new Function` go with it. RFC §9.4's rule — "do not
+// `rescueNote` WAS A SOURCE-SCRAPE TARGET. THE SCRAPE IS DISARMED, AND THE LAST ONE IN THE REPO.
+// `test/output-snapshot-retired.test.ts` used to read `public/views/task.js` as TEXT, match that
+// file's copy with `/function rescueNote\(events, status\) \{[\s\S]*?\n\}/`, and `new Function()` the
+// captured string. Phase 4e deleted task.js and re-pointed the test at the EXPORT below — which is
+// what it always wanted: it can no longer pass while watching a file the function has moved out of,
+// and the regex could never have survived the typed signature anyway. RFC §9.4's rule — "do not
 // reintroduce a sentinel" — generalises: do not reintroduce a scrape.
 //
-// (RFC §9.1's table of "3 coupled by other means" does not list `output-snapshot-retired`. It is a
+// (RFC §9.1's table of "3 coupled by other means" does not list `output-snapshot-retired`. It was a
 // fourth.)
 
 import type { TaskEvent, TaskView } from "../core/types.js";

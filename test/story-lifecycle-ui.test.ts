@@ -17,17 +17,12 @@
 // (This test used to scrape a `<test-extract:story-lifecycle-ui>` sentinel block out of the classic
 // public/app.js script and eval it with `new Function`, stubbing esc/isCompleteStatus/
 // storySubtaskTotal along the way. That harness is long gone. Do not reintroduce a sentinel.)
-import "./dom-register.ts"; // must precede every React import — installs `document`
 import { cleanup, render } from "@testing-library/react";
 import { createElement } from "react";
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterEach, expect, test } from "bun:test";
 import { storyLifecycle, storyProgress } from "../public/views/swimlanes-logic.js";
 import { StoryLifecycleChip } from "../public/views/swimlanes.tsx";
 
-// This FILE's DOM — the side-effect import above only covered the first React file the runner
-// reached. `registerDom` is idempotent. See test/dom-register.ts.
-beforeAll(registerDom);
 afterEach(cleanup);
 
 const story = (o: any = {}) => ({ work_kind: "node", status: "open", counts: {}, leader: {}, ...o });
@@ -73,7 +68,7 @@ test("storyProgress: complete over total, idle excluded from total", () => {
 });
 
 // ── The lane-header chip: null when there's no lifecycle, otherwise a quiet outlined pill ──
-// Queries come from `render()`, NEVER from `screen` — see test/dom-register.ts for why `screen` is
+// Queries come from `render()`, NEVER from `screen` — see test/test-setup.ts for why `screen` is
 // permanently poisoned under bun's module ordering.
 test("StoryLifecycleChip renders per-state class, glyph and title", () => {
   const { container } = render(createElement(StoryLifecycleChip, { story: story({ counts: { in_progress: 1 } }) }));
@@ -97,8 +92,3 @@ test("StoryLifecycleChip renders NOTHING for a story with no lifecycle", () => {
   // A null-returning component contributes no nodes at all — the old emitter's `null` return.
   expect(container.innerHTML).toBe("");
 });
-
-// `bun test` runs every file in one process, so a DOM left standing here is a DOM standing in
-// test/vanilla-views-dom-free.test.ts, whose tripwire would then fail for a reason that names
-// neither happy-dom nor this file. Restore unconditionally, even if a test above threw.
-afterAll(unregisterDom);

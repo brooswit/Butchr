@@ -15,10 +15,11 @@
 //           webapp's Timeline plus a dedicated "Why butchr moved this to review" panel.
 //       The db-side half of (B) is asserted in test/watchdog.test.ts (the rescue's audit-event
 //       note contains "stuck/runaway"). The FE half is asserted HERE, by driving the real
-//       `rescueNote()` out of public/views/task.js.
+//       `rescueNote()` from public/views/task-logic.ts.
 //   (C) The boot migration NULLs the payload and is IDEMPOTENT across boots.
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { rescueNote } from "../public/views/task-logic.js";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,10 +56,15 @@ describe("(A) nothing writes output_snapshot", () => {
     // Deliberately GLOBBED, not path-pinned. Pinned at `public/app.js` this guard rots silently
     // every time the FE module split relocates the task view: it keeps PASSING while watching a
     // file the render it guards no longer lives in. Sweeping every module under public/ means the
-    // guard follows the code wherever the remaining P2/P4 cuts land it.
+    // guard follows the code wherever the cuts land it.
+    //
+    // The extension filter is `.js`/`.ts`/`.tsx`, and it MUST stay that way. RFC Phase 4e deleted
+    // the last `.js` module from public/, so a `.js`-only filter — which is what this was — now
+    // matches ZERO files. That is precisely the vacuous pass the `length` assertion below exists to
+    // catch, and it caught it.
     const files = readdirSync(join(ROOT, "public"), { recursive: true })
       .map(String)
-      .filter((f) => f.endsWith(".js"));
+      .filter((f) => /\.(js|ts|tsx)$/.test(f));
     // A zero-file glob must FAIL, never vacuously pass — the whole point of the sweep.
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) {
@@ -80,17 +86,19 @@ describe("(A) nothing writes output_snapshot", () => {
 });
 
 describe("(B) the rescue reason is still visible on a rescued task", () => {
-  // Drive the REAL `rescueNote()` from public/views/task.js, where it moved with the task view
-  // (the browser module is not importable here, so scrape the function and evaluate it — the same
-  // harness other FE tests use). This is what decides whether the "Why butchr moved this to
-  // review" panel renders. It is a plain (non-exported) declaration, so the regex still matches.
-  const src = read("public/views/task.js");
-  const fn = src.match(/function rescueNote\(events, status\) \{[\s\S]*?\n\}/);
-  if (!fn) throw new Error("rescueNote() not found in public/views/task.js — did it get renamed?");
-  const rescueNote = new Function(`${fn[0]}; return rescueNote;`)() as (
-    events: unknown[],
-    status: string,
-  ) => string | null;
+  // Drive the REAL `rescueNote()`. This is what decides whether the "Why butchr moved this to
+  // review" panel renders.
+  //
+  // >>> IT IS AN IMPORT NOW, NOT A SOURCE SCRAPE. <<< This block used to read public/views/task.js
+  // as text, match `/function rescueNote\(events, status\) \{[\s\S]*?\n\}/`, and `new Function()` the
+  // captured body — because the browser module could not be imported under `bun test`. Both halves of
+  // that expired: RFC Phase 4a moved `rescueNote` into the DOM-free `views/task-logic.ts` and
+  // EXPORTED it, and Phase 4e deleted views/task.js outright, so the scrape reads a file that does
+  // not exist. It would not have survived the move regardless — the regex pins an untyped signature,
+  // and `new Function` cannot evaluate `(events: TaskEvent[], status: string)`.
+  //
+  // Importing the real export is what the guard always wanted: it cannot pass while watching the
+  // wrong file, and it cannot silently stop covering the function it names.
 
   // The three real rescue notes butchr authors (dispatcher.ts watcher + startup reconcile,
   // tasks.ts resume-cap). All share the prefix the panel keys on.
@@ -128,7 +136,7 @@ describe("(B) the rescue reason is still visible on a rescued task", () => {
 
   test("tolerates a missing/!array events payload (the fetch is best-effort)", () => {
     expect(rescueNote([], "in_review")).toBeNull();
-    expect(rescueNote(undefined as unknown as unknown[], "in_review")).toBeNull();
+    expect(rescueNote(undefined, "in_review")).toBeNull();
     expect(rescueNote([ev("in_review", null)], "in_review")).toBeNull();
   });
 });

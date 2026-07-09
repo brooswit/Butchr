@@ -1,5 +1,6 @@
 // The METRICS view — the aggregate dashboard at #/metrics. The FIRST view to render as React
-// (RFC Phase 4b); every other route still goes through bridge.tsx to its vanilla body.
+// (RFC Phase 4b), back when every other route still reached its vanilla body through bridge.tsx.
+// Phases 4b–4d migrated the rest and 4e deleted the bridge; every route is React now.
 //
 // >>> A CORRECTION TO THE RFC, AND IT IS LOAD-BEARING FOR THIS FILE. <<<
 // RFC §7.2 and §1.1 row 18 both say this view maps onto LaunchPad's `Table` / `TableHeader` /

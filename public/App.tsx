@@ -1,27 +1,26 @@
 // The React shell (RFC §10 Phase 3). It owns the chrome — topbar, pause banner, conn LED, theme
 // toggle, toast region, the hash router, and the SSE stream.
 //
-// >>> PHASE 4d ROUTED THE LAST TWO VIEWS. NO ROUTE GOES THROUGH THE BRIDGE. <<<
-// `<Routes>` renders inside `<main id="app">`, every route element is a React component, and the
-// bridge's central invariant — "a vanilla route and a React route are never mounted at the same
-// time" — is now vacuous. `bridge.tsx`, `core/nav.js`, `core/dom.js` and `ui-state.js` are still on
-// disk and no longer reachable from this entry point. Phase 4e deletes them in one reviewable diff;
-// splitting that from this rewrite is what keeps a working fallback one revert away.
+// >>> PHASE 4e DELETED THE VANILLA FRONT END. THERE IS NO BRIDGE AND NO FALLBACK. <<<
+// `bridge.tsx`, `core/nav.js`, `core/dom.js`, `ui-state.js` and every vanilla `views/*.js` /
+// `components/*.js` are gone from the tree. `<Routes>` renders inside `<main id="app">`, every route
+// element is a React component, and nothing calls `setRenderer`, `mount`, `render`, `el` or `svg`.
 //
-// THE ROLLBACK BOUNDARY IS STILL A `VanillaView` AWAY. Reverting one route means pointing it back at
-// `<VanillaView id=… run={render…}/>`; the vanilla view module and the bridge are both still here.
+// THE ROLLBACK BOUNDARY IS BEHIND US. Through 4d, reverting a route meant pointing it back at
+// `<VanillaView id=… run={render…}/>` and the vanilla module was still on disk. It is not. The tag
+// `p3-rollback-boundary` (4d10906) is the last commit where that one-revert escape existed.
 //
 // NO <StrictMode>. Its development-only double-invoked effects would open the EventSource twice.
-// Now that every view is React this is worth revisiting — but not in the phase that rewrote them:
-// turning it on is a behaviour change that wants its own diff and its own browser pass.
+// Now that every view is React this is worth revisiting — but not in the phase that DELETED the
+// fallback: turning it on is a behaviour change that wants its own diff and its own browser pass.
 
-import { Alert, AlertText, Button, RouterProvider, ToastRegion, ToggleButton, toastQueue } from "@launchpad-ui/components";
+import { Alert, AlertText, Button, RouterProvider, ToastRegion, ToggleButton } from "@launchpad-ui/components";
 import { Icon } from "@launchpad-ui/icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { To } from "react-router";
 import { HashRouter, Link, Navigate, Route, Routes, useHref, useLocation, useNavigate, useParams } from "react-router";
 
-import { setToastSink, toast } from "./components/toast.js";
+import { toast } from "./components/toast.js";
 import { api } from "./core/api.js";
 import { refreshSoon } from "./core/refresh.js";
 import type { Health, Project, Repo } from "./core/types.js";
@@ -39,11 +38,10 @@ import { WorkspaceView } from "./views/workspace.tsx";
  * without touching the DOM). Both had to fire because only one of them ever had work to do, and
  * which one depended on the route.
  *
- * PHASE 4d MIGRATED THE LAST TWO ROUTES, so no view is vanilla and nothing calls `render()`. The
- * wrapper is deleted and `core/refresh.ts`'s `refreshSoon` is imported directly — which is exactly
- * what that module's header said would happen "when the last vanilla view lands", and the warning it
- * carried against doing it early no longer binds. bridge.tsx, core/nav.js and core/dom.js are now
- * unreachable from this entry point; Phase 4e deletes them.
+ * Phase 4d migrated the last two routes and dropped the wrapper, importing `core/refresh.ts`'s
+ * `refreshSoon` directly. Phase 4e deleted the modules the other debouncer lived in. One debouncer,
+ * one mechanism: a version tick that every view's `useAsync` re-fetches against. Nothing under
+ * `public/` destroys or rebuilds a DOM subtree by hand any more.
  */
 
 const BASE_TITLE = "butchr";
@@ -382,16 +380,11 @@ function Shell() {
     }
   }, [paused, setPaused]);
 
-  // Route every vanilla `toast()` call into LaunchPad's ToastRegion. Registered as a SINK rather than
-  // by rewriting components/toast.js's import, deliberately: importing @launchpad-ui from a vanilla
-  // leaf would drag React and a CSS import into the module graph of every view — and of the six tests
-  // that import those views directly. The sink is unset in Phase 4 along with the vanilla fallback.
-  useEffect(() => {
-    setToastSink((msg: string, isErr: boolean) => {
-      toastQueue.add({ title: msg, status: isErr ? "error" : "success" }, { timeout: isErr ? 8000 : 5000 });
-    });
-    return () => setToastSink(null);
-  }, []);
+  // NO TOAST SINK. Through Phase 4d this effect registered a `setToastSink(…)` that forwarded into
+  // LaunchPad's `toastQueue`, because `components/toast.ts` could not import @launchpad-ui without
+  // dragging React into every vanilla view's module graph. Phase 4e deleted the vanilla views, so
+  // toast.ts calls `toastQueue.add` directly and the indirection is gone. `<ToastRegion/>` below is
+  // still what renders them.
 
   // ---------- SSE live updates ----------
   // `EventSource` is a browser API, not a framework concern: the stream opens once, dispatches into
@@ -437,10 +430,10 @@ function Shell() {
       <Topbar paused={paused} onTogglePause={togglePause} attention={attention} conn={conn} />
       {paused ? <PauseBanner onResume={togglePause} /> : null}
       {/*
-        THE VIEW CONTAINER, styled by style.css's `main` rule. As of Phase 4d every route below
-        renders React nodes into it, and it is an ORDINARY container again — the thing the bridge's
-        header promised it would become. It still lives in the LAYOUT rather than in a route, which is
-        now merely tidy (it was load-bearing while mount() had to find it).
+        THE VIEW CONTAINER, styled by style.css's `main` rule. An ORDINARY container: every route
+        below renders React nodes into it, and with the bridge deleted nothing looks it up by `id`
+        any more. The `id="app"` is kept because style.css and the operator's muscle memory both use
+        it; it is no longer load-bearing (it was, while `mount()` had to find it).
       */}
       <main id="app">
         <Routes>

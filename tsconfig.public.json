@@ -20,20 +20,21 @@
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
-    // Phases 1-3: public/ is still 19 vanilla .js modules. `allowJs` WITHOUT `checkJs` means an
-    // orphan .js file's TYPE errors are not reported, so until Phase 4 lands .tsx this is exactly
-    // as strong as the per-file `bun build` parse loop it replaced — not stronger. What it does
-    // keep is the loop's one real property: it reads every file `include` matches, orphan or not,
-    // and checks its syntax and module resolution. What it drops, for orphans only, is the
-    // bundler's missing-named-export check; reachable modules still get that from `build:fe`.
-    "allowJs": true,
-    // Permits `import { StatusChip } from "../components/chips.tsx"` — the explicit extension.
-    // It is REQUIRED, not stylistic, and only while a `.js` and a `.tsx` share a basename:
-    // `components/chips.js` (vanilla, still rendering chips for four vanilla views) sits next to
-    // `components/chips.tsx` (React), and `"./chips.js"` resolves to the FIRST of those under both
-    // `tsc` and `bun build`. There is no extensionless or `.js`-suffixed specifier that reaches the
-    // `.tsx`. Legal here because `noEmit` is set — the flag is rejected when tsc emits.
-    // Phase 4d deletes chips.js and this can go with it.
+    // NO `allowJs`. RFC Phase 4e deleted the last vanilla module, so public/ is 15 `.ts` + 15 `.tsx`
+    // and there is no JavaScript left to allow. Through Phases 1-3 it was set WITHOUT `checkJs`,
+    // which meant an orphan .js file's TYPE errors went unreported — exactly as strong as the
+    // per-file `bun build` parse loop it replaced, and no stronger. That caveat is now moot: every
+    // file `include` matches is fully typechecked, orphan or not, reachable from an entry point or
+    // not. `test/no-dangerous-html.test.ts` (f) is what keeps a `.js` from quietly reappearing and
+    // slipping back out of coverage.
+    //
+    // Permits `import { StatusChip } from "../components/chips.tsx"` — the explicit extension. It is
+    // no longer strictly REQUIRED: it existed because `components/chips.js` (vanilla) sat next to
+    // `components/chips.tsx` (React) and `"./chips.js"` resolved to the FIRST of those under both
+    // `tsc` and `bun build`, leaving no specifier that reached the `.tsx`. The `.js` twins are gone,
+    // so a `.js` specifier now resolves to the `.tsx` — but App.tsx and six test files still spell
+    // the extension out, and rewriting those is a rename, not a deletion. Legal here because
+    // `noEmit` is set; the flag is rejected when tsc emits.
     "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     // Explicit, per RFC §2.4. Omitting it works only because bun's DEFAULT is the automatic

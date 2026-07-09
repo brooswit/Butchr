@@ -28,18 +28,12 @@
 //     them at textContent alone and they still PASS — vacuously — while no longer covering the class
 //     they were written to test. A test that passes for the wrong reason is worse than a deleted one.
 // So `surface()` reproduces the old string's coverage: class list + rendered text, lowercased.
-import "./dom-register.ts"; // must precede every React import — installs `document`
 import { cleanup, render } from "@testing-library/react";
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { registerDom, unregisterDom } from "./dom-env.ts";
+import { afterEach, expect, test } from "bun:test";
 import { ceoNote } from "../public/views/projects.tsx";
 import { ceoPill, ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects-logic.js";
 
-beforeAll(registerDom);
 afterEach(cleanup);
-// Not optional: `test/vanilla-views-dom-free.test.ts` asserts `globalThis.document` is undefined, and
-// `bun test` runs every file in one process.
-afterAll(unregisterDom);
 
 type Ceo = { enabled: boolean; overridden: boolean; globalGate: boolean; live: boolean };
 
