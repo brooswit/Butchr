@@ -6,7 +6,7 @@
 // touches `document`, which is exactly why nothing under core/, components/, or views/ may
 // import it — see the header of core/nav.js.
 //
-// TERMINAL_STATUSES / FILTER_STATUSES / stateMetaLoaded are `export let`:
+// TERMINAL_STATUSES / stateMetaLoaded are `export let`:
 // applyStateMeta REASSIGNS them once /api/state-meta lands, and the ES live binding
 // propagates that new value here. Read them at CALL time — never destructure them into a
 // local const, which would snapshot the empty pre-load value and silently break every
@@ -15,8 +15,9 @@ import { el, esc, svg } from "./core/dom.js";
 // fmtBytes/fmtPct left with the metrics view — they had no other caller in this file.
 import { fmtDuration, fmtTime } from "./core/format.js";
 import { api, terminalToast, toast } from "./core/api.js";
+// FILTER_STATUSES is no longer imported here: its only consumer was dirCard's count-pill row,
+// which died with the unreachable dashboard surface. It remains exported from state-meta.js.
 import {
-  FILTER_STATUSES,
   TERMINAL_STATUSES,
   loadStateMeta,
   stateMetaLoaded,
@@ -137,8 +138,8 @@ function needsUserInputPanel(t) {
 
 // ---------- managed CTO agent (PER-WORKSPACE) ----------
 // The CTO agent's tri-state status, mapped from running/desired to a display label
-// and the matching cto-badge CSS class. Shared by the workspace panel and the
-// dashboard mini-badge so the mapping can't drift between them.
+// and the matching cto-badge CSS class. Used by the workspace panel (its dashboard-card
+// mini-badge counterpart went with the dashboard).
 function ctoState(s) {
   return {
     state: s.running ? "running" : (s.desired ? "starting…" : "stopped"),
@@ -249,12 +250,16 @@ async function action(btn, fn, { success, onDone } = {}) {
 }
 
 // ---------- router ----------
+// Returns the parsed route, or NULL for a hash this app does not recognize. A null route is not
+// an error: renderRoute REPLACE-redirects it to the Projects overview, the same way it handles a
+// bare hash. There is deliberately no catch-all route object — the legacy workspace-card dashboard
+// that once served that role is gone, and inventing a route name for "unknown" would only re-create
+// a surface with no view behind it.
 function parseHash() {
   const hash = location.hash.replace(/^#/, "") || "/";
   const parts = hash.split("/").filter(Boolean);
-  // LANDING = Projects (Hierarchical Projects IA S2): the default route now shows the
-  // projects overview, not the workspace-card dashboard. renderDashboard() stays defined
-  // (still the fallback for unknown hashes; its register form is retired in S4).
+  // LANDING = Projects (Hierarchical Projects IA S2): the default route shows the projects
+  // overview. The workspace-card dashboard it replaced has since been deleted outright.
   if (parts.length === 0) return { name: "projects" };
   if (parts[0] === "metrics") return { name: "metrics" };
   // `#/projects` is the overview; `#/projects/:id` is a project's detail view; and the
@@ -269,7 +274,7 @@ function parseHash() {
   }
   if (parts[0] === "workspace") return { name: "workspace", id: parts[1] };
   if (parts[0] === "task") return { name: "task", id: parts[1] };
-  return { name: "dashboard" };
+  return null; // unknown hash → renderRoute redirects to the Projects overview
 }
 
 // ---------- live output panel state ----------
@@ -372,20 +377,13 @@ async function renderRoute() {
   // CANONICALIZING REDIRECTS (Hierarchical Projects IA S3) — retire the flat top level by rewriting
   // legacy hashes to their hierarchical equivalents. REPLACE semantics (location.replace, not a
   // `location.hash =` push) so Back walks UP the hierarchy instead of landing on the old hash and
-  // bouncing forward into the redirect again (a history trap). parseHash keeps a bare→projects arm
-  // as a harmless belt; this makes the URL bar honest + deep-linkable.
+  // bouncing forward into the redirect again (a history trap). This makes the URL bar honest +
+  // deep-linkable. A BARE hash and an UNKNOWN hash (parseHash → null) share the arm: everything is
+  // reached project→workspace→work now, so both land on the Projects overview with the URL rewritten
+  // to match what is actually rendered.
   const rawHash = location.hash.replace(/^#/, "");
-  if (rawHash === "" || rawHash === "/") {
+  if (!route || rawHash === "" || rawHash === "/") {
     location.replace("#/projects"); // fires hashchange → render() re-runs on the canonical hash
-    return;
-  }
-  // Any UNKNOWN hash falls to the legacy flat workspace-card dashboard (parseHash's fallback arm).
-  // Retire that surface too (Hierarchical Projects IA S4): everything is reached project→workspace→
-  // work now, so REPLACE-redirect it to the Projects overview (same semantics as the bare-hash arm).
-  // renderDashboard/dirCard stay defined but are now unreachable — their loose-workspace register
-  // form (the only front-end path that created a top-level workspace) was removed in this increment.
-  if (route.name === "dashboard") {
-    location.replace("#/projects");
     return;
   }
   // A FLAT `#/workspace/:wid` (no projectId) → the nested route, deriving the owning project from
@@ -402,202 +400,13 @@ async function renderRoute() {
   stopActivity();
   syncTopnav(route);
   try {
-    if (route.name === "dashboard") await renderDashboard();
-    else if (route.name === "metrics") await renderMetrics();
+    if (route.name === "metrics") await renderMetrics();
     else if (route.name === "projects") await renderProjects();
     else if (route.name === "project") await renderProjectDetail(route.id);
     else if (route.name === "workspace") await renderWorkspace(route.id, route.projectId);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
     mount(el("div", { class: "empty" }, "error: " + e.message));
-  }
-}
-
-// ---------- stranded-work pull-signal ----------
-// <test-extract:stranded-indicator> — pure, DOM-free helpers for the STRANDED-WORK pull-signal
-// (story st-a4cc6082). Unit-tested in test/stranded-indicator-ui.test.ts by extracting this block
-// and eval'ing it against a tiny `esc` shim. Keep it self-contained (its ONLY dependency is `esc`).
-// The dashboard API (S2) serves, per workspace, `stranded` (count) + `strandedItems`
-// [{workId, kind, reason}] plus `totals.stranded`. Each item's `reason` ALREADY embeds BOTH the
-// condition AND the responder verdict (e.g. "idea task pending; CTO gave up (dead)" / "...; CTO
-// disabled" / "story merge_blocked; leader gave up (dead)" / "...; leader disabled"), so it is
-// rendered verbatim. kind ∈ idea | dead_blocked | stuck_story | merge_blocked.
-const STRANDED_KIND_LABEL = {
-  idea: "idea awaiting spec",
-  dead_blocked: "dead-blocked task",
-  stuck_story: "stuck story",
-  merge_blocked: "merge-blocked story",
-  idle_responder: "idle — not acting",
-};
-function strandedKindLabel(kind) {
-  return STRANDED_KIND_LABEL[kind] || String(kind || "");
-}
-// The link target for a stranded item. TASK-kind findings (idea / dead_blocked) carry a TASK id →
-// the work-detail route #/task/<id>. STORY-kind findings (stuck_story / merge_blocked) carry a
-// STORY id, and stories have NO detail route in this app (parseHash knows only dashboard | metrics
-// | workspace/<id> | task/<id>, and the story card is inert) — so a story id must route to its
-// OWNING WORKSPACE, never #/task/<storyId> (that would mis-render a node id in the task view).
-function strandedHref(kind, workId, workspaceId) {
-  // STORY-kind findings (stuck_story / merge_blocked) carry a STORY id and route to their owning
-  // workspace. The idle_responder summary (story st-a32c8138, PART 2) is a RESPONDER-level entry
-  // whose workId IS the directory/workspace id, so it likewise routes to the workspace/CTO view —
-  // never #/task/<workId> (that would mis-render a directory id in the task view).
-  if (kind === "stuck_story" || kind === "merge_blocked" || kind === "idle_responder") {
-    return "#/workspace/" + esc(workspaceId);
-  }
-  return "#/task/" + esc(workId);
-}
-// The DISTINCT, prominent stranded-work panel as an HTML string — or "" when nothing is stranded
-// (totals.stranded === 0), so the dashboard's calm empty state is preserved. Grouped by workspace
-// (so each item names which workspace/story it belongs to), every item linked via strandedHref.
-// A STRONGER signal than the ordinary review/needsAttention badge: a responder is DEAD or disabled
-// and a human must step in.
-function strandedMarkup(data) {
-  const total = (data && data.totals && data.totals.stranded) || 0;
-  if (!total) return "";
-  const workspaces = (data && data.workspaces) || [];
-  const groups = workspaces
-    .filter((w) => w && Array.isArray(w.strandedItems) && w.strandedItems.length)
-    .map((w) => {
-      const name = esc(w.label || w.path || w.id);
-      const items = w.strandedItems
-        .map((it) => {
-          const href = strandedHref(it.kind, it.workId, w.id);
-          // Distinct badge for the LIVE-but-IDLE case (story st-a32c8138, PART 2) so an idle
-          // responder reads visually apart from a dead/disabled one within the SAME list.
-          const kindClass = it.kind === "idle_responder"
-            ? "stranded-kind stranded-kind--idle"
-            : "stranded-kind";
-          return `<li class="stranded-item"><a class="stranded-link" href="${href}">`
-            + `<span class="${kindClass}">${esc(strandedKindLabel(it.kind))}</span>`
-            + `<span class="stranded-reason">${esc(it.reason)}</span></a></li>`;
-        })
-        .join("");
-      return `<div class="stranded-group"><div class="stranded-ws">${name}</div>`
-        + `<ul class="stranded-list">${items}</ul></div>`;
-    })
-    .join("");
-  return `<div class="panel stranded-panel" role="alert">
-      <div class="stranded-head">
-        <span class="stranded-icon" aria-hidden="true">⚠</span>
-        <h2>Stranded work <span class="stranded-count">${esc(String(total))}</span></h2>
-      </div>
-      <p class="stranded-lead">A responder is <strong>dead, disabled, or idle</strong> — this work
-        is pending with no agent acting on it, so a human must intervene.</p>
-      ${groups}
-    </div>`;
-}
-// </test-extract:stranded-indicator>
-
-// ---------- dashboard ----------
-async function renderDashboard() {
-  // The cross-project dashboard rollup: per-workspace active/review/needs-attention/
-  // failed counts + totals + each workspace's effective gate command. `workspaces`
-  // entries carry the same `counts` map dirCard expects, plus the aggregate buckets.
-  const data = await api("GET", "/dashboard");
-  const dirs = data.workspaces;
-  const totals = data.totals;
-  const wrap = el("div");
-  wrap.appendChild(el("h1", {}, "Workspaces"));
-  wrap.appendChild(el("div", { class: "crumbs" }, "registered workspaces · " + dirs.length));
-
-  // Cross-project summary: the four operator-facing buckets aggregated across every
-  // registered workspace, so "what needs my eyes anywhere" reads at a glance.
-  if (dirs.length) {
-    const sum = el("div", { class: "dash-summary" });
-    const stat = (label, n, cls) =>
-      el("div", { class: "dash-stat" + (cls ? " " + cls : "") + (n ? " nonzero" : "") }, [
-        el("span", { class: "ds-num" }, String(n)),
-        el("span", { class: "ds-label" }, label),
-      ]);
-    sum.appendChild(stat("active", totals.active));
-    sum.appendChild(stat("in review", totals.review, "review"));
-    sum.appendChild(stat("need attention", totals.needsAttention, "attn"));
-    sum.appendChild(stat("failed", totals.failed, "failed"));
-    // STRANDED pull-signal (story st-a4cc6082): pending work whose owning responder (CTO / story
-    // leader) is dead-while-desired or disabled. Distinct, stronger class (lights up red when
-    // non-zero) — a human, not an agent, must act.
-    sum.appendChild(stat("stranded", totals.stranded, "stranded"));
-    wrap.appendChild(sum);
-  }
-
-  // The prominent, visually-distinct stranded-work callout — listing each stranded item, its
-  // condition + responder reason, and which workspace/story it belongs to (linked to the work).
-  // Empty string ⇒ nothing stranded ⇒ no node added, so a healthy board stays calm.
-  const strandedHtml = strandedMarkup(data);
-  if (strandedHtml) wrap.appendChild(el("div", { html: strandedHtml }));
-
-  // NOTE (Hierarchical Projects IA S4): the global "Register a workspace" form was REMOVED here.
-  // Loose/top-level workspaces no longer exist — a workspace is created only from inside a project
-  // (renderProjectDetail → "+ Add workspace" → POST /api/projects/:id/workspaces). This view is now a
-  // read-only rollup and, after S4's unknown-hash redirect, is unreachable dead code left in place.
-  if (dirs.length === 0) {
-    wrap.appendChild(el("div", { class: "empty" }, "No workspaces registered yet — add one from inside a project (Projects)."));
-  } else {
-    const grid = el("div", { class: "grid dirs" });
-    for (const d of dirs) grid.appendChild(dirCard(d));
-    wrap.appendChild(grid);
-  }
-  mount(wrap);
-}
-
-function dirCard(d) {
-  const c = d.counts || {};
-  // Same status set + order as the filter chips (server's status list with the
-  // synthetic `idle` effStatus spliced in — see applyStateMeta / FILTER_STATUSES).
-  const pills = FILTER_STATUSES
-    .map((s) => {
-      const cls = s === "blocked" && c[s] ? "count-pill has-blocked"
-        : s === "inactive" && c[s] ? "count-pill has-inactive"
-        : s === "in_progress" && c[s] ? "count-pill has-running"
-        : s === "needs_user_input" && c[s] ? "count-pill has-needs-input"
-        : s === "idle" && c[s] ? "count-pill has-idle"
-        : s === "in_review" && c[s] ? "count-pill has-review"
-        : s === "spec_review" && c[s] ? "count-pill has-review"
-        : s === "needs_info" && c[s] ? "count-pill has-awaiting"
-        : s === "rolling_back" && c[s] ? "count-pill has-rolling-back"
-        : s === "failed" && c[s] ? "count-pill has-failed"
-        : "count-pill";
-      return `<span class="${cls}">${statusLabel(s)} <b>${c[s] || 0}</b></span>`;
-    }).join("");
-  // Aggregate bucket badges (active / review / needs-attention / failed) when the
-  // card comes from the dashboard rollup (those fields are absent on a plain
-  // WorkspaceView, so the row is simply omitted there). needs-attention/failed light
-  // up only when non-zero so a quiet workspace stays visually calm.
-  const buckets = typeof d.active === "number"
-    ? `<div class="ws-buckets">
-        <span class="ws-bucket">active <b>${d.active}</b></span>
-        <span class="ws-bucket${d.review ? " review" : ""}">review <b>${d.review}</b></span>
-        <span class="ws-bucket${d.needsAttention ? " attn" : ""}">attention <b>${d.needsAttention}</b></span>
-        <span class="ws-bucket${d.failed ? " failed" : ""}">failed <b>${d.failed}</b></span>
-        <span class="ws-bucket${d.stranded ? " stranded" : ""}">stranded <b>${d.stranded || 0}</b></span>
-      </div>`
-    : "";
-  const card = el("div", { class: "card" });
-  card.innerHTML = `
-    <div class="title">${esc(d.label || d.path)}</div>
-    <div class="path">${esc(d.path)}</div>
-    ${buckets}
-    <div class="counts">${pills}</div>
-    <div class="cto-mini" data-cto="${esc(d.id)}"><span class="cto-badge off">CTO …</span></div>`;
-  card.style.cursor = "pointer";
-  card.addEventListener("click", () => (location.hash = "#/workspace/" + d.id));
-  // Lazily fill in THIS workspace's CTO-agent status badge (best-effort; a failed
-  // probe just leaves the placeholder). Scoped per-workspace — one CTO per repo.
-  ctoMiniBadge(d.id, card.querySelector(".cto-mini"));
-  return card;
-}
-
-// Fill a dashboard card's compact CTO badge from /api/workspaces/:id/cto. Pure
-// status — the card's own click navigates into the workspace view (with full controls).
-async function ctoMiniBadge(dirId, slot) {
-  if (!slot) return;
-  try {
-    const s = await api("GET", "/workspaces/" + dirId + "/cto");
-    const { state, cls } = ctoState(s);
-    slot.innerHTML = `${kindBadge("cto")} <span class="cto-badge ${cls}">${esc(state)}</span>`;
-  } catch {
-    slot.innerHTML = "";
   }
 }
 
@@ -2004,7 +1813,7 @@ async function renderTask(id) {
 // ---------- topnav active state ----------
 // Highlight the topbar nav link matching the current route. With the flat "Workspaces" top level
 // retired (Hierarchical Projects IA S3), only two nav items remain: Metrics → #/metrics and
-// everything else (projects overview / project detail / nested + flat workspace / task / dashboard)
+// everything else (projects overview / project detail / nested + flat workspace / task)
 // → #/projects. A flat `#/workspace/:wid` is transient — it redirects to its nested home — so
 // lighting Projects during that hop keeps the nav stable.
 function syncTopnav(route) {
@@ -2932,8 +2741,8 @@ function openAddWorkspaceModal(project) {
 // ---------- needs-attention signal ----------
 // A live pull-signal so the operator gets drawn in instead of polling: GET /health
 // reports needsAttention { review, failed, total } and we reflect it as a tab-title
-// badge ("(2) butchr") plus a header indicator that links to the dashboard (whose
-// workspace cards highlight the review/failed counts). When permitted, a Web
+// badge ("(2) butchr") plus a header indicator that links to `#/` (which canonicalizes
+// to the Projects overview). When permitted, a Web
 // Notification fires as a task NEWLY enters review/failed. Refreshed on boot and on
 // every SSE event, so it tracks without a reload.
 const BASE_TITLE = "butchr";
@@ -3047,7 +2856,7 @@ function wirePause() {
 }
 
 // Clicking the header indicator opts into desktop notifications (requestPermission
-// needs a user gesture) on its way to the dashboard. The href handles navigation.
+// needs a user gesture) on its way to the Projects overview. The href handles navigation.
 function wireAttention() {
   const node = document.getElementById("attention");
   if (!node) return;

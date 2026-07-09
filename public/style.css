@@ -251,7 +251,7 @@ a:hover { text-decoration: underline; }
 .pause-banner .btn:hover { background: rgba(255, 255, 255, 0.88); }
 
 /* needs-attention header indicator — a count badge that appears only when tasks
-   are waiting in review or have failed to dispatch. Links to the dashboard. */
+   are waiting in review or have failed to dispatch. Links to the Projects overview. */
 .attention {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 22px; height: 22px; padding: 0 7px;
@@ -607,105 +607,6 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 }
 .needs-input-panel .ni-noctx { margin: 0 0 12px; font-size: 13px; }
 .needs-input-panel .ni-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-
-/* STRANDED-WORK panel (story st-a4cc6082) — the dashboard pull-signal callout. A bold red-accented
-   panel (thick left bar, like .needs-input-panel) listing the stranded items grouped by workspace,
-   each linked to the affected work. Deliberately LOUDER than the review/needsAttention badges:
-   this means a responder is DEAD or disabled and a human must step in. */
-.stranded-panel {
-  border: 1px solid var(--failed);
-  border-left: 4px solid var(--failed);
-  background: var(--panel-2);
-  margin: 4px 0 20px;
-}
-.stranded-panel .stranded-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
-.stranded-panel .stranded-head h2 { margin: 0; font-size: 16px; color: var(--failed); }
-.stranded-panel .stranded-icon { font-size: 18px; line-height: 1; }
-.stranded-panel .stranded-count {
-  display: inline-block; min-width: 20px; padding: 0 7px; margin-left: 4px;
-  font-size: 13px; font-weight: 700; text-align: center;
-  color: #fff; background: var(--failed); border-radius: 999px;
-}
-.stranded-panel .stranded-lead { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text); }
-.stranded-panel .stranded-group { margin-top: 10px; }
-.stranded-panel .stranded-ws {
-  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--muted); margin-bottom: 4px;
-}
-.stranded-panel .stranded-list { list-style: none; margin: 0; padding: 0; }
-.stranded-panel .stranded-item { margin: 0 0 4px; }
-.stranded-panel .stranded-link {
-  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
-  padding: 6px 8px; border-radius: var(--radius-md);
-  border: 1px solid var(--border); background: var(--panel);
-  text-decoration: none; color: var(--text);
-}
-.stranded-panel .stranded-link:hover { border-color: var(--failed); }
-.stranded-panel .stranded-kind {
-  font-size: 11px; font-weight: 700; color: var(--failed);
-  text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
-}
-/* The LIVE-but-IDLE responder case (story st-a32c8138, PART 2): same panel, but the badge reads
-   in the idle (cyan) tone so it is visually distinct from a dead/disabled (red) responder. */
-.stranded-panel .stranded-kind--idle { color: var(--idle); }
-.stranded-panel .stranded-reason { font-size: 13px; color: var(--muted); }
-
-.counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.count-pill {
-  font-size: 11px; color: var(--muted);
-  border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 2px 7px;
-}
-.count-pill b { color: var(--text); }
-.count-pill.has-blocked { border-color: var(--blocked); color: var(--blocked); }
-.count-pill.has-inactive { border-color: var(--inactive); color: var(--inactive); }
-.count-pill.has-running { border-color: var(--in_progress); color: var(--in_progress); }
-.count-pill.has-idle { border-color: var(--idle); color: var(--idle); }
-.count-pill.has-needs-input { border-color: var(--needs_user_input); color: var(--needs_user_input); }
-.count-pill.has-review { border-color: var(--in_review); color: var(--in_review); }
-.count-pill.has-awaiting { border-color: var(--needs_info); color: var(--needs_info); }
-.count-pill.has-rolling-back { border-color: var(--rolling_back); color: var(--rolling_back); }
-.count-pill.has-failed { border-color: var(--failed); color: var(--failed); }
-
-/* cross-project dashboard summary — the four operator buckets aggregated across all
-   registered workspaces. */
-.dash-summary {
-  display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 20px;
-}
-.dash-stat {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  min-width: 96px; padding: 12px 16px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.dash-stat .ds-num { font-size: 22px; font-weight: 700; color: var(--text); }
-.dash-stat .ds-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.dash-stat.review.nonzero { border-color: var(--review); }
-.dash-stat.review.nonzero .ds-num { color: var(--review); }
-.dash-stat.attn.nonzero { border-color: var(--review); }
-.dash-stat.attn.nonzero .ds-num { color: var(--review); }
-.dash-stat.failed.nonzero { border-color: var(--failed); }
-.dash-stat.failed.nonzero .ds-num { color: var(--failed); }
-
-/* per-workspace aggregate buckets on a dashboard card. */
-.ws-buckets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.ws-bucket {
-  font-size: 11px; color: var(--muted);
-  border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 2px 7px;
-}
-.ws-bucket b { color: var(--text); }
-.ws-bucket.review { border-color: var(--review); color: var(--review); }
-.ws-bucket.attn { border-color: var(--review); color: var(--review); }
-.ws-bucket.failed { border-color: var(--failed); color: var(--failed); }
-/* STRANDED pull-signal (story st-a4cc6082) — a STRONGER signal than ordinary review/attention:
-   a responder is dead or disabled and a human must intervene. The stat is FILLED (not just
-   outlined) so it reads louder than the other buckets, and the per-card bucket is bold red. */
-.dash-stat.stranded.nonzero { border-color: var(--failed); background: var(--failed); }
-.dash-stat.stranded.nonzero .ds-num { color: #fff; }
-.dash-stat.stranded.nonzero .ds-label { color: #fff; }
-.ws-bucket.stranded { border-color: var(--failed); color: #fff; background: var(--failed); }
-.ws-bucket.stranded b { color: #fff; }
 
 /* per-workspace build/test gate command panel + editor (workspace view). */
 .gate-cmd {
@@ -1329,14 +1230,11 @@ small.muted { font-size: 12px; }
 .sb-fill.awaiting_input { background: var(--awaiting); }
 .sb-fill.rejected    { background: var(--rejected); }
 
-/* ---- managed CTO agent (per-workspace: panel on the workspace view, mini-badge
-       on each dashboard card) ---- */
+/* ---- managed CTO agent (per-workspace: panel on the workspace view) ---- */
 .cto-card { margin-bottom: var(--space-6); }
 /* The CTO heading shares a flex row with its controls; it must not carry the base h2 margins
    on EITHER edge (a bottom margin would push it off-centre from the controls beside it). */
 .cto-card h2 { margin: 0; }
-.cto-mini { margin-top: 8px; }
-.cto-mini .cto-badge { margin-left: 0; }
 .cto-card .meta { color: var(--muted); font-size: 12.5px; margin-top: var(--space-1); }
 .cto-card .meta.err { color: var(--rejected); }
 .cto-badge {

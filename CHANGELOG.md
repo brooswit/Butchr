@@ -17,6 +17,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Front-end (RFC Phase 2, step 6): the unreachable workspace-card dashboard is deleted.**
+  A pure deletion — no module moves, no refactor. Since the Hierarchical Projects IA (S4)
+  redirect landed, `renderRoute` REPLACE-redirected `route.name === "dashboard"` to
+  `#/projects` *before* the dispatch arm that called `renderDashboard()`, so the view could
+  not execute: no `#/dashboard` link existed anywhere, and `parseHash` produced the
+  `dashboard` route from exactly one arm — its unknown-hash fallback. Removed from
+  `public/app.js`: `renderDashboard`, `dirCard`, `ctoMiniBadge`, and the whole
+  `<test-extract:stranded-indicator>` block (`STRANDED_KIND_LABEL`, `strandedKindLabel`,
+  `strandedHref`, `strandedMarkup`). `FILTER_STATUSES` is no longer imported here — its only
+  consumer was `dirCard`'s count-pill row — though it remains exported from
+  `core/state-meta.js`. `app.js` drops 191 lines (3,211 → 3,020).
+
+- **`test/stranded-indicator-ui.test.ts` (199 lines) is deleted.** It scraped the
+  `<test-extract:stranded-indicator>` sentinel out of `app.js` with `readFileSync` +
+  `new Function`, and could not even load once the block was gone. A test guarding code no
+  route can reach is not coverage, it is ballast. This is the third `new Function` harness
+  the module split has retired — two by conversion to real imports, this one by deleting
+  what it guarded.
+
+- **Dead CSS in `public/style.css`** (1,352 → 1,250 lines), each class verified to have no surviving
+  consumer by grepping BOTH the `class="…"` template form and the `el(tag, {class: …})`
+  object-prop form: `.stranded-panel` and its nine descendants, `.counts`, `.count-pill` and
+  its nine `.count-pill.has-*` modifiers, `.dash-summary`, `.dash-stat` (with `.review`,
+  `.attn`, `.failed`, `.stranded`, `.nonzero`), `.ds-num`, `.ds-label`, `.ws-buckets`,
+  `.ws-bucket` (with its modifiers), and `.cto-mini`. `.grid.dirs` is **kept** — it is still
+  built by `renderProjects()`; so is `.cto-badge`, still built by the workspace CTO panel.
+
+### Changed
+
+- **Unknown hashes no longer route through a phantom `dashboard` name.** `parseHash` now
+  returns `null` for a hash it does not recognize, and `renderRoute` folds that into its
+  existing bare-hash guard, so a bare hash and an unknown hash share one
+  `location.replace("#/projects")` arm instead of two. This preserves the canonicalizing
+  REPLACE-redirect the Hierarchical Projects IA established — the URL bar keeps matching what
+  is rendered, and Back walks up the hierarchy rather than bouncing through the redirect.
+
+- The server's `GET /api/dashboard` route is **untouched**: `renderWorkspace` still fetches it
+  for the gate command and bucket counts. This deletion is front-end only.
+
 ## [0.9.256] - 2026-07-09
 
 ### Changed
