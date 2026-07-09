@@ -317,12 +317,24 @@ export function resetInlineComments(taskId: string): void {
 // Compose the freeform note + any inline comments into one change-request note.
 // Inline comments are listed in file/line order under a header so the agent reads
 // them as a structured punch-list. Returns "" when there's nothing to send.
-export function composeReviewNote(freeform: string | null | undefined): string {
+//
+// >>> `comments` IS A PARAMETER NOW — THE FUNCTION IS FINALLY PURE. <<< The header above promised
+// this for "the phase that rewrites the CALL SITE", and Phase 4d is it: views/task.tsx owns the
+// comment map (it is the thing that sends it AND the thing that counts it) and passes it in.
+//
+// The DEFAULT keeps the module store, and that is not hedging — `views/task.js` still calls this
+// with one argument and still ships, until Phase 4e deletes it along with `inlineComments`,
+// `collapsedDiffFiles` and `resetInlineComments`. A default argument reads the LIVE binding at call
+// time, so `resetInlineComments`'s rebind still propagates. Delete the default with the store.
+export function composeReviewNote(
+  freeform: string | null | undefined,
+  comments: ReadonlyMap<string, InlineComment> = inlineComments,
+): string {
   const parts: string[] = [];
   const ff = (freeform || "").trim();
   if (ff) parts.push(ff);
-  if (inlineComments.size) {
-    const sorted = [...inlineComments.values()].sort((a, b) =>
+  if (comments.size) {
+    const sorted = [...comments.values()].sort((a, b) =>
       a.path === b.path ? a.line - b.line : a.path < b.path ? -1 : 1);
     const lines = ["Inline comments:"];
     for (const c of sorted) {

@@ -3,24 +3,33 @@
 // the Pipeline view can't tell active work from finished (a finished subtask wouldn't collapse
 // into its lane's done pile), so the fallback must always yield the server's non-empty sets.
 //
-// The state-meta helpers now live in public/core/state-meta.js, which is DOM-free at module
-// load, so we IMPORT it directly and assert on the real exports. (This test used to scrape a
-// `<test-extract:state-meta>` sentinel block out of the classic public/app.js script and eval
-// it with `new Function`; that harness is gone along with the sentinel.) This also guards the
-// client DEFAULT_STATE_META against drifting from the server's canonical sets in src/db.ts
-// (STATE_META / ALL_STATUSES / isTerminal).
-import { expect, test } from "bun:test";
+// The state-meta helpers live in public/core/state-meta.ts, which is DOM-free at module load, so we
+// IMPORT it directly and assert on the real exports. This also guards the client DEFAULT_STATE_META
+// against drifting from the server's canonical sets in src/db.ts (STATE_META / ALL_STATUSES /
+// isTerminal).
+//
+// >>> PHASE 4d MOVED THE CHIP HALF OFF `dom-stub.ts` AND ONTO `@testing-library/react`. <<<
+// `taskChips()` returned a DocumentFragment and ran inside `withDom()`. It is `<TaskChips/>` now, so
+// the live-binding guard below renders it into a real happy-dom DOM. What is asserted is unchanged.
+import "./dom-register.ts"; // must precede every React import — installs `document`
+import { cleanup, render } from "@testing-library/react";
+import { createElement } from "react";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { registerDom, unregisterDom } from "./dom-env.ts";
 import { ALL_STATUSES, STATE_META, isTerminal } from "../src/db.ts";
 import { DEFAULT_STATE_META, statusSetsFrom } from "../public/core/state-meta.js";
-// STATIC, top-level import — on purpose. It evaluates components/chips.js BEFORE any test
-// body runs applyStateMeta, exactly as app.js does (it imports chips.js at load, then calls
-// loadStateMeta at boot). A lazy `await import()` inside the test would evaluate chips.js
-// AFTER the tables were populated, and a `const {AGENT_TYPE} = ...` snapshot regression in
-// chips.js would sail straight through. See the live-binding assertion below.
-import { taskChips } from "../public/components/chips.js";
-// taskChips returns a DocumentFragment now, so it needs a `document`. withDom is a synchronous,
-// zero-dependency stub that restores `globalThis.document` in a finally — see test/dom-stub.ts.
-import { withDom } from "./dom-stub.ts";
+// STATIC, top-level import — ON PURPOSE, AND IT IS THE WHOLE POINT OF THE LAST TEST IN THIS FILE.
+// It evaluates components/chips.tsx BEFORE any test body runs applyStateMeta, exactly as main.tsx
+// does (it pulls the component graph in at load, then awaits ensureStateMeta at boot). A lazy
+// `await import()` inside the test would evaluate chips.tsx AFTER the tables were populated, and a
+// `const {AGENT_TYPE} = ...` snapshot regression in chips.tsx would sail straight through.
+import { TaskChips } from "../public/components/chips.tsx";
+
+beforeAll(registerDom);
+afterEach(cleanup);
+// Not optional: `test/vanilla-views-dom-free.test.ts` asserts `globalThis.document` is undefined, and
+// `bun test` runs every file in one process.
+afterAll(unregisterDom);
 
 // The cases that stand in for a FAILED / empty /api/state-meta response. loadStateMeta()
 // passes DEFAULT_STATE_META on the catch path; statusSetsFrom also falls back internally
@@ -67,15 +76,23 @@ test("client DEFAULT_STATE_META mirrors the server's canonical status sets (src/
 // Two properties in one test, because they share MODULE state (the `export let` tables) and
 // splitting them would make the assertions order-dependent:
 //
-//  (1) core/state-meta.js is importable OUTSIDE a browser — DOM-free at load, so its tables
-//      start empty. That is what makes the old `new Function` harness deletable, and what the
+//  (1) core/state-meta.ts is importable OUTSIDE a browser — DOM-free at load, so its tables
+//      start empty. That is what made the old `new Function` harness deletable, and what the
 //      rest of the P2 module split depends on. Add a top-level `document` touch here (or in
-//      core/api.js / core/dom.js beneath it) and the import at the top of this file throws,
-//      failing every test in it loudly.
+//      core/api.ts beneath it) and the import at the top of this file throws, failing every test
+//      in it loudly.
+//
+//      >>> THIS FILE NOW REGISTERS A DOM, SO READ (1) CAREFULLY. <<< It no longer proves that
+//      state-meta loads with NO `document` present — `dom-register.ts` installed one before any of
+//      these imports evaluated. What it still proves is that the TABLES START EMPTY, i.e. that
+//      nothing in this import graph populates them at load. The DOM-free-at-load property itself is
+//      owned by `test/vanilla-views-dom-free.test.ts`, which asserts `globalThis.document ===
+//      undefined` and is why the `afterAll(unregisterDom)` above is mandatory.
+//
 //  (2) applyStateMeta's REASSIGNMENT propagates to importers via the ES live binding. This is
-//      what lets app.js import the tables as named bindings; if it broke, every status chip
+//      what lets a component import the tables as named bindings; if it broke, every status chip
 //      would silently render empty.
-test("core/state-meta.js loads DOM-free, and applyStateMeta propagates to importers", async () => {
+test("core/state-meta.ts starts with empty tables, and applyStateMeta propagates to importers", async () => {
   const m = await import("../public/core/state-meta.js");
 
   // (1) pre-load state: the tables exist but are empty, and no fetch has succeeded.
@@ -94,26 +111,27 @@ test("core/state-meta.js loads DOM-free, and applyStateMeta propagates to import
   expect(m.stateKind("in_progress")).toBe("agent");
   expect(m.stateKind("needs_user_input")).toBe("feedback");
 
-  // (3) the live binding must reach a REAL importer, not just this test. components/chips.js
+  // (3) the live binding must reach a REAL importer, not just this test. components/chips.tsx
   //     (imported statically at the top of this file, so it evaluated BEFORE the reassignment
-  //     above) reads AGENT_TYPE / stateKind at CALL time. A regression to
+  //     above) reads AGENT_TYPE / stateKind at RENDER time. A regression to
   //     `const {AGENT_TYPE} = ...` there would snapshot the empty pre-load table and silently
   //     drop the agent-type text from every status chip.
   //
-  //     taskChips builds NODES, so this asserts on structure: the state-kind chip is the LAST
-  //     element of the returned fragment for these inputs, its class carries the kind and its
-  //     `title` carries the agent-type / awaited-artifact text that AGENT_TYPE feeds.
-  const stateKindChip = (t: any) => {
-    const kids = (taskChips(t, { kind: true }) as any).children;
-    return kids[kids.length - 1];
+  //     The state-kind chip is the LAST element of what TaskChips renders for these inputs; its
+  //     class carries the kind and its `title` carries the agent-type / awaited-artifact text that
+  //     AGENT_TYPE feeds.
+  const stateKindChip = (t: object) => {
+    const { container } = render(createElement(TaskChips, { task: t as never, kind: true }));
+    return container.children[container.children.length - 1];
   };
-  withDom(() => {
-    const running = stateKindChip({ work_kind: "leaf", status: "in_progress" });
-    expect(running.className).toContain("state-kind-agent");
-    expect(running.getAttribute("title")).toContain("workspace-agent is running");
-    // A feedback state names the awaited artifact instead of an agent type.
-    const review = stateKindChip({ work_kind: "leaf", status: "in_review" });
-    expect(review.className).toContain("state-kind-feedback");
-    expect(review.textContent).toContain("diff review");
-  });
+
+  const running = stateKindChip({ work_kind: "leaf", status: "in_progress" });
+  expect(running.className).toContain("state-kind-agent");
+  expect(running.getAttribute("title")).toContain("workspace-agent is running");
+  cleanup();
+
+  // A feedback state names the awaited artifact instead of an agent type.
+  const review = stateKindChip({ work_kind: "leaf", status: "in_review" });
+  expect(review.className).toContain("state-kind-feedback");
+  expect(review.textContent).toContain("diff review");
 });

@@ -1,21 +1,19 @@
 // The React shell (RFC §10 Phase 3). It owns the chrome — topbar, pause banner, conn LED, theme
 // toggle, toast region, the hash router, and the SSE stream.
 //
-// >>> PHASE 4b CHANGED WHAT LIVES INSIDE `<main id="app">`. <<< Through Phase 3, React rendered that
-// element with NO children ever, and the vanilla views owned everything under it through the bridge.
-// Now `<Routes>` renders INSIDE it, so a migrated route (today: `#/metrics`) paints React nodes there
-// and picks up style.css's `main { max-width: 1100px; … }` for free, while an un-migrated route still
-// renders `<VanillaView>`, which returns null and drives nav.js's mount() from an effect. React's
-// reconciler only touches children it created, so a route that renders null leaves the vanilla DOM
-// alone — the Phase-3 invariant, restated. What makes the OTHER direction safe (vanilla DOM sitting
-// in `#app` when a React route is placed) is VanillaView's layout-effect cleanup; see bridge.tsx.
+// >>> PHASE 4d ROUTED THE LAST TWO VIEWS. NO ROUTE GOES THROUGH THE BRIDGE. <<<
+// `<Routes>` renders inside `<main id="app">`, every route element is a React component, and the
+// bridge's central invariant — "a vanilla route and a React route are never mounted at the same
+// time" — is now vacuous. `bridge.tsx`, `core/nav.js`, `core/dom.js` and `ui-state.js` are still on
+// disk and no longer reachable from this entry point. Phase 4e deletes them in one reviewable diff;
+// splitting that from this rewrite is what keeps a working fallback one revert away.
 //
-// This is the ROLLBACK BOUNDARY for the un-migrated views. Reverting a migrated route means pointing
-// it back at its `<VanillaView>`, which is a two-line change per route until 4e deletes the bridge.
+// THE ROLLBACK BOUNDARY IS STILL A `VanillaView` AWAY. Reverting one route means pointing it back at
+// `<VanillaView id=… run={render…}/>`; the vanilla view module and the bridge are both still here.
 //
-// NO <StrictMode>. Its development-only double-invoked effects would run every vanilla view render
-// twice (two fetches, two mount() calls) and open the EventSource twice. React's own guarantees are
-// what Phase 4 buys; while any view is still vanilla there is nothing here for StrictMode to find.
+// NO <StrictMode>. Its development-only double-invoked effects would open the EventSource twice.
+// Now that every view is React this is worth revisiting — but not in the phase that rewrote them:
+// turning it on is a behaviour change that wants its own diff and its own browser pass.
 
 import { Alert, AlertText, Button, RouterProvider, ToastRegion, ToggleButton, toastQueue } from "@launchpad-ui/components";
 import { Icon } from "@launchpad-ui/icons";
@@ -23,27 +21,30 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { To } from "react-router";
 import { HashRouter, Link, Navigate, Route, Routes, useHref, useLocation, useNavigate, useParams } from "react-router";
 
-import { refreshSoon as refreshVanillaSoon, VanillaView } from "./bridge";
 import { setToastSink, toast } from "./components/toast.js";
 import { api } from "./core/api.js";
-import { refreshSoon as bumpReactSoon } from "./core/refresh.js";
+import { refreshSoon } from "./core/refresh.js";
 import type { Health, Project, Repo } from "./core/types.js";
 import { ensureStateMeta, isStateMetaLoaded } from "./state-meta-store";
 import { MetricsView } from "./views/metrics.js";
-import { renderProjectDetail, renderProjects } from "./views/projects.js";
-import { renderTask } from "./views/task.js";
+import { ProjectDetailView, ProjectsView } from "./views/projects.tsx";
+import { TaskDetail } from "./views/task.tsx";
 import { WorkspaceView } from "./views/workspace.tsx";
 
-/** THE SSE RE-RENDER, for BOTH worlds. Two debouncers, deliberately, because the two invalidation
- *  mechanisms cannot be merged while a single view is still vanilla: `refreshVanillaSoon` re-runs
- *  the mounted vanilla view through core/nav.js's render() (destroying and rebuilding `#app`), and
- *  `bumpReactSoon` ticks core/refresh.ts's version so every React view's `useAsync` re-fetches
- *  without touching the DOM. Only one of them ever has work to do — the inactive one's target does
- *  not exist. Phase 4e deletes the vanilla half along with the bridge. */
-function refreshSoon(): void {
-  refreshVanillaSoon();
-  bumpReactSoon();
-}
+/* THE SSE RE-RENDER, AND THERE IS NOW ONLY ONE OF THEM.
+ *
+ * Through Phase 4c this module owned a local `refreshSoon()` that called TWO debouncers: bridge.tsx's
+ * (which re-ran the mounted vanilla view through core/nav.js's `render()`, destroying and rebuilding
+ * `#app`) and core/refresh.ts's (which ticks a version so every React view's `useAsync` re-fetches
+ * without touching the DOM). Both had to fire because only one of them ever had work to do, and
+ * which one depended on the route.
+ *
+ * PHASE 4d MIGRATED THE LAST TWO ROUTES, so no view is vanilla and nothing calls `render()`. The
+ * wrapper is deleted and `core/refresh.ts`'s `refreshSoon` is imported directly — which is exactly
+ * what that module's header said would happen "when the last vanilla view lands", and the warning it
+ * carried against doing it early no longer binds. bridge.tsx, core/nav.js and core/dom.js are now
+ * unreachable from this entry point; Phase 4e deletes them.
+ */
 
 const BASE_TITLE = "butchr";
 const THEME_KEY = "butchr-theme";
@@ -300,13 +301,11 @@ async function projectIdForWorkspace(wid: string): Promise<string | null> {
   }
 }
 
-function ProjectsRoute() {
-  return <VanillaView id="projects" run={renderProjects} />;
-}
-
 function ProjectRoute() {
   const { projectId = "" } = useParams();
-  return <VanillaView id={`project:${projectId}`} run={() => renderProjectDetail(projectId)} />;
+  // `key` remounts on a params-only navigation, so a stale project's fetched data never paints under
+  // a new project's id. Same reason as WorkspaceRoute below.
+  return <ProjectDetailView key={projectId} projectId={projectId} />;
 }
 
 function WorkspaceRoute() {
@@ -320,7 +319,10 @@ function WorkspaceRoute() {
 
 function TaskRoute() {
   const { taskId = "" } = useParams();
-  return <VanillaView id={`task:${taskId}`} run={() => renderTask(taskId)} />;
+  // `key` again: the task detail holds per-task UI state (the review note, the inline comments, the
+  // transcript's loaded pages). Navigating from one task to another — the rollback button does
+  // exactly this — must not carry any of it across.
+  return <TaskDetail key={taskId} taskId={taskId} />;
 }
 
 /** The legacy flat `#/workspace/:wid` → `#/projects/:pid/workspaces/:wid` rewrite. The owning project
@@ -409,7 +411,8 @@ function Shell() {
       if (e.type === "hello") return;
       // Self-heal a failed state-meta load: while we're still on the built-in DEFAULT_STATE_META
       // fallback, retry the fetch on this event. Once it succeeds the real server values land, the
-      // store's version ticks, and every VanillaView re-renders against the authoritative set.
+      // store's version ticks, and every view that reads a status table re-renders against the
+      // authoritative set (each lists `useStateMetaVersion()` among its fetch deps).
       if (!isStateMetaLoaded()) {
         void ensureStateMeta().then(() => {
           refreshSoon();
@@ -434,20 +437,16 @@ function Shell() {
       <Topbar paused={paused} onTogglePause={togglePause} attention={attention} conn={conn} />
       {paused ? <PauseBanner onResume={togglePause} /> : null}
       {/*
-        THE VIEW CONTAINER, shared by both worlds and styled by style.css's `main` rule.
-
-        It lives in the LAYOUT, not in a route, so no navigation can unmount it out from under an
-        in-flight mount(). A MIGRATED route (MetricsView) renders its nodes here as React children.
-        An UN-MIGRATED route renders <VanillaView>, which returns null and lets nav.js's mount()
-        appendChild into this element — nodes React did not create and therefore never diffs. The two
-        never coexist: exactly one route matches, and VanillaView empties `#app` on its way out.
-        Phase 4e deletes the bridge and this becomes an ordinary container.
+        THE VIEW CONTAINER, styled by style.css's `main` rule. As of Phase 4d every route below
+        renders React nodes into it, and it is an ORDINARY container again — the thing the bridge's
+        header promised it would become. It still lives in the LAYOUT rather than in a route, which is
+        now merely tidy (it was load-bearing while mount() had to find it).
       */}
       <main id="app">
         <Routes>
           <Route path="/" element={<Navigate to="/projects" replace />} />
           <Route path="/metrics" element={<MetricsView />} />
-          <Route path="/projects" element={<ProjectsRoute />} />
+          <Route path="/projects" element={<ProjectsView />} />
           <Route path="/projects/:projectId" element={<ProjectRoute />} />
           <Route path="/projects/:projectId/workspaces/:workspaceId" element={<WorkspaceRoute />} />
           <Route path="/workspace/:workspaceId" element={<LegacyWorkspaceRoute />} />

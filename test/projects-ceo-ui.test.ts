@@ -1,47 +1,82 @@
-// Story st-04869886 (S5): the project-detail CEO-agent card. This guards the two PURE,
-// DOM-free helpers that decide what the card SAYS — ceoStatusPill (the status pill) and
-// ceoNote (the honest global-gate note). Feature #4 lives or dies on the note being
-// honest, so the whole {enabled, overridden, globalGate, live} matrix is asserted here:
-// isCeoEnabled makes an explicit override WIN over the global gate, so an explicit-ON CEO
-// runs REGARDLESS of the gate and must NEVER be labeled inert.
+// Story st-04869886 (S5): the project-detail CEO-agent card. This guards the PURE, DOM-free helpers
+// that decide what the card SAYS — ceoStatusPill (the status pill), ceoTerminalBtnState (the
+// terminal button's gate) and ceoNote (the honest global-gate note) — plus ceoPill, the overview
+// card's coarser pill. Feature #4 lives or dies on the note being honest, so the whole
+// {enabled, overridden, globalGate, live} matrix is asserted here: isCeoEnabled makes an explicit
+// override WIN over the global gate, so an explicit-ON CEO runs REGARDLESS of the gate and must
+// NEVER be labeled inert.
 //
-// The two PURE helpers now live in public/views/projects-logic.js — the DOM-free leaf of the RFC
-// Phase 2 horizontal split — and ceoNote, which returns a NODE, in public/views/projects.js, which
-// is DOM-free at module load (it touches `document` only inside a called function and imports only
-// leaves). We IMPORT both directly and assert on the real exports. (This test used to scrape a
-// `// <test-extract:projects-ceo-status>` sentinel block out of the classic public/app.js script
-// and eval it with `new Function`, because that script could not be imported; app.js is now the
-// router + bootstrap alone and that harness is gone along with the sentinel. Do not reintroduce
-// one. Same approach as test/kind-badge.test.ts / test/graph-rollup-completion.test.ts.)
+// The pure helpers live in public/views/projects-logic.ts — the DOM-free leaf of the RFC Phase 2
+// horizontal split — and `ceoNote`, which returns a NODE, in public/views/projects.tsx.
 //
-// ceoNote used to be `ceoNoteHtml` and returned a markup STRING (or "" for the no-note case); it
-// now builds and returns a NODE (or null), so the note tests run inside withDom(). ceoStatusPill
-// and ceoTerminalBtnState stay pure data and need no DOM.
+// >>> PHASE 4d: `ceoPill` MOVED INTO THE LEAF, AND `ceoNote` BECAME A COMPONENT. <<<
+// `ceoPill` was a private function inside the vanilla views/projects.js and had no coverage at all;
+// the salvage branch's views/projects.tsx imported it from projects-logic.ts, where it did not
+// exist. It is pure, so it now lives there in fact as well as in that import's imagination, and it
+// is asserted below.
+//
+// `ceoNote` returned an HTMLElement built with el(), asserted inside `withDom()` — a hand-rolled,
+// zero-dependency `document` stub. It returns a React element (or null), so its half of this file
+// renders through @testing-library/react into a real happy-dom DOM. The NULL case still needs no DOM
+// at all: `ceoNote` returns `null` before it ever builds anything.
 //
 // >>> WHY `surface()` READS className AND textContent, NOT JUST textContent. <<<
 // These assertions are NOT uniform, and narrowing them is a silent regression:
 //   • `.toContain("ceo-note inherit")` matches a CLASS, never any rendered text.
 //   • The NEGATIVE assertions (`not.toContain("inert")`, `not.toContain("stay disabled")`) and the
 //     whole-matrix invariant at the bottom used to scan the entire serialized markup string. Point
-//     them at textContent alone and they still PASS — vacuously — while no longer covering the
-//     class they were written to test. A test that passes for the wrong reason is worse than a
-//     deleted one.
+//     them at textContent alone and they still PASS — vacuously — while no longer covering the class
+//     they were written to test. A test that passes for the wrong reason is worse than a deleted one.
 // So `surface()` reproduces the old string's coverage: class list + rendered text, lowercased.
-// It walks the node tree directly; there is no markup-serializing helper to reach for (htmlOf() is
-// deleted) and the DOM stub deliberately has no `innerHTML`.
-import { expect, test } from "bun:test";
-import { withDom } from "./dom-stub";
-import { ceoNote } from "../public/views/projects.js";
-import { ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects-logic.js";
+import "./dom-register.ts"; // must precede every React import — installs `document`
+import { cleanup, render } from "@testing-library/react";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { registerDom, unregisterDom } from "./dom-env.ts";
+import { ceoNote } from "../public/views/projects.tsx";
+import { ceoPill, ceoStatusPill, ceoTerminalBtnState } from "../public/views/projects-logic.js";
 
-// The assertable surface of a note node: everything the old markup string exposed.
-// `null` (the no-note case) has no surface at all.
-function surface(node: any): string {
-  if (!node) return "";
-  return `${node.className} ${node.textContent}`.toLowerCase();
+beforeAll(registerDom);
+afterEach(cleanup);
+// Not optional: `test/vanilla-views-dom-free.test.ts` asserts `globalThis.document` is undefined, and
+// `bun test` runs every file in one process.
+afterAll(unregisterDom);
+
+type Ceo = { enabled: boolean; overridden: boolean; globalGate: boolean; live: boolean };
+
+/** Render a note and hand back its single root element. Only ever called for a non-null note. */
+function note(s: Ceo): Element {
+  const el = ceoNote(s);
+  expect(el).not.toBe(null);
+  return render(el as never).container.children[0];
 }
 
-// --- status pill (live > enabled > default/disabled) -------------------------------------
+/** The assertable surface of a note node: everything the old markup string exposed.
+ *  `null` (the no-note case) has no surface at all. */
+function surface(s: Ceo): string {
+  const el = ceoNote(s);
+  if (!el) return "";
+  const root = render(el as never).container.children[0];
+  const out = `${root.className} ${root.textContent}`.toLowerCase();
+  cleanup();
+  return out;
+}
+
+// --- overview pill (the coarse, three-way ceo_enabled column) ----------------------------
+test("ceoPill: explicit 1 / 0 / null map to enabled / disabled / default", () => {
+  expect(ceoPill({ id: "p", ceo_enabled: 1 })).toEqual({ cls: "enabled", label: "CEO enabled" });
+  expect(ceoPill({ id: "p", ceo_enabled: 0 })).toEqual({ cls: "disabled", label: "CEO disabled" });
+
+  // null / absent / a null project all INHERIT — the overview never fetches /ceo, so it cannot know
+  // whether the gate is on. It says "default" and names the gate in the hover title.
+  for (const p of [{ id: "p", ceo_enabled: null }, { id: "p" }, null, undefined] as const) {
+    const pill = ceoPill(p as never);
+    expect(pill.cls).toBe("inactive");
+    expect(pill.label).toBe("CEO default");
+    expect(pill.title).toContain("BUTCHR_CEO_AGENT");
+  }
+});
+
+// --- detail status pill (live > enabled > default/disabled) -------------------------------
 test("pill: live wins → green 'CEO live'", () => {
   const p = ceoStatusPill({ enabled: true, overridden: true, globalGate: true, live: true });
   expect(p).toEqual({ cls: "live", label: "CEO live" });
@@ -68,48 +103,40 @@ test("pill: EXPLICITLY disabled reads 'CEO disabled'", () => {
 // `BUTCHR_CEO_AGENT` is a real <code> child, so textContent still concatenates each note into
 // one uninterrupted sentence — which is what the phrase assertions below match against.
 test("note: INHERITING + gate OFF → the gate bites; points at the override, never 'saved but inert'", () => {
-  withDom(() => {
-    const n = ceoNote({ enabled: false, overridden: false, globalGate: false, live: false });
-    expect(n.textContent).toContain("global CEO gate");
-    expect(n.textContent).toContain("BUTCHR_CEO_AGENT");
-    expect(n.textContent).toContain("inherit the default stay disabled");
-    expect(n.textContent).toContain("override");
-    expect(surface(n)).not.toContain("inert");
-  });
+  const n = note({ enabled: false, overridden: false, globalGate: false, live: false });
+  expect(n.textContent).toContain("global CEO gate");
+  expect(n.textContent).toContain("BUTCHR_CEO_AGENT");
+  expect(n.textContent).toContain("inherit the default stay disabled");
+  expect(n.textContent).toContain("override");
+  expect(surface({ enabled: false, overridden: false, globalGate: false, live: false })).not.toContain("inert");
 });
 
 test("note: INHERITING + gate ON → inheriting-the-default context (no warning)", () => {
-  withDom(() => {
-    const n = ceoNote({ enabled: true, overridden: false, globalGate: true, live: false });
-    expect(n.textContent).toContain("Inheriting the global default");
-    expect(n.textContent).toContain("BUTCHR_CEO_AGENT");
-    // a CLASS, not text — the neutral (non-warning) variant
-    expect(n.className).toContain("ceo-note inherit");
-  });
+  const n = note({ enabled: true, overridden: false, globalGate: true, live: false });
+  expect(n.textContent).toContain("Inheriting the global default");
+  expect(n.textContent).toContain("BUTCHR_CEO_AGENT");
+  // a CLASS, not text — the neutral (non-warning) variant
+  expect(n.className).toContain("ceo-note inherit");
 });
 
 test("note: OVERRIDDEN-ON while gate OFF → runs via override; NEVER implies inert", () => {
-  withDom(() => {
-    const n = ceoNote({ enabled: true, overridden: true, globalGate: false, live: true });
-    expect(n.textContent).toContain("per-project override");
-    expect(n.textContent).toContain("runs regardless");
-    expect(surface(n)).not.toContain("inert");
-    expect(surface(n)).not.toContain("stay disabled");
-  });
+  const s: Ceo = { enabled: true, overridden: true, globalGate: false, live: true };
+  const n = note(s);
+  expect(n.textContent).toContain("per-project override");
+  expect(n.textContent).toContain("runs regardless");
+  cleanup();
+  expect(surface(s)).not.toContain("inert");
+  expect(surface(s)).not.toContain("stay disabled");
 });
 
 test("note: OVERRIDDEN-OFF → explicitly disabled for this project", () => {
-  withDom(() => {
-    const n = ceoNote({ enabled: false, overridden: true, globalGate: true, live: false });
-    expect(n.textContent).toContain("Explicitly disabled for this project");
-  });
+  const n = note({ enabled: false, overridden: true, globalGate: true, live: false });
+  expect(n.textContent).toContain("Explicitly disabled for this project");
 });
 
 test("note: OVERRIDDEN-ON while gate ON → no note (unambiguous)", () => {
-  withDom(() => {
-    // was `.toBe("")` while this returned a markup string; the no-note case is now a null node
-    expect(ceoNote({ enabled: true, overridden: true, globalGate: true, live: true })).toBe(null);
-  });
+  // The no-note case returns `null` WITHOUT touching the DOM — no render needed.
+  expect(ceoNote({ enabled: true, overridden: true, globalGate: true, live: true })).toBe(null);
 });
 
 // --- Open-CEO-terminal button gating (mirrors the CTO terminal affordance) ---------------
@@ -159,20 +186,18 @@ test("term: enabled iff live, and never disabled without a hint", () => {
 // must never contain a disabling/inert phrase (the exact mislabel the operator flagged).
 // Scans surface() — class + text — exactly as it once scanned the whole markup string.
 test("invariant: an ENABLED CEO is never described as inert/disabled anywhere in the matrix", () => {
-  withDom(() => {
-    for (const overridden of [true, false]) {
-      for (const globalGate of [true, false]) {
-        for (const live of [true, false]) {
-          // Only REALIZABLE states: when INHERITING (overridden=false) the server resolves
-          // enabled === globalGate (isCeoEnabled falls back to the gate), so enabled=true while
-          // inheriting a false gate is impossible and not worth asserting.
-          if (!overridden && !globalGate) continue;
-          const s = surface(ceoNote({ enabled: true, overridden, globalGate, live }));
-          expect(s).not.toContain("inert");
-          expect(s).not.toContain("stay disabled");
-          expect(s).not.toContain("explicitly disabled");
-        }
+  for (const overridden of [true, false]) {
+    for (const globalGate of [true, false]) {
+      for (const live of [true, false]) {
+        // Only REALIZABLE states: when INHERITING (overridden=false) the server resolves
+        // enabled === globalGate (isCeoEnabled falls back to the gate), so enabled=true while
+        // inheriting a false gate is impossible and not worth asserting.
+        if (!overridden && !globalGate) continue;
+        const s = surface({ enabled: true, overridden, globalGate, live });
+        expect(s).not.toContain("inert");
+        expect(s).not.toContain("stay disabled");
+        expect(s).not.toContain("explicitly disabled");
       }
     }
-  });
+  }
 });

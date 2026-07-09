@@ -10,13 +10,19 @@
 //   - projectInitiativeRollup:  the overview "X/Y initiatives done" count, using the server's
 //                               authoritative `done` boolean on each initiative.
 //
-// All three helpers now live in public/views/projects.js, which is DOM-free at module load (it
-// touches `document` only inside a called function and imports only leaves), so we IMPORT it
-// directly and assert on the real exports. (This test used to scrape a
-// `// <test-extract:initiative-rollup>` sentinel block out of the classic public/app.js script and
-// eval it with `new Function`, because that script could not be imported; app.js is now the router
-// + bootstrap alone and that harness is gone along with the sentinel. Do not reintroduce one. Same
-// approach as test/kind-badge.test.ts / test/graph-rollup-completion.test.ts.)
+// All three helpers live in public/views/projects-logic.ts — the DOM-FREE OUTRIGHT leaf of the RFC
+// Phase 2 horizontal split, with zero value imports — so we IMPORT it directly and assert on the
+// real exports, with no DOM at all. (This test used to scrape a `// <test-extract:initiative-rollup>`
+// sentinel block out of the classic public/app.js script and eval it with `new Function`, because
+// that script could not be imported; that harness is gone along with the sentinel. Do not
+// reintroduce one.)
+//
+// >>> PHASE 4d LEFT THIS FILE'S ASSERTIONS ALONE, AND THAT IS THE CORRECT OUTCOME. <<< The subtask
+// brief listed it among four tests to "rewrite onto @testing-library/react". It has nothing to
+// rewrite: it never rendered anything. Every helper it covers is a pure data derivation, it never
+// imported a DOM stub, and views/projects.tsx re-exports none of them. Only the stale reference to
+// `views/projects.js` above needed correcting. The RENDERING half of these derivations — the
+// initiative rows and their progress bars — is covered by the browser pass, not from here.
 import { expect, test } from "bun:test";
 import { initiativeHeading, initiativeRollup, projectInitiativeRollup } from "../public/views/projects-logic.js";
 

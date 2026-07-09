@@ -59,20 +59,25 @@ import { toast } from "./toast.js";
 // (main.tsx), so the override lands. This is RFC §7.1's posture applied at the variant level:
 // LaunchPad's component, butchr's one missing semantic.
 //
-// `.btn.success` (green, `--merged`) has NO entry here ON PURPOSE. Its only call sites are still
-// vanilla (components/project-modals.js's "Register this folder"), so an entry would ship a
-// `.btn-success` class with no CSS rule behind it — a silently unstyled button, which is exactly
-// the class of failure RFC §4.3 is about. Phase 4d adds it together with its rule.
-export type ButtonKind = "primary" | "ghost" | "danger" | "danger-outline";
+// `.btn.success` (green, `--merged`) IS HERE AS OF PHASE 4d, together with its CSS rule — which is
+// the condition the previous phase set for adding it. LaunchPad has no success-coloured variant, so
+// like `.btn.ghost.danger-outline` it is `primary` plus one additive class that overrides only the
+// fill. Its call sites are the affirmative half of every feedback surface — Approve & merge, Approve
+// spec, Approve plan, Submit spec, Send answer, Nudge, and the picker's "Register this folder".
+//
+//   .btn.success → variant="primary" + `.btn-success`
+export type ButtonKind = "primary" | "ghost" | "danger" | "danger-outline" | "success";
 
 const VARIANT: Record<ButtonKind, "primary" | "minimal" | "destructive"> = {
   primary: "primary",
   ghost: "minimal",
   danger: "destructive",
   "danger-outline": "destructive",
+  success: "primary",
 };
 const EXTRA: Partial<Record<ButtonKind, string>> = {
   "danger-outline": "btn-outline",
+  success: "btn-success",
 };
 
 /** The props every butchr button shares, so the two exported components can't drift. */

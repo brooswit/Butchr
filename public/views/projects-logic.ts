@@ -9,7 +9,7 @@
 // §0.1 #5 names only the three initiative* helpers. `ceoStatusPill` and `ceoTerminalBtnState` are
 // the same seam — pure data, DOM-free, already tested as such (projects-ceo-ui.test.ts's own header
 // says so) — so they came across too. `ceoNote` returns a NODE and stays in views/projects.js.
-import type { CeoStatus, InitiativeView } from "../core/types.js";
+import type { CeoStatus, InitiativeView, Project } from "../core/types.js";
 
 /** A status pill: a `.pill.<cls>` with its label and an optional hover explanation. */
 export type Pill = { cls: string; label: string; title?: string };
@@ -47,6 +47,22 @@ export function projectInitiativeRollup(inits: InitiativeView[] | null | undefin
   const total = list.length;
   const done = list.filter((i) => i && i.done).length;
   return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
+}
+
+// The OVERVIEW card's coarse CEO pill, read straight off the project row's THREE-way `ceo_enabled`
+// column (1 = explicit on, 0 = explicit off, null = inherit the global gate). The overview lists
+// every project from `GET /api/projects` and does NOT fetch each one's `/ceo`, so it cannot know
+// whether the gate is on or whether the agent is live — hence "CEO default" rather than a resolved
+// verdict. The detail card's `ceoStatusPill` below is the resolved one; do not conflate them.
+//
+// Moved here from views/projects.js in Phase 4d. It was private to that module, and the salvage
+// branch's views/projects.tsx imported it from THIS file — where it did not exist. It is pure and
+// DOM-free, so it belongs on this side of the split; that import was right about the destination and
+// wrong about it already being here.
+export function ceoPill(p: Project | null | undefined): Pill {
+  if (p && p.ceo_enabled === 1) return { cls: "enabled", label: "CEO enabled" };
+  if (p && p.ceo_enabled === 0) return { cls: "disabled", label: "CEO disabled" };
+  return { cls: "inactive", label: "CEO default", title: "Inherits the global CEO gate (BUTCHR_CEO_AGENT)" };
 }
 
 // The CEO card's status pill, derived from the RESOLVED fields: live wins (green), else enabled

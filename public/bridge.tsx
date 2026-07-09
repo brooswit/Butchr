@@ -26,12 +26,27 @@
 // the deletion, which precedes the sibling placement in the same commit. That ordering is the whole
 // trick, and it is why the two hooks below are not the same hook.
 
+// >>> PHASE 4d: NO ROUTE MOUNTS THIS ANY MORE. `App.tsx` does not import it. <<<
+// It is kept on disk, unreachable and still typechecked, so that reverting a single route is a
+// two-line change. Phase 4e deletes it.
+//
+// AND IT LOST ITS `stopLiveOutput` IMPORT, WHICH WAS FORCED, NOT TIDYING.
+// `import { stopLiveOutput } from "./views/task.js"` used to resolve to the vanilla `views/task.js`
+// under both tools, because no `views/task.ts*` existed. `views/task.tsx` exists now, and the two
+// tools DISAGREE about which file that specifier names: `tsc` tries `.ts`/`.tsx` before the literal
+// `.js` and lands on the React view (which exports no such function — TS2305), while `bun build`
+// resolves the literal `.js` and lands on the vanilla one. There is no specifier both agree on; that
+// is precisely the hazard `components/chips.tsx`'s header documents, seen from the other side.
+//
+// The call was there to stop the vanilla task view's live-output poll timer, which outlived its own
+// view's DOM, before every re-render. No vanilla route is mounted, so that timer can never have been
+// started, and the call is unreachable. If you revert the task route to `<VanillaView>`, restore
+// this import too — spell it as a relative path bun and tsc cannot disagree on, or accept the leak.
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { el } from "./core/dom.js";
 import { mount, render, setRenderer } from "./core/nav.js";
 import { useStateMetaVersion } from "./state-meta-store";
 import { captureUiState, restoreUiState } from "./ui-state.js";
-import { stopLiveOutput } from "./views/task.js";
 
 /** The currently-mounted view's render thunk, or null between routes. This is the cell nav.js's
  *  `render()` delegates into — the same inversion app.js's `setRenderer(renderRoute)` performed, for
@@ -70,12 +85,9 @@ export function VanillaView({ id, run }: { id: string; run: () => Promise<unknow
   }, []);
 
   useEffect(() => {
-    // ONE route-scoped poll timer is left: task.js's live-output poll, which outlives its view's DOM.
-    // Stop it before every render, exactly as the vanilla renderRoute did; the view restarts it after
-    // mount(). workspace.js's `stopActivity` was the other one — Phase 4c migrated that view, and the
-    // activity pulse it drove had had no `.pulse` node to find since the st-ef0e7690 dead-code sweep.
+    // The route-scoped `stopLiveOutput()` that used to run here is gone — see the header. No vanilla
+    // route is mounted, so no vanilla poll timer can exist to stop.
     const fn = async () => {
-      stopLiveOutput();
       try {
         await runRef.current();
       } catch (e) {
@@ -89,7 +101,6 @@ export function VanillaView({ id, run }: { id: string; run: () => Promise<unknow
     void fn();
     return () => {
       if (currentRender === fn) currentRender = null;
-      stopLiveOutput();
     };
   }, [id, version]);
 

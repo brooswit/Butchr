@@ -17,6 +17,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **RFC front-end Phase 4d — the last two views become React; no route goes through the bridge.**
+  `views/projects.tsx` (overview + detail) and `views/task.tsx` (the task detail / review page, the
+  largest view, written fresh rather than salvaged) replace their vanilla counterparts, and
+  `App.tsx` points the `#/projects`, `#/projects/:id` and `#/task/:id` routes at real React
+  elements. `bridge.tsx`, `core/nav.js`, `core/dom.js`, `ui-state.js` and the vanilla `views/*.js` +
+  `components/*.js` are now unreachable from the entry point but remain on disk; Phase 4e deletes
+  them in one reviewable diff, keeping a working fallback one revert away.
+- New components: `components/panel.tsx` (`Collapsible` on LaunchPad's `Disclosure`, `FractionMeter`
+  on `Meter variant="bar"`, the CI + conformance gate badges, `ListPanel`/`BlockerRow`/`Block`),
+  `components/project-modals.tsx` (the three project dialogs on `Form`/`TextField`/`TextArea`/
+  `Label`/`Input`), `components/clickable.tsx` (the keyboard-operable whole-row click target), and
+  `components/overlay.tsx`'s `DirectoryPicker`.
+- The directory picker is rebuilt on `Autocomplete` + `ListBox` + `ListBoxItem` (not `ComboBox`,
+  which is a form field that collapses into a popover — wrong for a full-height browsing pane inside
+  a dialog). It gains type-to-filter and real arrow-key navigation. Its rows now only *navigate*: a
+  `ListBoxItem` is `role="option"` and may not contain a nested button, so committing a path is the
+  footer's job, where the vanilla put it too.
+- `components/chips.tsx` gains `TaskChips`, `TagChips` and `LivenessChip`; `components/button.tsx`
+  gains the `success` kind (green, `--merged`) together with its `.btn-success` CSS rule.
+- `views/projects-logic.ts` gains `ceoPill`, which was private to the vanilla `views/projects.js`
+  and had no test coverage; it is pure, so it moves to the DOM-free leaf and is now asserted.
+- `composeReviewNote(freeform, comments)` is finally **pure** — the inline-comment map is a
+  parameter. The module-scoped `inlineComments` store stays only as a default argument, for the
+  vanilla `views/task.js` that still ships until Phase 4e.
+- The task detail's `#inline-comment-summary` cross-module id is gone: `views/diff.js` used to reach
+  into the task view's DOM with `getElementById` to repaint it. The comment count is a render now.
+- `captureUiState`/`restoreUiState` is subsumed by React reconciliation on every migrated view —
+  the operator's typed text now survives an SSE refresh because nothing unmounts the input.
+
+### Fixed
+
+- The task detail's "Open CEO terminal" and "Confirm (send 1)" hover hints now appear when the
+  button is **disabled**. They rode on the `<button>`, and browsers suppress hover events on a
+  disabled button — so the hint explaining *why* a control was disabled was the one least likely to
+  be seen. They ride on a wrapping `<span>` now.
+
+### Tests
+
+- `test/kind-badge.test.ts`, `test/state-meta-fallback.test.ts` and `test/projects-ceo-ui.test.ts`
+  move off the hand-rolled `test/dom-stub.ts` and onto `@testing-library/react` + happy-dom. Their
+  pure halves keep their assertions unchanged. `test/projects-initiatives-ui.test.ts` needed no
+  rewrite — it never rendered anything.
+
 ## [0.9.286] - 2026-07-09
 
 ### Added

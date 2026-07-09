@@ -1093,7 +1093,13 @@ pre.block {
    still mounted elsewhere keep resolving through exactly the rules they always did. Phase 4d, which
    migrates the last modal, can drop the `label` qualifier and delete these. */
 .modal .field { display: block; margin-bottom: var(--space-5); }
-.modal .field .lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+/* NOT `.modal .field .lbl` — the launch modal's fan-out label ("targets — one {repo, brief} per
+   repo…") is a BARE `.lbl` span with no `.field` around it, so the narrower selector left it
+   `display: inline` and it wrapped around the inline-flex `.seg` tabs beside it, overlapping them.
+   The vanilla `components/project-modals.js` built exactly the same bare span, so this is a
+   PRE-EXISTING layout defect that the Phase-4d browser pass is simply the first thing to look at.
+   Every `.lbl` inside a modal is a field label; none of them wants to be inline. */
+.modal .lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
 /* LaunchPad's `TextArea` brings a single-class rule, which outranks style.css's bare `textarea`
    element selector no matter which sheet loads last. Re-assert butchr's monospace brief box. */
 .modal .field textarea[class] {
@@ -1290,3 +1296,100 @@ small.muted { font-size: 12px; }
 /* workspace "Unregister" zone — set well clear of the panels above it. Single caller, so the
    32px stays literal rather than minting a token nothing else would use. */
 .ws-danger-zone { margin-top: 32px; }
+
+/* ============================================================================================
+   RFC PHASE 4d — the last two views (projects, task) become React, and with them the last
+   hand-rolled modal, collapsible, progress bar and directory picker.
+
+   Every rule below exists because a LaunchPad component brought its own single-class rule and
+   butchr needs one semantic back. `[class]` doubles specificity to (0,2,0) so it beats that rule
+   without `!important`; style.css is imported LAST (main.tsx) but a tie still goes to whichever
+   sheet the bundler happened to order second, and these are not ties worth losing.
+   ============================================================================================ */
+
+/* --- the success button ------------------------------------------------------------------
+   LaunchPad ships five Button variants and none is green. `.btn.success` was butchr's
+   affirmative fill (Approve & merge, Approve spec, Approve plan, Submit spec, Send answer,
+   Nudge, "Register this folder"), so it comes back as `primary` + this one additive class,
+   exactly as `.btn.ghost.danger-outline` did. components/button.tsx maps kind="success" here,
+   and its header refused to add the mapping until this rule existed. Now it does.
+   `data-hovered`/`data-pressed` are react-aria's, not CSS `:hover` — a `:hover` rule would miss
+   keyboard-driven presses entirely. */
+.btn-success[class] { background: var(--merged); border-color: var(--merged); color: #fff; }
+.btn-success[class][data-hovered],
+.btn-success[class][data-pressed] { background: var(--merged); filter: brightness(1.12); }
+.btn-success[class][data-disabled] { opacity: 0.55; }
+
+/* --- LaunchPad TextArea, outside `.modal .field` -------------------------------------------
+   `.modal .field textarea[class]` (added in 4c) covers the modals' briefs. The launch modal's
+   fan-out TARGET ROWS put a `TextArea` in a `.target-row` grid cell instead, where that selector
+   does not reach — and LaunchPad's own single-class rule outranks style.css's bare `textarea`
+   element selector no matter which sheet loads last. Without this the target briefs render with
+   LaunchPad's chrome and none of butchr's. Same monospace box, keyed on the class the component
+   is given. */
+.lp-ta[class] {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px 10px;
+  resize: vertical; min-height: 90px; font-family: var(--mono); font-size: 13px;
+}
+.target-row .lp-ta[class] { min-height: 60px; }
+
+/* --- the modal `<Form>` --------------------------------------------------------------------
+   `.modal` is a flex column that scrolls `.m-body` between a fixed `.m-head` and `.m-foot`. The
+   React modals wrap body+foot in a `<Form>` so Enter submits, which inserts a block element in
+   the middle of that column and breaks the scroll containment. The form becomes the column.
+   `min-height: 0` is what actually lets `.m-body`'s `overflow: auto` engage — a flex item's
+   default `min-height: auto` refuses to shrink below its content. */
+.modal .m-form {
+  display: flex; flex-direction: column; flex: 1; min-height: 0;
+}
+
+/* --- Collapsible (Disclosure) --------------------------------------------------------------
+   `collapsible()` built a bare `<button class="…-head">`. `Disclosure` wants its trigger inside a
+   `Heading`, and LaunchPad's `Button` brings a pill: inline-flex, centred, rounded, min-height,
+   its own font-weight. The four existing head rules (`.live-output-head`, `.transcript-head`,
+   `.ci-detail-toggle`, and any future one) still supply padding/background/colour; this strips the
+   pill back so they land on the same box they always did.
+
+   `Disclosure` also HIDES its own panel when collapsed, so the `.panel.live-output.collapsed
+   .live-output-body { display:none }` pairs above are now dead — left in place for Phase 4e to
+   sweep with the vanilla `collapsible()`, since nothing renders that `collapsed` class today. */
+.collapsible-heading { margin: 0; font: inherit; }
+.collapsible-head[class] {
+  width: 100%; justify-content: flex-start; text-align: left;
+  border-radius: 0; min-height: 0; font: inherit; font-weight: inherit;
+}
+/* The caret is an `Icon` now, not a "▾"/"▸" text glyph swapped in JS. It must not stretch. */
+.collapsible-head .caret { flex: none; }
+.ci-detail-toggle[class] { padding: 0; background: none; border: none; color: var(--muted); font-size: 12px; }
+
+/* --- FractionMeter (Meter variant="bar") ---------------------------------------------------
+   `Meter variant="bar"` is a two-row grid — "label value" over "bar bar" — that fills its track
+   from `--fill-color` and prints a percent in the `value` cell from value/min/max. That is
+   `.rollup-summary` + `.rollup-bar` + `.rollup-pct` in one component, so those three rules are now
+   unused (Phase 4e sweeps them with components/panel.js). All this has to do is re-point the fill
+   at butchr's green — the same re-basing the `:root` alias block does for `--bg`/`--text`. */
+.lp-fraction { --fill-color: var(--merged); margin: 4px 0; }
+.rollup-panel .lp-fraction { margin: 8px 0 4px; }
+
+/* --- the CEO enable toggle (Switch) --------------------------------------------------------- */
+.ceo-toggle { display: inline-flex; align-items: center; gap: 8px; }
+.ceo-toggle-lbl { font-size: 12.5px; }
+
+/* --- the directory picker (Autocomplete + ListBox) -------------------------------------------
+   The rows were `<div class="fs-row">`s with a click handler and no keyboard affordance. They are
+   `ListBoxItem`s (role="option") and one `Button` (the `..` row) now, so both need the pill reset
+   the collapsible heads needed, and the option needs a real focus ring — it is reachable by arrow
+   key for the first time. `.fs-row`'s own layout/padding/hover rules above are untouched. */
+.m-filter { padding: 8px 16px 0; }
+.m-filter input { width: 100%; box-sizing: border-box; }
+.fs-row[class] {
+  width: 100%; justify-content: flex-start; text-align: left;
+  border-radius: var(--radius-md); min-height: 0; font: inherit; font-weight: inherit;
+  background: none; border: 1px solid transparent;
+}
+.fs-row[class][data-hovered],
+.fs-row[class][data-focused] { background: var(--panel-2); }
+.fs-row[class][data-focus-visible] { outline: 2px solid var(--accent); outline-offset: -2px; }
+.modal .m-list [role="listbox"] { display: block; outline: none; }
