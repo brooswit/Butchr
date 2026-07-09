@@ -82,6 +82,18 @@
   --radius-sm: 3px;  /* LaunchPad regular */
   --radius-md: 6px;  /* LaunchPad medium */
   --radius-lg: 16px; /* LaunchPad large */
+
+  /* SPACING scale. Values are OBSERVED, not invented — they are the margins/gaps that were
+     hardcoded per-call-site across app.js before this scale existed. Deliberately NOT mirrored
+     into the dark-theme block below: spacing is theme-invariant.
+     One-off values with a single caller (a modal's 14px pad, the danger zone's 32px) stay
+     literal in their component rule — a token needs a cohort, not one consumer. */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 12px;
+  --space-6: 18px;
 }
 
 html[data-theme="dark"] {
@@ -951,19 +963,37 @@ input[type="text"], textarea, select {
   font-size: 13px; font-family: inherit;
 }
 textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-size: 13px; }
-label.field { display: block; margin-bottom: 12px; }
+label.field { display: block; margin-bottom: var(--space-5); }
+/* A field in a dense stack (modal bodies, review panels) where the default 12px gutter
+   over-separates it from the control below. */
+label.field.tight { margin-bottom: var(--space-2); }
 label.field .lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
 /* inline field hint (e.g. the template picker's "Fill in: {{…}}" placeholder list) */
 label.field .hint { display: block; font-size: 12px; color: var(--muted); margin-top: 5px; }
+/* a label wrapping a text input + a trailing button (e.g. path + "Browse…") */
+.field-row { display: flex; align-items: center; gap: var(--space-3); }
+.field-row input { flex: 1; }
+.field-row .btn { white-space: nowrap; }
 
-.row { display: flex; gap: 10px; align-items: center; }
+.row { display: flex; gap: var(--space-4); align-items: center; }
 .row.between { justify-content: space-between; }
 .spacer { flex: 1; }
+.mono { font-family: var(--mono); }
+/* a block set off from whatever precedes it (a panel below a panel, a trailing action row) */
+.stacked { margin-top: var(--space-6); }
 
 .panel {
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-  padding: 18px; margin-bottom: 18px;
+  padding: var(--space-6); margin-bottom: var(--space-6);
 }
+/* A panel's leading heading: the base h2 rule carries a 28px top margin to separate SIBLING
+   sections, which a panel's own border already does. Explicit class, not :first-child — the
+   markup here gets reorganized in later phases and a positional rule would silently break. */
+.panel-title { margin-top: 0; }
+/* a panel's intro paragraph, between its title and its controls */
+.lede { margin: 0 0 var(--space-4); }
+/* a panel's trailing action row (buttons + an explanatory <small>) */
+.panel-actions { margin-top: var(--space-5); }
 /* failed-dispatch panel on the task detail view — a red accent edge to flag it */
 .panel.failed-panel { border-left: 3px solid var(--failed); }
 .panel.failed-panel h2 { color: var(--failed); }
@@ -1139,6 +1169,7 @@ pre.block {
   word-break: break-all; background: var(--bg);
 }
 .modal .m-list { overflow: auto; flex: 1; padding: 6px; }
+.modal .m-list .m-empty { padding: 14px; }
 .modal .m-body { overflow: auto; padding: 16px; }
 .modal .m-error { flex: 1; font-size: 12px; color: var(--muted); }
 .modal .m-error.on { color: var(--rejected); }
@@ -1300,10 +1331,13 @@ small.muted { font-size: 12px; }
 
 /* ---- managed CTO agent (per-workspace: panel on the workspace view, mini-badge
        on each dashboard card) ---- */
-.cto-card { margin-bottom: 18px; }
+.cto-card { margin-bottom: var(--space-6); }
+/* The CTO heading shares a flex row with its controls; it must not carry the base h2 margins
+   on EITHER edge (a bottom margin would push it off-centre from the controls beside it). */
+.cto-card h2 { margin: 0; }
 .cto-mini { margin-top: 8px; }
 .cto-mini .cto-badge { margin-left: 0; }
-.cto-card .meta { color: var(--muted); font-size: 12.5px; }
+.cto-card .meta { color: var(--muted); font-size: 12.5px; margin-top: var(--space-1); }
 .cto-card .meta.err { color: var(--rejected); }
 .cto-badge {
   display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px;
@@ -1312,4 +1346,7 @@ small.muted { font-size: 12px; }
 .cto-badge.ok   { color: var(--merged); }
 .cto-badge.warn { color: var(--in_review); }
 .cto-badge.off  { color: var(--aborted); }
-.cto-controls { flex-wrap: wrap; justify-content: flex-end; }
+.cto-controls { flex-wrap: wrap; justify-content: flex-end; gap: var(--space-3); }
+/* workspace "Unregister" zone — set well clear of the panels above it. Single caller, so the
+   32px stays literal rather than minting a token nothing else would use. */
+.ws-danger-zone { margin-top: 32px; }

@@ -525,10 +525,10 @@ async function ctoPanel(dirId) {
   try {
     s = await api("GET", base);
   } catch {
-    return el("div", { class: "panel cto-card", style: "margin-top:18px" },
+    return el("div", { class: "panel cto-card stacked" },
       el("small", { class: "muted" }, "CTO agent status unavailable"));
   }
-  const card = el("div", { class: "panel cto-card", style: "margin-top:18px" });
+  const card = el("div", { class: "panel cto-card stacked" });
   const { state, cls: stateCls } = ctoState(s);
   const bits = [];
   if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
@@ -536,13 +536,13 @@ async function ctoPanel(dirId) {
   if (s.restarts) bits.push(`${s.restarts} restart${s.restarts === 1 ? "" : "s"}`);
   if (!s.enabled) bits.push("auto-start disabled");
   card.innerHTML = `
-    <div class="row" style="justify-content:space-between; align-items:center; gap:10px">
+    <div class="row between">
       <div>
-        <h2 style="margin:0">${kindBadge("cto")} CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
-        <div class="meta" style="margin-top:4px">${bits.map(esc).join(" · ") || "not started"}</div>
-        ${s.lastError ? `<div class="meta err" style="margin-top:4px">last error: ${esc(s.lastError)}</div>` : ""}
+        <h2>${kindBadge("cto")} CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
+        <div class="meta">${bits.map(esc).join(" · ") || "not started"}</div>
+        ${s.lastError ? `<div class="meta err">last error: ${esc(s.lastError)}</div>` : ""}
       </div>
-      <div class="row cto-controls" style="gap:8px"></div>
+      <div class="row cto-controls"></div>
     </div>`;
   const controls = card.querySelector(".cto-controls");
   const btn = (label, cls, fn) => {
@@ -682,7 +682,7 @@ function openPicker(onSelect) {
       list.appendChild(up);
     }
     if (cur.entries.length === 0) {
-      list.appendChild(el("div", { class: "muted", style: "padding:14px" }, "(no subfolders)"));
+      list.appendChild(el("div", { class: "muted m-empty" }, "(no subfolders)"));
     }
     for (const e of cur.entries) {
       const row = el("div", { class: "fs-row" });
@@ -1142,7 +1142,7 @@ async function renderWorkspace(id, projectId) {
   // subtasks. Standalone task + idea creation are gone (the server rejects them) — the only
   // task creatable directly is a rollback, via the per-task "Roll back" button.
   // Rendered UNDER the CTO panel (above the Pipeline) so the CTO controls stay at the top.
-  const launch = el("div", { class: "row between", style: "margin-top:18px" });
+  const launch = el("div", { class: "row between stacked" });
   launch.appendChild(el("small", { class: "muted" },
     `New work is a STORY — a leader decomposes it into subtasks. ${queueLine(tasks)}`));
   const newStoryBtn = el("button", { class: "btn", id: "new-story" }, "New story");
@@ -1164,7 +1164,7 @@ async function renderWorkspace(id, projectId) {
   // config — so there is no step-responder config panel here anymore.)
 
   // danger zone
-  const dz = el("div", { class: "row", style: "margin-top:32px" });
+  const dz = el("div", { class: "row ws-danger-zone" });
   const del = el("button", { class: "btn ghost" }, "Unregister workspace");
   del.addEventListener("click", async () => {
     if (!confirm("Unregister this workspace? Non-merged worktrees will be removed.")) return;
@@ -1197,7 +1197,7 @@ async function renderWorkspace(id, projectId) {
 function openNewStoryModal(workspaceId) {
   const body = el("div", { class: "m-body" });
   body.innerHTML = `
-    <label class="field" style="margin-bottom:6px">
+    <label class="field tight">
       <span class="lbl">story — a one-line brief; a story leader decomposes it into the subtasks needed to deliver it</span>
       <textarea id="ns-brief" placeholder="Describe the story in a sentence or two…"></textarea>
     </label>
@@ -1768,7 +1768,7 @@ function conformanceBadge(t) {
 function renderTimeline(events) {
   if (!Array.isArray(events) || events.length === 0) return null;
   const panel = el("div", { class: "panel timeline-panel" });
-  panel.appendChild(el("h2", { style: "margin-top:0" }, "Timeline"));
+  panel.appendChild(el("h2", { class: "panel-title" }, "Timeline"));
   const list = el("div", { class: "timeline" });
   for (const ev of events) {
     const transition = ev.from_status && ev.from_status !== ev.to_status
@@ -2021,7 +2021,7 @@ function blockerRow(id, status, { dead = false } = {}) {
 // a ".blockers" list of `rows`.
 function listPanel(heading, rows, { chainLine, cls = "", lead } = {}) {
   const panel = el("div", { class: "panel" + (cls ? " " + cls : "") });
-  panel.appendChild(el("h2", { style: "margin-top:0" }, heading));
+  panel.appendChild(el("h2", { class: "panel-title" }, heading));
   if (chainLine) panel.appendChild(el("div", { class: "chain-est", html: chainLine }));
   for (const node of [].concat(lead || [])) panel.appendChild(node);
   panel.appendChild(el("div", { class: "blockers" }, rows));
@@ -2065,7 +2065,7 @@ async function renderTask(id) {
     class: "crumbs",
     html: `<a href="#/projects">Projects</a> / <a href="#/workspace/${esc(t.workspace_id)}">${esc(dir ? (dir.label || dir.path) : t.workspace_id)}</a> / <span aria-current="page">${esc(t.id)}</span>`,
   }));
-  const headerRight = el("div", { class: "row", style: "gap:10px" });
+  const headerRight = el("div", { class: "row" });
   if (isLive(t)) {
     const term = el("button", { class: "btn ghost" }, "⌗ Open terminal");
     term.addEventListener("click", () => openTaskTerminal(t.id, term));
@@ -2093,7 +2093,7 @@ async function renderTask(id) {
     headerRight.appendChild(el("button", { class: "btn ghost danger-outline", id: "rollback" }, "Roll back"));
   }
   wrap.appendChild(el("div", { class: "row between" }, [
-    el("h1", { html: `<span style="font-family:var(--mono)">${esc(t.id)}</span>` }),
+    el("h1", { html: `<span class="mono">${esc(t.id)}</span>` }),
     headerRight,
   ]));
 
@@ -2174,10 +2174,10 @@ async function renderTask(id) {
   if (t.status === "aborted" && t.revert_reason) {
     const panel = el("div", { class: "panel failed-panel" });
     panel.innerHTML = `
-      <h2 style="margin-top:0">Merge auto-reverted off main</h2>
-      <p class="muted" style="margin:0 0 10px">This branch merged, but the post-merge verify (build + tests) failed on the default branch, so the merge was reverted to keep main green. The branch + worktree were kept.</p>
+      <h2 class="panel-title">Merge auto-reverted off main</h2>
+      <p class="muted lede">This branch merged, but the post-merge verify (build + tests) failed on the default branch, so the merge was reverted to keep main green. The branch + worktree were kept.</p>
       <pre class="block">${esc(t.revert_reason)}</pre>
-      <div class="row" style="margin-top:12px">
+      <div class="row panel-actions">
         <button class="btn" id="requeue">Re-queue</button>
         <small class="muted">Re-launches the agent (in-context) to fix the breakage, then it can be re-reviewed.</small>
       </div>`;
@@ -2186,10 +2186,10 @@ async function renderTask(id) {
     const n = t.dispatch_attempts || 0;
     const panel = el("div", { class: "panel failed-panel" });
     panel.innerHTML = `
-      <h2 style="margin-top:0">Dispatch failed</h2>
-      <p class="muted" style="margin:0 0 10px">Failed after ${n} dispatch attempt${n === 1 ? "" : "s"}. The agent never started.</p>
+      <h2 class="panel-title">Dispatch failed</h2>
+      <p class="muted lede">Failed after ${n} dispatch attempt${n === 1 ? "" : "s"}. The agent never started.</p>
       <pre class="block">${esc(t.last_dispatch_error || "(no error recorded)")}</pre>
-      <div class="row" style="margin-top:12px">
+      <div class="row panel-actions">
         <button class="btn" id="requeue">Re-queue</button>
         <small class="muted">Clears the retry state and dispatches again from scratch.</small>
       </div>`;
@@ -2313,8 +2313,8 @@ async function renderTask(id) {
       const n = t.major_confirm_count || 0;
       const banner = el("div", { class: "panel major-confirm-panel" });
       banner.innerHTML = `
-        <h2 style="margin-top:0">Awaiting major-version confirmation (${esc(String(n))}/2)</h2>
-        <p class="muted" style="margin:0 0 10px">This task declares a <strong>major</strong> version bump, so merging it is a deliberate human double-confirm — <strong>Approve does not merge it</strong>. Click <strong>Confirm major version</strong> <strong>twice in a row</strong> (streak ${esc(String(n))}/2); the second consecutive confirm lands the merge. <strong>Any other action</strong> (Approve, Request change, re-review, re-declaring the bump) <strong>resets the streak to 0</strong>.</p>
+        <h2 class="panel-title">Awaiting major-version confirmation (${esc(String(n))}/2)</h2>
+        <p class="muted lede">This task declares a <strong>major</strong> version bump, so merging it is a deliberate human double-confirm — <strong>Approve does not merge it</strong>. Click <strong>Confirm major version</strong> <strong>twice in a row</strong> (streak ${esc(String(n))}/2); the second consecutive confirm lands the merge. <strong>Any other action</strong> (Approve, Request change, re-review, re-declaring the bump) <strong>resets the streak to 0</strong>.</p>
         <div class="row">
           <button class="btn danger" id="confirm-major">Confirm major version (${esc(String(n))}/2)</button>
           <small class="muted">Two consecutive confirms required — this is the human gate on a breaking release.</small>
@@ -2352,10 +2352,10 @@ async function renderTask(id) {
       .then((d) => { diffBox.innerHTML = renderDiff(d.diff); wireDiff(diffBox, id); })
       .catch((e) => { diffBox.innerHTML = `<div class="meta">diff error: ${esc(e.message)}</div>`; });
 
-    const controls = el("div", { class: "panel", style: "margin-top:18px" });
+    const controls = el("div", { class: "panel stacked" });
     controls.innerHTML = `
-      <h2 style="margin-top:0">Review</h2>
-      <label class="field" style="margin-bottom:6px">
+      <h2 class="panel-title">Review</h2>
+      <label class="field tight">
         <span class="lbl">change request note</span>
         <textarea id="rnote" data-restore-key="reject" placeholder="What needs to change? The note (plus any inline comments above) goes back to the same live agent, which keeps working in-context (no restart)."></textarea>
       </label>
@@ -2422,16 +2422,16 @@ async function renderTask(id) {
     // pending_responder (story|cto|user). Falls back to "cto" defensively.
     const specResponder = t.pending_responder || "cto";
     if (t.review_note) block("Spec changes requested", t.review_note, wrap);
-    const specPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    const specPanel = el("div", { class: "panel stacked" });
     const specResponderCopy = specResponder === "user"
       ? "You are the responder for this spec. Turn the brief above into a concrete, repo-grounded spec and submit it to advance the task to spec review."
       : specResponder === "story"
       ? "The <strong>story leader</strong> agent will write the spec from the brief (it was notified on its story channel). You can also write and submit one yourself below."
       : "The <strong>CTO agent</strong> will write the spec from the brief (it was notified on the CTO channel). You can also write and submit one yourself below.";
     specPanel.innerHTML = `
-      <h2 style="margin-top:0">${specResponder === "user" ? "Write the spec" : "Spec requested"}</h2>
-      <p class="muted" style="margin:0 0 10px">${specResponderCopy}</p>
-      <label class="field" style="margin-bottom:6px">
+      <h2 class="panel-title">${specResponder === "user" ? "Write the spec" : "Spec requested"}</h2>
+      <p class="muted lede">${specResponderCopy}</p>
+      <label class="field tight">
         <span class="lbl">spec (required)</span>
         <textarea id="spec" data-restore-key="spec" placeholder="Write the full spec for this brief — what to build, where, and how it should be verified."></textarea>
       </label>
@@ -2450,11 +2450,11 @@ async function renderTask(id) {
   // spec_review — a spec was submitted (by the CTO agent or a human); operator approves
   // to start the workspace agent, or requests changes to revise the spec (back to idea).
   if (t.status === "spec_review") {
-    const controls = el("div", { class: "panel", style: "margin-top:18px" });
+    const controls = el("div", { class: "panel stacked" });
     controls.innerHTML = `
-      <h2 style="margin-top:0">Review spec</h2>
-      <p class="muted" style="margin:0 0 10px">A spec was submitted for this idea. Approve to dispatch the workspace agent, or request changes to revise the spec.</p>
-      <label class="field" style="margin-bottom:6px">
+      <h2 class="panel-title">Review spec</h2>
+      <p class="muted lede">A spec was submitted for this idea. Approve to dispatch the workspace agent, or request changes to revise the spec.</p>
+      <label class="field tight">
         <span class="lbl">change request note (required if requesting changes)</span>
         <textarea id="rnote" data-restore-key="spec-reject" placeholder="What needs to change in the spec?"></textarea>
       </label>
@@ -2489,10 +2489,10 @@ async function renderTask(id) {
   //     agent session via `--resume` with the response injected.
   if (t.status === "needs_info" && t.plan_preview) {
     if (t.question) block("Proposed plan", t.question, wrap);
-    const planPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    const planPanel = el("div", { class: "panel stacked" });
     planPanel.innerHTML = `
-      <h2 style="margin-top:0">Review plan</h2>
-      <p class="muted" style="margin:0 0 10px">Approve to let the agent implement this plan, or request changes with feedback — the agent revises and re-proposes. Both resume the same session in-context.</p>
+      <h2 class="panel-title">Review plan</h2>
+      <p class="muted lede">Approve to let the agent implement this plan, or request changes with feedback — the agent revises and re-proposes. Both resume the same session in-context.</p>
       <label class="field">
         <span class="lbl">feedback (optional for approve · required to request changes)</span>
         <textarea id="planNote" data-restore-key="plan-note" placeholder="On approve: optional steering notes folded into the implementation. On request-changes: what the plan must change before implementing."></textarea>
@@ -2514,9 +2514,9 @@ async function renderTask(id) {
     wrap.appendChild(planPanel);
   } else if (t.status === "needs_info") {
     if (t.question) block("Agent raised", t.question, wrap);
-    const answerPanel = el("div", { class: "panel", style: "margin-top:18px" });
+    const answerPanel = el("div", { class: "panel stacked" });
     answerPanel.innerHTML = `
-      <h2 style="margin-top:0">Respond</h2>
+      <h2 class="panel-title">Respond</h2>
       <label class="field">
         <span class="lbl">your response (required)</span>
         <textarea id="answer" data-restore-key="answer" placeholder="Respond to what the agent raised. It goes back to the same agent, which butchr re-launches in-context (--resume) to continue."></textarea>
@@ -2541,10 +2541,10 @@ async function renderTask(id) {
   // is genuinely alive (and /nudge re-checks liveness regardless).
   if (t.status === "in_progress" && t.idle) {
     if (t.idle_context) block("Idle context (recent output)", t.idle_context, wrap);
-    const idlePanel = el("div", { class: "panel", style: "margin-top:18px" });
+    const idlePanel = el("div", { class: "panel stacked" });
     idlePanel.innerHTML = `
-      <h2 style="margin-top:0">Idle agent</h2>
-      <p class="muted" style="margin:0 0 10px">This agent is alive but has gone quiet. Read the context above to judge why it stopped, then steer it with guidance (or a bare “continue”), re-queue it to relaunch its session, or abort it from the header.</p>
+      <h2 class="panel-title">Idle agent</h2>
+      <p class="muted lede">This agent is alive but has gone quiet. Read the context above to judge why it stopped, then steer it with guidance (or a bare “continue”), re-queue it to relaunch its session, or abort it from the header.</p>
       <label class="field">
         <span class="lbl">guidance (optional — blank sends a bare “continue”)</span>
         <textarea id="nudgeText" data-restore-key="nudge" placeholder="Optional steering note, sent to the agent as if typed by a human. Leave blank to just nudge it to continue."></textarea>
@@ -3326,7 +3326,7 @@ async function openNewProjectModal() {
       <span class="lbl">anchor workspace — the project's home directory (the CEO agent's launch cwd)</span>
       <select id="np-anchor"><option value="">loading workspaces…</option></select>
     </label>
-    <label class="field" style="margin-bottom:6px">
+    <label class="field tight">
       <span class="lbl">brief — what this project should deliver across its repos</span>
       <textarea id="np-brief" data-restore-key="new-project-brief" placeholder="Describe the project in a sentence or two…"></textarea>
     </label>
@@ -3863,7 +3863,7 @@ function openLaunchModal(project, repos, wsById) {
     if (mode === "single") {
       inner +=
         '<label class="field"><span class="lbl">repo</span>' + repoSelectHtml("li-repo") + '</label>' +
-        '<label class="field" style="margin-bottom:6px"><span class="lbl">brief — what to build in this repo</span>' +
+        '<label class="field tight"><span class="lbl">brief — what to build in this repo</span>' +
           '<textarea class="tgt-brief" placeholder="Describe the initiative for this repo…"></textarea></label>' +
         '<small class="hint muted">A single-repo initiative sends a directive to that repo’s CTO, who ' +
           'decomposes it into stories — it’s tracked here (and on that repo’s board). ' +
@@ -4037,14 +4037,14 @@ async function unregisterRepo(project, repo, row) {
 function openAddWorkspaceModal(project) {
   const body = el("div", { class: "m-body" });
   body.innerHTML =
-    '<label class="field" style="margin-bottom:8px">' +
+    '<label class="field tight">' +
       '<span class="lbl">path to a git repository</span>' +
-      '<div class="row" style="gap:8px">' +
-        '<input type="text" id="aw-path" placeholder="/home/you/code/project" style="flex:1" />' +
-        '<button type="button" class="btn ghost" id="aw-browse" style="white-space:nowrap">Browse…</button>' +
+      '<div class="field-row">' +
+        '<input type="text" id="aw-path" placeholder="/home/you/code/project" />' +
+        '<button type="button" class="btn ghost" id="aw-browse">Browse…</button>' +
       '</div>' +
     '</label>' +
-    '<label class="field" style="margin-bottom:8px">' +
+    '<label class="field tight">' +
       '<span class="lbl">label (optional)</span>' +
       '<input type="text" id="aw-label" placeholder="defaults to dir name" />' +
     '</label>' +

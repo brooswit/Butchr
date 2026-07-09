@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `public/style.css` gains a SPACING scale (`--space-1` 4px … `--space-6` 18px) alongside the
+  existing `--radius-*` tokens, completing the design-token set. Values are the ones already
+  hardcoded across `public/app.js`, not invented; the scale is not mirrored into the dark-theme
+  block because spacing is theme-invariant. Phase 3 of `docs/rfc-frontend-design-system.md`
+  (story st-b1ca22e5).
+- All 49 static inline styles in `public/app.js` are retired in favour of component-level CSS
+  rules — `.panel-title`, `.lede`, `.panel-actions`, `.stacked`, `.field.tight`, `.field-row`,
+  `.mono`, `.m-empty`, `.ws-danger-zone`. The three remaining inline styles are the swimlane and
+  rollup progress bars, which compute a percent width at runtime. The CTO card's header row also
+  drops an inline `justify-content`/`align-items`/`gap` triple that merely restated `.row.between`.
+- fix: the two Add-workspace modal fields tighten from 8px to 6px, matching the six other
+  `.field` sites in dense stacks. Sole intended visual change; no other spacing moves.
+
 ## [0.9.248] - 2026-07-09
 
 - fix: `serveStatic` returns a real 404 for a missing *file* (a basename containing `.`) instead of
