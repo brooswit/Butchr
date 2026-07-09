@@ -29,10 +29,13 @@ the full lifecycle from task creation through review and merge, delegating all
 terminal/agent session management to **[herdr](https://github.com/)**.
 
 - **Stack:** Bun · SQLite (`bun:sqlite`) · herdr · git.
-- **Webapp:** vanilla JS single-page app, no framework, no build step — being migrated to
-  React 19 + [LaunchDarkly LaunchPad](https://launchpad.launchdarkly.com/) (`@launchpad-ui`),
-  bundled by `bun build` (`docs/rfc-frontend-launchpad.md`). The server has **zero runtime npm
+- **Webapp:** a single-page app under `public/`, **bundled by `bun build` into `dist/`**, which is
+  what the server serves. Still vanilla JS today; migrating to React 19 +
+  [LaunchDarkly LaunchPad](https://launchpad.launchdarkly.com/) (`@launchpad-ui`) —
+  `docs/rfc-frontend-launchpad.md` is the standard. The server has **zero runtime npm
   dependencies**; every dependency is front-end or build/test tooling.
+- **Build before you serve:** `bun run build:fe`. `bun start`, `scripts/supervise.sh`, the systemd
+  unit, and `scripts/ci` all do it for you; `dist/` is gitignored, so a fresh clone has none.
 
 **Core concepts:**
 

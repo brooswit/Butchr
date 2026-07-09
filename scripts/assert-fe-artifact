@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# The three silent-failure assertions (RFC §4.3), run against a built front-end directory.
+#
+# Each of the three failures below EXITS 0, BOOTS, AND IS STILL WRONG. None produces a build
+# error, and none is visible to a layout or size assertion. These three assertions are the entire
+# defence. Do not delete them as "redundant with the build" — the build is exactly what cannot
+# see them. `test/fe-artifact-assertions.test.ts` proves each one still fires.
+#
+# Usage:  bun run assert:fe <dist-dir>   (scripts/ci must invoke it this way — see scripts/ci)
+set -euo pipefail
+
+DIST="${1:-}"
+if [ -z "$DIST" ] || [ ! -d "$DIST" ]; then
+  echo "usage: scripts/assert-fe-artifact <dist-dir>" >&2
+  exit 2
+fi
+
+# A glob matching zero files must FAIL, never silently pass: an assertion that runs over no
+# input is an assertion that cannot fail, which is worse than no assertion at all.
+shopt -s nullglob
+CSS=("$DIST"/*.css)
+JS=("$DIST"/*.js)
+if [ "${#CSS[@]}" -eq 0 ] || [ "${#JS[@]}" -eq 0 ] || [ ! -f "$DIST/index.html" ]; then
+  echo "FE ARTIFACT: $DIST is not a built front end (need index.html + at least one .css and .js)" >&2
+  exit 1
+fi
+
+# --- assertion 1: TOKENS ---------------------------------------------------------------------
+# @launchpad-ui/components' CSS var()s ~187 `--lp-*` names and DEFINES ONE (a component-local
+# --lp-button-padding). Every colour, radius and spacing resolves to nothing and the page renders
+# UNSTYLED. The fix is two imports in the entry module — `@launchpad-ui/tokens/index.css` and
+# `.../themes.css` — and this is what proves they are still there.
+#
+# The threshold is 300, not an exact count: the real numbers are 377 definitions WITH both sheets
+# and 1 WITHOUT. An exact count would go red on every `@launchpad-ui/tokens` bump for no reason;
+# the failure being guarded is 1-vs-377, and 300 is far from both.
+#
+# `|| true` is load-bearing: grep exits 1 on ZERO matches, and under `set -o pipefail` that
+# would abort the script here — going red with an EMPTY diagnostic, in the one case the
+# diagnostic matters most (0 definitions == the failure being guarded).
+DEFS=$({ grep -ohE -- '--lp-[a-z0-9-]+:' "${CSS[@]}" || true; } | sort -u | wc -l)
+if [ "$DEFS" -le 300 ]; then
+  echo "FE ARTIFACT: token CSS missing — only $DEFS --lp-* definitions in the bundle (expected >300)." >&2
+  echo "  The page will render UNSTYLED while the build exits 0. The entry module must import BOTH" >&2
+  echo "  '@launchpad-ui/tokens/index.css' and '@launchpad-ui/tokens/themes.css'." >&2
+  echo "  ('@launchpad-ui/tokens/style.css' does not exist — do not guess the specifier.)" >&2
+  exit 1
+fi
+
+# --- assertion 2: SPRITE ---------------------------------------------------------------------
+# Icon emits <use href="#lp-icon-x">, a document-local reference. Without the sprite spliced into
+# <body>, every icon renders BLANK while keeping its 20x20 box — invisible to any layout test.
+if ! grep -q 'id="lp-icon-' "$DIST/index.html"; then
+  echo "FE ARTIFACT: icon sprite not inlined into <body> of $DIST/index.html." >&2
+  echo "  Every icon renders BLANK while keeping its 20x20 layout box. Run scripts/inline-sprite." >&2
+  exit 1
+fi
+
+# --- assertion 3: PRODUCTION BUILD -----------------------------------------------------------
+# `--production` is opt-in, and it does two things: it minifies, and it sets NODE_ENV=production,
+# which is what selects React's PRODUCTION bundle over its DEVELOPMENT one (1.61 MB vs 0.46 MB,
+# with dev-mode checks running in the operator's browser). Nothing warns.
+#
+# It is checked TWO ways, deliberately, because in Phase 1 the obvious check is VACUOUS. public/
+# is still 19 vanilla modules and imports no React, so `grep react-dom.development` matches
+# nothing whether or not `--production` was passed — measured: dropping `--production` from
+# `build:fe` today still exits 0 through that grep alone. An assertion that cannot fail is worse
+# than none, because it is trusted. So the LOAD-BEARING check today is minification, which
+# `--production` controls from the very first build:
+#
+#   with --production:     84 KB,    14 lines,     1 indented line
+#   without --production: 133 KB, 3,696 lines, 1,289 indented lines
+#
+# The React grep stays, and starts doing real work the moment Phase 3 puts React in the graph. It
+# catches a case minification cannot: `--minify` without NODE_ENV. Neither check subsumes the other.
+INDENTED=$({ grep -chE '^[[:space:]]{2,}[^[:space:]]' "${JS[@]}" || true; } | awk '{s+=$1} END {print s+0}')
+if [ "$INDENTED" -ge 100 ]; then
+  echo "FE ARTIFACT: the JS bundle is NOT minified — $INDENTED indented lines (a minified bundle has ~0)." >&2
+  echo "  Did --production get dropped from build:fe? It also sets NODE_ENV=production, which is what" >&2
+  echo "  selects React's 0.46 MB production build over its 1.61 MB development one." >&2
+  exit 1
+fi
+if grep -q 'react-dom.development' "${JS[@]}"; then
+  echo "FE ARTIFACT: React DEVELOPMENT build in the output — NODE_ENV was not production." >&2
+  echo "  That is 1.61 MB instead of 0.46 MB, with dev-mode checks running in the browser." >&2
+  echo "  --production sets NODE_ENV; --minify alone does not." >&2
+  exit 1
+fi
+
+echo "FE ARTIFACT: ok — $DEFS --lp-* token definitions, sprite inlined, minified production bundle."

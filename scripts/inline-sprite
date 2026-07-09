@@ -1,0 +1,85 @@
+#!/usr/bin/env bun
+// Splice @launchpad-ui/icons' sprite.svg into the built HTML's <body>.
+//
+// WHY THIS EXISTS. `Icon` renders `<use href="#lp-icon-check">` — a document-local fragment
+// reference with no URL. The 214 KB sprite is never pulled into the JS graph and never emitted,
+// so `<use>` resolves against the current document, finds nothing, and EVERY ICON RENDERS BLANK
+// while keeping its 20x20 layout box. The build exits 0. No size or layout assertion can see it.
+// `scripts/assert-fe-artifact` is the only thing that can, and it asserts on what this writes.
+//
+// WHY POST-BUILD, FROM node_modules. Authoring the sprite into `public/index.html` also works
+// (bun leaves unknown markup alone), but it vendors 214 KB of SVG that silently drifts from the
+// installed icons package on every bump. Reading it from the resolved package means the sprite
+// always matches the icons the code imports.
+//
+// The path is resolved through the package's `exports` map, NOT hardcoded: the export specifier
+// is `@launchpad-ui/icons/sprite.svg` but the file on disk is `dist/sprite.svg`. RFC §3.4 quotes
+// the un-prefixed path; the package wins.
+//
+// Idempotent: a document that already carries the sprite is left byte-identical. That makes it
+// safe to run after `bun run build:fe` and again from `scripts/ci`.
+//
+// Usage:  scripts/inline-sprite <html-file>
+//         scripts/inline-sprite --watch <html-file>    # re-splice after each --watch rebuild
+
+import { watch } from "node:fs";
+import { dirname, resolve } from "node:path";
+
+const MARKER = 'id="lp-icon-';
+
+function spritePath(): string {
+  // import.meta.resolve honours the package's exports map, so `dist/` never appears here.
+  return Bun.fileURLToPath(import.meta.resolve("@launchpad-ui/icons/sprite.svg"));
+}
+
+async function inline(htmlPath: string): Promise<"inlined" | "already-present"> {
+  const html = await Bun.file(htmlPath).text();
+  if (html.includes(MARKER)) return "already-present";
+
+  let sprite = (await Bun.file(spritePath()).text()).trim();
+  // Drop the generator's leading XML comment; keep everything else verbatim.
+  sprite = sprite.replace(/^<!--[\s\S]*?-->\s*/, "");
+  if (!sprite.startsWith("<svg")) {
+    throw new Error(`sprite.svg does not start with <svg — refusing to splice: ${spritePath()}`);
+  }
+  if (!sprite.includes(MARKER)) {
+    throw new Error(`sprite.svg contains no ${MARKER}… symbols — wrong file? ${spritePath()}`);
+  }
+  // Hide it without display:none on a wrapper the icons live inside — a `<use>` reference into a
+  // display:none <svg> still resolves, and this keeps the sprite out of layout and out of the
+  // accessibility tree.
+  sprite = sprite.replace(/^<svg/, '<svg aria-hidden="true" style="display:none"');
+
+  const bodyOpen = html.match(/<body[^>]*>/);
+  if (!bodyOpen) throw new Error(`no <body> tag in ${htmlPath}`);
+  const at = bodyOpen.index! + bodyOpen[0].length;
+  const out = `${html.slice(0, at)}\n${sprite}\n${html.slice(at)}`;
+  await Bun.write(htmlPath, out);
+  return "inlined";
+}
+
+const args = Bun.argv.slice(2);
+const watchMode = args[0] === "--watch";
+const target = watchMode ? args[1] : args[0];
+if (!target) {
+  console.error("usage: scripts/inline-sprite [--watch] <html-file>");
+  process.exit(2);
+}
+const htmlPath = resolve(target);
+
+if (!watchMode) {
+  const r = await inline(htmlPath);
+  if (r === "inlined") console.log(`inline-sprite: spliced 337-symbol sprite into ${target}`);
+  process.exit(0);
+}
+
+// --watch: `bun build --watch` rewrites index.html on every rebuild, which DROPS the sprite.
+// Re-splice whenever the file changes and lacks it. `inline()` is idempotent, so the write we
+// make here does not feed back into an infinite loop.
+await inline(htmlPath).catch(() => {}); // dist/index.html may not exist for the first few ms
+watch(dirname(htmlPath), (_e, name) => {
+  if (name && resolve(dirname(htmlPath), name) === htmlPath) {
+    inline(htmlPath).catch((e) => console.error(`inline-sprite: ${e.message}`));
+  }
+});
+console.log(`inline-sprite: watching ${target}`);

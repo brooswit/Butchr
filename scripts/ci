@@ -18,46 +18,51 @@ bun build src/index.ts --target bun --outfile /dev/null
 #   `??`, so plain `bunx tsc` dies with `SyntaxError: Unexpected token '?'` before it typechecks a
 #   single file. `--bun` forces the bun runtime. (RFC Errata E2, re-verified on this host.)
 #
-#   -p is explicit. A bare `tsc` reads ./tsconfig.json, whose `include` is ["src"] — the same
-#   config this names. Saying so keeps the scope legible now that public/ is about to grow its own
-#   config (RFC §5.5: src/ and public/ CANNOT share one — public/ needs `lib: DOM`, and DOM in
-#   src/ breaks `for await (… of Bun.stdin.stream())` in channel.ts and masks mcp.ts's
-#   `await req.json()`). public/ is NOT typechecked yet; RFC Phase 1 adds tsconfig.public.json.
+#   -p is explicit, and it is passed TWICE. A bare `tsc` reads ./tsconfig.json, whose `include`
+#   is ["src"] — it would never look at public/ at all, silently typechecking half of what this
+#   step promises. src/ and public/ CANNOT share one config, and the blocker is `lib`, not JSX
+#   (RFC §5.5/§13.2, re-verified on this host): public/ needs `lib: DOM`, and DOM in src/ BREAKS
+#   `for await (… of Bun.stdin.stream())` in channel.ts (TS2504 — lib.dom's ReadableStream is not
+#   async-iterable) and MASKS mcp.ts's `await req.json()` (`unknown` under bun-types, `any` under
+#   lib.dom's Request). Wrong in both directions, so: two configs, two invocations.
 #
-# ~6.5s, so it is the gate's second-most expensive step after the test suite. It sits ahead of the
-# front-end rules per RFC §4.2: it is the step most likely to catch a real error, and unlike any
-# bundle it reads EVERY file matched by `include` — reachable from an entry point or not, which is
-# the src/ analog of the orphan-module rule below.
-bunx --bun tsc --noEmit -p tsconfig.json
-# front-end rules run BEFORE the backend suite: they cost ~100ms, the suite costs orders of
-# magnitude more, and a broken FE import should fail the gate in under a second.
-# fe rule 1: whole-graph build from the real entry point. index.html loads /app.js as a
-# module, so this resolves every import reachable from it. The bundler IS the import/export
-# check — it already flags a missing named export, an unresolvable path, and a syntax error,
-# each with a precise message. Bare command: `set -e` aborts here and bun's stderr passes
-# through untouched (it names the file and the unresolved symbol).
-bun build public/app.js --target browser --outfile /dev/null
-# fe rule 2: parse EVERY module on disk, not just the reachable ones. Rule 1 is blind to a
-# file nothing imports yet — an orphan `public/views/foo.js` full of syntax errors exits 0.
-# A not-yet-wired module is the normal intermediate state of a module split, so that is
-# exactly the gap that matters. A glob matching zero files must FAIL, never silently pass.
-mapfile -d '' -t FE_FILES < <(find public -name '*.js' -print0)
-if [ "${#FE_FILES[@]}" -eq 0 ] || [ ! -f public/app.js ]; then
-  echo "FRONT-END: found no public/**/*.js (or public/app.js is missing) — the gate cannot vouch for a tree it never parsed" >&2
-  exit 1
-fi
-# `if !` keeps `set -e` from aborting the loop, so a first failure never hides the rest.
-FE_FAILED=()
-for f in "${FE_FILES[@]}"; do
-  if ! bun build "$f" --target browser --outfile /dev/null; then FE_FAILED+=("$f"); fi
-done
-if [ "${#FE_FAILED[@]}" -gt 0 ]; then
-  {
-    echo "FRONT-END: ${#FE_FAILED[@]} of ${#FE_FILES[@]} module(s) failed to parse/resolve:"
-    printf '    %s\n' "${FE_FAILED[@]}"
-  } >&2
-  exit 1
-fi
+# ~10s together (src/ ~6.0s, public/ ~4.0s), NOT the ~100ms the old front-end rules cost. That
+# retires the ordering rationale those rules were written under ("FE first, it's nearly free").
+# The typecheck still runs before the bundle and the suite, on a different justification: it is
+# the step most likely to catch a real error, and unlike any bundle it reads EVERY file matched by
+# `include` — reachable from an entry point or not. That is how it REPLACES the orphan-module rule
+# the old per-file parse loop provided.
+#
+#   Replaces, not strictly strengthens. Be precise about what is lost: through Phases 1-3 public/
+#   is still 19 vanilla .js modules, and tsconfig.public.json sets `allowJs` WITHOUT `checkJs`, so
+#   an orphan .js file's TYPE errors are NOT reported. For syntax and module resolution — which is
+#   all the retired loop ever checked — this is exactly as strong, over the same file set. It only
+#   becomes stronger when Phase 4 lands .tsx. No coverage is given up today; none is gained either.
+#
+# It stays behind `bun build src/index.ts` (~1s) so an outright broken backend still fails fast,
+# and ahead of `bun test ./test`, which dominates everything by orders of magnitude.
+bunx --bun tsc --noEmit -p tsconfig.json         # src/    — bun target, no DOM
+bunx --bun tsc --noEmit -p tsconfig.public.json  # public/ — browser target, DOM, JSX
+# front-end bundle. This is the REAL production build, into the REAL dist/ (gitignored), via the
+# exact command `bun start` runs — so the gate proves the artifact the operator will be served,
+# and `bun test ./test` below gets a dist/ to exercise serveStatic against.
+#
+# `--outdir`, NEVER `--outfile`. @launchpad-ui's JS imports its own CSS on line 1, so every build
+# is multi-output, and `bun build public/index.html --outfile /dev/null` exits 1 with
+# `error: cannot write multiple output files without an output directory`. The retired FE rules
+# used --outfile; they could not have survived the first CSS import.
+#
+# "It builds" is the FE validation for resolution and syntax ONLY. It proves nothing about the
+# three ways this front end fails while exiting 0 — hence the next line, which is not optional.
+bun run build:fe
+# the three silent-failure assertions (RFC §4.3). Spelled `bun run assert:fe`, NEVER
+# `scripts/assert-fe-artifact` directly: test/changelog-header-drop.test.ts reads THIS FILE's text
+# and executes it against temp git fixtures, stripping top-level `/^bunx?\s/` lines so the gate
+# does not recursively rebuild and re-run the suite inside a fixture. A step invoked by any other
+# command is not stripped, so it would run in a fixture that has no dist/ and turn all 8 of that
+# file's CHANGELOG-guard tests red. Do not widen the strip pattern to cover `scripts/` — that
+# would silently disarm every future gate step. Route new steps through package.json instead.
+bun run assert:fe dist
 bun test ./test
 # changelog rule: a CODE change must update CHANGELOG.md (docs-only diffs EXEMPT)
 BASE="${BUTCHR_BASE_REF:-}"

@@ -1,0 +1,41 @@
+{
+  // public/ CANNOT share the root tsconfig.json, and the blocker is `lib`, not JSX (RFC §5.5,
+  // measured in §13.2). public/ needs "DOM" to see `document`. Adding "DOM" to the root config
+  // changes src/'s type universe in BOTH directions: it BREAKS src/channel.ts's
+  // `for await (const chunk of Bun.stdin.stream())` (lib.dom's ReadableStream is not
+  // async-iterable — TS2504) and it MASKS src/mcp.ts's `await req.json()` (`unknown` under
+  // bun-types, `any` under lib.dom's Request). A shared config is wrong in both directions.
+  //
+  // The split is also a feature. With "types": [] here, `Bun.file(…)` in a browser module is a
+  // compile error; with no "DOM" in the root config, `document.title` in src/ is a compile error.
+  // Each tree is confined to its own globals.
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    // No bun globals in browser code — this is what makes Bun.file() a compile error here.
+    "types": [],
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    // Phases 1-3: public/ is still 19 vanilla .js modules. `allowJs` WITHOUT `checkJs` means an
+    // orphan .js file's TYPE errors are not reported, so until Phase 4 lands .tsx this is exactly
+    // as strong as the per-file `bun build` parse loop it replaced — not stronger. What it does
+    // keep is the loop's one real property: it reads every file `include` matches, orphan or not,
+    // and checks its syntax and module resolution. What it drops, for orphans only, is the
+    // bundler's missing-named-export check; reachable modules still get that from `build:fe`.
+    "allowJs": true,
+    "esModuleInterop": true,
+    // Explicit, per RFC §2.4. Omitting it works only because bun's DEFAULT is the automatic
+    // runtime; `tsc` needs it stated to typecheck JSX at all. Never set "react" (the classic
+    // transform) — bun would emit React.createElement into files that never import React, exit
+    // 0, and throw at runtime.
+    "jsx": "react-jsx"
+  },
+  // Side-effect CSS imports (`import "@launchpad-ui/tokens/index.css"`) need NO
+  // `declare module "*.css"` shim — TS only demands a declaration for a BINDING import. Do not
+  // add a declarations.d.ts; it is the obvious-looking move and it is unnecessary.
+  "include": ["public"]
+}

@@ -1,6 +1,18 @@
 // butchr webapp — vanilla JS single-page app. Hash-routed, SSE live updates.
 "use strict";
 
+// @launchpad-ui design tokens. BOTH are required and neither is optional: the component CSS
+// var()s ~187 `--lp-*` names and defines 1, so a page missing these renders UNSTYLED while the
+// build still exits 0. `index.css` declares them under `:root`; `themes.css` declares them under
+// `:root,[data-theme]` and `[data-theme='dark']` — that is where the colour VALUES live, so
+// importing index.css alone leaves the page mis-coloured. `@launchpad-ui/tokens/style.css` does
+// NOT exist (only `components` and `icons` expose one); do not pattern-match the specifier from
+// its siblings. Both sheets are pure custom-property declarations, and nothing under public/
+// reads a `--lp-*` name yet, so today they cost 377 declarations and zero pixels.
+// `scripts/assert-fe-artifact` fails the gate if they ever fall out of the bundle.
+import "@launchpad-ui/tokens/index.css";
+import "@launchpad-ui/tokens/themes.css";
+
 // `core/` holds dependency-free leaves — nothing there imports this file. Each is DOM-free
 // at module load. THIS file is not: its boot (setupTheme / wireAttention / connectSSE, below)
 // touches `document`, which is exactly why nothing under core/, components/, or views/ may

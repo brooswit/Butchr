@@ -17,6 +17,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The webapp is a build artifact (RFC `docs/rfc-frontend-launchpad.md`, Phase 1).** `public/` is
+  now bundled by `bun build public/index.html --outdir dist --production --sourcemap=linked`, and
+  `src/server.ts`'s `PUBLIC_DIR` points at `dist/` instead of `public/`. `dist/` is gitignored, so
+  `git revert` plus a rebuild is the rollback. **Zero front-end behaviour change:** `public/app.js`
+  is still the same 19 vanilla modules and gains only two side-effect imports
+  (`@launchpad-ui/tokens/index.css` and `.../themes.css`); no `--lp-*` name is read yet, so the
+  bundle carries 377 custom-property declarations and zero pixels of difference. Run
+  `bun run build:fe` before serving — `bun start`, `scripts/supervise.sh`, `deploy/butchr.service`
+  and `scripts/ci` all do it for you, and `startServer()` warns loudly if nobody did. Both
+  `serveStatic` rules are unchanged: a missing path *with* an extension still 404s (which is now
+  what a stale hashed bundle path gets), and only extensionless route-like paths get the SPA
+  fallback.
+- **butchr takes its 15 front-end dependencies**, all exact-pinned with no carets: `react`,
+  `react-dom`, `react-router`, `react-aria*`/`react-stately*`, `react-hook-form`, and
+  `@launchpad-ui/{components,icons,tokens}`, plus devDependencies `@types/react` and
+  `@types/react-dom` (mandatory — React 19 ships no `.d.ts`, and without them `tsc` emits TS7016
+  while `bun build` still exits 0). The server keeps **zero runtime npm dependencies**; every one
+  of these is front-end or tooling. `CONTRIBUTING.md`'s webapp summary is updated to match.
+- **`scripts/ci` grows a front-end artifact gate, and `public/` is typechecked for the first
+  time.** New `tsconfig.public.json` (browser `lib`, `types: []`, `jsx: react-jsx`) is typechecked
+  by a second `bunx --bun tsc --noEmit -p` — `src/` and `public/` cannot share one config, because
+  `lib: DOM` in `src/` breaks `channel.ts`'s `for await (… of Bun.stdin.stream())` and masks
+  `mcp.ts`'s `await req.json()`. The two old front-end rules (the whole-graph `--outfile /dev/null`
+  build and the per-file orphan-parse loop) are retired: `--outfile` cannot survive a CSS-importing
+  entry at all (`error: cannot write multiple output files without an output directory`), and the
+  `tsc -p tsconfig.public.json` pass reads every file `include` matches, orphan or not.
+- **New `scripts/assert-fe-artifact` (run as `bun run assert:fe dist`) and `scripts/inline-sprite`,
+  guarding the three ways this front end ships broken while the build exits 0**: missing token CSS
+  (the page renders **unstyled**), a missing icon sprite (every icon renders **blank** while keeping
+  its 20×20 box), and the default build shipping React's **development** bundle (1.61 MB vs
+  0.46 MB — `--production` is opt-in). None produces a build error and none is visible to a layout
+  or size test. `test/fe-artifact-assertions.test.ts` breaks each artifact in turn and requires the
+  script to go red, so an assertion cannot rot into a comment.
+
 ## [0.9.278] - 2026-07-09
 
 - **butchr takes its first dependency, and `tsc` runs against `src/` for the first time
