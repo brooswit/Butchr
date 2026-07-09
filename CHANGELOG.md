@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Front-end Phase 4 (RFC §5): the workspace view and the PROJECTS modals build DOM, not HTML strings.**
+  `public/views/workspace.js` and `public/components/project-modals.js` now construct every element
+  with `el()`, driving their `esc()` calls, their one `el({html:})` bridge (the workspace breadcrumbs)
+  and all nine `innerHTML` writes to zero — escaping is structural (`createTextNode`) rather than a
+  hand-written `esc()`. `repoSelectHtml` becomes a node-returning `repoSelect`. Every listener that was
+  re-attached by `querySelector` AFTER an `innerHTML` write (the launch modal's `[data-mode]` seg tabs,
+  `#targets`, `#addTgt`, the per-row `.icon-btn`, and the add-workspace `#aw-path`/`#aw-label`/`#aw-browse`
+  fields) is now wired on the node at construction, and the fan-out submit reads a held array of target
+  rows instead of re-querying the container. `Button` is adopted for the cancel/submit/`#addTgt`/`#aw-browse`
+  controls; the `.icon-btn` remove-target control and the seg tabs stay hand-built (`.icon-btn` and
+  `.seg > button` are standalone classes, not `.btn` modifiers). The submits keep their hand-rolled
+  validate-then-`action()` click rather than `Button({onAction})`, which would disable the button and toast
+  on an empty field instead of showing the inline `.m-error`. Rendered DOM and behavior are unchanged; the
+  `#ns-brief`, `#np-brief` (+ its `data-restore-key`) and `#aw-path` ids are preserved as contracts with
+  app.js's restore pass and overlay.js's picker seeding.
+
 ## [0.9.268] - 2026-07-09
 
 ### Changed

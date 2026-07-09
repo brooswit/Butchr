@@ -21,10 +21,10 @@
 //
 // DOM-free at module load: `document` is touched only inside a CALLED function, exactly like
 // views/metrics.js, views/diff.js and views/swimlanes.js.
-import { el, esc } from "../core/dom.js";
+import { el } from "../core/dom.js";
 import { fmtDuration, projectTitle } from "../core/format.js";
 import { api, toast } from "../core/api.js";
-import { action } from "../components/button.js";
+import { Button, action } from "../components/button.js";
 import { mount, render } from "../core/nav.js";
 import { pruneWorkCaches, workLeaves, workListPath } from "../core/work-graph.js";
 import { effStatus } from "../components/chips.js";
@@ -50,7 +50,7 @@ function applyPulse(node, a) {
   const actionEl = node.querySelector(".pulse-action");
   if (actionEl) {
     if (a && a.lastAction) actionEl.textContent = a.lastAction;
-    else actionEl.innerHTML = `<span class="muted">waiting for activity…</span>`;
+    else actionEl.replaceChildren(el("span", { class: "muted" }, "waiting for activity…"));
   }
 }
 
@@ -125,10 +125,15 @@ export async function renderWorkspace(id, projectId) {
   }
 
   const wrap = el("div");
-  const crumbsHtml = projectId
-    ? `<a href="#/projects">Projects</a> / <a href="#/projects/${esc(projectId)}">${esc(projectName)}</a> / <span aria-current="page">${esc(dir.label || dir.path)}</span>`
-    : `<a href="#/projects">Projects</a> / <span aria-current="page">${esc(dir.label || dir.path)}</span>`;
-  wrap.appendChild(el("div", { class: "crumbs", html: crumbsHtml }));
+  // Each " / " separator is a REAL text node — a rendered gap between the inline crumbs, not
+  // markup whitespace. The project href uses encodeURIComponent, matching app.js's construction
+  // of the very nested route (`#/projects/:pid/workspaces/:wid`) this crumb links into.
+  const crumbs = [el("a", { href: "#/projects" }, "Projects")];
+  if (projectId) {
+    crumbs.push(" / ", el("a", { href: "#/projects/" + encodeURIComponent(projectId) }, projectName));
+  }
+  crumbs.push(" / ", el("span", { "aria-current": "page" }, dir.label || dir.path));
+  wrap.appendChild(el("div", { class: "crumbs" }, crumbs));
   wrap.appendChild(el("h1", {}, dir.label || dir.path));
   wrap.appendChild(el("div", { class: "path" }, dir.path));
 
@@ -151,8 +156,8 @@ export async function renderWorkspace(id, projectId) {
   const launch = el("div", { class: "row between stacked" });
   launch.appendChild(el("small", { class: "muted" },
     `New work is a STORY — a leader decomposes it into subtasks. ${queueLine(tasks)}`));
-  const newStoryBtn = el("button", { class: "btn", id: "new-story" }, "New story");
-  newStoryBtn.addEventListener("click", () => openNewStoryModal(id));
+  const newStoryBtn = Button({ label: "New story", onClick: () => openNewStoryModal(id) });
+  newStoryBtn.id = "new-story";
   launch.appendChild(newStoryBtn);
   wrap.appendChild(launch);
 
@@ -171,14 +176,19 @@ export async function renderWorkspace(id, projectId) {
 
   // danger zone
   const dz = el("div", { class: "row ws-danger-zone" });
-  const del = el("button", { class: "btn ghost" }, "Unregister workspace");
-  del.addEventListener("click", async () => {
-    if (!confirm("Unregister this workspace? Non-merged worktrees will be removed.")) return;
-    try {
-      await api("DELETE", "/workspaces/" + id);
-      toast("workspace unregistered");
-      location.hash = "#/";
-    } catch (e) { toast(e.message, true); }
+  // NOT `onAction`: this control confirm()s first, never disables itself, and navigates instead
+  // of re-rendering. Its dance is not action()'s — only the NODE comes from Button.
+  const del = Button({
+    label: "Unregister workspace",
+    class: "ghost",
+    onClick: async () => {
+      if (!confirm("Unregister this workspace? Non-merged worktrees will be removed.")) return;
+      try {
+        await api("DELETE", "/workspaces/" + id);
+        toast("workspace unregistered");
+        location.hash = "#/";
+      } catch (e) { toast(e.message, true); }
+    },
   });
   dz.appendChild(del);
   wrap.appendChild(dz);
@@ -201,29 +211,36 @@ export async function renderWorkspace(id, projectId) {
 // butchr lands the story `open` and launches its leader (which creates + reviews the
 // subtasks); the new story surfaces via the SSE-driven re-render.
 export function openNewStoryModal(workspaceId) {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML = `
-    <label class="field tight">
-      <span class="lbl">story — a one-line brief; a story leader decomposes it into the subtasks needed to deliver it</span>
-      <textarea id="ns-brief" placeholder="Describe the story in a sentence or two…"></textarea>
-    </label>
-    <small class="hint muted">The operator creates STORIES; the leader creates + reviews the tasks. Each story's subtask progress shows below.</small>`;
-  const briefEl = body.querySelector("#ns-brief");
+  // `#ns-brief` is held from creation, not re-found by selector after a markup write. The id
+  // itself stays: it is part of this modal's published shape.
+  const briefEl = el("textarea", { id: "ns-brief", placeholder: "Describe the story in a sentence or two…" });
+  const body = el("div", { class: "m-body" }, [
+    el("label", { class: "field tight" }, [
+      el("span", { class: "lbl" },
+        "story — a one-line brief; a story leader decomposes it into the subtasks needed to deliver it"),
+      briefEl,
+    ]),
+    el("small", { class: "hint muted" },
+      "The operator creates STORIES; the leader creates + reviews the tasks. Each story's subtask progress shows below."),
+  ]);
 
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const submit = el("button", { class: "btn" }, "Create story");
+  const submit = Button({ label: "Create story" });
+  const { close } = openModal({ title: "New story", body, footer: foot });
+  const cancel = Button({ label: "Cancel", class: "ghost", onClick: close });
   foot.appendChild(errEl);
   foot.appendChild(cancel);
   foot.appendChild(submit);
 
-  const { close } = openModal({ title: "New story", body, footer: foot });
-  cancel.addEventListener("click", close);
   briefEl.focus();
 
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
+  // WHY THIS IS NOT `Button({onAction})`. onAction runs action() on EVERY click, which disables
+  // the button and toasts. This submit must validate first and surface an empty brief INLINE in
+  // .m-error, leaving the button live. Same reasoning holds for every submit in
+  // components/project-modals.js. Adopt Button for the NODE; keep the hand-rolled click.
   submit.addEventListener("click", () => {
     const brief = briefEl.value.trim();
     if (!brief) { showErr("Describe the story first."); briefEl.focus(); return; }

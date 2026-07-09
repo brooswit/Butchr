@@ -6,10 +6,10 @@
 //
 // DOM-free at module load, like everything under components/: nothing here touches `document`
 // until a function is CALLED. Nothing here imports app.js — the projects views call IN.
-import { el, esc } from "../core/dom.js";
+import { el } from "../core/dom.js";
 import { api, toast } from "../core/api.js";
 import { repoDisplay } from "../core/format.js";
-import { action } from "./button.js";
+import { Button, action } from "./button.js";
 import { render } from "../core/nav.js";
 import { openModal, openPicker } from "./overlay.js";
 
@@ -36,30 +36,35 @@ function rememberCreatedProject(id) {
 // returns the full row) via a re-render, remember its id in localStorage as a fallback,
 // and surface any error (e.g. 404 missing workspace) inline in .m-error (not only a toast).
 export async function openNewProjectModal() {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML = `
-    <label class="field">
-      <span class="lbl">anchor workspace — the project's home directory (the CEO agent's launch cwd)</span>
-      <select id="np-anchor"><option value="">loading workspaces…</option></select>
-    </label>
-    <label class="field tight">
-      <span class="lbl">brief — what this project should deliver across its repos</span>
-      <textarea id="np-brief" data-restore-key="new-project-brief" placeholder="Describe the project in a sentence or two…"></textarea>
-    </label>
-    <small class="hint muted">A project registers repos and coordinates cross-repo initiatives via a CEO agent.</small>`;
-  const anchorEl = body.querySelector("#np-anchor");
-  const briefEl = body.querySelector("#np-brief");
+  // Both fields are held from creation. `#np-brief`'s id AND its data-restore-key are a contract
+  // with app.js's restore-uistate pass (and the shape test/app-restore-uistate.test.ts mirrors).
+  const anchorEl = el("select", { id: "np-anchor" }, el("option", { value: "" }, "loading workspaces…"));
+  const briefEl = el("textarea", {
+    id: "np-brief",
+    "data-restore-key": "new-project-brief",
+    placeholder: "Describe the project in a sentence or two…",
+  });
+  const body = el("div", { class: "m-body" }, [
+    el("label", { class: "field" }, [
+      el("span", { class: "lbl" }, "anchor workspace — the project's home directory (the CEO agent's launch cwd)"),
+      anchorEl,
+    ]),
+    el("label", { class: "field tight" }, [
+      el("span", { class: "lbl" }, "brief — what this project should deliver across its repos"),
+      briefEl,
+    ]),
+    el("small", { class: "hint muted" },
+      "A project registers repos and coordinates cross-repo initiatives via a CEO agent."),
+  ]);
 
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const submit = el("button", { class: "btn" }, "Create project");
+  const submit = Button({ label: "Create project" });
+  const { close } = openModal({ title: "New project", body, footer: foot });
+  const cancel = Button({ label: "Cancel", class: "ghost", onClick: close });
   foot.appendChild(errEl);
   foot.appendChild(cancel);
   foot.appendChild(submit);
-
-  const { close } = openModal({ title: "New project", body, footer: foot });
-  cancel.addEventListener("click", close);
 
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
@@ -69,16 +74,15 @@ export async function openNewProjectModal() {
   try {
     const workspaces = await api("GET", "/workspaces");
     if (!workspaces.length) {
-      anchorEl.innerHTML = '<option value="">no workspaces registered</option>';
+      anchorEl.replaceChildren(el("option", { value: "" }, "no workspaces registered"));
       showErr("Register a workspace first — a project anchors to an existing directory.");
     } else {
-      anchorEl.innerHTML = workspaces.map((w) =>
-        '<option value="' + esc(w.id) + '">' + esc(w.label || w.path) + '</option>').join("");
+      anchorEl.replaceChildren(...workspaces.map((w) => el("option", { value: w.id }, w.label || w.path)));
       submit.disabled = false;
       briefEl.focus();
     }
   } catch (e) {
-    anchorEl.innerHTML = '<option value="">could not load workspaces</option>';
+    anchorEl.replaceChildren(el("option", { value: "" }, "could not load workspaces"));
     showErr(e.message);
   }
 
@@ -122,86 +126,126 @@ export function openLaunchModal(project, repos, wsById) {
   const body = el("div", { class: "m-body" });
   const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const submit = el("button", { class: "btn" }, "Launch");
+  const submit = Button({ label: "Launch" });
+  const { close } = openModal({ title: "Launch initiative", body, footer: foot });
+  const cancel = Button({ label: "Cancel", class: "ghost", onClick: close });
   foot.appendChild(errEl);
   foot.appendChild(cancel);
   foot.appendChild(submit);
 
-  const { close } = openModal({ title: "Launch initiative", body, footer: foot });
-  cancel.addEventListener("click", close);
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
-  function repoSelectHtml(id, selected) {
-    return '<select ' + (id ? 'id="' + esc(id) + '" ' : "") + 'class="tgt-repo">' +
-      repoOpts.map((o) =>
-        '<option value="' + esc(o.id) + '"' + (o.id === selected ? " selected" : "") + '>' +
-          esc(o.name) + '</option>').join("") +
-      '</select>';
+  // THE LIVE FIELDS OF THE CURRENT DRAW. draw() re-runs on every mode toggle and REASSIGNS these;
+  // the submit handler below reads them at CLICK time, so it always sees the nodes the current
+  // draw painted. `rows` is reset by draw() — a stale target row from a previous draw surviving
+  // into submit would launch an initiative against a repo the operator had removed.
+  let rows = [];              // fanout: [{ row, repoSel, briefTa }]
+  let singleRepoSel = null;   // single: the #li-repo <select>
+  let singleBriefTa = null;   // single: the .tgt-brief <textarea>
+
+  // Returns a <select> NODE (it used to return markup). Setting `.value` after the options are
+  // appended selects the matching one — no `selected` attribute needed.
+  function repoSelect(id, selected) {
+    const sel = el("select", { id: id || null, class: "tgt-repo" },
+      repoOpts.map((o) => el("option", { value: o.id }, o.name)));
+    if (selected != null) sel.value = selected;
+    return sel;
   }
 
   function draw() {
+    rows = [];
+    singleRepoSel = null;
+    singleBriefTa = null;
     if (!repoOpts.length) {
-      body.innerHTML = '<div class="empty">Register at least one repo before launching an initiative.</div>';
+      body.replaceChildren(el("div", { class: "empty" }, "Register at least one repo before launching an initiative."));
       submit.disabled = true;
       return;
     }
     submit.disabled = false;
-    let inner =
-      '<div class="seg" role="tablist" aria-label="Initiative scope">' +
-        '<button type="button" data-mode="single" class="' + (mode === "single" ? "on" : "") +
-          '" role="tab" aria-selected="' + (mode === "single") + '">Single repo</button>' +
-        '<button type="button" data-mode="fanout" class="' + (mode === "fanout" ? "on" : "") +
-          '" role="tab" aria-selected="' + (mode === "fanout") + '">Cross-repo fan-out</button>' +
-      '</div>';
-    if (mode === "single") {
-      inner +=
-        '<label class="field"><span class="lbl">repo</span>' + repoSelectHtml("li-repo") + '</label>' +
-        '<label class="field tight"><span class="lbl">brief — what to build in this repo</span>' +
-          '<textarea class="tgt-brief" placeholder="Describe the initiative for this repo…"></textarea></label>' +
-        '<small class="hint muted">A single-repo initiative sends a directive to that repo’s CTO, who ' +
-          'decomposes it into stories — it’s tracked here (and on that repo’s board). ' +
-          'Use fan-out to coordinate several repos under one rolled-up initiative.</small>';
-    } else {
-      inner +=
-        '<span class="lbl">targets — one {repo, brief} per repo; add as many as you need</span>' +
-        '<div id="targets"></div>' +
-        '<button type="button" class="btn ghost xs add-target" id="addTgt">+ Add target</button>';
-    }
-    body.innerHTML = inner;
 
-    Array.prototype.forEach.call(body.querySelectorAll("[data-mode]"), (b) => {
-      b.addEventListener("click", () => { mode = b.getAttribute("data-mode"); showErr(""); draw(); });
-    });
+    // The seg tabs are hand-built, NOT Button(): Button force-prefixes `btn ` onto its class, and
+    // `.seg > button` is styled standalone. They also carry role/aria-selected/data-mode.
+    const segBtn = (m, label) => {
+      const b = el("button", {
+        type: "button",
+        "data-mode": m,
+        class: mode === m ? "on" : "",
+        role: "tab",
+        "aria-selected": String(mode === m),
+      }, label);
+      b.addEventListener("click", () => { mode = m; showErr(""); draw(); });
+      return b;
+    };
+    const seg = el("div", { class: "seg", role: "tablist", "aria-label": "Initiative scope" }, [
+      segBtn("single", "Single repo"),
+      segBtn("fanout", "Cross-repo fan-out"),
+    ]);
+
     if (mode === "single") {
-      const t = body.querySelector(".tgt-brief"); if (t) t.focus();
+      singleRepoSel = repoSelect("li-repo");
+      singleBriefTa = el("textarea", { class: "tgt-brief", placeholder: "Describe the initiative for this repo…" });
+      body.replaceChildren(
+        seg,
+        el("label", { class: "field" }, [el("span", { class: "lbl" }, "repo"), singleRepoSel]),
+        el("label", { class: "field tight" }, [
+          el("span", { class: "lbl" }, "brief — what to build in this repo"),
+          singleBriefTa,
+        ]),
+        el("small", { class: "hint muted" },
+          "A single-repo initiative sends a directive to that repo’s CTO, who " +
+          "decomposes it into stories — it’s tracked here (and on that repo’s board). " +
+          "Use fan-out to coordinate several repos under one rolled-up initiative."),
+      );
+      singleBriefTa.focus();
     } else {
-      const wrap = body.querySelector("#targets");
+      const wrap = el("div", { id: "targets" });
       const addRow = (sel) => {
-        const row = el("div", { class: "target-row" });
-        row.innerHTML =
-          repoSelectHtml(null, sel) +
-          '<textarea class="tgt-brief" placeholder="Brief for this repo…"></textarea>' +
-          '<button type="button" class="icon-btn" title="Remove target" aria-label="Remove target">×</button>';
-        row.querySelector(".icon-btn").addEventListener("click", () => {
-          if (wrap.children.length > 1) wrap.removeChild(row);
-          else toast("keep at least one target");
+        const repoSel = repoSelect(null, sel);
+        const briefTa = el("textarea", { class: "tgt-brief", placeholder: "Brief for this repo…" });
+        // `.icon-btn` is a STANDALONE class (style.css), not a `.btn` modifier — Button would
+        // emit `btn icon-btn` and visibly restyle it. Hand-built on purpose.
+        const rm = el("button", {
+          type: "button", class: "icon-btn", title: "Remove target", "aria-label": "Remove target",
+        }, "×");
+        const row = el("div", { class: "target-row" }, [repoSel, briefTa, rm]);
+        const entry = { row, repoSel, briefTa };
+        rm.addEventListener("click", () => {
+          if (rows.length > 1) {
+            wrap.removeChild(row);
+            rows.splice(rows.indexOf(entry), 1);
+          } else toast("keep at least one target");
         });
+        rows.push(entry);
         wrap.appendChild(row);
       };
+      const addTgt = Button({
+        label: "+ Add target",
+        class: "ghost xs add-target",
+        type: "button",
+        onClick: () => addRow(repoOpts[0].id),
+      });
+      addTgt.id = "addTgt";
+      body.replaceChildren(
+        seg,
+        el("span", { class: "lbl" }, "targets — one {repo, brief} per repo; add as many as you need"),
+        wrap,
+        addTgt,
+      );
       addRow(repoOpts[0].id);
       addRow((repoOpts[1] || repoOpts[0]).id);
-      body.querySelector("#addTgt").addEventListener("click", () => addRow(repoOpts[0].id));
     }
   }
   draw();
 
+  // Not `Button({onAction})` — see the note on openNewStoryModal's submit in views/workspace.js:
+  // action() disables + toasts unconditionally, but these submits validate first and surface the
+  // error INLINE in .m-error with the button left live.
   submit.addEventListener("click", () => {
     if (!repoOpts.length) return;
     showErr("");
     if (mode === "single") {
-      const repo = body.querySelector(".tgt-repo").value;
-      const brief = body.querySelector(".tgt-brief").value.trim();
+      const repo = singleRepoSel.value;
+      const brief = singleBriefTa.value.trim();
       if (!brief) { showErr("Write a brief first."); return; }
       const repoName = (repoOpts.find((o) => o.id === repo) || {}).name || repo;
       action(submit, async () => {
@@ -217,11 +261,10 @@ export function openLaunchModal(project, repos, wsById) {
         onDone: () => { close(); render(); },
       });
     } else {
-      const rows = Array.prototype.slice.call(body.querySelectorAll(".target-row"));
       const targets = [];
-      for (const row of rows) {
-        const repo = row.querySelector(".tgt-repo").value;
-        const brief = row.querySelector(".tgt-brief").value.trim();
+      for (const { repoSel, briefTa } of rows) {
+        const repo = repoSel.value;
+        const brief = briefTa.value.trim();
         if (brief) targets.push({ repo, brief }); // skip blank-brief rows
       }
       if (!targets.length) { showErr("Fill in at least one target brief."); return; }
@@ -253,42 +296,48 @@ export function openLaunchModal(project, repos, wsById) {
 // gone), not just a transient toast. On success we close + render() so the new workspace appears as a
 // drill-in repo row.
 export function openAddWorkspaceModal(project) {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML =
-    '<label class="field tight">' +
-      '<span class="lbl">path to a git repository</span>' +
-      '<div class="field-row">' +
-        '<input type="text" id="aw-path" placeholder="/home/you/code/project" />' +
-        '<button type="button" class="btn ghost" id="aw-browse">Browse…</button>' +
-      '</div>' +
-    '</label>' +
-    '<label class="field tight">' +
-      '<span class="lbl">label (optional)</span>' +
-      '<input type="text" id="aw-label" placeholder="defaults to dir name" />' +
-    '</label>' +
-    '<small class="hint muted">Registers an existing git repository and nests it under this project. The gate is the repo\'s own <code>./scripts/ci</code>.</small>';
-
-  const foot = el("div", { class: "m-foot" });
-  const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const submit = el("button", { class: "btn" }, "Add workspace");
-  foot.appendChild(errEl);
-  foot.appendChild(cancel);
-  foot.appendChild(submit);
-
-  const { close } = openModal({ title: "Add workspace", body, footer: foot });
-  cancel.addEventListener("click", close);
-  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
-
-  const pathEl = body.querySelector("#aw-path");
-  const labelEl = body.querySelector("#aw-label");
+  // `#aw-path`'s id is a CROSS-MODULE contract: overlay.js's openPicker seeds itself from
+  // document.getElementById("aw-path"). Do not rename it.
+  const pathEl = el("input", { type: "text", id: "aw-path", placeholder: "/home/you/code/project" });
+  const labelEl = el("input", { type: "text", id: "aw-label", placeholder: "defaults to dir name" });
 
   // Browse the filesystem for a git repo — reuse the shared picker FILL-ONLY: whichever way the user
   // picks (a git-row "Register" button or "Use this path"), we just drop the path into the field and
   // let them confirm via the modal's submit. Registration goes through THIS project's endpoint.
-  body.querySelector("#aw-browse").addEventListener("click", () => {
-    openPicker((picked) => { pathEl.value = picked; pathEl.focus(); });
+  const browse = Button({
+    label: "Browse…",
+    class: "ghost",
+    type: "button",
+    onClick: () => openPicker((picked) => { pathEl.value = picked; pathEl.focus(); }),
   });
+  browse.id = "aw-browse";
+
+  const body = el("div", { class: "m-body" }, [
+    el("label", { class: "field tight" }, [
+      el("span", { class: "lbl" }, "path to a git repository"),
+      el("div", { class: "field-row" }, [pathEl, browse]),
+    ]),
+    el("label", { class: "field tight" }, [
+      el("span", { class: "lbl" }, "label (optional)"),
+      labelEl,
+    ]),
+    el("small", { class: "hint muted" }, [
+      "Registers an existing git repository and nests it under this project. The gate is the repo's own ",
+      el("code", {}, "./scripts/ci"),
+      ".",
+    ]),
+  ]);
+
+  const foot = el("div", { class: "m-foot" });
+  const errEl = el("span", { class: "m-error hint" }, "");
+  const submit = Button({ label: "Add workspace" });
+  const { close } = openModal({ title: "Add workspace", body, footer: foot });
+  const cancel = Button({ label: "Cancel", class: "ghost", onClick: close });
+  foot.appendChild(errEl);
+  foot.appendChild(cancel);
+  foot.appendChild(submit);
+
+  function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
   function doSubmit() {
     const path = pathEl.value.trim();
