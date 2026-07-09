@@ -3,43 +3,15 @@
 // the Pipeline view can't tell active work from finished (a finished subtask wouldn't collapse
 // into its lane's done pile), so the fallback must always yield the server's non-empty sets.
 //
-// public/app.js is a classic browser script (touches `document` at module load, no exports),
-// so we can't import it. Instead we extract the PURE, DOM-free state-meta helper block the fix
-// deliberately fenced with a `<test-extract:...>` sentinel and eval it in isolation. This also
-// guards the client DEFAULT_STATE_META against drifting from the server's canonical sets in
-// src/db.ts (STATE_META / ALL_STATUSES / isTerminal).
+// The state-meta helpers now live in public/core/state-meta.js, which is DOM-free at module
+// load, so we IMPORT it directly and assert on the real exports. (This test used to scrape a
+// `<test-extract:state-meta>` sentinel block out of the classic public/app.js script and eval
+// it with `new Function`; that harness is gone along with the sentinel.) This also guards the
+// client DEFAULT_STATE_META against drifting from the server's canonical sets in src/db.ts
+// (STATE_META / ALL_STATUSES / isTerminal).
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { ALL_STATUSES, STATE_META, isTerminal } from "../src/db.ts";
-
-const ROOT = join(import.meta.dir, "..");
-const APP = readFileSync(join(ROOT, "public", "app.js"), "utf8");
-
-/** Pull the source fenced by `// <test-extract:name>` ... `// </test-extract:name>`. The
- *  opening sentinel may share its `//` line with descriptive prose, so capture from the
- *  NEXT line to avoid pulling that bare (non-comment) tail into the eval'd source. */
-function extract(name: string): string {
-  const m = APP.match(new RegExp(`// <test-extract:${name}>[^\\n]*\\n([\\s\\S]*?)// </test-extract:${name}>`));
-  if (!m) throw new Error(`missing test-extract sentinel block: ${name}`);
-  return m[1];
-}
-
-// Eval the pure state-meta block and expose the helpers the tests need (no DOM / module state).
-const harness = `
-${extract("state-meta")}
-return { DEFAULT_STATE_META, statusSetsFrom };
-`;
-const { DEFAULT_STATE_META, statusSetsFrom } = new Function(harness)() as {
-  DEFAULT_STATE_META: any;
-  statusSetsFrom: (meta: any) => {
-    ALL_STATUSES: string[];
-    TERMINAL_STATUSES: string[];
-    ACTIVE_STATUSES: string[];
-    FILTER_STATUSES: string[];
-    STATE_KIND: Record<string, string>;
-  };
-};
+import { DEFAULT_STATE_META, statusSetsFrom } from "../public/core/state-meta.js";
 
 // The cases that stand in for a FAILED / empty /api/state-meta response. loadStateMeta()
 // passes DEFAULT_STATE_META on the catch path; statusSetsFrom also falls back internally
@@ -77,8 +49,39 @@ test("client DEFAULT_STATE_META mirrors the server's canonical status sets (src/
     ALL_STATUSES.filter(isTerminal).sort(),
   );
   for (const s of ALL_STATUSES) {
-    const def = DEFAULT_STATE_META.stateMeta[s] || {};
+    const def = (DEFAULT_STATE_META.stateMeta as Record<string, any>)[s] || {};
     expect(def.kind).toBe(STATE_META[s].kind);
     expect(def.agentType ?? undefined).toBe(STATE_META[s].agentType ?? undefined);
   }
+});
+
+// Two properties in one test, because they share MODULE state (the `export let` tables) and
+// splitting them would make the assertions order-dependent:
+//
+//  (1) core/state-meta.js is importable OUTSIDE a browser — DOM-free at load, so its tables
+//      start empty. That is what makes the old `new Function` harness deletable, and what the
+//      rest of the P2 module split depends on. Add a top-level `document` touch here (or in
+//      core/api.js / core/dom.js beneath it) and the import at the top of this file throws,
+//      failing every test in it loudly.
+//  (2) applyStateMeta's REASSIGNMENT propagates to importers via the ES live binding. This is
+//      what lets app.js import the tables as named bindings; if it broke, every status chip
+//      would silently render empty.
+test("core/state-meta.js loads DOM-free, and applyStateMeta propagates to importers", async () => {
+  const m = await import("../public/core/state-meta.js");
+
+  // (1) pre-load state: the tables exist but are empty, and no fetch has succeeded.
+  expect(m.stateMetaLoaded).toBe(false);
+  expect(m.ALL_STATUSES).toEqual([]);
+  expect(m.STATE_KIND).toEqual({});
+
+  // (2) reassign, then re-read the SAME imported bindings.
+  m.applyStateMeta(DEFAULT_STATE_META);
+  expect(m.ALL_STATUSES).toEqual([...ALL_STATUSES]);
+  expect(m.ACTIVE_STATUSES).toContain("in_progress");
+  expect(m.TERMINAL_STATUSES).toContain("merged");
+  expect(m.STATE_KIND.in_progress).toBe("agent");
+  expect(m.AGENT_TYPE.in_progress).toBe("workspace-agent");
+  // stateKind() reads the live table, plus the synthetic needs_user_input override.
+  expect(m.stateKind("in_progress")).toBe("agent");
+  expect(m.stateKind("needs_user_input")).toBe("feedback");
 });

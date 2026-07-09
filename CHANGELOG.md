@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `public/core/` — front-end **Phase 2, step 1**: the module scaffold. Four dependency-free leaf
+  modules now hold what the whole app shares, moved **verbatim** out of `public/app.js` (no rewrites,
+  no renames, no signature changes) and imported back: `core/dom.js` (`el`, `svg`, `SVG_NS`, `esc`),
+  `core/format.js` (`fmtTime`, `fmtDuration`, `fmtBytes`, `fmtPct`), `core/api.js` (`api`, `toast`,
+  `terminalToast`) and `core/state-meta.js` (the status labels, the six status tables, the
+  `DEFAULT_STATE_META` fallback and `loadStateMeta`/`applyStateMeta`/`stateKind`). No view code moved
+  and the UI is unchanged. Each `core/` module is **DOM-free at load** — `document` is touched only
+  inside a called function — so `const app = document.getElementById("app")` stays the app's one
+  top-level DOM access, and the modules import cleanly outside a browser. The six status tables are
+  `export let`, reassigned only by `applyStateMeta`; importers read them at call time and must never
+  destructure them into consts, which would snapshot the empty pre-load value.
+- `test/state-meta-fallback.test.ts` — **the scraping harness is deleted, not relocated.** Because
+  `core/state-meta.js` loads DOM-free, the test now does a real
+  `import("../public/core/state-meta.js")` and asserts on the actual exports, replacing the
+  `readFileSync` + `new Function` eval of a `// <test-extract:state-meta>` sentinel block. That
+  sentinel is gone from the tree (the remaining 13 blocks in `app.js` are untouched). Two properties
+  are newly pinned in one order-independent test: the module is importable outside a browser with its
+  tables starting empty, and `applyStateMeta`'s reassignment propagates to importers through the ES
+  live binding — the guarantee that keeps every status chip from silently rendering empty.
+
 ## [0.9.251] - 2026-07-09
 
 - `scripts/ci` now FAILS a diff that deletes a released version header from `CHANGELOG.md`. This

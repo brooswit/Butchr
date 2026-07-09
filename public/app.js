@@ -1,204 +1,36 @@
 // butchr webapp — vanilla JS single-page app. Hash-routed, SSE live updates.
 "use strict";
 
+// `core/` holds dependency-free leaves — nothing there imports this file. Each is DOM-free
+// at module load, so `app` below remains the only top-level `document` access in the app.
+//
+// AGENT_TYPE / TERMINAL_STATUSES / FILTER_STATUSES / stateMetaLoaded are `export let`:
+// applyStateMeta REASSIGNS them once /api/state-meta lands, and the ES live binding
+// propagates that new value here. Read them at CALL time — never destructure them into a
+// local const, which would snapshot the empty pre-load value and silently break every
+// status chip.
+import { el, esc, svg } from "./core/dom.js";
+import { fmtBytes, fmtDuration, fmtPct, fmtTime } from "./core/format.js";
+import { api, terminalToast, toast } from "./core/api.js";
+import {
+  AGENT_TYPE,
+  FILTER_STATUSES,
+  TERMINAL_STATUSES,
+  loadStateMeta,
+  stateKind,
+  stateMetaLoaded,
+  statusLabel,
+} from "./core/state-meta.js";
+
 const app = document.getElementById("app");
 
-// ---------- tiny helpers ----------
-function el(tag, attrs = {}, children = []) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") node.className = v;
-    else if (k === "html") node.innerHTML = v;
-    else if (k.startsWith("on") && typeof v === "function")
-      node.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) node.setAttribute(k, v);
-  }
-  for (const c of [].concat(children)) {
-    if (c == null) continue;
-    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-  }
-  return node;
-}
-// SVG sibling of el(): builds nodes in the SVG namespace so <svg>, <path>, <rect>,
-// <text> etc. render correctly (createElement would put them in the HTML namespace
-// and they'd be inert). Same attr/children contract as el().
-const SVG_NS = "http://www.w3.org/2000/svg";
-function svg(tag, attrs = {}, children = []) {
-  const node = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") node.setAttribute("class", v);
-    else if (k.startsWith("on") && typeof v === "function")
-      node.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) node.setAttribute(k, v);
-  }
-  for (const c of [].concat(children)) {
-    if (c == null) continue;
-    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-  }
-  return node;
-}
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
-  );
-}
-function fmtTime(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-  return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-// CANONICAL STATUS LABELS for the 12-state model. Maps internal status keys to their
-// friendly display labels. Any status not listed shows verbatim (fallback for
-// unknown values from historical audit logs). The chip CSS class stays the raw status.
-const STATUS_LABELS = {
-  spec_review: "spec review",
-  inactive: "ready",
-  in_progress: "in progress",
-  in_review: "in review",
-  needs_info: "needs info",
-  // Synthetic effStatus (a flag on a LIVE in_progress agent, like `idle`) — the agent is
-  // wedged at a human-only OS/CLI prompt and needs a person to answer in its live pane.
-  needs_user_input: "needs your input",
-  rolling_back: "rolling back",
-  rolled_back: "rolled back",
-  idea: "idea",
-  blocked: "blocked",
-  // CEO directive (RFC Q1) — a directive awaiting a repo's CTO, and its terminal accepted state.
-  directive: "CEO directive",
-  accepted: "accepted",
-  merged: "merged",
-  failed: "failed",
-  aborted: "aborted",
-  // STORY (node) statuses — stories share the unified work list with tasks, so their
-  // statuses get friendly labels here too. `aborted` is shared with tasks (defined above).
-  open: "open",
-  done: "done",
-  merging: "merging",
-  merge_blocked: "merge blocked",
-};
-function statusLabel(status) {
-  return STATUS_LABELS[status] || status;
-}
 function chip(status) {
   return `<span class="chip ${esc(status)}">${esc(statusLabel(status))}</span>`;
-}
-// CANONICAL STATE METADATA — owned by the SERVER, never hand-mirrored here. The
-// 12-state machine's kind (idle/agent/feedback), per-state agent type, ordered status
-// list, and terminal subset all live in src/db.ts (STATE_META / ALL_STATUSES /
-// isTerminal) and are served at /api/state-meta. These tables are BUILT from that served
-// meta once at boot (loadStateMeta / applyStateMeta, run before the first render), so a
-// state-model change needs editing exactly one file. Declared `let` and start empty; the
-// helpers and views read them live. If the meta is briefly unavailable the tables stay
-// empty and everything degrades to safe defaults (no crash) rather than mirroring db.ts.
-let STATE_KIND = {};        // status -> "idle" | "agent" | "feedback"
-let AGENT_TYPE = {};        // status -> agent type (only for agent-kind states)
-let ALL_STATUSES = [];      // every canonical status, server's stable order
-let TERMINAL_STATUSES = []; // the terminal (Finished) subset
-let ACTIVE_STATUSES = [];   // non-terminal statuses (stay in the active list)
-// FILTER_STATUSES is ALL_STATUSES with the synthetic `idle` effStatus (an idle RUNNING
-// task — see effStatus) spliced in after in_progress, so it filters independently.
-let FILTER_STATUSES = [];
-// False until a /api/state-meta fetch SUCCEEDS. While false the tables hold the built-in
-// DEFAULT_STATE_META fallback (see below) and connectSSE retries the fetch on the next
-// event, so a transient meta hiccup self-heals without a page reload.
-let stateMetaLoaded = false;
-
-// <test-extract:state-meta> — pure, DOM-free helpers unit-tested in
-// test/state-meta-fallback.test.ts. Keep this block self-contained (no document / module
-// state) so the test can eval it in isolation.
-// SERVER-CANONICAL DEFAULTS — a hand-kept mirror of src/db.ts (STATE_META / ALL_STATUSES /
-// isTerminal) in the exact shape /api/state-meta serves. Used ONLY as a FALLBACK when that
-// fetch fails: without it the status tables (ACTIVE_STATUSES / TERMINAL_STATUSES) would be
-// empty, and the Pipeline view can't tell active work from finished — a finished subtask
-// wouldn't collapse into its lane's done pile. The served meta is authoritative and replaces
-// these the moment the fetch succeeds (see loadStateMeta), so this drift-prone copy is only
-// ever live during an outage. If db.ts's state model changes, update this mirror to match.
-const DEFAULT_STATE_META = {
-  stateMeta: {
-    idea: { kind: "feedback" },
-    spec_review: { kind: "feedback" },
-    blocked: { kind: "idle" },
-    needs_info: { kind: "feedback" },
-    directive: { kind: "feedback" },
-    inactive: { kind: "agent", agentType: "workspace-agent" },
-    in_progress: { kind: "agent", agentType: "workspace-agent" },
-    in_review: { kind: "feedback" },
-    merged: { kind: "idle" },
-    rolling_back: { kind: "idle" },
-    rolled_back: { kind: "idle" },
-    failed: { kind: "idle" },
-    aborted: { kind: "idle" },
-    accepted: { kind: "idle" },
-  },
-  allStatuses: [
-    "idea", "spec_review", "blocked", "needs_info", "directive", "inactive", "in_progress",
-    "in_review", "merged", "rolling_back", "rolled_back", "failed", "aborted", "accepted",
-  ],
-  terminalStatuses: ["merged", "aborted", "failed", "rolled_back", "accepted"],
-};
-
-// Build the six status tables from the served meta — or, when `meta` is missing/empty (a
-// failed fetch), from DEFAULT_STATE_META so the returned sets are NEVER empty. Pure: returns
-// the tables, touches no module state and no DOM (applyStateMeta assigns them in).
-function statusSetsFrom(meta) {
-  const ok = meta && Array.isArray(meta.allStatuses) && meta.allStatuses.length > 0;
-  const src = ok ? meta : DEFAULT_STATE_META;
-  const stateMeta = src.stateMeta || {};
-  const all = src.allStatuses || [];
-  const terminal = src.terminalStatuses || [];
-  const STATE_KIND = {};
-  const AGENT_TYPE = {};
-  for (const s of all) {
-    const m = stateMeta[s] || {};
-    STATE_KIND[s] = m.kind || "idle";
-    if (m.agentType) AGENT_TYPE[s] = m.agentType;
-  }
-  const FILTER = all.flatMap((s) => (s === "in_progress" ? [s, "needs_user_input", "idle"] : [s]));
-  // Story (node) statuses live alongside task statuses in the unified work list, so the
-  // filter chips must narrow stories too. Append the story-specific statuses not already
-  // present (`aborted` is shared with tasks, so it's already in the set).
-  for (const s of ["open", "done"]) if (!FILTER.includes(s)) FILTER.push(s);
-  return {
-    STATE_KIND,
-    AGENT_TYPE,
-    ALL_STATUSES: all.slice(),
-    TERMINAL_STATUSES: terminal.slice(),
-    ACTIVE_STATUSES: all.filter((s) => !terminal.includes(s)),
-    FILTER_STATUSES: FILTER,
-  };
-}
-// </test-extract:state-meta>
-
-// Fetch the server-owned state metadata and (re)build every table above from it. Called once
-// at boot BEFORE the first render, then re-tried on SSE events until it succeeds (see
-// connectSSE). On failure the tables fall back to the non-empty DEFAULT_STATE_META so the
-// board/list/filters keep working, and stateMetaLoaded stays false so the next event retries.
-async function loadStateMeta() {
-  try {
-    applyStateMeta(await api("GET", "/state-meta"));
-    stateMetaLoaded = true;
-  } catch (e) {
-    console.error("state-meta load failed; using built-in defaults, will retry on next event", e);
-    applyStateMeta(DEFAULT_STATE_META);
-  }
-}
-function applyStateMeta(meta) {
-  const sets = statusSetsFrom(meta);
-  STATE_KIND = sets.STATE_KIND;
-  AGENT_TYPE = sets.AGENT_TYPE;
-  ALL_STATUSES = sets.ALL_STATUSES;
-  TERMINAL_STATUSES = sets.TERMINAL_STATUSES;
-  ACTIVE_STATUSES = sets.ACTIVE_STATUSES;
-  FILTER_STATUSES = sets.FILTER_STATUSES;
 }
 
 // What an operator is AWAITING for each feedback state (chip hint). Pure UI copy — these
 // strings have no source in db.ts, so they are deliberately NOT part of the served state
-// metadata (unlike the kind/agent-type tables above, which the server now owns).
+// metadata (unlike the kind/agent-type tables in core/state-meta.js, which the server owns).
 const AWAITED_LABEL = {
   idea: "a spec",
   spec_review: "spec approval",
@@ -206,12 +38,6 @@ const AWAITED_LABEL = {
   needs_info: "response to raised item",
   needs_user_input: "your answer at the terminal",
 };
-function stateKind(status) {
-  // `needs_user_input` is a synthetic effStatus (not in the server's STATE_KIND table) — it
-  // is a feedback condition (a human must answer), so surface it like the feedback states.
-  if (status === "needs_user_input") return "feedback";
-  return STATE_KIND[status] || "idle";
-}
 // Who is EXPECTED to act on a feedback task, read from the server-computed STRUCTURAL
 // `pending_responder` (story|cto|user — see tasks.pendingResponder). butchr is
 // responder-agnostic, so the action controls are always available; this is emphasis only.
@@ -413,34 +239,6 @@ function collapsible({
   };
   head.addEventListener("click", () => setOpen(!isOpen));
   return { panel, head, caret, setOpen };
-}
-
-async function api(method, path, body) {
-  const res = await fetch("/api" + path, {
-    method,
-    headers: body ? { "content-type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
-  return data;
-}
-
-let toastTimer = null;
-function toast(msg, isErr) {
-  const old = document.querySelector(".toast");
-  if (old) old.remove();
-  const t = el("div", { class: "toast" + (isErr ? " err" : "") }, msg);
-  document.body.appendChild(t);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.remove(), isErr ? 6000 : 3000);
-}
-
-// The toast confirming a terminal attach, naming the emulator butchr launched.
-function terminalToast(r) {
-  toast("opened terminal" + (r.emulator ? " (" + r.emulator + ")" : ""));
 }
 
 // Open a GUI terminal attached to a running task's live agent pane. Routed through
@@ -3030,39 +2828,6 @@ function syncTopnav(route) {
 }
 
 // ---------- metrics view ----------
-// Format a millisecond duration as a compact human string (e.g. "2h 5m", "3m",
-// "45s"). Returns "—" for null/zero so empty medians read cleanly.
-function fmtDuration(ms) {
-  if (ms == null || !isFinite(ms) || ms <= 0) return "—";
-  const s = Math.round(ms / 1000);
-  if (s < 60) return s + "s";
-  const m = Math.round(s / 60);
-  if (m < 60) return m + "m";
-  const h = Math.floor(m / 60);
-  const rem = m % 60;
-  if (h < 24) return rem ? `${h}h ${rem}m` : `${h}h`;
-  const d = Math.floor(h / 24);
-  const hr = h % 24;
-  return hr ? `${d}d ${hr}h` : `${d}d`;
-}
-// Format a byte count as a human-readable size (KB/MB/GB, binary units). "—" for
-// null/non-finite; "0 B" for zero.
-function fmtBytes(bytes) {
-  if (bytes == null || !isFinite(bytes)) return "—";
-  if (bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let n = bytes;
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  const v = n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1);
-  return `${v} ${units[i]}`;
-}
-// Format a rate (0..1 or null) as a percentage string; "—" when there's no data.
-function fmtPct(rate) {
-  if (rate == null || !isFinite(rate)) return "—";
-  const pct = rate * 100;
-  return (pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)) + "%";
-}
 
 // A single number card: big value, label, and an optional sub-line (e.g. raw
 // numerator/denominator behind a rate).

@@ -1,0 +1,46 @@
+// Pure display formatters — no DOM, no module state. Every one of these maps a raw
+// value to the string an operator reads, and returns "—" for absent data so empty
+// cells and medians read cleanly rather than showing "null" or "NaN".
+
+export function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+// Format a millisecond duration as a compact human string (e.g. "2h 5m", "3m",
+// "45s"). Returns "—" for null/zero so empty medians read cleanly.
+export function fmtDuration(ms) {
+  if (ms == null || !isFinite(ms) || ms <= 0) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  if (h < 24) return rem ? `${h}h ${rem}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const hr = h % 24;
+  return hr ? `${d}d ${hr}h` : `${d}d`;
+}
+// Format a byte count as a human-readable size (KB/MB/GB, binary units). "—" for
+// null/non-finite; "0 B" for zero.
+export function fmtBytes(bytes) {
+  if (bytes == null || !isFinite(bytes)) return "—";
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  const v = n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1);
+  return `${v} ${units[i]}`;
+}
+// Format a rate (0..1 or null) as a percentage string; "—" when there's no data.
+export function fmtPct(rate) {
+  if (rate == null || !isFinite(rate)) return "—";
+  const pct = rate * 100;
+  return (pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)) + "%";
+}
