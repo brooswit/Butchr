@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Front-end (RFC Phase 4):** `public/views/projects.js` now builds its DOM entirely with `el()` —
+  the PROJECTS overview card, the managed CEO-agent card, the Repos rows, the Initiatives panel,
+  the breadcrumbs and the delete-confirm modal. Removes all 16 `esc()` calls, both `el({html:})`
+  bridges, both transitional `htmlOf()` callers and all four `innerHTML` writes from the view;
+  escaping is now structural (every text child goes through `createTextNode`). The CEO card no
+  longer re-queries its own markup for `.ceo-toggle` / `.ceo-term` / `.ceo-reset` — the controls
+  are held as references and closed over by their handlers. `ceoNoteHtml` is renamed **`ceoNote`**
+  and returns a node (or `null`) instead of an HTML string. Hand-built `.btn` controls adopt the
+  shared `Button` component. Rendered DOM and behavior are unchanged.
+
 ## [0.9.269] - 2026-07-09
 
 ### Changed

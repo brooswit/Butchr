@@ -6,8 +6,8 @@
 // public surface) plus every helper they need: the overview's CEO pill and initiative-rollup line
 // (`ceoPill`, `projectInitiativesLine`, `projectInitiativeRollup`), the initiative derivations
 // shared by both surfaces (`initiativeHeading`, `initiativeRollup`), the managed CEO-agent card
-// (`ceoStatusPill`, `ceoNoteHtml`, `ceoTerminalBtnState`, `buildCeoCard`, `ceoPanel`), the detail
-// page's panels (`reposPanel`, `unregisterRepo`, `initiativesPanel`, `initiativeMarkup`), and the
+// (`ceoStatusPill`, `ceoNote`, `ceoTerminalBtnState`, `buildCeoCard`, `ceoPanel`), the detail
+// page's panels (`reposPanel`, `unregisterRepo`, `initiativesPanel`, `initiativeNode`), and the
 // Delete-project danger zone (`projectDangerZone`, `confirmDeleteProject`).
 //
 // The six PURE, DOM-free derivation helpers are also exported — not for another view, but because
@@ -24,12 +24,15 @@
 //
 // DOM-free at module load: `document` is touched only inside a CALLED function, exactly like
 // views/metrics.js, views/workspace.js and views/swimlanes.js.
-// `htmlOf` is the TRANSITIONAL bridge letting the innerHTML templates below consume the
-// now-node-returning chip / kindBadge. A later subtask converts those templates and drops it.
-import { el, esc, htmlOf } from "../core/dom.js";
+//
+// Every surface here is built with el() — no esc(), no `html:` bridge, no htmlOf(), no innerHTML
+// write. el() appends each text child through createTextNode, so escaping is STRUCTURAL rather
+// than the author's job. Do not reintroduce a markup string: the chips/badges this view composes
+// already return nodes, and core/dom.js's esc()/htmlOf()/`html:` are scheduled for deletion.
+import { el } from "../core/dom.js";
 import { projectTitle, repoDisplay } from "../core/format.js";
 import { api, terminalToast, toast } from "../core/api.js";
-import { action } from "../components/button.js";
+import { Button } from "../components/button.js";
 import { mount, render } from "../core/nav.js";
 import { chip, kindBadge } from "../components/chips.js";
 import { openModal } from "../components/overlay.js";
@@ -52,17 +55,20 @@ function ceoPill(p) {
   return { cls: "inactive", label: "CEO default", title: "Inherits the global CEO gate (BUTCHR_CEO_AGENT)" };
 }
 
-// The overview card's initiative rollup line. `inits` is the project's InitiativeView[] — or
-// undefined when its fetch failed, in which case we keep the honest muted placeholder rather than
-// assert a count we don't have. Otherwise a compact .swim-prog mini-bar reads "X/Y initiatives
+// The overview card's initiative rollup line, as a NODE. `inits` is the project's InitiativeView[]
+// — or undefined when its fetch failed, in which case we keep the honest muted placeholder rather
+// than assert a count we don't have. Otherwise a compact .swim-prog mini-bar reads "X/Y initiatives
 // done" (done via the server's `done` boolean on each initiative — see projectInitiativeRollup).
 function projectInitiativesLine(inits) {
-  if (!inits) return '<div class="pc-placeholder muted">initiatives —</div>';
+  if (!inits) return el("div", { class: "pc-placeholder muted" }, "initiatives —");
   const roll = projectInitiativeRollup(inits);
-  return '<div class="swim-prog" title="cross-repo initiatives fully done across their repos">' +
-      '<span class="swim-track"><i style="width:' + roll.pct + '%"></i></span>' +
-      '<span class="swim-prog-txt">' + roll.done + '/' + roll.total + ' initiatives done</span>' +
-    '</div>';
+  return el("div", {
+    class: "swim-prog",
+    title: "cross-repo initiatives fully done across their repos",
+  }, [
+    el("span", { class: "swim-track" }, el("i", { style: "width:" + roll.pct + "%" })),
+    el("span", { class: "swim-prog-txt" }, roll.done + "/" + roll.total + " initiatives done"),
+  ]);
 }
 
 export async function renderProjects() {
@@ -89,9 +95,7 @@ export async function renderProjects() {
     "Cross-repo initiatives coordinated by a project CEO agent." +
     (projects.length ? ` ${projects.length} project${projects.length === 1 ? "" : "s"}.` : "")));
   head.appendChild(text);
-  const newBtn = el("button", { class: "btn" }, "+ New project");
-  newBtn.addEventListener("click", () => openNewProjectModal());
-  head.appendChild(newBtn);
+  head.appendChild(Button({ label: "+ New project", onClick: () => openNewProjectModal() }));
   wrap.appendChild(head);
 
   if (!projects.length) {
@@ -106,20 +110,17 @@ export async function renderProjects() {
     const pill = ceoPill(p);
     // Each card OPENS the project detail view (#/projects/:id). It's a real button for
     // a11y: role=button + tabindex so it's tab-reachable and Enter/Space activate it.
-    const card = el("div", { class: "card clickable", role: "button", tabindex: "0" });
-    card.innerHTML =
-      '<div class="pc-head">' +
-        '<div class="title">' + esc(projectTitle(p)) + '</div>' +
-      '</div>' +
-      '<div class="path">' + esc(p.workspace_id) + '</div>' +
+    const card = el("div", { class: "card clickable", role: "button", tabindex: "0" }, [
+      el("div", { class: "pc-head" }, el("div", { class: "title" }, projectTitle(p))),
+      el("div", { class: "path" }, p.workspace_id),
       // repos rollup is still a later subtask's concern; the initiative rollup is filled here (S4).
-      '<div class="pc-placeholder muted">repos —</div>' +
-      projectInitiativesLine(initsByProject.get(p.id)) +
-      '<div class="pc-foot">' +
-        '<span class="chip ' + pill.cls + '"' +
-          (pill.title ? ' title="' + esc(pill.title) + '"' : "") + '>' +
-          esc(pill.label) + '</span>' +
-      '</div>';
+      el("div", { class: "pc-placeholder muted" }, "repos —"),
+      projectInitiativesLine(initsByProject.get(p.id)),
+      // `title` only when the pill carries one — el() skips a null attribute, exactly as the old
+      // template omitted the attribute entirely.
+      el("div", { class: "pc-foot" },
+        el("span", { class: "chip " + pill.cls, title: pill.title ?? null }, pill.label)),
+    ]);
     const open = () => { location.hash = "#/projects/" + p.id; };
     card.addEventListener("click", open);
     card.addEventListener("keydown", (e) => {
@@ -210,36 +211,46 @@ export function ceoStatusPill(s) {
 
 // The honest context note under the CEO card, CONDITIONAL on override-vs-inherit so it never
 // contradicts the runtime (isCeoEnabled: an explicit override WINS over the global gate, so an
-// explicit-ON CEO runs regardless of the gate). Returns an HTML string ("" for the no-note case).
+// explicit-ON CEO runs regardless of the gate). Returns a NODE, or `null` for the no-note case
+// (el() skips a null child, and the one call site guards).
 //   • INHERITING (overridden=false): always note it's inheriting the default; when the global
 //     gate is ALSO off, this is exactly where the gate bites → say so and point at the override.
 //   • OVERRIDDEN-ON while the gate is off: NEVER "inert" — it runs via the override; a neutral note.
 //   • OVERRIDDEN-OFF: explicitly disabled for this project.
-export function ceoNoteHtml(s) {
+//
+// Named `ceoNote` (not `…Html`) since it stopped being a string. `BUTCHR_CEO_AGENT` is a real
+// <code> child, so each note's textContent still reads as one uninterrupted sentence.
+export function ceoNote(s) {
+  const env = () => el("code", {}, "BUTCHR_CEO_AGENT");
   if (!s.overridden) {
     if (!s.globalGate) {
-      return '<div class="ceo-note">The global CEO gate (<code>BUTCHR_CEO_AGENT</code>) is off, ' +
-        "so projects that inherit the default stay disabled. Toggle this project on to override " +
-        "and run its CEO regardless.</div>";
+      return el("div", { class: "ceo-note" }, [
+        "The global CEO gate (", env(), ") is off, so projects that inherit the default stay " +
+        "disabled. Toggle this project on to override and run its CEO regardless.",
+      ]);
     }
-    return '<div class="ceo-note inherit">Inheriting the global default (<code>BUTCHR_CEO_AGENT</code> ' +
-      "is on) — toggle to set an explicit per-project override.</div>";
+    return el("div", { class: "ceo-note inherit" }, [
+      "Inheriting the global default (", env(),
+      " is on) — toggle to set an explicit per-project override.",
+    ]);
   }
   // overridden === true — the per-project value wins; never imply it's inert.
   if (s.enabled && !s.globalGate) {
-    return '<div class="ceo-note inherit">Running via a per-project override; the global CEO gate ' +
-      "(<code>BUTCHR_CEO_AGENT</code>) is off, but this project's CEO runs regardless.</div>";
+    return el("div", { class: "ceo-note inherit" }, [
+      "Running via a per-project override; the global CEO gate (", env(),
+      ") is off, but this project's CEO runs regardless.",
+    ]);
   }
   if (!s.enabled) {
-    return '<div class="ceo-note inherit">Explicitly disabled for this project.</div>';
+    return el("div", { class: "ceo-note inherit" }, "Explicitly disabled for this project.");
   }
-  return "";
+  return null;
 }
 
 // The "Open CEO terminal" button's enabled state + honest hint, derived only from the RESOLVED
 // {enabled, overridden, globalGate, live} fields. Unlike the CTO button (which HIDES when not
 // running), this stays visible but disables when there's no live pane and explains WHY — using
-// the same honest wording as ceoNoteHtml so the two never contradict. Returns { enabled, title }.
+// the same honest wording as ceoNote so the two never contradict. Returns { enabled, title }.
 export function ceoTerminalBtnState(s) {
   if (s.live) return { enabled: true, title: "Attach a terminal to the live CEO agent" };
   if (s.enabled) return { enabled: false, title: "CEO agent is starting… — no live pane to attach yet" };
@@ -255,30 +266,17 @@ export function ceoTerminalBtnState(s) {
 
 // Build the CEO card DOM from a fetched CeoStatus. Standalone (no closure over the fetch) so the
 // toggle handler can rebuild + replace the card in place after a PATCH + refetch.
+//
+// Every control is HELD AS A LOCAL and closed over by its handler. This card used to be an
+// innerHTML template that then re-queried `.ceo-toggle` / `.ceo-toggle-lbl` / `.ceo-term` /
+// `.ceo-reset` back out of itself to wire them up — a selector round-trip that only worked
+// because the markup and the querySelector strings happened to agree. Building the nodes and
+// keeping the references removes that coupling; the class names below are now purely for CSS.
 function buildCeoCard(projectId, s) {
   const pill = ceoStatusPill(s);
   const term = ceoTerminalBtnState(s);
   const lifeCls = s.live ? "alive" : "down";
   const lifeTxt = s.live ? "CEO agent live" : (s.enabled ? "CEO agent starting…" : "CEO agent inactive");
-  const card = el("div", { class: "panel ceo-card" });
-  card.innerHTML = `
-    <div class="panel-head">
-      <h2>${htmlOf(kindBadge("ceo"))} CEO agent</h2>
-      <span class="spacer"></span>
-      <span class="chip ${pill.cls}"${pill.title ? ` title="${esc(pill.title)}"` : ""}>${esc(pill.label)}</span>
-    </div>
-    <div class="ceo-row">
-      <label class="switch">
-        <input type="checkbox" class="ceo-toggle"${s.enabled ? " checked" : ""} />
-        <span class="track"></span>
-        <span class="ceo-toggle-lbl">${s.enabled ? "Enabled" : "Disabled"}</span>
-      </label>
-      <span class="ceo-life"><span class="ceo-dot ${lifeCls}"></span>${esc(lifeTxt)}</span>
-      <span class="spacer"></span>
-      <button class="btn ceo-term"${term.enabled ? "" : " disabled"} title="${esc(term.title)}">⌗ Open CEO terminal</button>
-      ${s.overridden ? '<button class="btn ghost xs ceo-reset" title="Clear the per-project override and inherit the global default">Reset to default</button>' : ""}
-    </div>
-    ${ceoNoteHtml(s)}`;
 
   // Rebuild + replace this card from a fresh /ceo read after a write — keeps the pill, life
   // line and note honest without re-fetching the whole page.
@@ -287,20 +285,25 @@ function buildCeoCard(projectId, s) {
     card.replaceWith(buildCeoCard(projectId, next));
   };
 
+  // `checked` is set as a PROPERTY, not an attribute: the attribute only seeds the control's
+  // DEFAULT state, while the property is its live value (what the change handler reads back).
+  const cb = el("input", { type: "checkbox", class: "ceo-toggle" });
+  cb.checked = !!s.enabled;
+  const lbl = el("span", { class: "ceo-toggle-lbl" }, s.enabled ? "Enabled" : "Disabled");
+
   // Optimistic enable/disable toggle → PATCH { ceo_enabled }. Disable the input during the
   // round-trip; on failure revert the checkbox + label and surface the error inline (toast).
-  const cb = card.querySelector(".ceo-toggle");
   cb.addEventListener("change", async () => {
     const want = cb.checked;
     cb.disabled = true;
-    card.querySelector(".ceo-toggle-lbl").textContent = want ? "Enabled" : "Disabled";
+    lbl.textContent = want ? "Enabled" : "Disabled";
     try {
       await api("PATCH", "/projects/" + encodeURIComponent(projectId), { ceo_enabled: want });
       toast(want ? "CEO enabled" : "CEO disabled");
       await refresh();
     } catch (e) {
       cb.checked = !want;
-      card.querySelector(".ceo-toggle-lbl").textContent = !want ? "Enabled" : "Disabled";
+      lbl.textContent = !want ? "Enabled" : "Disabled";
       cb.disabled = false;
       toast(e.message, true);
     }
@@ -308,38 +311,72 @@ function buildCeoCard(projectId, s) {
 
   // Open CEO terminal → POST /api/projects/:id/ceo/terminal (the CEO analog of the CTO terminal
   // route, same attach payload). Enabled only when the CEO is live (ceoTerminalBtnState gates +
-  // titles it honestly). Mirrors the CTO button's disable/try/toast pattern; no render() since
-  // attaching a terminal never navigates.
-  const termBtn = card.querySelector(".ceo-term");
-  if (term.enabled) {
-    termBtn.addEventListener("click", async () => {
-      termBtn.disabled = true;
-      try {
+  // titles it honestly). The listener is attached ONLY when enabled, as before.
+  //
+  // Routed through Button's `onAction` (= action()), which reproduces the hand-rolled dance
+  // exactly: disable → await → toast the error and re-enable on failure. The two non-default
+  // flags are load-bearing:
+  //   restoreOnSuccess — the old handler's `finally` re-enabled on BOTH paths.
+  //   onDone: no-op    — action()'s DEFAULT onDone is render(). The old handler never called it:
+  //                      attaching a terminal does not navigate. A bare Button() would re-render.
+  // terminalToast(r) fires inside the fn, so no `success` string is passed.
+  const termBtn = Button({
+    label: "⌗ Open CEO terminal",
+    class: "ceo-term",
+    title: term.title,
+    disabled: !term.enabled,
+    onAction: term.enabled
+      ? async () => {
         const r = await api("POST", "/projects/" + encodeURIComponent(projectId) + "/ceo/terminal");
         terminalToast(r);
-      } catch (e) {
-        toast(e.message, true);
-      } finally {
-        termBtn.disabled = false;
       }
-    });
-  }
+      : undefined,
+    restoreOnSuccess: true,
+    onDone: () => {},
+  });
 
   // Reset-to-inherit → PATCH { ceo_enabled: null } — only present while an explicit override is set.
-  const reset = card.querySelector(".ceo-reset");
-  if (reset) {
-    reset.addEventListener("click", async () => {
-      reset.disabled = true;
-      try {
-        await api("PATCH", "/projects/" + encodeURIComponent(projectId), { ceo_enabled: null });
-        toast("CEO reset to the global default");
-        await refresh();
-      } catch (e) {
-        reset.disabled = false;
-        toast(e.message, true);
-      }
-    });
-  }
+  //
+  // DELIBERATELY NOT `onAction`. This handler awaits refresh() INSIDE its try, so a rejecting
+  // refresh() re-enables the button and toasts. action() invokes `onDone` WITHOUT awaiting it, so
+  // routing this through onAction would turn that rejection into an unhandled promise rejection —
+  // a real behavior change. Button() still owns the MARKUP (`btn ghost xs ceo-reset`); only the
+  // async dance stays hand-rolled, via the plain synchronous `onClick`.
+  const reset = s.overridden
+    ? Button({
+      label: "Reset to default",
+      class: "ghost xs ceo-reset",
+      title: "Clear the per-project override and inherit the global default",
+      onClick: async () => {
+        reset.disabled = true;
+        try {
+          await api("PATCH", "/projects/" + encodeURIComponent(projectId), { ceo_enabled: null });
+          toast("CEO reset to the global default");
+          await refresh();
+        } catch (e) {
+          reset.disabled = false;
+          toast(e.message, true);
+        }
+      },
+    })
+    : null;
+
+  const card = el("div", { class: "panel ceo-card" }, [
+    el("div", { class: "panel-head" }, [
+      // the literal space before "CEO agent" is a real text node — the gap after the badge
+      el("h2", {}, [kindBadge("ceo"), " CEO agent"]),
+      el("span", { class: "spacer" }),
+      el("span", { class: "chip " + pill.cls, title: pill.title ?? null }, pill.label),
+    ]),
+    el("div", { class: "ceo-row" }, [
+      el("label", { class: "switch" }, [cb, el("span", { class: "track" }), lbl]),
+      el("span", { class: "ceo-life" }, [el("span", { class: "ceo-dot " + lifeCls }), lifeTxt]),
+      el("span", { class: "spacer" }),
+      termBtn,
+      reset, // null when not overridden — el() skips a null child
+    ]),
+    ceoNote(s), // null for the unambiguous case
+  ]);
   return card;
 }
 
@@ -373,10 +410,12 @@ export async function renderProjectDetail(id) {
   // header: breadcrumb trail + title/anchor/brief + a subtle (cosmetic) node-status chip. The
   // Projects crumb links back to the overview; the trailing project name is the current page
   // (aria-current), mirroring the workspace view's .crumbs (Hierarchical Projects IA S3).
-  wrap.appendChild(el("div", {
-    class: "crumbs",
-    html: `<a href="#/projects">Projects</a> / <span aria-current="page">${esc(projectTitle(project))}</span>`,
-  }));
+  // the " / " between the crumbs is a real text node — the rendered separator
+  wrap.appendChild(el("div", { class: "crumbs" }, [
+    el("a", { href: "#/projects" }, "Projects"),
+    " / ",
+    el("span", { "aria-current": "page" }, projectTitle(project)),
+  ]));
 
   const head = el("div", { class: "page-head" });
   const text = el("div", { class: "ph-text" });
@@ -419,9 +458,11 @@ export async function renderProjectDetail(id) {
 function projectDangerZone(project) {
   const zone = el("div", { class: "pd-danger-zone" });
   zone.appendChild(el("div", { class: "pd-danger-lbl muted" }, "Danger zone"));
-  const del = el("button", { class: "btn ghost danger-outline" }, "Delete project");
-  del.addEventListener("click", () => confirmDeleteProject(project));
-  zone.appendChild(del);
+  zone.appendChild(Button({
+    label: "Delete project",
+    class: "ghost danger-outline",
+    onClick: () => confirmDeleteProject(project),
+  }));
   return zone;
 }
 
@@ -438,26 +479,24 @@ function projectDangerZone(project) {
 // api() collapses the response to a message string, so this reads res.status directly via a
 // small fetch (api() is itself only a fetch wrapper) to tell the guarded 409 apart.
 function confirmDeleteProject(project) {
-  const body = el("div", { class: "m-body" });
-  body.innerHTML =
-    '<p>Delete <strong>' + esc(projectTitle(project)) + '</strong>? This removes the project ' +
-    'node and its CEO agent. Its registered repos and their work are not deleted.</p>';
+  const body = el("div", { class: "m-body" },
+    el("p", {}, [
+      "Delete ", el("strong", {}, projectTitle(project)),
+      "? This removes the project node and its CEO agent. Its registered repos and their work " +
+      "are not deleted.",
+    ]));
 
-  const foot = el("div", { class: "m-foot" });
   const errEl = el("span", { class: "m-error hint" }, "");
-  const cancel = el("button", { class: "btn ghost" }, "Cancel");
-  const del = el("button", { class: "btn danger" }, "Delete project");
-  foot.appendChild(errEl);
-  foot.appendChild(cancel);
-  foot.appendChild(del);
-
-  const { close } = openModal({ title: "Delete project", body, footer: foot });
-  cancel.addEventListener("click", close);
   function showErr(msg) { errEl.textContent = msg || ""; errEl.classList.toggle("on", !!msg); }
 
-  del.addEventListener("click", () => {
-    showErr("");
-    action(del, async () => {
+  const cancel = Button({ label: "Cancel", class: "ghost", onClick: () => close() });
+  // showErr("") now clears the inline error at the top of the action rather than just before it.
+  // Both run in the same click tick with no paint between, so it is visually identical.
+  const del = Button({
+    label: "Delete project",
+    class: "danger",
+    onAction: async () => {
+      showErr("");
       const res = await fetch("/api/projects/" + encodeURIComponent(project.id), { method: "DELETE" });
       if (res.ok) return;
       const text = await res.text();
@@ -470,8 +509,13 @@ function confirmDeleteProject(project) {
         showErr(msg);
       }
       throw new Error(msg);
-    }, { success: "project deleted", onDone: () => { close(); location.hash = "#/projects"; } });
+    },
+    success: "project deleted",
+    onDone: () => { close(); location.hash = "#/projects"; },
   });
+
+  const foot = el("div", { class: "m-foot" }, [errEl, cancel, del]);
+  const { close } = openModal({ title: "Delete project", body, footer: foot });
 }
 
 // The Initiatives panel: header with a right-aligned "Launch initiative" action, then one
@@ -486,9 +530,10 @@ function initiativesPanel(project, initiatives, repos, wsById) {
   const phead = el("div", { class: "panel-head" });
   phead.appendChild(el("h2", {}, "Initiatives"));
   phead.appendChild(el("span", { class: "spacer" }));
-  const launchBtn = el("button", { class: "btn" }, "Launch initiative");
-  launchBtn.addEventListener("click", () => openLaunchModal(project, repos, wsById));
-  phead.appendChild(launchBtn);
+  phead.appendChild(Button({
+    label: "Launch initiative",
+    onClick: () => openLaunchModal(project, repos, wsById),
+  }));
   panel.appendChild(phead);
 
   if (!initiatives.length) {
@@ -498,40 +543,42 @@ function initiativesPanel(project, initiatives, repos, wsById) {
   }
 
   for (const init of initiatives) {
-    panel.appendChild(el("div", { class: "init", html: initiativeMarkup(init, wsById) }));
+    panel.appendChild(el("div", { class: "init" }, initiativeNode(init, wsById)));
   }
   return panel;
 }
 
-// One initiative's markup: a heading + short id, its per-repo child rows (each = resolved repo
-// name + the shared status .chip + the child brief), and a rolled-up doneness bar. The bar's
-// fraction (initiativeRollup) is LOCKED to the server's status==='done' predicate so it reads
-// 100% exactly when the server's `done` boolean is true. Each child.workspace_id is a repo/
-// directory id, resolved to a friendly name via repoDisplay (id-only, so its fallback is the id —
-// never the story brief).
-function initiativeMarkup(init, wsById) {
+// One initiative's DOM, as a DocumentFragment: a heading + short id, its per-repo child rows
+// (each = resolved repo name + the shared status .chip + the child brief), and a rolled-up
+// doneness bar. The bar's fraction (initiativeRollup) is LOCKED to the server's status==='done'
+// predicate so it reads 100% exactly when the server's `done` boolean is true. Each
+// child.workspace_id is a repo/directory id, resolved to a friendly name via repoDisplay (id-only,
+// so its fallback is the id — never the story brief). chip() returns a node and is appended
+// directly; .init-target is a flex row with a `gap`, so there are no separator text nodes.
+function initiativeNode(init, wsById) {
   const roll = initiativeRollup(init);
   const targets = (init.children || []).map((c) => {
     const d = repoDisplay({ id: c.workspace_id }, wsById);
     const brief = c.brief && String(c.brief).trim();
-    return '<div class="init-target">' +
-        '<span class="tr">' + esc(d.name) + '</span>' +
-        htmlOf(chip(c.status)) +
-        (brief ? '<span class="ibr">' + esc(brief) + '</span>' : "") +
-      '</div>';
-  }).join("");
-  return (
-    '<div class="init-head">' +
-      '<span class="ib">' + esc(initiativeHeading(init)) + '</span>' +
-      '<span class="init-id" title="initiative grouping id">' + esc(init.initiative_id) + '</span>' +
-    '</div>' +
-    '<div class="init-targets">' + targets + '</div>' +
-    '<div class="rollup-summary">' +
-      '<span class="rollup-frac">' + roll.done + '/' + roll.total + '</span>' +
-      '<span class="muted">' + (init.done ? "done — all stories landed" : "stories done") + '</span>' +
-    '</div>' +
-    '<div class="rollup-bar"><div class="rollup-bar-fill" style="width:' + roll.pct + '%"></div></div>'
-  );
+    return el("div", { class: "init-target" }, [
+      el("span", { class: "tr" }, d.name),
+      chip(c.status),
+      brief ? el("span", { class: "ibr" }, brief) : null,
+    ]);
+  });
+  const f = document.createDocumentFragment();
+  f.appendChild(el("div", { class: "init-head" }, [
+    el("span", { class: "ib" }, initiativeHeading(init)),
+    el("span", { class: "init-id", title: "initiative grouping id" }, init.initiative_id),
+  ]));
+  f.appendChild(el("div", { class: "init-targets" }, targets));
+  f.appendChild(el("div", { class: "rollup-summary" }, [
+    el("span", { class: "rollup-frac" }, roll.done + "/" + roll.total),
+    el("span", { class: "muted" }, init.done ? "done — all stories landed" : "stories done"),
+  ]));
+  f.appendChild(el("div", { class: "rollup-bar" },
+    el("div", { class: "rollup-bar-fill", style: "width:" + roll.pct + "%" })));
+  return f;
 }
 
 // The Repos panel: a header with a right-aligned "+ Add repo" action, then one row per
@@ -546,9 +593,11 @@ function reposPanel(project, repos, wsById) {
   // directory and nests it under THIS project atomically — the primary (and only) add path now that
   // loose workspaces are gone. It replaces the old "+ Add repo" (add-an-already-materialized-repo)
   // flow, which is meaningless once every repo lives under a project.
-  const addBtn = el("button", { class: "btn ghost xs" }, "+ Add workspace");
-  addBtn.addEventListener("click", () => openAddWorkspaceModal(project));
-  phead.appendChild(addBtn);
+  phead.appendChild(Button({
+    label: "+ Add workspace",
+    class: "ghost xs",
+    onClick: () => openAddWorkspaceModal(project),
+  }));
   panel.appendChild(phead);
 
   if (!repos.length) {
@@ -562,13 +611,20 @@ function reposPanel(project, repos, wsById) {
     // The repo IS a workspace/directory node (repo.id === workspace id), so the row DRILLS IN
     // to that workspace's work views via the nested route `#/projects/:pid/workspaces/:wid`
     // (Hierarchical Projects IA S2). A11y: a real focusable button-row (Enter/Space activate).
-    const row = el("div", { class: "repo-row clickable", role: "button", tabindex: "0" });
-    row.innerHTML =
-      '<span class="ic" aria-hidden="true">◆</span>' +
-      '<span class="nm">' + esc(d.name) + '</span>' +
-      '<span class="rp">' + esc(d.dir) + '</span>' +
-      '<span class="spacer"></span>' +
-      '<button class="icon-btn" title="Unregister repo" aria-label="Unregister ' + esc(d.name) + '">×</button>';
+    // NOT a Button(): `.icon-btn` is a standalone class, not a `.btn` variant, and Button()
+    // force-prefixes `btn ` — adopting it here would emit `btn icon-btn` and restyle the control.
+    const del = el("button", {
+      class: "icon-btn",
+      title: "Unregister repo",
+      "aria-label": "Unregister " + d.name,
+    }, "×");
+    const row = el("div", { class: "repo-row clickable", role: "button", tabindex: "0" }, [
+      el("span", { class: "ic", "aria-hidden": "true" }, "◆"),
+      el("span", { class: "nm" }, d.name),
+      el("span", { class: "rp" }, d.dir),
+      el("span", { class: "spacer" }),
+      del,
+    ]);
     const drillIn = () => {
       location.hash = "#/projects/" + encodeURIComponent(project.id) +
         "/workspaces/" + encodeURIComponent(repo.id);
@@ -581,7 +637,6 @@ function reposPanel(project, repos, wsById) {
     row.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); drillIn(); }
     });
-    const del = row.querySelector(".icon-btn");
     del.addEventListener("click", (e) => {
       e.stopPropagation(); // don't let the unregister click bubble to the row's drill-in
       unregisterRepo(project, repo, row);
