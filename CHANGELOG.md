@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.280] - 2026-07-09
+
 - **The front end's pure logic is split out of its DOM builders (RFC
   `docs/rfc-frontend-launchpad.md`, Phase 2).** The real seam in `public/` is pure-logic vs
   DOM-building, and it ran *through* five modules rather than between directories. Each now has a
