@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.250] - 2026-07-09
+
 - `docs/rfc-frontend-design-system.md` — ERRATA. Three factual claims in the signed-off RFC were
   disproven while building Phase 3 and are corrected in place, with an `Errata` block near the top
   recording what was wrong and who found it. (1) The inline-style count was **38, actually 52**: the
