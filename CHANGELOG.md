@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.253] - 2026-07-09
+
 ### Changed
 
 - **FE modernization P2 (step 2): extracted the chip + badge cluster into
