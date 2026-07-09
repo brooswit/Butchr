@@ -24,7 +24,7 @@
 import { el, esc } from "../core/dom.js";
 import { fmtDuration, projectTitle } from "../core/format.js";
 import { api, toast } from "../core/api.js";
-import { action } from "../core/action.js";
+import { action } from "../components/button.js";
 import { mount, render } from "../core/nav.js";
 import { pruneWorkCaches, workLeaves, workListPath } from "../core/work-graph.js";
 import { effStatus } from "../components/chips.js";

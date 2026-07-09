@@ -14,11 +14,15 @@
 // (`document` is touched only inside a CALLED function, via `el`), importing only from `core/`
 // and from its sibling components. It NEVER imports app.js — see the header of core/nav.js for
 // why that edge is fatal.
-import { el, esc } from "../core/dom.js";
+//
+// This module is fully NODE-RETURNING (RFC Phase 4): it writes no raw markup and does no manual
+// escaping. Its controls come from the shared Button, which subsumed the private `btn()` factory
+// this file used to carry — one of the two rival async-action-button implementations named in D6.
+import { el } from "../core/dom.js";
 import { fmtTime } from "../core/format.js";
 import { api, terminalToast, toast } from "../core/api.js";
-import { render } from "../core/nav.js";
-import { kindBadge } from "./chips.js";
+import { Button } from "./button.js";
+import { kindVisual } from "./chips.js";
 
 // The CTO agent's tri-state status, mapped from running/desired to a display label
 // and the matching cto-badge CSS class. Used by the workspace panel (its dashboard-card
@@ -29,6 +33,13 @@ export function ctoState(s) {
     cls: s.running ? "ok" : (s.desired ? "warn" : "off"),
   };
 }
+
+// Every control on this card shares one dance, and it is NOT action()'s default one: the old
+// private `btn()` re-enabled the button on success *before* re-rendering, re-rendered on failure
+// too, and toasted "failed" when an error carried no message. Those three opt-ins reproduce it
+// exactly — see components/button.js's `action` header. Do not drop them: the UI must stay
+// byte-identical through this conversion.
+const CTO_BTN = { renderOnError: true, restoreOnSuccess: true, errorFallback: "failed" };
 
 // Each workspace runs its OWN CTO agent (in that repo's root — its principal/dev
 // agent). This panel renders that workspace's CTO agent: a status line (running/
@@ -44,62 +55,83 @@ export async function ctoPanel(dirId) {
     return el("div", { class: "panel cto-card stacked" },
       el("small", { class: "muted" }, "CTO agent status unavailable"));
   }
-  const card = el("div", { class: "panel cto-card stacked" });
   const { state, cls: stateCls } = ctoState(s);
   const bits = [];
-  if (s.sessionId) bits.push(`session ${esc(s.sessionId.slice(0, 8))}`);
+  if (s.sessionId) bits.push(`session ${s.sessionId.slice(0, 8)}`);
   if (s.since) bits.push(`since ${fmtTime(s.since)}`);
   if (s.restarts) bits.push(`${s.restarts} restart${s.restarts === 1 ? "" : "s"}`);
   if (!s.enabled) bits.push("auto-start disabled");
-  card.innerHTML = `
-    <div class="row between">
-      <div>
-        <h2>${kindBadge("cto")} CTO agent <span class="cto-badge ${stateCls}">${state}</span></h2>
-        <div class="meta">${bits.map(esc).join(" · ") || "not started"}</div>
-        ${s.lastError ? `<div class="meta err">last error: ${esc(s.lastError)}</div>` : ""}
-      </div>
-      <div class="row cto-controls"></div>
-    </div>`;
-  const controls = card.querySelector(".cto-controls");
-  const btn = (label, cls, fn) => {
-    const b = el("button", { class: "btn " + cls }, label);
-    b.addEventListener("click", async () => {
-      b.disabled = true;
-      try { await fn(); } catch (e) { toast(e.message || "failed", true); }
-      finally { b.disabled = false; render(); }
-    });
-    return b;
-  };
+
+  // The kind badge is sourced from kindVisual() — the pure, DOM-free lookup behind chips.js's
+  // kindBadge() — rather than from kindBadge() itself, which still returns an HTML STRING and
+  // would need el()'s `html:` bridge to land here. Phase 4 converts the chip cluster to nodes in
+  // its own subtask; this markup then collapses onto that component. Same class, title, and text.
+  const kv = kindVisual("cto");
+  const badge = el("span", { class: "kind-badge kind-" + kv.cls, title: kv.label },
+    `${kv.glyph} ${kv.label}`);
+
+  const controls = el("div", { class: "row cto-controls" });
+  const card = el("div", { class: "panel cto-card stacked" },
+    el("div", { class: "row between" }, [
+      el("div", {}, [
+        el("h2", {}, [badge, " CTO agent ", el("span", { class: "cto-badge " + stateCls }, state)]),
+        // `bits` is joined into ONE string, which el() appends as a single createTextNode — so
+        // the per-bit escaping this replaced is not merely redundant, it is structurally
+        // impossible to need: no bit can ever be parsed as markup.
+        el("div", { class: "meta" }, bits.join(" · ") || "not started"),
+        s.lastError ? el("div", { class: "meta err" }, "last error: " + s.lastError) : null,
+      ]),
+      controls,
+    ]));
+
   if (s.running) {
-    controls.appendChild(btn("Open CTO terminal", "", async () => {
-      const r = await api("POST", base + "/terminal");
-      terminalToast(r);
+    controls.appendChild(Button({
+      label: "Open CTO terminal", ...CTO_BTN,
+      onAction: async () => {
+        const r = await api("POST", base + "/terminal");
+        terminalToast(r);
+      },
     }));
   }
   if (s.running || s.desired) {
-    controls.appendChild(btn("Restart", "ghost", async () => {
-      await api("POST", base + "/restart");
-      toast("CTO agent restarting (resuming session)");
+    controls.appendChild(Button({
+      label: "Restart", class: "ghost", ...CTO_BTN,
+      onAction: async () => {
+        await api("POST", base + "/restart");
+        toast("CTO agent restarting (resuming session)");
+      },
     }));
-    controls.appendChild(btn("Restart fresh", "ghost", async () => {
-      await api("POST", base + "/restart?fresh=1");
-      toast("CTO agent restarting with a fresh session");
+    controls.appendChild(Button({
+      label: "Restart fresh", class: "ghost", ...CTO_BTN,
+      onAction: async () => {
+        await api("POST", base + "/restart?fresh=1");
+        toast("CTO agent restarting with a fresh session");
+      },
     }));
-    controls.appendChild(btn("Stop", "ghost danger-outline", async () => {
-      await api("POST", base + "/stop");
-      toast("CTO agent stopped");
+    controls.appendChild(Button({
+      label: "Stop", class: "ghost danger-outline", ...CTO_BTN,
+      onAction: async () => {
+        await api("POST", base + "/stop");
+        toast("CTO agent stopped");
+      },
     }));
   } else {
-    controls.appendChild(btn("Start", "", async () => {
-      await api("POST", base + "/start");
-      toast("CTO agent starting");
+    controls.appendChild(Button({
+      label: "Start", ...CTO_BTN,
+      onAction: async () => {
+        await api("POST", base + "/start");
+        toast("CTO agent starting");
+      },
     }));
     // Opt the workspace into boot auto-start + supervision, and start it now.
     if (!s.enabled) {
-      controls.appendChild(btn("Enable", "ghost", async () => {
-        await api("PATCH", "/workspaces/" + dirId, { cto_enabled: true });
-        await api("POST", base + "/start");
-        toast("CTO agent enabled + starting");
+      controls.appendChild(Button({
+        label: "Enable", class: "ghost", ...CTO_BTN,
+        onAction: async () => {
+          await api("PATCH", "/workspaces/" + dirId, { cto_enabled: true });
+          await api("POST", base + "/start");
+          toast("CTO agent enabled + starting");
+        },
       }));
     }
   }

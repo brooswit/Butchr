@@ -27,7 +27,7 @@
 import { el, esc } from "../core/dom.js";
 import { projectTitle, repoDisplay } from "../core/format.js";
 import { api, terminalToast, toast } from "../core/api.js";
-import { action } from "../core/action.js";
+import { action } from "../components/button.js";
 import { mount, render } from "../core/nav.js";
 import { chip, kindBadge } from "../components/chips.js";
 import { openModal } from "../components/overlay.js";

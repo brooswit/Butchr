@@ -3,11 +3,10 @@
 // `document.body` and own their own dismissal (Escape + backdrop click), so a caller never
 // hand-rolls the backdrop/keydown dance.
 //
-// NOT here: `action()`, the async-action-button helper. It stays in app.js because its
-// `onDone` defaults to `render()` — moving it would make this module import app.js and close
-// a components/ -> app.js cycle. It is a BUTTON concern anyway (RFC D6), not an overlay one;
-// it lands in a components/button.js once Phase 4 introduces the missing Button and the
-// continuation stops being an app-level default.
+// NOT here: `action()`, the async-action-button helper. It is a BUTTON concern (RFC D6), not an
+// overlay one, and Phase 4 landed it in components/button.js alongside the Button it belongs to.
+// Its `onDone` defaults to `render()` — imported from core/nav.js, never from app.js, so that
+// the components/ -> app.js cycle stays closed. See that module's header.
 //
 // DOM-free at module load, like everything under components/: nothing here touches `document`
 // until a function is CALLED.

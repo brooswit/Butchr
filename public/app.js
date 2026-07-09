@@ -43,8 +43,8 @@ import { loadStateMeta, stateMetaLoaded } from "./core/state-meta.js";
 // that views can import `render` from a leaf instead of from this file. That inversion is what
 // keeps `views/ -> app.js` from ever existing — see core/nav.js's header for why it is fatal.
 import { mount, render, setRenderer } from "./core/nav.js";
-// core/action.js is no longer imported here either: confirmDeleteProject was its last caller in
-// this file and went with the projects views. work-graph.js holds the pure, DOM-free work-list/
+// components/button.js's `action()` is not imported here either: confirmDeleteProject was its
+// last caller in this file and went with the projects views. work-graph.js holds the pure, DOM-free work-list/
 // dependency-graph leaves the task, workspace, and pipeline views all share — likewise imported
 // only by those views.
 // `views/` holds one module per route: each owns its fetch → build → mount() entry point and

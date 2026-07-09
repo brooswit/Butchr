@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Front-end: the shared `Button` component lands, and the two rival async-action-button
+  implementations collapse into it** (RFC Phase 4, defect D6). New
+  `public/components/button.js` exports a node-returning `Button(props)` plus the `action()`
+  dance it owns. `public/core/action.js` is **deleted** (not shimmed) and its four importers —
+  `components/project-modals.js`, `views/workspace.js`, `views/projects.js`, `views/task.js` —
+  now import `action` from its new home under the same name. `components/cto-panel.js` drops its
+  private `btn()` factory and its `innerHTML` template for `el()` construction, so it now makes
+  **zero** `esc()` calls and **zero** raw-markup writes. The two dances differed in three
+  observable ways (re-render on failure; re-enable before the success re-render; an
+  `|| "failed"` toast fallback), so `action()` takes three documented flags —
+  `renderOnError`, `restoreOnSuccess`, `errorFallback` — that default to the generic behavior,
+  with the CTO card opting into its own. **The UI is byte-identical.**
+
 ## [0.9.265] - 2026-07-09
 
 ### Changed

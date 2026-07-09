@@ -9,7 +9,7 @@
 import { el, esc } from "../core/dom.js";
 import { api, toast } from "../core/api.js";
 import { repoDisplay } from "../core/format.js";
-import { action } from "../core/action.js";
+import { action } from "./button.js";
 import { render } from "../core/nav.js";
 import { openModal, openPicker } from "./overlay.js";
 

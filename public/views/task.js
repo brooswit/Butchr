@@ -51,7 +51,7 @@ import {
   rollupPanel,
 } from "../components/panel.js";
 import { backToWorkspace, mount, render } from "../core/nav.js";
-import { action } from "../core/action.js";
+import { action } from "../components/button.js";
 import {
   gatedSubtree,
   isCompleteStatus,
