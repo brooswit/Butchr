@@ -6,10 +6,55 @@
 > no build step does not depart from butchr identity, it *is* the ratified
 > policy (CONTRIBUTING §4).
 >
+> **Phases landed since sign-off:**
+> - **Phase 1 — shipped in 0.9.248.** `serveStatic` now 404s on a not-found path
+>   that has a file extension (SPA fallback kept for extensionless routes);
+>   `index.html` loads `app.js` as `<script type="module">`. **No front-end code
+>   moved.**
+> - **Phase 3 — shipped in 0.9.249.** `--space-1..6` added to `style.css`; all
+>   **49** static inline styles removed from `app.js`. The **3** dynamic
+>   width bars remain inline by design. Landed as explicit `.panel-title` /
+>   `.lede` / `.tight` / `.stacked` / `.mono` / `.field-row` classes rather than
+>   positional selectors (see §5, Phase 3).
+> - **Phases 2 and 4 remain open. Phase 5 remains deferred.**
+>
 > Every claim below is grounded in the tree at `main` @ 0.9.246, cited
 > `file:line`. Where the story brief and the code disagree, **the code wins and
-> I say so explicitly** (§1.1). Line numbers cited in §1.3 predate the
-> 0.9.245–246 dead-code sweep by a few lines; the counts are re-grounded.
+> I say so explicitly** (§1.1).
+>
+> ⚠ **All `file:line` citations in this document were accurate at 0.9.246 and
+> will drift** as later phases move code. They are provided as pointers, not
+> anchors — **the counts and the claims are what matter**, and those have been
+> re-grounded (see Errata).
+
+---
+
+## Errata (corrected 2026-07-08, post-Phase-3)
+
+Three claims in the original text were **wrong** — two counts and one framing.
+They were found by the Phase 3 build agent while implementing §3, and
+independently verified against `main` by the story leader. They are corrected in
+place throughout this document; the numbers you now read are the true ones.
+**The conclusions and the Option 0 recommendation are unaffected** — only these
+counts, and the framing of the `.field` decision, were wrong.
+
+1. **Inline-style count: 38 → 52.** The original figure came from
+   `grep 'style="'`, which is **blind to inline styles passed through `el()`'s
+   attrs object** — `el("div", { style: "margin-top:18px" })`. There were **52**
+   inline styles: 38 matching `style="` plus **14** matching `style: "`. Grep for
+   **both** forms.
+2. **Dynamic sites: 2 → 3**, so **static: 35 → 49.** The dynamic set is the two
+   `swim-track` bars *and* `rollup-bar-fill`.
+3. **The `.field` spacing decision had three values, not two.** The original text
+   missed the base rule `label.field { margin-bottom: 12px }` in `style.css`
+   (§1.3, §3).
+
+**Why error 1 mattered, and not just for tidiness.** **Nine of the fourteen
+hidden `el()` styles were `margin-top:18px`, and they were the *only* consumers
+of `--space-6` in `app.js`.** Had Phase 3 trusted the RFC's own grep, it would
+have minted `--space-6` and then left it with zero callers — **contradicting this
+RFC's own "no dead tokens" acceptance criterion using this RFC's own
+methodology.**
 
 ---
 
@@ -19,8 +64,8 @@ The brief asks whether butchr should adopt a component framework to fix a
 front-end described as "ad-hoc inline styles" with no shared CSS. **Grounding
 refutes that premise.** The styling layer is already good: a 1,312-line
 `public/style.css` with a **50-token custom-property system** and full dark
-theming, consumed by **280 `class="…"` sites** in `app.js` against only **38
-inline `style=`** (35 of which are trivial margin nudges; 2 are legitimately
+theming, consumed by **280 `class="…"` sites** in `app.js` against only **52
+inline styles** (49 of which are trivial margin nudges; 3 are legitimately
 dynamic progress-bar widths). There are **no hardcoded colors** in `app.js`.
 
 The real defects are different, and none of them is solved by a framework:
@@ -30,7 +75,7 @@ The real defects are different, and none of them is solved by a framework:
 | D1 | `app.js` is **one 4,379-line classic script** — no modules, so no file boundaries exist to hang components on. `renderTask` alone is ~565 lines | `index.html:63` loads `<script src="/app.js">` (not `type="module"`) |
 | D2 | **Two incompatible authoring models** that cannot compose: **14 helpers return HTML strings**, ~22 return **DOM nodes** | `kindBadge`→string (`app.js:287`) vs `metricCard`→`el()` (`app.js:3091`) |
 | D3 | The string path makes escaping **opt-in**: **126 hand-written `esc()` calls** guard agent-authored text | 40 `.innerHTML =` + 16 `{html:}` = **56 raw-markup injection sites** |
-| D4 | Tokens cover color/radius/font but **not spacing or typography scale** — which is exactly why the 38 inline nudges exist | `:root` has `--radius-sm/md/lg` but no `--space-*` |
+| D4 | Tokens cover color/radius/font but **not spacing or typography scale** — which is exactly why the 52 inline styles exist | `:root` has `--radius-sm/md/lg` but no `--space-*` |
 | D5 | SSE does a **wholesale re-render**; a bespoke `captureUiState`/`restoreUiState` hack exists solely to stop it eating scroll, focus, and half-typed text | `app.js:4262` → `refreshSoon()` → `mount()` clears `innerHTML` |
 | D6 | **No `Button` component at all** — ~56 hand-built buttons, and *two rival* async-action-button implementations | `ctoPanel`'s local `btn()` (`app.js:562-570`) duplicates the generic `action()` (`app.js:645-655`) |
 
@@ -57,7 +102,8 @@ turns on them:
    a documented, LaunchPad-derived token system with light + dark themes
    (`style.css:10` `:root`, `style.css:87` `html[data-theme="dark"]`).
 2. **"ad-hoc inline styles"** — inline styling is *marginal*, not dominant:
-   280 `class="` vs 38 `style="`, 1 `.style.` assignment, 1 `var(--` in JS, and
+   280 `class="` vs **52 inline styles** (38 `style="` + 14 `style: "` inside
+   `el()` attrs — see Errata), 1 `.style.` assignment, 1 `var(--` in JS, and
    **zero** hardcoded hex colors beyond three `#fff`. The style layer is
    already centralized.
 3. **"patterns that beg to be components"** — many already *are* components,
@@ -138,10 +184,15 @@ boundary, the same concept gets re-implemented per site:
   **ten class families** for one "colored status label" concept: `chip`,
   `count-pill`, `ws-bucket`, `cto-badge`, `ci-badge`, `conf-badge`,
   `kind-badge`, `stranded-kind`, `git-badge`, `disk-warn-badge`.
-- **Same `field`, two paddings:** `margin-bottom:6px` (`1236, 2380, 2456, 2479,
-  2516, 3351, 3888`) vs `margin-bottom:8px` (`4062, 4069`). And *three* ways to
-  zero a heading margin: `style="margin-top:0"` (9×), `style="margin:0"` (`555`),
-  and no inline style at all (`1003`, `3565`).
+- **Same `field`, *three* paddings — not two.** There is a **base rule**,
+  `label.field { margin-bottom: 12px }` (`style.css:954`), which the original
+  draft of this RFC missed (see Errata). The real distribution is **5 bare sites
+  inheriting 12px**, **6 inline at `margin-bottom:6px`**, and **2 inline at
+  `margin-bottom:8px`**. Naively "standardizing on 6px" by rewriting the base
+  rule would have **silently moved 5 sites from 12px to 6px** — an undocumented
+  visual regression. And *three* ways to zero a heading margin:
+  `style="margin-top:0"` (9×), `style="margin:0"` (`555`), and no inline style at
+  all (`1003`, `3565`).
 
 `collapsible()` (`app.js:378`) is the one genuinely reusable component in the
 file — stateful, returns a handle `{panel, head, caret, setOpen}`. It is the
@@ -226,11 +277,23 @@ families (`--font --mono`). **Missing: a spacing scale and a type scale.** Add:
 --space-4: 10px; --space-5: 12px; --space-6: 18px;
 ```
 
-These six values are not invented — they are the *observed* margins in the 38
+These six values are not invented — they are the *observed* margins in the 52
 inline styles (`4px 6px 8px 10px 12px 18px`, from `grep -oE '[0-9]+px'`).
-Introducing them lets all 35 non-dynamic inline nudges become classes and
-**deletes the inline-style category** (the 2 progress-bar `width:${pct}%` sites
+Introducing them lets all 49 non-dynamic inline styles become classes and
+**deletes the inline-style category** (the 3 progress-bar `width:${pct}%` sites
 must stay inline — they are genuinely dynamic, and that is correct).
+
+⚠ **Grep both forms when enumerating these.** `grep 'style="'` misses the 14
+styles passed through `el()`'s attrs object (`style: "…"`). Nine of those are
+`margin-top:18px` and are the **only** consumers of `--space-6` — miss them and
+the token lands dead. See Errata.
+
+**`.field` — keep the 12px base, add a modifier.** Do *not* rewrite the base rule
+to 6px: 5 sites rely on the 12px inherited default (§1.3). The correct shape is
+`label.field { margin-bottom: var(--space-5) }` (12px, unchanged) plus a
+`label.field.tight { margin-bottom: var(--space-2) }` (6px) applied to the 8-site
+tight cohort. **The only intended visual delta is the two Add-workspace fields
+tightening from 8px to 6px.** (This is what shipped in 0.9.249.)
 
 **Component library.** Formalize the ~29 existing helpers into a named set with
 one uniform signature (`(props) => HTMLElement`):
@@ -307,17 +370,28 @@ dashboard*, so a dark period is unacceptable. Every phase below leaves the app
 fully working and is independently shippable and revertible. Ordering is by
 **dependency, then by risk-adjusted payoff.**
 
-- **Phase 1 — Make modules possible.** Fix `serveStatic` to 404 on
-  extensioned misses (§4); flip `index.html` to `type="module"`. **No move of
-  code yet.** Ships alone, provably inert. *This is the only phase with a
+- **Phase 1 — Make modules possible.** *(Shipped 0.9.248.)* Fix `serveStatic` to
+  404 on extensioned misses (§4); flip `index.html` to `type="module"`. **No move
+  of code yet.** Ships alone, provably inert. *This is the only phase with a
   server-side change.*
 - **Phase 2 — Split by seam, not by size.** Extract in dependency order:
   `tokens/esc/el` + `api.js` (fetch wrappers) → `components/` → `views/`
   (one module per `render*` view). One view per commit. `app.js` becomes a thin
   entry that imports and registers routes. Each commit: UI byte-identical.
-- **Phase 3 — Finish the tokens.** Add `--space-*` + type scale to
-  `style.css`; convert the 35 static inline nudges to classes. Leaves the 2
-  dynamic width sites alone. Pure CSS + markup; no logic touched.
+- **Phase 3 — Finish the tokens.** *(Shipped 0.9.249.)* Add `--space-*` + type
+  scale to `style.css`; convert the 49 static inline styles to classes. Leaves
+  the 3 dynamic width sites alone. Pure CSS + markup; no logic touched.
+  Two rules emerged while building, and hold for Phase 4:
+  - **A spacing token needs a *cohort* of callers.** Single-caller values stay
+    literal inside a named component rule rather than minting a token for one
+    consumer each — `padding:14px` (a modal's empty-list row) and
+    `margin-top:32px` (the workspace danger zone) did **not** become
+    `--space-7`/`--space-8`.
+  - **Do NOT use positional selectors** (`:first-child`, `:first-of-type`) for
+    component styling. They encode "happens to be first" as a contract, and
+    **Phases 2 and 4 move nodes** — they would break silently, and there is
+    **zero front-end test coverage** to catch it. Use explicit classes
+    (`.panel-title`, `.lede`, `.tight`, `.stacked`, `.mono`, `.field-row`).
 - **Phase 4 — Unify on nodes, one component at a time.** Convert the 12
   string helpers to `(props) => HTMLElement`, innermost-first (Badge, Chip,
   Pill → Button → Card, Panel → Modal). Each conversion deletes its `esc()`

@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `docs/rfc-frontend-design-system.md` — ERRATA. Three factual claims in the signed-off RFC were
+  disproven while building Phase 3 and are corrected in place, with an `Errata` block near the top
+  recording what was wrong and who found it. (1) The inline-style count was **38, actually 52**: the
+  original `grep 'style="'` was blind to styles passed through `el()`'s attrs object (`style: "…"`),
+  hiding 14 — nine of which were `margin-top:18px` and the *only* consumers of `--space-6`, so the
+  RFC's own grep would have violated its own "no dead tokens" criterion. (2) **Three** inline styles
+  are dynamic, not two (both `swim-track` bars plus `rollup-bar-fill`), so **49** were static, not 35.
+  (3) The `.field` spacing decision was framed as two values (6px vs 8px) but had **three** — it
+  missed the `label.field { margin-bottom: 12px }` base rule, and naively standardizing on 6px would
+  have silently regressed 5 sites from 12px. The status block now records Phase 1 (0.9.248) and
+  Phase 3 (0.9.249) as shipped, Phases 2/4 open, Phase 5 deferred, and notes that all `file:line`
+  citations were accurate at 0.9.246 and may drift. Phase 3's write-up also records the two rules
+  that emerged: a spacing token needs a *cohort* of callers (single-caller values stay literal), and
+  never use positional selectors for component styling (Phases 2/4 move nodes; no FE test coverage
+  catches the break). The RFC's conclusions and its Option 0 recommendation are unchanged. Docs only.
+  Story st-b1ca22e5.
+
 ## [0.9.249] - 2026-07-09
 
 - `public/style.css` gains a SPACING scale (`--space-1` 4px … `--space-6` 18px) alongside the
