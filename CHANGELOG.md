@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.270] - 2026-07-09
+
 - **Front-end (RFC Phase 4):** `public/views/projects.js` now builds its DOM entirely with `el()` —
   the PROJECTS overview card, the managed CEO-agent card, the Repos rows, the Initiatives panel,
   the breadcrumbs and the delete-confirm modal. Removes all 16 `esc()` calls, both `el({html:})`
