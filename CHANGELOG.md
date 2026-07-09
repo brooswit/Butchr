@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.259] - 2026-07-09
+
 ### Changed
 
 - Front-end module split (RFC Phase 2): extracted the leaves the three big views share out of
