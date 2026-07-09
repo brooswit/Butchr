@@ -59,7 +59,7 @@ function statusBars(byStatus) {
       style: `width:${Math.max(2, Math.round((n / max) * 100))}%`,
     });
     return el("div", { class: "status-bar-row" }, [
-      el("span", { class: "sb-label", html: chip(status) }),
+      el("span", { class: "sb-label" }, chip(status)),
       el("div", { class: "sb-track" }, [fill]),
       el("span", { class: "sb-count" }, String(n)),
     ]);

@@ -27,7 +27,9 @@
 //
 // `stopLiveOutput` is exported because the poll timer must not survive a navigation: renderRoute
 // clears it up front on every route change, and renderTask restarts it if the task is still live.
-import { el, esc } from "../core/dom.js";
+// `htmlOf` is the TRANSITIONAL bridge that lets the innerHTML templates below consume the
+// now-node-returning chip components. A later subtask converts those templates and drops it.
+import { el, esc, htmlOf } from "../core/dom.js";
 import { fmtDuration, fmtTime } from "../core/format.js";
 import { api, terminalToast, toast } from "../core/api.js";
 // TERMINAL_STATUSES is an `export let` reassigned once /api/state-meta lands; the ES live binding
@@ -154,8 +156,8 @@ function renderTimeline(events) {
   const list = el("div", { class: "timeline" });
   for (const ev of events) {
     const transition = ev.from_status && ev.from_status !== ev.to_status
-      ? `${chip(ev.from_status)}<span class="tl-arrow">→</span>${chip(ev.to_status)}`
-      : chip(ev.to_status);
+      ? `${htmlOf(chip(ev.from_status))}<span class="tl-arrow">→</span>${htmlOf(chip(ev.to_status))}`
+      : htmlOf(chip(ev.to_status));
     const row = el("div", { class: "tl-event" });
     row.innerHTML = `
       <span class="tl-dot ${esc(ev.to_status)}"></span>
@@ -394,9 +396,7 @@ export async function renderTask(id) {
     term.addEventListener("click", () => openTaskTerminal(t.id, term));
     headerRight.appendChild(term);
   }
-  headerRight.appendChild(el("div", {
-    html: taskChips(t, { plan: true, kind: true }),
-  }));
+  headerRight.appendChild(el("div", {}, taskChips(t, { plan: true, kind: true })));
   // Abort is available from any non-terminal state (TERMINAL_STATUSES comes from the
   // server meta), EXCEPT `rolling_back` — a mechanical merge in flight with no live
   // agent to stop.
@@ -430,8 +430,8 @@ export async function renderTask(id) {
   const meta = el("div", { class: "panel" });
   meta.innerHTML = `<div class="meta-grid">
     <div class="k">status</div><div class="v">${esc(statusLabel(effStatus(t)))}</div>
-    ${t.liveness ? `<div class="k">liveness</div><div class="v" title="${esc(t.liveness.evidence)}">${livenessChip(t.liveness)}</div>` : ""}
-    ${Array.isArray(t.tags) && t.tags.length ? `<div class="k">tags</div><div class="v">${tagChips(t)}</div>` : ""}
+    ${t.liveness ? `<div class="k">liveness</div><div class="v" title="${esc(t.liveness.evidence)}">${htmlOf(livenessChip(t.liveness))}</div>` : ""}
+    ${Array.isArray(t.tags) && t.tags.length ? `<div class="k">tags</div><div class="v">${htmlOf(tagChips(t))}</div>` : ""}
     ${Array.isArray(t.allowlist) && t.allowlist.length ? `<div class="k">allowlist</div><div class="v">${t.allowlist.map((a) => `<code>${esc(a)}</code>`).join(" ")}</div>` : ""}
     <div class="k">priority</div><div class="v">${esc(String(t.priority ?? 0))}</div>
     <div class="k">created</div><div class="v">${esc(t.created_at || "—")}</div>

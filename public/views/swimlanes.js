@@ -17,7 +17,9 @@
 // be fenced by `<test-extract:...>` sentinels and eval'd out of the classic app.js script with
 // `new Function`, because a classic script could not be imported. That harness is gone — do not
 // reintroduce a sentinel here.
-import { el, esc, svg } from "../core/dom.js";
+// `htmlOf` is the TRANSITIONAL bridge letting the innerHTML templates below consume the
+// now-node-returning kindBadge. A later subtask converts those templates and drops it.
+import { el, esc, htmlOf, svg } from "../core/dom.js";
 import { effStatus, kindBadge } from "../components/chips.js";
 import {
   graphChildOf,
@@ -188,7 +190,7 @@ function swimLane(story, byId, allIds, repaint) {
   const title = laneTitle(story.brief, story.id);
   const fullTitle = story.brief || story.id;
   const hd = el("div", { class: "swim-hd", html:
-    `<span class="swim-kind">${kindBadge("node")}</span>` +
+    `<span class="swim-kind">${htmlOf(kindBadge("node"))}</span>` +
     `<span class="swim-title" title="${esc(fullTitle)}">${esc(title)}</span>` +
     `<span class="swim-laneid">${esc(story.id)}</span>` +
     `<div class="swim-meta"><span class="chip ${esc(st)}">${esc(st)}</span>${storyLifecycleChip(story)}` +

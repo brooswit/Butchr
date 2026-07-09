@@ -13,7 +13,7 @@
 // DOM-free at module load, like everything under components/: nothing here touches `document`
 // or `localStorage` until a function is CALLED, so this module imports cleanly under a
 // non-browser test runner (test/cli-helpers.test.ts imports it directly).
-import { el, esc } from "../core/dom.js";
+import { el } from "../core/dom.js";
 import { chip, effStatus } from "./chips.js";
 
 // ---------- collapsible panel ----------
@@ -158,12 +158,14 @@ export function block(heading, text, parent) {
 // One ".blocker-row": the id (linked to its task) plus an optional status chip, with
 // a "dead" flag (terminal blocker that will never merge) adding the class + warning.
 // Pass a falsy `status` to omit the chip (an id-only row).
+//
+// Built entirely with el() now that chip() returns a node: no innerHTML write, and escaping is
+// structural (el() text children go through createTextNode, setAttribute takes a raw value).
 export function blockerRow(id, status, { dead = false } = {}) {
-  const row = el("div", { class: "blocker-row" + (dead ? " dead" : "") });
-  row.innerHTML = `<a class="bk-id" href="#/task/${esc(id)}">${esc(id)}</a>`
-    + (status ? chip(status) : "")
-    + (dead ? '<span class="bk-dead">will never merge — edit blocked_by to proceed</span>' : "");
-  return row;
+  const kids = [el("a", { class: "bk-id", href: "#/task/" + id }, id)];
+  if (status) kids.push(chip(status));
+  if (dead) kids.push(el("span", { class: "bk-dead" }, "will never merge — edit blocked_by to proceed"));
+  return el("div", { class: "blocker-row" + (dead ? " dead" : "") }, kids);
 }
 
 // The shared scaffold behind the task-detail dependency panels (blocked-by,

@@ -17,6 +17,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Front-end Phase 4 (RFC §5): the chip/badge cluster returns NODES, not HTML strings.**
+  `chip`, `kindBadge`, `taskChips`, `tagChips`, `responderChip` and `livenessChip` in
+  `public/components/chips.js` are now `(props) => Node` components built with `el()`, so
+  escaping is structural (`createTextNode`) instead of a hand-written `esc()` call. `taskChips`
+  returns a `DocumentFragment` preserving the exact asymmetric literal spacing between sibling
+  chips; `tagChips`/`responderChip` return `null` (was `""`) when empty. The pure token/data
+  helpers (`kindVisual`, `KIND_VISUAL`, `effStatus`, `awaitedLabel`, `feedbackStepLabel`,
+  `AWAITED_LABEL`) are unchanged. Rendered DOM is unchanged across the dashboard, Pipeline,
+  task detail, metrics and projects views.
+- `components/panel.js`'s `blockerRow` is now built entirely with `el()` — dropping its
+  `innerHTML` write and its two `esc()` calls.
+- `views/metrics.js` and `views/task.js` each drop an `el()` `{html:}` bridge, appending the
+  chip node directly.
+
+### Added
+- `htmlOf(node)` in `public/core/dom.js` — a **transitional** serializer letting call sites that
+  are still `innerHTML` template literals consume a node-returning component. It drops event
+  listeners, so it is valid only for listener-free presentational nodes. Scheduled for deletion
+  together with `esc()` and el()'s `html:` branch once both reach zero callers.
+- `test/dom-stub.ts` — a synchronous, zero-dependency `withDom(fn)` `document` stub for the bun
+  test runner, preserving the `typeof document === "undefined"` guard that proves no `public/`
+  module touches the DOM at module load. No new dependency (RFC Option 0).
+
 ## [0.9.266] - 2026-07-09
 
 ### Changed

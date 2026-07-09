@@ -42,3 +42,24 @@ export function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
   );
 }
+
+// ⚠ TRANSITIONAL — SCHEDULED FOR DELETION. Serializes a node (or DocumentFragment) to an HTML
+// string, so a caller that is STILL an innerHTML template literal can consume a component that
+// has already been converted to return a NODE. It exists only to let Phase 4 of the RFC convert
+// components innermost-first without rewriting every call site in the same commit
+// (docs/rfc-frontend-design-system.md §5, "Phase 4"). The FINAL subtask of this story deletes
+// `htmlOf`, `esc`, and el()'s `html:` branch together, once all three hit zero callers. Do not
+// add a NEW caller — convert the call site to append the node instead.
+//
+// It DROPS EVENT LISTENERS: addEventListener registrations don't survive serialization, so this
+// is only ever valid for listener-free PRESENTATIONAL nodes (which every chip is).
+//
+// Note on "byte-identical": the guarantee is the rendered DOM, not the serialized bytes. esc()
+// escapes an apostrophe to `&#39;`, whereas the innerHTML serializer leaves `'` literal — so a
+// free-form string (e.g. a tag containing an apostrophe) serializes to different BYTES through
+// htmlOf while producing an IDENTICAL DOM. That difference is expected. Do not chase it.
+export function htmlOf(node) {
+  const box = document.createElement("div");
+  box.appendChild(node);
+  return box.innerHTML;
+}

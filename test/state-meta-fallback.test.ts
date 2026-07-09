@@ -18,6 +18,9 @@ import { DEFAULT_STATE_META, statusSetsFrom } from "../public/core/state-meta.js
 // AFTER the tables were populated, and a `const {AGENT_TYPE} = ...` snapshot regression in
 // chips.js would sail straight through. See the live-binding assertion below.
 import { taskChips } from "../public/components/chips.js";
+// taskChips returns a DocumentFragment now, so it needs a `document`. withDom is a synchronous,
+// zero-dependency stub that restores `globalThis.document` in a finally — see test/dom-stub.ts.
+import { withDom } from "./dom-stub.ts";
 
 // The cases that stand in for a FAILED / empty /api/state-meta response. loadStateMeta()
 // passes DEFAULT_STATE_META on the catch path; statusSetsFrom also falls back internally
@@ -96,11 +99,21 @@ test("core/state-meta.js loads DOM-free, and applyStateMeta propagates to import
   //     above) reads AGENT_TYPE / stateKind at CALL time. A regression to
   //     `const {AGENT_TYPE} = ...` there would snapshot the empty pre-load table and silently
   //     drop the agent-type text from every status chip.
-  const running = taskChips({ work_kind: "leaf", status: "in_progress" }, { kind: true });
-  expect(running).toContain("state-kind-agent");
-  expect(running).toContain("workspace-agent is running");
-  // A feedback state names the awaited artifact instead of an agent type.
-  const review = taskChips({ work_kind: "leaf", status: "in_review" }, { kind: true });
-  expect(review).toContain("state-kind-feedback");
-  expect(review).toContain("diff review");
+  //
+  //     taskChips builds NODES, so this asserts on structure: the state-kind chip is the LAST
+  //     element of the returned fragment for these inputs, its class carries the kind and its
+  //     `title` carries the agent-type / awaited-artifact text that AGENT_TYPE feeds.
+  const stateKindChip = (t: any) => {
+    const kids = (taskChips(t, { kind: true }) as any).children;
+    return kids[kids.length - 1];
+  };
+  withDom(() => {
+    const running = stateKindChip({ work_kind: "leaf", status: "in_progress" });
+    expect(running.className).toContain("state-kind-agent");
+    expect(running.getAttribute("title")).toContain("workspace-agent is running");
+    // A feedback state names the awaited artifact instead of an agent type.
+    const review = stateKindChip({ work_kind: "leaf", status: "in_review" });
+    expect(review.className).toContain("state-kind-feedback");
+    expect(review.textContent).toContain("diff review");
+  });
 });

@@ -17,8 +17,14 @@
 // mutate module state shared across the whole `bun test` process and break
 // test/state-meta-fallback.test.ts's pre-load assertions. The live-binding guard for
 // taskChips -> AGENT_TYPE lives there instead, alongside the applyStateMeta call it needs.
+//
+// kindBadge/taskChips now return NODES (Phase 4 of the RFC), so every call is wrapped in
+// withDom() — a synchronous, zero-dependency `document` stub (see test/dom-stub.ts for WHY it
+// is hand-rolled and why it must never go async). The assertions moved from substring-matching
+// HTML to STRUCTURE (className / textContent), which is what they were reaching for all along.
 import { expect, test } from "bun:test";
 import { KIND_VISUAL, kindBadge, kindVisual, taskChips } from "../public/components/chips.js";
+import { withDom } from "./dom-stub.ts";
 
 test("KIND_VISUAL maps the six known kinds (2 work-item + 4 agent)", () => {
   expect(Object.keys(KIND_VISUAL).sort()).toEqual(["build", "ceo", "cto", "leader", "leaf", "node"]);
@@ -39,13 +45,17 @@ test("KIND_VISUAL maps the six known kinds (2 work-item + 4 agent)", () => {
 });
 
 test("kindBadge renders the mapped label + cssClass for each known kind", () => {
-  for (const [k, v] of Object.entries(KIND_VISUAL)) {
-    const html = kindBadge(k);
-    expect(html).toContain(`kind-${v.cls}`);
-    expect(html).toContain(v.label);
-    expect(html).toContain(v.glyph);
-    expect(html.startsWith("<span")).toBe(true);
-  }
+  withDom(() => {
+    for (const [k, v] of Object.entries(KIND_VISUAL)) {
+      const node = kindBadge(k);
+      expect(node.tagName).toBe("span");
+      expect(node.className).toContain(`kind-${v.cls}`);
+      expect(node.className).toContain("kind-badge");
+      expect(node.getAttribute("title")).toBe(v.label);
+      expect(node.textContent).toContain(v.label);
+      expect(node.textContent).toContain(v.glyph);
+    }
+  });
 });
 
 test("kindVisual falls back to a generic neutral badge for an UNKNOWN kind", () => {
@@ -56,44 +66,87 @@ test("kindVisual falls back to a generic neutral badge for an UNKNOWN kind", () 
   expect(v.label).toBe("REPO");
   expect(v.glyph.length).toBeGreaterThan(0);
 
-  const html = kindBadge("project");
-  expect(html).toContain("kind-unknown");
-  expect(html).toContain("PROJECT");
+  withDom(() => {
+    const node = kindBadge("project");
+    expect(node.className).toContain("kind-unknown");
+    expect(node.textContent).toContain("PROJECT");
+  });
 });
 
 test("kindBadge never throws on empty / null / undefined kinds", () => {
-  for (const k of ["", null as any, undefined as any]) {
-    const html = kindBadge(k);
-    expect(html).toContain("kind-unknown");
-    expect(html.startsWith("<span")).toBe(true);
-  }
+  withDom(() => {
+    for (const k of ["", null as any, undefined as any]) {
+      const node = kindBadge(k);
+      expect(node.tagName).toBe("span");
+      expect(node.className).toContain("kind-unknown");
+    }
+  });
 });
 
 test("a node routed through kindBadge renders STORY, not TASK", () => {
   // The taskChips() choke point renders BOTH finished tasks ('leaf') AND finished stories
   // ('node') via finishedList(), so its badge must follow the item's authoritative kind —
   // a 'node' must read STORY. (Mirrors what taskChips does: kindBadge(t.work_kind).)
-  const nodeBadge = kindBadge("node");
-  expect(nodeBadge).toContain("kind-node");
-  expect(nodeBadge).toContain("STORY");
-  expect(nodeBadge).not.toContain("TASK");
+  withDom(() => {
+    const nodeBadge = kindBadge("node");
+    expect(nodeBadge.className).toContain("kind-node");
+    expect(nodeBadge.textContent).toContain("STORY");
+    expect(nodeBadge.textContent).not.toContain("TASK");
+  });
 });
 
 test("taskChips keys its type badge off the authoritative work_kind (regression guard)", () => {
   // Regression guard for the finished-story mislabel: taskChips must badge the item by its
   // work_kind, NOT a hardcoded 'leaf' (which would badge a finished STORY as '▪ TASK').
   // This used to be a source-level regex over app.js; now that chips.js is importable we
-  // assert on the RENDERED OUTPUT, which is what actually mattered all along.
-  const story = taskChips({ work_kind: "node", status: "done" });
-  expect(story).toContain("kind-node");
-  expect(story).toContain("STORY");
-  expect(story).not.toContain("kind-leaf");
+  // assert on the RENDERED STRUCTURE, which is what actually mattered all along.
+  //
+  // taskChips returns a DocumentFragment whose FIRST element is always the kind badge.
+  const badgeOf = (t: any) => (taskChips(t) as any).children[0];
 
-  const task = taskChips({ work_kind: "leaf", status: "merged" });
-  expect(task).toContain("kind-leaf");
-  expect(task).toContain("TASK");
-  expect(task).not.toContain("kind-node");
+  withDom(() => {
+    const story = badgeOf({ work_kind: "node", status: "done" });
+    expect(story.className).toContain("kind-node");
+    expect(story.textContent).toContain("STORY");
+    expect(story.className).not.toContain("kind-leaf");
 
-  // An item with no work_kind lands on the neutral fallback rather than silently reading TASK.
-  expect(taskChips({ status: "merged" })).toContain("kind-unknown");
+    const task = badgeOf({ work_kind: "leaf", status: "merged" });
+    expect(task.className).toContain("kind-leaf");
+    expect(task.textContent).toContain("TASK");
+    expect(task.className).not.toContain("kind-node");
+
+    // An item with no work_kind lands on the neutral fallback rather than silently reading TASK.
+    expect(badgeOf({ status: "merged" }).className).toContain("kind-unknown");
+  });
+});
+
+test("taskChips preserves the ASYMMETRIC literal spaces between sibling chips", () => {
+  // The separators are real text nodes, and they are NOT uniform: the kind badge and the
+  // plan-preview chip carry a TRAILING space; the state-kind, conflict, priority and released
+  // chips carry a LEADING one; the status chip carries neither. Dropping any of them silently
+  // changes the rendered spacing, and no other test would notice. Assert the exact interleave.
+  withDom(() => {
+    const f: any = taskChips(
+      { work_kind: "leaf", status: "merged", plan_preview: 1, conflict: 1, priority: 3, released_version: "0.9.1" },
+      { plan: true },
+    );
+    const shape = f.childNodes.map((n: any) =>
+      n.nodeType === 3 ? JSON.stringify(n.textContent) : n.className,
+    );
+    expect(shape).toEqual([
+      "kind-badge kind-leaf",
+      '" "',
+      "chip plan",
+      '" "',
+      "chip merged",
+      '" "',
+      "chip aborted",
+      '" "',
+      "chip priority",
+      '" "',
+      "chip released",
+    ]);
+    // …and the whole cluster reads with single spaces between every chip.
+    expect(f.textContent).toBe("▪ TASK plan-preview merged conflict prio 3 v0.9.1");
+  });
 });

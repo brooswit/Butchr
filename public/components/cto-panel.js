@@ -63,9 +63,9 @@ export async function ctoPanel(dirId) {
   if (!s.enabled) bits.push("auto-start disabled");
 
   // The kind badge is sourced from kindVisual() — the pure, DOM-free lookup behind chips.js's
-  // kindBadge() — rather than from kindBadge() itself, which still returns an HTML STRING and
-  // would need el()'s `html:` bridge to land here. Phase 4 converts the chip cluster to nodes in
-  // its own subtask; this markup then collapses onto that component. Same class, title, and text.
+  // kindBadge() — and rebuilt inline here. kindBadge() now returns a NODE and would drop straight
+  // in; collapsing this onto it is a follow-up, not this subtask's business. Same class, title,
+  // and text either way.
   const kv = kindVisual("cto");
   const badge = el("span", { class: "kind-badge kind-" + kv.cls, title: kv.label },
     `${kv.glyph} ${kv.label}`);

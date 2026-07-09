@@ -24,7 +24,9 @@
 //
 // DOM-free at module load: `document` is touched only inside a CALLED function, exactly like
 // views/metrics.js, views/workspace.js and views/swimlanes.js.
-import { el, esc } from "../core/dom.js";
+// `htmlOf` is the TRANSITIONAL bridge letting the innerHTML templates below consume the
+// now-node-returning chip / kindBadge. A later subtask converts those templates and drops it.
+import { el, esc, htmlOf } from "../core/dom.js";
 import { projectTitle, repoDisplay } from "../core/format.js";
 import { api, terminalToast, toast } from "../core/api.js";
 import { action } from "../components/button.js";
@@ -261,7 +263,7 @@ function buildCeoCard(projectId, s) {
   const card = el("div", { class: "panel ceo-card" });
   card.innerHTML = `
     <div class="panel-head">
-      <h2>${kindBadge("ceo")} CEO agent</h2>
+      <h2>${htmlOf(kindBadge("ceo"))} CEO agent</h2>
       <span class="spacer"></span>
       <span class="chip ${pill.cls}"${pill.title ? ` title="${esc(pill.title)}"` : ""}>${esc(pill.label)}</span>
     </div>
@@ -514,7 +516,7 @@ function initiativeMarkup(init, wsById) {
     const brief = c.brief && String(c.brief).trim();
     return '<div class="init-target">' +
         '<span class="tr">' + esc(d.name) + '</span>' +
-        chip(c.status) +
+        htmlOf(chip(c.status)) +
         (brief ? '<span class="ibr">' + esc(brief) + '</span>' : "") +
       '</div>';
   }).join("");
