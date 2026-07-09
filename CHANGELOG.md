@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.283] - 2026-07-09
+
 ### Fixed
 
 - **Phantom-release guard no longer false-positives on renamed files.** The guard compares a
