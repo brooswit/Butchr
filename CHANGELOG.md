@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.246] - 2026-07-09
+
 ### Removed
 
 - **`tasks.output_snapshot` is retired — butchr no longer stores the agent's run-log blob.**
