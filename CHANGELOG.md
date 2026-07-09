@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix: `serveStatic` returns a real 404 for a missing *file* (a basename containing `.`) instead of
+  falling through to `index.html`; extensionless route-like paths keep the SPA fallback and the `..`
+  403 guard is unchanged. A `200 text/html` answer to a missing `.js` is an opaque MIME error under
+  ES modules.
+- `public/index.html` loads the app as an ES module (`<script type="module" src="/app.js">`); no
+  front-end code moved. Phase 1 of `docs/rfc-frontend-design-system.md` (story st-b1ca22e5).
+
 ## [0.9.247] - 2026-07-09
 
 - docs: add the signed-off front-end components/consistency RFC (docs/rfc-frontend-design-system.md, story st-b1ca22e5).

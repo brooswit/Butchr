@@ -332,12 +332,18 @@ function sseResponse(): Response {
 }
 
 // ---- static files ----
-async function serveStatic(pathname: string): Promise<Response> {
+export async function serveStatic(pathname: string): Promise<Response> {
   let rel = pathname === "/" ? "/index.html" : pathname;
   // prevent path traversal
   if (rel.includes("..")) return new Response("forbidden", { status: 403 });
   const file = Bun.file(join(PUBLIC_DIR, rel));
   if (await file.exists()) return new Response(file);
+  // A missing FILE must 404, never fall through to index.html: under
+  // <script type="module"> a mistyped import path that answers 200 text/html
+  // surfaces as an opaque MIME-type error pointing nowhere near the typo.
+  // Only extensionless (route-like) paths get the SPA fallback.
+  const base = rel.slice(rel.lastIndexOf("/") + 1);
+  if (base.includes(".")) return new Response("not found", { status: 404 });
   // SPA fallback
   const index = Bun.file(join(PUBLIC_DIR, "index.html"));
   if (await index.exists()) return new Response(index);
