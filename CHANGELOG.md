@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.272] - 2026-07-09
+
 - **Front-end Phase 4 (RFC §5): `public/views/task.js` builds DOM, not HTML strings — the last
   conversion.** The task detail's thirteen `innerHTML` templates (needs-your-input card, timeline,
   transcript row, crumbs + header, metadata grid, the two aborted panels, the major-version confirm
