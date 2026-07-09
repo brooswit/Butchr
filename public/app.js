@@ -2,7 +2,9 @@
 "use strict";
 
 // `core/` holds dependency-free leaves — nothing there imports this file. Each is DOM-free
-// at module load, so `app` below remains the only top-level `document` access in the app.
+// at module load. THIS file is not: its boot (setupTheme / wireAttention / connectSSE, below)
+// touches `document`, which is exactly why nothing under core/, components/, or views/ may
+// import it — see the header of core/nav.js.
 //
 // TERMINAL_STATUSES / FILTER_STATUSES / stateMetaLoaded are `export let`:
 // applyStateMeta REASSIGNS them once /api/state-meta lands, and the ES live binding
@@ -10,7 +12,8 @@
 // local const, which would snapshot the empty pre-load value and silently break every
 // status chip.
 import { el, esc, svg } from "./core/dom.js";
-import { fmtBytes, fmtDuration, fmtPct, fmtTime } from "./core/format.js";
+// fmtBytes/fmtPct left with the metrics view — they had no other caller in this file.
+import { fmtDuration, fmtTime } from "./core/format.js";
 import { api, terminalToast, toast } from "./core/api.js";
 import {
   FILTER_STATUSES,
@@ -44,8 +47,16 @@ import {
   rollupPanel,
 } from "./components/panel.js";
 import { openModal, openPicker } from "./components/overlay.js";
+// nav.js owns the `#app` mount point, hash navigation, and the re-render handle. The route
+// DISPATCHER still lives here (renderRoute, below); app.js registers it via setRenderer() so
+// that views can import `render` from a leaf instead of from this file. That inversion is what
+// keeps `views/ -> app.js` from ever existing — see core/nav.js's header for why it is fatal.
+import { backToWorkspace, mount, render, setRenderer } from "./core/nav.js";
+// `views/` holds one module per route: each owns its fetch → build → mount() entry point and
+// imports only leaves. metrics.js is the first (RFC Phase 2); the rest follow.
+import { renderMetrics } from "./views/metrics.js";
 
-const app = document.getElementById("app");
+setRenderer(renderRoute); // hoisted function declaration — safe to register before its body appears
 
 // The agent is live (attachable) whenever butchr owns a launched agent for it
 // (has_agent): a running/idle `in_progress` build agent until butchr tears it down.
@@ -345,8 +356,9 @@ async function projectIdForWorkspace(wid) {
   }
 }
 
-let current = null;
-async function render() {
+// The route DISPATCHER, registered with nav.js's setRenderer() above. Everything else calls the
+// imported `render()` (nav.js's delegator), so this is the only name that changed in the split.
+async function renderRoute() {
   const route = parseHash();
   // CANONICALIZING REDIRECTS (Hierarchical Projects IA S3) — retire the flat top level by rewriting
   // legacy hashes to their hierarchical equivalents. REPLACE semantics (location.replace, not a
@@ -377,7 +389,6 @@ async function render() {
       return;
     }
   }
-  current = route;
   stopLiveOutput();
   stopActivity();
   syncTopnav(route);
@@ -389,20 +400,8 @@ async function render() {
     else if (route.name === "workspace") await renderWorkspace(route.id, route.projectId);
     else if (route.name === "task") await renderTask(route.id);
   } catch (e) {
-    app.innerHTML = "";
-    app.appendChild(el("div", { class: "empty" }, "error: " + e.message));
+    mount(el("div", { class: "empty" }, "error: " + e.message));
   }
-}
-
-function mount(node) {
-  app.innerHTML = "";
-  app.appendChild(node);
-}
-
-// After acting on a task (merge / request changes), return to its workspace's
-// task list — that's the next thing you want, not the now-stale task page.
-function backToWorkspace(workspaceId) {
-  location.hash = workspaceId ? "#/workspace/" + workspaceId : "#/";
 }
 
 // ---------- stranded-work pull-signal ----------
@@ -2403,133 +2402,6 @@ function syncTopnav(route) {
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-}
-
-// ---------- metrics view ----------
-
-// A single number card: big value, label, and an optional sub-line (e.g. raw
-// numerator/denominator behind a rate).
-function metricCard(label, value, sub) {
-  return el("div", { class: "metric-card" }, [
-    el("div", { class: "metric-value" }, String(value)),
-    el("div", { class: "metric-label" }, label),
-    sub != null ? el("div", { class: "metric-sub" }, sub) : null,
-  ]);
-}
-// "num/of" sub-line for a rate card (or "no data" when nothing has happened yet).
-function rateSub(r) {
-  if (!r || r.of === 0) return "no data yet";
-  return `${r.num} / ${r.of}`;
-}
-
-// Tiny inline bar sparkline for merged-per-day throughput. No chart lib: a row of
-// CSS-height bars, each titled with its date + count. Heights are scaled to the
-// busiest day in the window (a flat zero series renders as a baseline).
-function throughputSpark(perDay) {
-  const max = Math.max(1, ...perDay.map((d) => d.count));
-  const bars = perDay.map((d) => {
-    const h = d.count > 0 ? Math.max(8, Math.round((d.count / max) * 100)) : 2;
-    const bar = el("div", {
-      class: "spark-bar" + (d.count > 0 ? "" : " zero"),
-      style: `height:${h}%`,
-      title: `${d.date}: ${d.count} merged`,
-    });
-    return el("div", { class: "spark-col" }, [bar]);
-  });
-  return el("div", { class: "spark" }, bars);
-}
-
-// Horizontal status breakdown bars: one row per present status, reusing the
-// existing .chip color via a class, width proportional to the largest count.
-function statusBars(byStatus) {
-  const entries = Object.entries(byStatus).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) return el("div", { class: "empty" }, "No tasks yet.");
-  const max = Math.max(1, ...entries.map(([, n]) => n));
-  const rows = entries.map(([status, n]) => {
-    const fill = el("div", {
-      class: "sb-fill " + status,
-      style: `width:${Math.max(2, Math.round((n / max) * 100))}%`,
-    });
-    return el("div", { class: "status-bar-row" }, [
-      el("span", { class: "sb-label", html: chip(status) }),
-      el("div", { class: "sb-track" }, [fill]),
-      el("span", { class: "sb-count" }, String(n)),
-    ]);
-  });
-  return el("div", { class: "status-bars" }, rows);
-}
-
-async function renderMetrics() {
-  const m = await api("GET", "/metrics");
-  const wrap = el("div");
-  wrap.appendChild(el("h1", {}, "Metrics"));
-  wrap.appendChild(el("div", { class: "crumbs" },
-    `aggregate across all tasks · ${m.total} total`));
-
-  // number cards
-  const cards = el("div", { class: "metrics-cards" });
-  cards.appendChild(metricCard("Total tasks", m.total));
-  cards.appendChild(metricCard("Merged (all-time)", m.throughput.totalMerged));
-  cards.appendChild(metricCard("Merged / last " + m.throughput.days + "d", m.throughput.windowMerged));
-  cards.appendChild(metricCard("Median time to review",
-    fmtDuration(m.timeToReview.medianMs), `${m.timeToReview.count} sample${m.timeToReview.count === 1 ? "" : "s"}`));
-  cards.appendChild(metricCard("Median time to merge",
-    fmtDuration(m.timeToMerge.medianMs), `${m.timeToMerge.count} sample${m.timeToMerge.count === 1 ? "" : "s"}`));
-  cards.appendChild(metricCard("Conflict rate", fmtPct(m.conflictRate.rate), rateSub(m.conflictRate)));
-  cards.appendChild(metricCard("Revert rate", fmtPct(m.revertRate.rate), rateSub(m.revertRate)));
-  cards.appendChild(metricCard("CI pass rate", fmtPct(m.ciPassRate.rate), rateSub(m.ciPassRate)));
-  cards.appendChild(metricCard("Auto-merge rate", fmtPct(m.autoMergeRate.rate), rateSub(m.autoMergeRate)));
-  wrap.appendChild(cards);
-
-  // throughput sparkline
-  wrap.appendChild(el("h2", {}, "Throughput — merged / day"));
-  const tp = el("div", { class: "panel" });
-  tp.appendChild(throughputSpark(m.throughput.perDay));
-  tp.appendChild(el("div", { class: "spark-axis" }, [
-    el("span", {}, m.throughput.perDay[0] ? m.throughput.perDay[0].date : ""),
-    el("span", {}, m.throughput.perDay.length
-      ? m.throughput.perDay[m.throughput.perDay.length - 1].date : ""),
-  ]));
-  wrap.appendChild(tp);
-
-  // status breakdown
-  wrap.appendChild(el("h2", {}, "Tasks by status"));
-  const sb = el("div", { class: "panel" });
-  sb.appendChild(statusBars(m.byStatus));
-  wrap.appendChild(sb);
-
-  wrap.appendChild(el("small", { class: "muted" },
-    "Rates reflect each task's current state — conflict/CI flags can be cleared as a task moves on, so treat them as best-effort snapshots."));
-
-  // Disk usage readout — sourced from /health's `disk` object (best-effort; absent
-  // if sizing failed). Surfaces butchr's two growth footprints (task worktrees + DB
-  // backups) and an advisory badge when the total crosses the configured threshold.
-  let health = null;
-  try { health = await api("GET", "/health"); } catch (e) { /* degraded — skip readout */ }
-  const disk = health && health.disk;
-  if (disk) {
-    const head = el("h2", {}, "Disk usage");
-    if (disk.warn) {
-      head.appendChild(el("span", {
-        class: "disk-warn-badge",
-        title: `Total ${fmtBytes(disk.totalBytes)} exceeds the ${fmtBytes(disk.warnBytes)} advisory threshold (BUTCHR_DISK_WARN_BYTES)`,
-      }, "over threshold"));
-    }
-    wrap.appendChild(head);
-    const dcards = el("div", { class: "metrics-cards" });
-    dcards.appendChild(metricCard("Task worktrees", fmtBytes(disk.worktreesBytes),
-      `${disk.worktreeCount} worktree${disk.worktreeCount === 1 ? "" : "s"}`));
-    dcards.appendChild(metricCard("DB backups", fmtBytes(disk.backupsBytes)));
-    dcards.appendChild(metricCard("Total", fmtBytes(disk.totalBytes),
-      disk.warnBytes > 0 ? `threshold ${fmtBytes(disk.warnBytes)}` : "no threshold"));
-    wrap.appendChild(dcards);
-    wrap.appendChild(el("small", { class: "muted" },
-      "Worktrees are the per-task git checkouts under each repo; backups are the DB snapshots. "
-      + (disk.truncated ? "Some trees hit the scan cap, so totals are a floor. " : "")
-      + "Set BUTCHR_DISK_WARN_BYTES to tune the advisory threshold (0 disables it)."));
-  }
-
-  mount(wrap);
 }
 
 // ---------- projects view (REVAMP-4 tier UI) ----------

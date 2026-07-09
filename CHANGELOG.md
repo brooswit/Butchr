@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Front-end module split (RFC Phase 2, step 4): `public/core/nav.js` + the first view,
+  `public/views/metrics.js`.** `mount()` and `backToWorkspace()` move out of `public/app.js`
+  into a new dependency-free `core/nav.js`, which also gains a `render()` / `setRenderer()`
+  pair: `app.js` registers its route dispatcher (renamed `render` → `renderRoute`) at boot, and
+  views import `render` from the leaf instead of from `app.js`. That inversion is what keeps a
+  `views/ -> app.js` cycle from ever forming — such an edge would drag `app.js`'s
+  `document`-touching boot into every view's module graph and break importing `public/*.js`
+  under `bun test`. `renderMetrics` and its four helpers move verbatim to `views/metrics.js`;
+  `fmtBytes`/`fmtPct` travel with them, having had no other caller. All nine `render()`, four
+  `backToWorkspace()`, and six `mount()` call sites in `app.js` are unchanged. `app.js` is 3722
+  → 3594 lines.
+
+### Removed
+
+- **Dead route state `current` in `public/app.js`.** It was assigned on every route change and
+  never read — no property access, no dynamic lookup, no test. Deleted rather than carried into
+  `core/nav.js`, where an exported `current` + `setCurrent` would have minted a public
+  live-binding API around a value nothing consumes.
+- The hand-inlined copy of `mount()` in the route dispatcher's `catch` arm, and the now-unused
+  module-level `const app`. `#app` is resolved in exactly one place (`nav.mount`).
+
 ## [0.9.254] - 2026-07-09
 
 ### Changed
