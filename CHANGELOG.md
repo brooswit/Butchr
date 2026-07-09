@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.263] - 2026-07-09
+
 ### Changed
 
 - **FE modernization (P2 prep):** moved the shared, pure repo-display helpers `repoDisplay()`
