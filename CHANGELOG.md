@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.292] - 2026-07-10
+
 ### Fixed
 
 - **Two LaunchPad tokens were used but defined nowhere, silently mis-colouring text.**
