@@ -8,7 +8,9 @@
 // a bundler, a type checker, or a jsdom-flavoured unit test. A real browser is the only thing that
 // can see it. This is the LaunchPad Phase-4 exit gate (RFC §4.3's fourth assertion, deferred).
 //
-// It is deliberately NOT wired into `scripts/ci` here — that is a later subtask.
+// WIRED INTO THE GATE. `scripts/ci` runs this as `bun run verify:fe dist`, immediately after
+// `bun run assert:fe dist` and before `bun test ./test`. See the comment there for why it sits at
+// that exact point, and why it is kept even though the suite's own happy-path case overlaps it.
 //
 // Usage:  bun run verify:fe [dist-dir]     (default `dist`)
 //   exit 0  every check passed  (or: no headless browser -> LOUD SKIP, never a silent pass)

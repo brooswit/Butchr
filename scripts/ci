@@ -63,6 +63,51 @@ bun run build:fe
 # file's CHANGELOG-guard tests red. Do not widen the strip pattern to cover `scripts/` — that
 # would silently disarm every future gate step. Route new steps through package.json instead.
 bun run assert:fe dist
+# render verification. `assert:fe` above reads BYTES; this boots the built dist/ in real headless
+# Chrome and reads PIXELS. It is the step that can see a dashboard that boots BLANK.
+#
+# PROVEN END TO END, not claimed. With main.tsx's `createRoot(root)` changed to
+# `createRoot(document.createElement("div"))` — the app renders into a detached node, so #root stays
+# empty — every byte-level gate above stays GREEN and this line is what reddens:
+#     bun build src/index.ts             exit 0
+#     bunx --bun tsc -p tsconfig.json    exit 0
+#     bunx --bun tsc -p tsconfig.public  exit 0
+#     bun run build:fe                   exit 0
+#     bun run assert:fe dist             exit 0  ("380 token definitions, sprite inlined, minified")
+#     bun run verify:fe dist             exit 1  <- MOUNT: "#root is EMPTY ... boots BLANK"
+# Four gates certify a dashboard nobody can use. That is what this line is for.
+#
+# Spelled `bun run verify:fe`, NEVER `scripts/verify-render` directly — the same strip-pattern trap
+# documented above `bun run assert:fe`. package.json already carries the `verify:fe` script.
+#
+# ORDER. After `bun run build:fe`, because there is nothing to boot before it. After
+# `bun run assert:fe dist`, because a ~50ms grep must fail before a Chrome launch. BEFORE
+# `bun test ./test`, because the suite dominates this gate's wall clock and a blank dashboard should
+# redden the gate in seconds, not minutes. MEASURED on this host: gate 1m21.9s before this line,
+# 1m23.8s after (+1.9s); the step itself is 1.37s green (`time bun run verify:fe dist`).
+#
+# >>> THIS LINE IS COVERAGE-REDUNDANT WITH THE SUITE TODAY, AND IT STILL BELONGS HERE. <<<
+# Do not delete it as duplicated work. test/verify-render-catches-breaks.test.ts DOES boot the real
+# dist/ — its `happy` case copies the artifact `build:fe` just produced — so a blank dashboard already
+# reddens `bun test ./test`. MEASURED on the detached-node break above: 1554 pass, 8 FAIL, and all 8
+# are in that ONE file, every one of them tripping its `THE SOURCE ARTIFACT IS ALREADY BROKEN` guard.
+# Not one of the other 1554 assertions notices that the dashboard is blank.
+#
+# So the suite's coverage IS this script, run as a CONTROL — it exists so a verify-render that
+# unconditionally `exit 1`s cannot pass the six corruption tests around it. The two assert DIFFERENT
+# propositions, and each owns one:
+#     the test file  ->  "the guard can see breaks"
+#     this line      ->  "THIS artifact renders"
+# Leaning on the control as the production gate makes the gate hostage to a test file's fixture
+# strategy. Rewrite prepareSourceDist() to build an isolated fixture dist/ — a reasonable change that
+# file's own comment already gestures at ("NEVER blindly reuse whatever dist/ happens to be on disk")
+# — and the gate silently stops render-verifying the real artifact while every test stays green. A
+# guard that merely LOOKS armed is the bug this whole gate step exists to kill. 1.37s to decouple them.
+#
+# SKIP, NEVER HARD-FAIL. On a host with no Chrome, verify-render prints a loud banner and exits 0, so
+# a browserless environment does not redden the gate. VERIFIED: `CHROME=/nonexistent bun run verify:fe
+# dist` warns and exits 0. That is a deliberate hole, and it is a LOUD one.
+bun run verify:fe dist
 bun test ./test
 # changelog rule: a CODE change must update CHANGELOG.md (docs-only diffs EXEMPT)
 BASE="${BUTCHR_BASE_REF:-}"

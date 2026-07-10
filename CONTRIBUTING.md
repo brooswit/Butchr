@@ -682,6 +682,23 @@ are **not optional**, because each failure exits 0, boots, and is still wrong.
    every icon renders blank while keeping its 20×20 layout box — no test catches
    it.
 
+**The gate reads pixels, not just bytes.** Those four assertions grep the built
+artifact; they cannot see a dashboard that boots *blank*. So `scripts/ci` also
+runs `bun run verify:fe dist` (`scripts/verify-render`), which boots the real
+`dist/` in headless Chrome against a self-contained fixture server and asserts
+that `#root` mounts, the console is free of errors, a token resolves to a painted
+colour, `<use>` has a non-zero `getBBox()`, and `[data-theme=dark]` changes a
+computed colour. It runs after `assert:fe` (a cheap grep should fail before a
+browser launch) and before `bun test ./test` (a blank dashboard should redden the
+gate in seconds, not minutes), and costs ~1.4s.
+
+**On a host with no browser it prints a loud SKIP banner and exits 0** — it looks
+for `$CHROME`, then `google-chrome`, `chromium`, `chrome`. A browserless
+environment is never hard-failed, but the skip is never silent either: the banner
+says the dashboard was not booted and may render blank. `scripts/verify-render`'s
+own checks are themselves tested, against corrupted copies of a real build, in
+`test/verify-render-catches-breaks.test.ts`.
+
 ### 4.3 Dependencies are pinned EXACTLY. No carets.
 
 `@launchpad-ui/components` pins its peers to exact versions, including

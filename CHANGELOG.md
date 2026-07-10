@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/ci` now boots the built `dist/` in real headless Chrome.** The gate
+  runs `bun run verify:fe dist` immediately after `bun run assert:fe dist` and
+  before `bun test ./test` — `assert:fe` reads bytes, this reads pixels, and it is
+  the first gate step that can see a dashboard which boots BLANK. Proven end to
+  end: with `public/main.tsx` rendering into a detached element, `bun build`, both
+  `tsc --noEmit` passes and `bun run assert:fe dist` all exit 0 and the render
+  check is the only thing that reddens. On a host with no browser the step prints
+  a loud SKIP banner and exits 0, so a browserless environment is never
+  hard-failed. Gate wall clock: 1m21.9s → 1m23.8s, i.e. +1.9s on every task's
+  build (the step itself is 1.37s green).
+
 ## [0.9.295] - 2026-07-10
 
 ### Added
