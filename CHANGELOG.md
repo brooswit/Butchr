@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.295] - 2026-07-10
+
 ### Added
 
 - **`test/verify-render-catches-breaks.test.ts` — proof that the render gate actually catches the
