@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.296] - 2026-07-10
+
 ### Added
 
 - **`scripts/ci` now boots the built `dist/` in real headless Chrome.** The gate
