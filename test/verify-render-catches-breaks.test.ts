@@ -19,6 +19,14 @@
 // check fired AND that the others did NOT. Four of the five isolate perfectly. The fifth (MOUNT)
 // provably cannot; see its test.
 //
+// ICONS GETS TWO TESTS, because it has two branches and only one of them is why this script exists:
+//   - the EXISTENCE branch (no sprite at all) — which `scripts/assert-fe-artifact` already catches
+//     with a grep, so it needs no browser;
+//   - the ZERO-SIZE branch (sprite present, `id`s intact, symbols emptied of geometry) — where
+//     `assert-fe-artifact` exits 0 and prints `sprite inlined` while every icon in the dashboard is
+//     BLANK. That branch is the entire justification for booting Chrome, and testing only the first
+//     one would leave the guard that matters unproven while this file looked green.
+//
 // See also: `docs`-free by design — the reasoning lives next to the assertion it justifies.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -164,10 +172,15 @@ const CORRUPTIONS: Record<string, (dir: string) => void> = {
   styled: (d) => replaceOrThrow(cssOf(d), "--lp-color-bg-ui-primary:var(--lp-color-white-950);", ""),
 
   /**
-   * ICONS: excise the inlined sprite from `index.html`, exactly as a build that forgot
-   * `scripts/inline-sprite` would emit it. `<use href="#lp-icon-…">` then resolves to nothing:
-   * every icon renders BLANK inside an unchanged 16x16 layout box. Nothing else moves — the app
-   * mounts (2 children), boots clean, styles, and flips theme.
+   * ICONS, branch 1 — THE EXISTENCE BRANCH (`icons.symbols === 0`). Excise the inlined sprite from
+   * `index.html`, exactly as a build that forgot `scripts/inline-sprite` would emit it.
+   * `<use href="#lp-icon-…">` then resolves to nothing: every icon renders BLANK inside an unchanged
+   * 16x16 layout box. Nothing else moves — the app mounts (2 children), boots clean, styles, flips.
+   *
+   * Note honestly what this branch is worth: `scripts/assert-fe-artifact` ALREADY catches it with
+   * `grep -q 'id="lp-icon-'`, so it is the one ICONS branch that needs no browser. It is kept
+   * because it is a DIFFERENT BUG from `iconsGeometry` below (build forgot inline-sprite, vs sprite
+   * present but geometry-dead), not because it is what justifies this script.
    */
   icons: (d) => {
     const html = readFileSync(htmlOf(d), "utf8");
@@ -176,6 +189,30 @@ const CORRUPTIONS: Record<string, (dir: string) => void> = {
     const end = html.indexOf("</svg>", start);
     if (end === -1) throw new Error("inlined sprite has no closing </svg>");
     writeFileSync(htmlOf(d), html.slice(0, start) + html.slice(end + "</svg>".length));
+  },
+
+  /**
+   * ICONS, branch 2 — THE ZERO-SIZE BRANCH (`icons.w === 0 || icons.h === 0`). THIS IS THE HEADLINE
+   * CASE, and the only check in the entire verifier that NO byte-level gate can see.
+   *
+   * Empty every `<symbol>` of its geometry while leaving its `id` INTACT (337 symbols on current
+   * main). The sprite is still there, every `id="lp-icon-…"` is still there, every `<use>` still
+   * resolves to a real element and still occupies its 16x16 layout box — and every icon in the
+   * dashboard is BLANK. `<use>` clones the referenced symbol into a shadow tree; when that symbol
+   * has no geometry the tree is empty and `use.getBBox()` is 0 x 0.
+   *
+   * `scripts/assert-fe-artifact` exits 0 on this artifact and prints `sprite inlined`, because its
+   * grep only ever looked for `id="lp-icon-`. The paired assertion in this corruption's test says
+   * exactly that, and it is the strongest thing this file can say about why `verify-render` exists.
+   */
+  iconsGeometry: (d) => {
+    const html = readFileSync(htmlOf(d), "utf8");
+    // Non-greedy body, so each <symbol>…</symbol> is emptied individually rather than the regex
+    // swallowing from the first symbol to the last.
+    const symbols = /(<symbol\b[^>]*>)[\s\S]*?<\/symbol>/g;
+    const n = (html.match(symbols) || []).length;
+    if (n === 0) throw new Error("no <symbol> elements in the source artifact — is `dist/` un-spliced?");
+    writeFileSync(htmlOf(d), html.replace(symbols, "$1</symbol>"));
   },
 
   /**
@@ -246,14 +283,18 @@ function corruptedCopy(name: string): string {
 }
 
 /**
- * CONCURRENCY. Sequentially this file costs ~18s, of which MOUNT alone is 11.2s — that is
+ * CONCURRENCY. Sequentially this file costs ~21s, of which MOUNT alone is 11.2s — that is
  * `MOUNT_POLL_MS` (10s) burning down BY DESIGN, not slowness, so it cannot be optimised away. Each
  * `verify-render` invocation owns an ephemeral-port `Bun.serve` and a `mkdtemp` Chrome profile, so
- * the runs are independent and can overlap. Six at once brings wall clock to ~max(case) ≈ 12s.
+ * the runs are independent and can overlap. Six lanes brings wall clock to ~max(case) ≈ 13s.
  *
- * MEASURED over 3 back-to-back full-file runs at LANES=6: identical `fired` sets every time, no
- * leaked Chrome processes, no leftover `butchr-verify-render-*` temp profiles. If that ever drifts
- * under load, drop LANES to 3 — trading ~12s for ~20s is a good trade; a flaky gate step is not.
+ * SEVEN cases in SIX lanes is deliberate, not an off-by-one. Peak Chrome count stays at 6, and the
+ * 7th case starts the moment the first finishes (~3.5s) — well inside MOUNT's 13s, so it is free.
+ *
+ * MEASURED over 3 back-to-back full-file runs at LANES=6, twice (6 cases, then 7): 12.8-14.0s,
+ * identical `fired` sets every time, no leaked Chrome processes, no leftover
+ * `butchr-verify-render-*` temp profiles. If that ever drifts under load, drop LANES to 3 — trading
+ * ~13s for ~24s is a good trade; a flaky gate step is not.
  */
 const LANES = 6;
 
@@ -376,10 +417,9 @@ describe("scripts/verify-render catches the breaks it claims to catch", () => {
     expect(fired(r)).toEqual(["STYLED"]);
   }, 30_000);
 
-  // Check 4. The failure `assert:fe`'s grep CAN see (it greps `id="lp-icon-` in index.html) — but
-  // only because the whole sprite is gone. The subtler case it CANNOT see, symbols present with
-  // their geometry emptied, is covered by the verifier's `use.getBBox()` probe, whose own comment
-  // records the four-candidate measurement. Here we assert the crude case reddens exactly ICONS.
+  // Check 4, branch 1 (EXISTENCE). The failure `assert:fe`'s grep CAN see, because the whole sprite
+  // is gone. Cheap to prove, and a genuinely different bug from branch 2 — but NOT the branch that
+  // justifies booting a browser. That one is the next test.
   it("ICONS: an un-inlined sprite fails ALONE, naming the blank icons", () => {
     const r = run("icons");
     expect(r.code).toBe(1);
@@ -388,6 +428,55 @@ describe("scripts/verify-render catches the breaks it claims to catch", () => {
     expect(r.out).toContain("Every icon renders BLANK");
     expect(fired(r)).toEqual(["ICONS"]);
   }, 30_000);
+
+  // Check 4, branch 2 (ZERO-SIZE) — THE HEADLINE CASE. The sprite is present, every `id="lp-icon-…"`
+  // is present, every `<use>` keeps its 16x16 layout box, and every icon is BLANK. This is the ONLY
+  // check in the verifier that no byte-level gate, no type check, and no layout assertion can see,
+  // and it is the reason the script boots a real browser at all.
+  //
+  // A comment claiming `use.getBBox()` catches this is not a test. This is the test.
+  it("ICONS: symbols emptied of geometry (ids intact) fail on getBBox(), where assert:fe sees NOTHING", () => {
+    const r = run("iconsGeometry");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("RENDER [ICONS] FAILED");
+    expect(r.out).toContain("resolves to a ZERO-SIZE symbol (getBBox() = 0 x 0)");
+    expect(r.out).toContain("The icon renders BLANK inside an");
+    // The symbols are all still THERE — that is the entire point. Assert the count is non-zero
+    // rather than the literal 337, which moves with every @launchpad-ui/icons bump.
+    const symbols = r.out.match(/though (\d+) <symbol> element\(s\) are present/);
+    expect(symbols).not.toBeNull();
+    expect(Number(symbols![1])).toBeGreaterThan(0);
+    // It isolates perfectly: the existence branch does NOT fire, and nothing else does either.
+    expect(r.out).not.toContain('no <symbol id="lp-icon-..."> in the LIVE DOM');
+    expect(fired(r)).toEqual(["ICONS"]);
+
+    // THE STRONGEST ASSERTION IN THIS FILE. The byte-level gate exits 0 — and says `sprite inlined`
+    // — on a dashboard whose every single icon is blank. Its grep only ever looked for
+    // `id="lp-icon-`, and every id is still there. Without a browser, this ships.
+    const assertFe = Bun.spawnSync([ASSERT_FE, join(TMP, "iconsGeometry")], { cwd: REPO_ROOT });
+    expect(assertFe.exitCode).toBe(0);
+    expect(assertFe.stdout.toString()).toContain("sprite inlined");
+  }, 30_000);
+
+  // THE REMAINING TWO ICONS BRANCHES, since "is it dead?" deserves evidence rather than a shrug.
+  //
+  //   `icons.uses === 0`  — REACHABLE, and already exercised: it is the second diagnostic the MOUNT
+  //     test asserts ("NO <use> element references it"). Every <use> is React-emitted, so any
+  //     no-mount artifact reaches it. It needs no test of its own; it HAS one.
+  //
+  //   `icons.err` (getBBox threw) — UNREACHABLE in Chrome 150, and MEASURED, not assumed. Probed in
+  //     the real built page, `use.getBBox()` returns 0x0 rather than throwing in all three ways it
+  //     could plausibly throw:
+  //         <use> inside a display:none subtree   -> 0x0
+  //         <use> detached, never in the document -> 0x0
+  //         <use> with display:none on itself     -> 0x0
+  //         (control: the real app's first <use>) -> 7.866 x 10.533
+  //     Per SVG 2, getBBox() on a non-rendered element is defined to return an empty rect, not to
+  //     throw; the DOM-1-era NotFoundError is a Firefox/legacy behaviour. So the branch is a
+  //     defensive backstop for a browser that is not the one we ship this gate against. It cannot be
+  //     driven from a corrupted artifact, and I did not weaken any assertion to pretend otherwise.
+  //     Leave it in the script — it costs nothing and it degrades to a named diagnostic — but it is
+  //     honestly untestable here.
 
   // Check 5. The one `assert:fe` structurally cannot see: every token NAME is still defined under
   // `:root`, so its definition COUNT is unchanged and it exits 0 — while dark mode is dead.

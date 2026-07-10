@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unconditionally `exit 1`s cannot pass. Every case asserts the WHOLE set of checks that fired, not
   merely its own, because a corruption that reddens three checks proves nothing about the other two.
 
+  **ICONS gets two tests, because it has two branches and only one of them justifies booting a
+  browser.** The *existence* branch (no sprite at all) is what `assert-fe-artifact` already catches
+  with `grep -q 'id="lp-icon-'`. The *zero-size* branch — sprite present, every `id` intact, every
+  `<symbol>` emptied of its geometry — is the only check in the entire verifier that no byte-level
+  gate can see: `use.getBBox()` reads `0 x 0`, every icon renders BLANK inside an unchanged 16x16
+  layout box, and `assert-fe-artifact` exits **0** printing `sprite inlined`. That test asserts both
+  halves, and it is the strongest claim this file makes.
+
   Two corrections to the checks' documented behaviour fell out of building it, both measured rather
   than reasoned:
   - **MOUNT cannot be isolated from ICONS, and no corruption can make it so.** The ICONS probe
@@ -54,9 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   five corruption tests green and only the happy path red. A broken source now fails the whole file
   with a message saying the other results are meaningless.
 
-  **Cost:** the six verifier runs execute concurrently in `beforeAll` (each already owns an
+  `getBBox()` was measured never to throw in Chrome 150 — on a detached `<use>`, inside a
+  `display:none` subtree, and with `display:none` on itself, it returns `0x0` — so `verify-render`'s
+  `icons.err` branch is a backstop for a browser we do not gate against, and is honestly untestable
+  here rather than papered over. The `icons.uses === 0` branch needs no test of its own: the MOUNT
+  case already drives it.
+
+  **Cost:** the seven verifier runs execute concurrently in `beforeAll` (each already owns an
   ephemeral-port server and its own temp Chrome profile), so the file costs ~13s wall rather than the
-  ~18s of a sequential run — `MOUNT`'s 11s is `MOUNT_POLL_MS` burning down by design and cannot be
+  ~21s of a sequential run — `MOUNT`'s 11s is `MOUNT_POLL_MS` burning down by design and cannot be
   optimised away. Measured stable over three consecutive runs, with no leaked Chrome processes and no
   leftover temp profiles.
 
