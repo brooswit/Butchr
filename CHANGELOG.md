@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.291] - 2026-07-10
+
 ### Fixed
 
 - **`bun run dev` no longer serves an icon-less dashboard.** `dev:fe` is `bun build --watch`, which
