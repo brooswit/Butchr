@@ -53,9 +53,9 @@ bunx --bun tsc --noEmit -p tsconfig.public.json  # public/ — browser target, D
 # used --outfile; they could not have survived the first CSS import.
 #
 # "It builds" is the FE validation for resolution and syntax ONLY. It proves nothing about the
-# three ways this front end fails while exiting 0 — hence the next line, which is not optional.
+# four ways this front end fails while exiting 0 — hence the next line, which is not optional.
 bun run build:fe
-# the three silent-failure assertions (RFC §4.3). Spelled `bun run assert:fe`, NEVER
+# the four silent-failure assertions (RFC §4.3). Spelled `bun run assert:fe`, NEVER
 # `scripts/assert-fe-artifact` directly: test/changelog-header-drop.test.ts reads THIS FILE's text
 # and executes it against temp git fixtures, stripping top-level `/^bunx?\s/` lines so the gate
 # does not recursively rebuild and re-run the suite inside a fixture. A step invoked by any other

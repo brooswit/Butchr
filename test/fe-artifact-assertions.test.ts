@@ -1,9 +1,17 @@
 // Tests for scripts/assert-fe-artifact and scripts/inline-sprite.
 //
-// WHY THIS FILE EXISTS. The three assertions in scripts/assert-fe-artifact are the ENTIRE defence
-// against the three ways this front end ships broken while the build exits 0: unstyled (no token
-// CSS), every icon blank (no inlined sprite), and React's 1.61 MB development bundle
-// (--production dropped). None of those is visible to a build, a typecheck, or a layout test.
+// WHY THIS FILE EXISTS. The four assertions in scripts/assert-fe-artifact are the ENTIRE defence
+// against the four ways this front end ships broken while the build exits 0: unstyled (no token
+// CSS), every icon blank (no inlined sprite), React's 1.61 MB development bundle (--production
+// dropped), and an ORPHANED token — a `var(--lp-x)` defined nowhere in the bundle, whose
+// declaration is invalid at computed-value time and is silently dropped, leaving an inherited
+// property like `color` showing its PARENT's value. None of those is visible to a build, a
+// typecheck, or a layout test.
+//
+// The fourth is not hypothetical: @launchpad-ui/components@0.21.0 references
+// `--lp-color-text-ui-secondary-base` and `--lp-color-text-ui-tertiary`, which
+// @launchpad-ui/tokens@0.16.0 defines nowhere. Assertion 1 stayed GREEN throughout — it counts
+// DEFINITIONS (378 were present), and cannot see a USED name that resolves to nothing.
 //
 // An assertion nobody exercises rots into a comment. Each test below BREAKS one artifact and
 // requires the script to go red — and one requires it to stay green, so a script that simply
@@ -23,10 +31,19 @@ const INLINE_SPRITE = join(REPO_ROOT, "scripts", "inline-sprite");
 
 let TMP: string;
 
-/** A CSS body carrying `n` distinct `--lp-*` definitions, mimicking the tokens stylesheets. */
-function tokenCss(n: number): string {
+/**
+ * A CSS body carrying `n` distinct `--lp-*` definitions, mimicking the tokens stylesheets.
+ *
+ * It also USES one of them. That is not decoration: assertion 4 fails a bundle with zero
+ * `var(--lp-*)` usages (an assertion that runs over no input cannot fail), and a real stylesheet
+ * always uses the tokens it defines. Emitting a usage makes the fixture MORE faithful rather than
+ * weakening the rule — which is separately exercised by the `noLpUsage` option below. The used
+ * token is a DEFINED one, so the healthy fixture stays green.
+ */
+function tokenCss(n: number, usage = true): string {
   const decls = Array.from({ length: n }, (_, i) => `  --lp-color-token-${i}: #00${i % 10};`);
-  return `:root {\n${decls.join("\n")}\n}\n`;
+  const use = usage && n > 0 ? `.t { color: var(--lp-color-token-0); }\n` : "";
+  return `:root {\n${decls.join("\n")}\n}\n${use}`;
 }
 
 const SPRITE =
@@ -44,7 +61,7 @@ function html(cssName: string, jsName: string, sprite: boolean): string {
 
 /**
  * Write a dist-like fixture. Defaults are the HEALTHY artifact; each option degrades exactly one
- * of the three silent-failure modes, so a red result names its cause unambiguously.
+ * of the four silent-failure modes, so a red result names its cause unambiguously.
  */
 function fixture(
   name: string,
@@ -60,6 +77,10 @@ function fixture(
     staleCssDefs?: number;
     /** Reference a stylesheet that was never emitted. */
     danglingCss?: boolean;
+    /** Appended to the referenced stylesheet — how assertion 4's cases are driven. */
+    extraCss?: string;
+    /** Suppress tokenCss's `var()` usage, leaving DEFINITIONS but zero usages. */
+    noLpUsage?: boolean;
   } = {},
 ): string {
   const dir = join(TMP, name);
@@ -71,7 +92,10 @@ function fixture(
     join(dir, "index.html"),
     html(opts.danglingCss ? "index-GONE.css" : cssName, jsName, opts.sprite !== false),
   );
-  if (!opts.danglingCss) writeFileSync(join(dir, cssName), tokenCss(opts.tokenDefs ?? 377));
+  if (!opts.danglingCss) {
+    const css = tokenCss(opts.tokenDefs ?? 377, !opts.noLpUsage) + (opts.extraCss ?? "");
+    writeFileSync(join(dir, cssName), css);
+  }
   if (opts.staleCssDefs !== undefined) {
     writeFileSync(join(dir, "index-stale99.css"), tokenCss(opts.staleCssDefs));
   }
@@ -186,6 +210,86 @@ describe("scripts/assert-fe-artifact", () => {
     const r = runAssert(fixture("empty", { empty: true }));
     expect(r.code).toBe(1);
     expect(r.out).toContain("not a built front end");
+  });
+
+  // Assertion 4. THE REAL BUG: @launchpad-ui/components@0.21.0 var()s
+  // `--lp-color-text-ui-secondary-base` and `--lp-color-text-ui-tertiary`; @launchpad-ui/tokens
+  // @0.16.0 defines neither. Both `color:` declarations are invalid at computed-value time and get
+  // dropped, so the text inherits its parent's colour. Build, typecheck and gate all exited 0.
+  test("silent-failure 4: a var(--lp-*) with no definition fails, and NAMES the orphan", () => {
+    const r = runAssert(fixture("orphan-token", { extraCss: `.x { color: var(--lp-x); }\n` }));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("orphaned --lp-* token");
+    expect(r.out).toContain("--lp-x");
+    expect(r.out).toContain("INVALID AT COMPUTED-VALUE TIME");
+    // Assertion 1 is GREEN here (377 definitions > 300) — which is exactly why 4 exists. If this
+    // fired instead, the test would be proving nothing about the orphan check.
+    expect(r.out).not.toContain("token CSS missing");
+  });
+
+  test("silent-failure 4: EVERY orphan is named, not just the first", () => {
+    const r = runAssert(
+      fixture("orphan-tokens-many", {
+        // The two real names, verbatim.
+        extraCss:
+          `.a { color: var(--lp-color-text-ui-secondary-base); }\n` +
+          `.b { color: var(--lp-color-text-ui-tertiary); }\n`,
+      }),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("--lp-color-text-ui-secondary-base");
+    expect(r.out).toContain("--lp-color-text-ui-tertiary");
+  });
+
+  // The stays-GREEN case for assertion 4: a script that unconditionally `exit 1`s cannot pass.
+  test("silent-failure 4: a var(--lp-*) that IS defined stays green", () => {
+    const r = runAssert(
+      fixture("defined-token", {
+        extraCss: `:root { --lp-mine: #fff; }\n.x { color: var(--lp-mine); }\n`,
+      }),
+    );
+    expect(r.code).toBe(0);
+  });
+
+  // A fallback is a deliberate may-be-undefined: `var(--x, red)` is VALID with no `--x`. Tested
+  // against an UNDEFINED name on purpose — the real bundle's only fallback-guarded token
+  // (--lp-button-padding) happens to also be defined, so exercising that one would pass even if
+  // the exemption were broken.
+  test("silent-failure 4: an UNDEFINED var(--lp-x, fallback) is exempt and stays green", () => {
+    const r = runAssert(
+      fixture("fallback-token", { extraCss: `.x { padding: var(--lp-never-defined, 0px); }\n` }),
+    );
+    expect(r.code).toBe(0);
+  });
+
+  // The definition regex must be anchored to NEITHER `:root` NOR a line start: themes.css defines
+  // its dark palette inside `[data-theme='dark']`, and the real bundle is minified onto one line.
+  test("silent-failure 4: a definition inside [data-theme='dark'] counts as a definition", () => {
+    const r = runAssert(
+      fixture("dark-block-def", {
+        extraCss: `[data-theme='dark']{--lp-dark-only:#000}.x{color:var(--lp-dark-only)}\n`,
+      }),
+    );
+    expect(r.code).toBe(0);
+  });
+
+  // ...and minification itself must not blind it: no newlines at all, definition and usage jammed
+  // onto one line, exactly as `bun build --production` emits.
+  test("silent-failure 4: an orphan is caught in a MINIFIED single-line stylesheet", () => {
+    const r = runAssert(
+      fixture("minified-orphan", { extraCss: `@media (min-width:1px){.x{color:var(--lp-min)}}` }),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("--lp-min");
+  });
+
+  // The zero-input rule, exercised directly. This fixture is healthy in every OTHER respect
+  // (377 defs, sprite, minified) so it reaches assertion 4 rather than dying at 1, 2 or 3.
+  test("silent-failure 4: a stylesheet with definitions but ZERO usages fails, not vacuously passes", () => {
+    const r = runAssert(fixture("no-lp-usage", { noLpUsage: true }));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("no var(--lp-*) usages");
+    expect(r.out).not.toContain("token CSS missing");
   });
 });
 

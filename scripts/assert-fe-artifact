@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# The three silent-failure assertions (RFC §4.3), run against a built front-end directory.
+# The four silent-failure assertions (RFC §4.3), run against a built front-end directory.
 #
-# Each of the three failures below EXITS 0, BOOTS, AND IS STILL WRONG. None produces a build
-# error, and none is visible to a layout or size assertion. These three assertions are the entire
+# Each of the four failures below EXITS 0, BOOTS, AND IS STILL WRONG. None produces a build
+# error, and none is visible to a layout or size assertion. These four assertions are the entire
 # defence. Do not delete them as "redundant with the build" — the build is exactly what cannot
 # see them. `test/fe-artifact-assertions.test.ts` proves each one still fires.
 #
 # Assertion 3 is three greps, not one, and the third was added in Phase 3 after the first build with
 # React in it PROVED the other two miss `--minify`-without-NODE_ENV. See its comment block.
+#
+# Assertion 4 defends against an ORPHANED token: a `var(--lp-*)` whose name is defined NOWHERE in
+# the bundle. The declaration is then invalid at computed-value time and is dropped — and an
+# INHERITED property like `color` silently takes its parent's value. Not hypothetical:
+# `@launchpad-ui/components@0.21.0` var()s two names (`--lp-color-text-ui-secondary-base`,
+# `--lp-color-text-ui-tertiary`) that `@launchpad-ui/tokens@0.16.0` never defines. The build, the
+# typecheck, and the whole gate were green. Assertion 1 could not see it: it counts DEFINITIONS,
+# and 380 of them are present while two USED names resolve to nothing.
 #
 # Usage:  bun run assert:fe <dist-dir>   (scripts/ci must invoke it this way — see scripts/ci)
 set -euo pipefail
@@ -73,10 +81,14 @@ fi
 # The threshold is 300, not an exact count: an exact count would go red on every
 # `@launchpad-ui/tokens` bump for no reason. Measured against the real 0.16.0 package:
 #
-#   both sheets        377 definitions   <- the only healthy state
+#   both sheets        380 definitions   <- the only healthy state
 #   index.css only     149               <- red: the colour VALUES live in themes.css
 #   themes.css only    228               <- red
 #   neither              0               <- red (and grep exits 1 — see `|| true` below)
+#
+# That 380 DRIFTS — it moves with every `@launchpad-ui/tokens` bump, and with any local `--lp-*`
+# definition (public/style.css's two-token upstream-bug shim took it from 378 to 380). It is a
+# smell test, never an assertion. The loose threshold is exactly what keeps a bump green.
 #
 # So the guard is not merely 0-vs-377: it catches dropping EITHER sheet, which is the mistake an
 # author is actually likely to make. 300 sits above 228 and far below 377.
@@ -149,4 +161,72 @@ if grep -q 'jsxDEV' "${JS[@]}"; then
   exit 1
 fi
 
-echo "FE ARTIFACT: ok — $DEFS --lp-* token definitions, sprite inlined, minified production bundle."
+# --- assertion 4: ORPHANED TOKENS ------------------------------------------------------------
+# Assertion 1 counts DEFINITIONS. It cannot see a token that is USED and defined nowhere: 380
+# definitions are present, the sheet loads, and two `color:` declarations are still invalid at
+# computed-value time. An invalid var() does not fall back to a sane default and does not warn —
+# the declaration is dropped, and for an INHERITED property (`color`, `font-family`, …) the
+# element silently takes its PARENT's value. That is how `--lp-color-text-ui-secondary-base` and
+# `--lp-color-text-ui-tertiary` shipped: referenced by @launchpad-ui/components@0.21.0, defined by
+# nothing, invisible to the build, the typecheck, and every layout assertion.
+#
+# Over the referenced CSS only — never `$DIST/*.css` (see the CSS array above), and never the JS
+# bundle, whose `--lp-*` strings are not CSS custom-property references.
+#
+# FALLBACKS ARE EXEMPT, BY DESIGN. `var(--x, 0px)` is a deliberate may-be-undefined: if `--x` is
+# missing the fallback resolves and the declaration is valid. The USED pattern therefore requires
+# the closing `)` immediately after the name, which matches only a var() with NO fallback. Today's
+# bundle has exactly one fallback-guarded name (`--lp-button-padding`, which is also defined — so
+# do not let that coincidence convince you the exemption works; test/fe-artifact-assertions.test.ts
+# exercises an UNDEFINED fallback-guarded name directly). Without this, the first legitimate
+# fallback anyone adds reddens the gate for no reason.
+#
+# NESTED var() falls out correctly, and it looks like a bug, so: `var(--lp-a, var(--lp-b))` exempts
+# `--lp-a` (it has a fallback) while the inner `var(--lp-b)` matches as a hard usage — correct,
+# because nothing is behind `--lp-b` and an undefined `--lp-b` invalidates the whole declaration.
+# `var(--lp-a, var(--lp-b, red))` exempts both, and `red` always resolves. The rule the pattern
+# actually implements is "a var() with no fallback behind it must resolve."
+#
+# The DEFINITION pattern is anchored to NEITHER `:root` NOR a line start. Definitions inside
+# `@media`, `@supports`, and `[data-theme='dark']` blocks are real definitions, and the bundle is
+# minified onto essentially ONE line — a line-oriented regex would see the whole sheet as a single
+# match and collect nothing. Both patterns use BOUNDED character classes: an unbounded negated
+# class (`[^)]*`) backtracking across 150 KB with no newline hangs for minutes, and this script
+# runs on every single gate invocation in the repo.
+#
+# `|| true` on EVERY grep, for the same reason as assertion 1: grep exits 1 on ZERO matches, which
+# under `set -o pipefail` aborts with an EMPTY diagnostic in the case the diagnostic matters most.
+# BOTH stages of each pipeline need it, not just the first — that is not paranoia, it was observed:
+# guarding only the outer grep still let the zero-usage case abort silently with exit 1 and no
+# message, and the `no var(--lp-*) usages` test below is what caught it.
+USED=$({ grep -ohE -- 'var\([[:space:]]*--lp-[a-z0-9-]+[[:space:]]*\)' "${CSS[@]}" || true; } \
+  | { grep -oE -- '--lp-[a-z0-9-]+' || true; } | sort -u)
+DEFINED=$({ grep -ohE -- '--lp-[a-z0-9-]+[[:space:]]*:' "${CSS[@]}" || true; } \
+  | { grep -oE -- '--lp-[a-z0-9-]+' || true; } | sort -u)
+
+# Zero usages must FAIL, never vacuously pass — the same argument the CSS/JS globs make above. A
+# real bundle uses the tokens it defines (240 hard usages today); zero means the stylesheet is not
+# what this script thinks it is, and an assertion that runs over no input cannot fail.
+if [ -z "$USED" ]; then
+  echo "FE ARTIFACT: no var(--lp-*) usages in the referenced CSS — the orphan-token check would" >&2
+  echo "  pass vacuously. An assertion that runs over no input cannot fail. Is this a real bundle?" >&2
+  exit 1
+fi
+
+ORPHANS=$(comm -23 <(printf '%s\n' "$USED") <(printf '%s\n' "$DEFINED"))
+if [ -n "$ORPHANS" ]; then
+  {
+    echo "FE ARTIFACT: orphaned --lp-* token(s) — used via var(), defined NOWHERE in the bundle:"
+    printf '%s\n' "$ORPHANS" | sed 's/^/    /'
+    echo "Each declaration using one of these is INVALID AT COMPUTED-VALUE TIME. It is dropped, with"
+    echo "no error and no warning: the build exits 0 and the page boots. The property then falls back"
+    echo "silently — for an INHERITED property such as 'color' that means the element takes its"
+    echo "PARENT's value, which is why this is invisible to a layout or size assertion."
+    echo "Either define the name (see the upstream-bug shim in public/style.css) or, if it is"
+    echo "deliberately optional, give the var() a fallback: var(--lp-x, <default>)."
+  } >&2
+  exit 1
+fi
+USES=$(printf '%s\n' "$USED" | wc -l)
+
+echo "FE ARTIFACT: ok — $DEFS --lp-* token definitions, $USES used and all defined, sprite inlined, minified production bundle."

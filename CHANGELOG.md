@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CI guard: an orphaned `--lp-*` token can never ship silently again.** Assertion 4 in
+  `scripts/assert-fe-artifact` (already wired into `scripts/ci` as `bun run assert:fe dist`) now
+  cross-checks, over the CSS files `dist/index.html` actually references, every `--lp-*` name USED
+  via `var(--lp-…)` against every name DEFINED via a `--lp-…:` declaration. Any orphan is printed
+  by name and fails the gate. This is the generalisation of the 0.9.292 fix: assertion 1 counts
+  *definitions* and stayed green while two *used* names resolved to nothing, so the declarations
+  were dropped at computed-value time and inherited properties like `color` silently took their
+  parent's value — through a build, a typecheck, and a layout assertion that all exited 0.
+  Verified by deleting the shim and watching the gate go red naming both tokens.
+  - `var(--lp-x, fallback)` is EXEMPT — a fallback is a deliberate may-be-undefined. The rule the
+    pattern implements is "a `var()` with no fallback behind it must resolve", which also handles
+    nested `var()` correctly.
+  - Definitions inside `@media`, `@supports` and `[data-theme='dark']` blocks count; the check is
+    not line-anchored, because the production bundle is minified onto a single line.
+  - Zero `var(--lp-*)` usages FAILS rather than passing vacuously — an assertion that runs over no
+    input cannot fail.
+
 ## [0.9.292] - 2026-07-10
 
 ### Fixed
