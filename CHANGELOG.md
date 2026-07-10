@@ -17,6 +17,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`test/verify-render-catches-breaks.test.ts` — proof that the render gate actually catches the
+  breaks it claims to catch.** `scripts/verify-render` shipped in 0.9.294 with its checks verified by
+  hand, once, by their author. An unproven guard is worse than none: it makes `scripts/ci` *look*
+  like it can see a blank dashboard. Each of the verifier's five checks now has a test that corrupts
+  a copy of a REAL built `dist/` and requires the script to exit non-zero with **that check's own
+  diagnostic** — plus a happy-path case requiring an untouched copy to exit 0, so a script that
+  unconditionally `exit 1`s cannot pass. Every case asserts the WHOLE set of checks that fired, not
+  merely its own, because a corruption that reddens three checks proves nothing about the other two.
+
+  Two corrections to the checks' documented behaviour fell out of building it, both measured rather
+  than reasoned:
+  - **MOUNT cannot be isolated from ICONS, and no corruption can make it so.** The ICONS probe
+    measures `use.getBBox()`, and every `<use>` in the document is emitted by React's `Icon`. No
+    mount means no `<use>`, so ICONS necessarily co-fires. It is a property of the two checks, not
+    of the corruption. The test asserts the exact pair `["MOUNT", "ICONS"]`.
+  - **Dropping the token stylesheet is *not* a targeted STYLED corruption** — it reddens DARK\_MODE
+    too, because `body { background: var(--bg) }` then paints `rgba(0, 0, 0, 0)` in *both* themes.
+    Deleting only the light-layer definition of `--lp-color-bg-ui-primary` reddens both STYLED probes
+    while the dark flip still lands on `html[data-theme="dark"] { --bg: #181a1f }` — a literal — so
+    DARK\_MODE stays green.
+
+  **Skip semantics are tested too**, because a silent skip is the failure mode the render gate exists
+  to prevent: an unresolvable `$CHROME` and an empty `PATH` must each exit 0 with their own *distinct*
+  loud warning, and a run with a browser present must NOT print one. The empty-`PATH` case spawns
+  `bun` explicitly rather than through the `#!/usr/bin/env bun` shebang, which would otherwise die at
+  exec with `env: 'bun': No such file or directory`.
+
+  **It cannot go vacuously green.** With no browser resolvable, `verify-render` exits 0 for every
+  input, so the six corruption tests would pass while proving nothing; they are gated on
+  `test.skipIf(NO_BROWSER)` and the file prints a banner naming what went unproven. The source `dist/`
+  is validated with `bun run assert:fe` before it is copied — `bun run dev:fe` writes a `dist/`
+  *without* inlining the sprite — and rebuilt if unhealthy, because a broken source would leave all
+  five corruption tests green and only the happy path red. A broken source now fails the whole file
+  with a message saying the other results are meaningless.
+
+  **Cost:** the six verifier runs execute concurrently in `beforeAll` (each already owns an
+  ephemeral-port server and its own temp Chrome profile), so the file costs ~13s wall rather than the
+  ~18s of a sequential run — `MOUNT`'s 11s is `MOUNT_POLL_MS` burning down by design and cannot be
+  optimised away. Measured stable over three consecutive runs, with no leaked Chrome processes and no
+  leftover temp profiles.
+
 ## [0.9.294] - 2026-07-10
 
 ### Added
