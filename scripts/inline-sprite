@@ -100,7 +100,7 @@ const dir = dirname(htmlPath);
 // Serialize. `inline()` is read-then-write and rebuilds arrive in bursts, so two overlapping runs
 // can interleave as read(A) read(B) write(B) write(A) — and A's write, made from the older bytes,
 // wins. Chaining every request onto one promise makes the read and the write atomic with respect
-// to each other. The trailing re-check collapses a burst into at most one extra pass.
+// to each other. A burst therefore costs one no-op `already-present` pass per event, not a race.
 let chain: Promise<unknown> = Promise.resolve();
 const resplice = () => {
   chain = chain
