@@ -746,13 +746,22 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   padding: 13px 16px; border-bottom: 1px solid var(--border); background: var(--panel-2);
 }
 .swim-kind { flex: none; display: inline-flex; }
-/* one-line title, clamped in code (laneTitle) AND belted here so no data can wrap the header */
+/* one-line title, clamped in code (laneTitle) AND belted here so no data can wrap the header.
+   The cap is 42ch, not the 52ch this carried before the lane header grew an "Open Leader terminal"
+   button (0.9.282). A `flex-wrap: wrap` container breaks lines on each item's HYPOTHETICAL main size
+   — flex-basis clamped by max-width, computed BEFORE any shrinking — so a title parked at its cap
+   pushed `.swim-meta` (chips + button + progress) onto a second row, and only on lanes whose title
+   was long enough to reach the cap. Lane headers then stood at 86px next to 51px ones. 42ch keeps
+   the widest header on one line at the 1440px reference viewport; `flex-wrap` stays as the genuine
+   small-screen valve, and the ellipsis is still the belt. */
 .swim-title {
-  font-weight: 650; font-size: 15px; color: var(--text);
-  max-width: min(52ch, 60vw); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-weight: 650; font-size: 15px; color: var(--text); min-width: 0;
+  max-width: min(42ch, 44vw); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.swim-laneid { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.swim-meta { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.swim-laneid { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+/* nowrap: the meta cluster is one unit — it may leave the header's line, but must never fold
+   in half (chips over progress bar). */
+.swim-meta { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
 /* Tooltip host for the lane's "Open Leader terminal" control — LaunchPad's Button takes no `title`,
    so the hint (and the reason it is disabled) lives on this wrapper. It must not become a block-level
    flex item and push the button's baseline. See views/swimlanes.tsx's LeaderTerminalBtn. */

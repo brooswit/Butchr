@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Pipeline's lane header no longer wraps to two rows.** Since 0.9.282 added the "Open Leader
+  terminal" button to `.swim-meta`, any lane whose title reached its `min(52ch, 60vw)` width cap
+  pushed the status chip, lifecycle chip, button and progress bar onto a second row — an 86px header
+  next to a 51px one on the sibling lane whose title happened to be shorter. `.swim-hd` is
+  `flex-wrap: wrap`, and a wrapping flex container breaks lines on each item's HYPOTHETICAL main size
+  (flex-basis clamped by `max-width`, computed *before* shrinking), so the title's `overflow: hidden`
+  ellipsis never got the chance to absorb the overflow. `.swim-title` is now capped at
+  `min(42ch, 44vw)`, `.swim-laneid` is `flex: none`, and `.swim-meta` is `flex-wrap: nowrap` so the
+  meta cluster can never fold in half. `flex-wrap: wrap` stays on the header as the small-screen
+  valve. Caught by the RFC Phase 5b swimlanes parity sweep against `p3-rollback-boundary`; see
+  `docs/design/phase5-swimlanes-parity.md`, which records the full side-by-side and finds the React
+  port otherwise pixel-faithful.
+
 ## [0.9.289] - 2026-07-09
 
 ## [0.9.288] - 2026-07-09
