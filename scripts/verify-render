@@ -1,0 +1,699 @@
+#!/usr/bin/env bun
+// RENDER VERIFICATION: boot the BUILT dist/ in real headless Chrome and assert it actually renders.
+//
+// WHY THIS EXISTS. `scripts/assert-fe-artifact` reads BYTES; this reads PIXELS. Every other gate we
+// own — `bun build`, both `tsc --noEmit` passes, `bun run assert:fe`, 1545 component tests — exits 0
+// on a dashboard that boots BLANK. React can throw on mount, a token can resolve to nothing, an
+// `/api` call can explode, and the sprite can be spliced-but-unreferenced. None of that is visible to
+// a bundler, a type checker, or a jsdom-flavoured unit test. A real browser is the only thing that
+// can see it. This is the LaunchPad Phase-4 exit gate (RFC §4.3's fourth assertion, deferred).
+//
+// It is deliberately NOT wired into `scripts/ci` here — that is a later subtask.
+//
+// Usage:  bun run verify:fe [dist-dir]     (default `dist`)
+//   exit 0  every check passed  (or: no headless browser -> LOUD SKIP, never a silent pass)
+//   exit 1  a check FAILED, with a diagnostic naming the check and what it saw
+//   exit 2  usage error (no dist dir / no index.html)  <- reserved for THESE two only
+//
+// Debug: VERIFY_RENDER_DUMP=1 prints every collected console/log/exception entry, ALL levels, plus
+// the measured values behind each check. That dump is how check 2's exemption list was kept EMPTY —
+// see the CONSOLE check below.
+
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { DEFAULT_STATE_META } from "../public/core/state-meta.ts";
+
+// ---- timing constants -------------------------------------------------------------------------
+// Every wait below is bounded. An unbounded wait in a gate is a hung CI job, and a hung CI job is
+// indistinguishable from a slow one until somebody kills it by hand.
+//
+// MEASURED on this host (Chrome 150.0.7871.114, warm page cache):
+//   DevToolsActivePort appears   ~0.8 s
+//   whole run, green             1.33 s  (`time bun run verify:fe dist`)
+// The caps are therefore ~10x headroom over measurement, not guesses tuned to make a flake pass.
+const HARD_CAP_MS = 25_000; // whole-run wall clock; target is "well under 30s"
+const PORT_WAIT_MS = 10_000; // DevToolsActivePort file to appear
+const PORT_POLL_MS = 50;
+const WS_CONNECT_MS = 5_000;
+const LOAD_WAIT_MS = 15_000; // Page.loadEventFired
+const EVAL_MS = 5_000; // any single Runtime.evaluate
+const MOUNT_POLL_MS = 10_000; // #root to acquire content
+const SETTLE_MS = 600; // quiet period after mount, so late effects/SSE errors surface
+
+// The ONE token check 3 and check 5 both probe. MEASURED in the real 0.16.0 bundle — it is defined
+// in BOTH cascade layers, with DIFFERENT values, which is exactly what checks 3 and 5 need:
+//   :root,[data-theme]  --lp-color-bg-ui-primary: var(--lp-color-white-950)
+//   [data-theme=dark]   --lp-color-bg-ui-primary: var(--lp-color-gray-950)
+// Computed on :root at runtime it reads "#fff" (Chrome resolves the var() chain), and the body's
+// background-color it drives resolves to rgb(255, 255, 255) light / rgb(24, 26, 31) dark.
+//
+// >>> DO NOT swap this for `--lp-color-text-ui-secondary-base` or `--lp-color-text-ui-tertiary`. <<<
+// @launchpad-ui/components USES both names and @launchpad-ui/tokens DEFINES NEITHER (story
+// st-c9340b63). Because `color` inherits, the text silently took its parent's colour while every gate
+// stayed green. As of 0.9.292 `public/style.css` carries an `UPSTREAM-BUG WORKAROUND` block that
+// defines them locally, so they now measure 1 definition each in the built CSS — but that block is
+// explicitly slated for deletion on the `@launchpad-ui/tokens` bump that defines them upstream.
+// Pinning this gate to a token whose only definition is a temporary shim would silently re-arm the
+// original bug the day the shim is removed. `--lp-color-bg-ui-primary` is defined by the tokens
+// PACKAGE, in both cascade layers, which is what a gate should depend on.
+const PROBE_TOKEN = "--lp-color-bg-ui-primary";
+
+const DUMP = process.env.VERIFY_RENDER_DUMP === "1";
+
+// ---- teardown ---------------------------------------------------------------------------------
+// A leaked Chrome or a leaked temp profile is a FAILED run even if every check passed. `cleanup()`
+// is idempotent and is called from `finally`, from the signal handlers, AND from the unhandled-throw
+// handlers — because `finally` does not run when the process is signalled.
+let chromeProc: ReturnType<typeof spawn> | null = null;
+let server: ReturnType<typeof Bun.serve> | null = null;
+let userDataDir: string | null = null;
+let capTimer: ReturnType<typeof setTimeout> | null = null;
+let cleaned = false;
+
+function cleanup(): void {
+  if (cleaned) return;
+  cleaned = true;
+  if (capTimer) clearTimeout(capTimer);
+
+  // KILL THE PROCESS GROUP, NOT THE PROCESS. This is measured, not defensive coding.
+  //
+  // Chrome forks a zygote and per-renderer children. `chromeProc.kill("SIGKILL")` kills only the
+  // browser process it was handed, and SIGKILL gives that process no chance to reap its children —
+  // so they survive as orphans, keep file handles open inside the user-data-dir, and the rmSync
+  // below then fails with ENOTEMPTY. MEASURED before this fix, over 9 runs (5 green, 3 red, 1
+  // SIGINT): 8 leaked temp profiles and 2 stray Chrome processes. Every exit path leaked.
+  //
+  // Chrome is spawned `detached: true`, so it is a process-GROUP leader and its children inherit
+  // that group. `process.kill(-pid, …)` signals the whole group, so nothing is left holding the dir.
+  // SIGTERM first (Chrome tears its children down properly), SIGKILL as the backstop for a browser
+  // wedged before it installed its handlers.
+  if (chromeProc && chromeProc.pid && chromeProc.exitCode === null) {
+    for (const sig of ["SIGTERM", "SIGKILL"] as const) {
+      try {
+        process.kill(-chromeProc.pid, sig);
+      } catch {
+        break; // ESRCH: the group is already gone, so the SIGKILL would be pointless too.
+      }
+    }
+  }
+
+  // `stop(true)` closes in-flight connections. Without the `true` the held-open SSE stream keeps
+  // the server alive and the process never exits.
+  if (server) {
+    try {
+      server.stop(true);
+    } catch {
+      /* already stopped */
+    }
+  }
+
+  if (userDataDir) {
+    // `maxRetries`/`retryDelay` are load-bearing, not superstition: even with the group killed, the
+    // kernel may not have finished reaping when we unlink, and rmSync races Chrome's last writes to
+    // ENOTEMPTY/EBUSY. Node retries exactly those codes. ~0.5s of retries, well inside HARD_CAP_MS.
+    try {
+      rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (e) {
+      // NEVER silent. A leaked temp profile that nobody is told about is a slow disk leak in CI.
+      process.stderr.write(
+        `RENDER: WARNING — could not remove temp profile ${userDataDir}: ${(e as NodeJS.ErrnoException).code}\n`,
+      );
+    }
+  }
+}
+
+function die(msg: string, code = 1): never {
+  cleanup();
+  process.stderr.write(msg.endsWith("\n") ? msg : msg + "\n");
+  process.exit(code);
+}
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    cleanup();
+    process.exit(1);
+  });
+}
+process.on("uncaughtException", (e) => die(`RENDER: unhandled exception — ${e && (e as Error).stack}`));
+process.on("unhandledRejection", (e) => die(`RENDER: unhandled rejection — ${e}`));
+
+// ---- arg handling (the ONLY two exit-2 cases) -------------------------------------------------
+const DIST = process.argv[2] || "dist";
+if (!existsSync(DIST)) die(`usage: scripts/verify-render <dist-dir>\n  no such directory: ${DIST}`, 2);
+if (!existsSync(join(DIST, "index.html")))
+  die(`usage: scripts/verify-render <dist-dir>\n  ${DIST} is not a built front end (no index.html)`, 2);
+
+// ---- browser resolution + the TWO loud-skip cases ---------------------------------------------
+// Both exit 0. Neither is silent. They are DISTINCT cases with DISTINCT warnings, because a typo in
+// $CHROME must not look like "this host has no browser" — the next subtask writes tests against this
+// contract. Exit 2 is reserved for the dist-dir usage errors above; a bad $CHROME is NOT exit 2.
+function resolveBrowser(): string | null {
+  const override = process.env.CHROME;
+  if (override) {
+    const found = Bun.which(override);
+    if (!found) {
+      process.stderr.write(
+        "\n" +
+          "  ============================================================\n" +
+          "  WARNING: RENDER VERIFICATION SKIPPED\n" +
+          "  ============================================================\n" +
+          `  $CHROME is set to: ${override}\n` +
+          "  ...but that path is not executable (or not on PATH).\n" +
+          "\n" +
+          "  The built dashboard was NOT booted and NOT verified. It may\n" +
+          "  render completely BLANK and this run would still exit 0.\n" +
+          "\n" +
+          "  Fix $CHROME, or unset it to fall back to auto-detection of\n" +
+          "  google-chrome / chromium / chrome.\n" +
+          "  ============================================================\n\n",
+      );
+      return null;
+    }
+    return found;
+  }
+  for (const candidate of ["google-chrome", "chromium", "chrome"]) {
+    const found = Bun.which(candidate);
+    if (found) return found;
+  }
+  process.stderr.write(
+    "\n" +
+      "  ============================================================\n" +
+      "  WARNING: RENDER VERIFICATION SKIPPED\n" +
+      "  ============================================================\n" +
+      "  No headless browser found on this host. Looked for, in order:\n" +
+      "    $CHROME (unset), google-chrome, chromium, chrome\n" +
+      "\n" +
+      "  The built dashboard was NOT booted and NOT verified. It may\n" +
+      "  render completely BLANK and this run would still exit 0.\n" +
+      "\n" +
+      "  Install Chrome/Chromium, or point $CHROME at a binary, to arm\n" +
+      "  the render checks (mount, console errors, tokens, icons, dark\n" +
+      "  mode).\n" +
+      "  ============================================================\n\n",
+  );
+  return null;
+}
+
+const BROWSER = resolveBrowser();
+if (!BROWSER) process.exit(0); // LOUD skip already printed. Never a silent pass.
+
+// ---- the fixture server -----------------------------------------------------------------------
+// OPTION (a) from the brief, and the other two are not merely worse — they are UNSAFE:
+//
+//   (b) "reuse serveStatic from src/server.ts" — CANNOT WORK AND CARRIES (c)'S HAZARD.
+//       `src/server.ts:131` is `const PUBLIC_DIR = join(import.meta.dir, "..", "dist")`, a pinned
+//       module const, so it cannot serve the <dist-dir> argument at all. And importing src/server.ts
+//       VALUE-imports ./db.ts, whose line 13 is `new Database(config.dbPath, { create: true })`
+//       followed by migrations AT MODULE SCOPE. Importing it opens and MIGRATES THE LIVE DB.
+//   (c) booting src/index.ts — reconciles operators, can spawn agents, migrates the DB. No.
+//
+// So: a self-contained Bun.serve that imports NOTHING from src/. It serves dist/ statically and
+// answers exactly the `/api` calls the boot path makes.
+//
+// THE BOOT-PATH `/api` SET, enumerated from source (not guessed):
+//   GET /api/state-meta  main.tsx -> ensureStateMeta(), AWAITED before the first createRoot().render()
+//   GET /api/health      App.tsx useHealth  (api("GET","/health") prefixes "/api")
+//   GET /api/events      App.tsx `new EventSource("/api/events")`
+//   GET /api/projects    ProjectsView, via route "/" -> <Navigate to="/projects">
+// NOT reached: /api/projects/:id/initiatives (per-project; the list is empty) and /api/workspaces
+// (ProjectDetailView, route /projects/:id).
+//
+// Payload shapes come from the real handlers, and where a shape is uncertain we serve what the real
+// server returns for an EMPTY workspace. `state-meta` is served from public/core/state-meta.ts's
+// exported DEFAULT_STATE_META — that module is DOM-free and imports only `api.ts` (which imports
+// nothing), so it is safe to pull in here, and it cannot drift from the client's own contract.
+//
+// UNMATCHED /api/* -> 404, NEVER a blanket 200. A catch-all 200 would silently green-light a future
+// boot-path endpoint; a 404 makes api() throw, which reddens the CONSOLE check and prints the path.
+const unmatchedApi: string[] = [];
+
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+}
+
+server = Bun.serve({
+  port: 0, // ephemeral
+  hostname: "127.0.0.1",
+  async fetch(req) {
+    const { pathname } = new URL(req.url);
+
+    if (pathname === "/api/state-meta") return json(DEFAULT_STATE_META);
+
+    // Only `paused` and `needsAttention` are read (App.tsx useHealth). The empty-workspace shape.
+    if (pathname === "/api/health")
+      return json({ paused: false, needsAttention: { total: 0, in_review: 0, spec_review: 0, needs_info: 0 } });
+
+    if (pathname === "/api/projects") return json([]);
+
+    // A REAL SSE response, held open. A 404 here (or a stream that closes) makes EventSource fire
+    // `onerror`, which Chrome logs as a network error — reddening the CONSOLE check for a reason
+    // that has nothing to do with the artifact under test. `hello` is the exact event type App.tsx's
+    // onmessage short-circuits on, so it provokes no refresh storm.
+    if (pathname === "/api/events") {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"type":"hello"}\n\n'));
+          // Deliberately left open. cleanup()'s `server.stop(true)` closes it.
+        },
+      });
+      return new Response(stream, {
+        headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+      });
+    }
+
+    if (pathname.startsWith("/api/")) {
+      unmatchedApi.push(pathname);
+      return new Response(JSON.stringify({ error: `fixture: unstubbed endpoint ${pathname}` }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Chrome requests /favicon.ico on every navigation. dist/ has none, and a 404 shows up as a
+    // console network error. Answering 204 is not an exemption or a filter — it is the fixture
+    // serving something the browser LEGITIMATELY asks for, which is the only sanctioned way to get
+    // the CONSOLE check to green. MEASURED: with this handler removed, the run collects exactly TWO
+    // `Log.network/error` entries ("Failed to load resource: … 404 … /favicon.ico") and the CONSOLE
+    // check goes red. That is the check working, not a false positive — so the fixture answers it.
+    if (pathname === "/favicon.ico") return new Response(null, { status: 204 });
+
+    // Static, mirroring serveStatic's contract: a missing FILE 404s, only extensionless route-like
+    // paths get the SPA fallback. butchr is a hash router, so the fallback is barely exercised.
+    const rel = pathname === "/" ? "/index.html" : pathname;
+    if (rel.includes("..")) return new Response("forbidden", { status: 403 });
+    const file = Bun.file(join(DIST, rel));
+    if (await file.exists()) return new Response(file);
+    const base = rel.slice(rel.lastIndexOf("/") + 1);
+    if (base.includes(".")) return new Response("not found", { status: 404 });
+    return new Response(Bun.file(join(DIST, "index.html")));
+  },
+});
+
+const ORIGIN = `http://127.0.0.1:${server.port}`;
+
+// ---- launch Chrome ----------------------------------------------------------------------------
+// MEASURED on Chrome 150.0.7871.114: `--headless=new` launches fine, and `DevToolsActivePort` lands
+// in the user-data-dir in ~0.8s with the port on line 1 and the browser ws path on line 2.
+//
+// DO NOT go back to `--dump-dom`: Chrome 150 defaults to NEW headless, where it returns EMPTY, and a
+// naive `--headless=old` invocation HUNG past a two-minute timeout. We drive CDP instead.
+//
+// We do NOT scrape stderr for the port. It is racy and the file is the documented contract.
+// `--disable-extensions` because /json/list otherwise also lists an extension `background_page`
+// target alongside the real page.
+userDataDir = mkdtempSync(join(tmpdir(), "butchr-verify-render-"));
+chromeProc = spawn(
+  BROWSER,
+  [
+    "--headless=new",
+    "--remote-debugging-port=0",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--no-first-run",
+    "--no-default-browser-check",
+    `--user-data-dir=${userDataDir}`,
+    "about:blank",
+  ],
+  // `detached: true` makes Chrome a process-GROUP leader so cleanup() can signal the whole group
+  // (browser + zygote + renderers) in one call. See cleanup()'s comment: without it, Chrome's
+  // children outlive the kill and pin the temp profile open.
+  { stdio: "ignore", detached: true },
+);
+
+capTimer = setTimeout(() => {
+  die(`RENDER: HARD TIMEOUT — the run exceeded ${HARD_CAP_MS}ms. Chrome killed, temp profile removed.`);
+}, HARD_CAP_MS);
+// Do not let the cap timer itself hold the event loop open once the checks finish.
+if (typeof capTimer.unref === "function") capTimer.unref();
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function devtoolsPort(): Promise<number> {
+  const portFile = join(userDataDir!, "DevToolsActivePort");
+  const deadline = Date.now() + PORT_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (chromeProc && chromeProc.exitCode !== null)
+      die(`RENDER: Chrome exited early (code ${chromeProc.exitCode}) before writing DevToolsActivePort.`);
+    if (existsSync(portFile)) {
+      const first = readFileSync(portFile, "utf8").split("\n")[0]!.trim();
+      const port = Number(first);
+      if (Number.isFinite(port) && port > 0) return port;
+    }
+    await sleep(PORT_POLL_MS);
+  }
+  die(`RENDER: Chrome never wrote DevToolsActivePort within ${PORT_WAIT_MS}ms (browser: ${BROWSER}).`);
+}
+
+const cdpPort = await devtoolsPort();
+
+// Attach DIRECTLY to the page target's webSocketDebuggerUrl. The browser-level endpoint would need
+// Target.attachToTarget + sessionId plumbing on every message; the page endpoint needs none.
+async function pageWsUrl(): Promise<string> {
+  const res = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.timeout(EVAL_MS) });
+  const targets = (await res.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+  const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+  if (!page) die(`RENDER: no CDP target of type "page" (saw: ${targets.map((t) => t.type).join(", ") || "none"}).`);
+  return page.webSocketDebuggerUrl!;
+}
+
+// ---- minimal CDP client -----------------------------------------------------------------------
+// ~60 lines, zero packages. puppeteer/playwright would each want to download their own Chromium,
+// and this repo is deliberately dependency-light.
+type Entry = { source: string; level: string; text: string; url?: string };
+const entries: Entry[] = [];
+
+const ws = new WebSocket(await pageWsUrl());
+let nextId = 1;
+const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+const loadFired = { done: false };
+
+await new Promise<void>((resolve, reject) => {
+  const t = setTimeout(() => reject(new Error(`CDP websocket did not open within ${WS_CONNECT_MS}ms`)), WS_CONNECT_MS);
+  ws.onopen = () => {
+    clearTimeout(t);
+    resolve();
+  };
+  ws.onerror = () => {
+    clearTimeout(t);
+    reject(new Error("CDP websocket error"));
+  };
+}).catch((e) => die(`RENDER: ${e.message}`));
+
+ws.onmessage = (ev) => {
+  const msg = JSON.parse(String(ev.data));
+  if (msg.id !== undefined) {
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    if (msg.error) p.reject(new Error(`${msg.error.message} (${msg.error.code})`));
+    else p.resolve(msg.result);
+    return;
+  }
+  // ---- event collection for the CONSOLE check ----
+  // ALL levels are collected, not just errors. The check filters to errors, but VERIFY_RENDER_DUMP=1
+  // prints everything — that dump is how we prove the exemption list is empty ON THE MERITS.
+  switch (msg.method) {
+    case "Page.loadEventFired":
+      loadFired.done = true;
+      break;
+    case "Runtime.exceptionThrown": {
+      const d = msg.params.exceptionDetails;
+      const text = d.exception?.description || d.text || "uncaught exception";
+      entries.push({ source: "exceptionThrown", level: "error", text, url: d.url });
+      break;
+    }
+    case "Runtime.consoleAPICalled": {
+      const text = (msg.params.args || [])
+        .map((a: any) => (a.value !== undefined ? String(a.value) : a.description || a.type))
+        .join(" ");
+      entries.push({ source: "consoleAPICalled", level: msg.params.type, text });
+      break;
+    }
+    case "Log.entryAdded": {
+      const e = msg.params.entry;
+      entries.push({ source: `Log.${e.source}`, level: e.level, text: e.text, url: e.url });
+      break;
+    }
+  }
+};
+
+function send(method: string, params: Record<string, unknown> = {}, timeoutMs = EVAL_MS): Promise<any> {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    pending.set(id, {
+      resolve: (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      reject: (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+/** Evaluate in the page and return the value. Throws on a JS exception, so a broken probe cannot
+ *  masquerade as a passing check. */
+async function evaluate<T>(expression: string): Promise<T> {
+  const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+  if (r.exceptionDetails) {
+    const d = r.exceptionDetails;
+    throw new Error(`probe threw: ${d.exception?.description || d.text}`);
+  }
+  return r.result.value as T;
+}
+
+// Enable BEFORE navigating, so nothing thrown during boot is missed.
+await send("Runtime.enable");
+await send("Log.enable");
+await send("Page.enable");
+
+await send("Page.navigate", { url: ORIGIN + "/" });
+
+// Wait for load, bounded.
+{
+  const deadline = Date.now() + LOAD_WAIT_MS;
+  while (!loadFired.done && Date.now() < deadline) await sleep(25);
+  if (!loadFired.done) die(`RENDER: page load did not fire within ${LOAD_WAIT_MS}ms (${ORIGIN}/).`);
+}
+
+// ---- the checks -------------------------------------------------------------------------------
+const failures: string[] = [];
+function fail(check: string, detail: string): void {
+  failures.push(`RENDER [${check}] FAILED: ${detail}`);
+}
+
+// --- check 1: MOUNT ----------------------------------------------------------------------------
+// The blank-page check, and the reason the whole script exists. React mounting is ASYNC relative to
+// the load event (main.tsx awaits ensureStateMeta() before its first render), so this POLLS rather
+// than sampling once. `childElementCount` alone is not enough — React can attach an empty container
+// — so we require real text too.
+type Mount = { children: number; text: number };
+let mount: Mount = { children: 0, text: 0 };
+{
+  const deadline = Date.now() + MOUNT_POLL_MS;
+  while (Date.now() < deadline) {
+    mount = await evaluate<Mount>(`(() => {
+      const r = document.getElementById("root");
+      if (!r) return { children: -1, text: -1 };
+      return { children: r.childElementCount, text: r.textContent.trim().length };
+    })()`);
+    if (mount.children > 0 && mount.text > 0) break;
+    await sleep(50);
+  }
+}
+if (mount.children === -1) {
+  fail("MOUNT", `#root is missing from the served index.html — nothing can render into it.`);
+} else if (mount.children === 0 || mount.text === 0) {
+  fail(
+    "MOUNT",
+    `#root is EMPTY after ${MOUNT_POLL_MS}ms (childElementCount=${mount.children}, trimmed text length=${mount.text}). ` +
+      `The dashboard boots BLANK. Check the CONSOLE failures below — React almost certainly threw on mount.`,
+  );
+}
+
+// Let late effects, the SSE open, and any deferred throw land before we judge the console.
+await sleep(SETTLE_MS);
+
+// --- check 3: STYLED ---------------------------------------------------------------------------
+// Two probes, because they catch different things. The custom property proves the TOKEN SHEETS are
+// in the bundle at all; the resolved `background-color` proves a token actually drives a real
+// painted property (a defined-but-unreferenced token would pass the first and fail the second).
+//
+// MEASURED green values on current main:
+//   getPropertyValue("--lp-color-bg-ui-primary")     "#fff"
+//   getComputedStyle(document.body).backgroundColor  "rgb(255, 255, 255)"
+//
+// NOTE: a custom property's computed value is its SUBSTITUTION TEXT, not the resolved colour — so we
+// assert non-empty on it and assert RESOLVEDNESS on backgroundColor, which is where `var()` actually
+// gets evaluated. Asserting `rgb(...)` on the custom property would be asserting the wrong thing.
+type Styled = { token: string; bodyBg: string };
+const styled = await evaluate<Styled>(`(() => ({
+  token: getComputedStyle(document.documentElement).getPropertyValue(${JSON.stringify(PROBE_TOKEN)}).trim(),
+  bodyBg: getComputedStyle(document.body).backgroundColor,
+}))()`);
+if (!styled.token) {
+  fail(
+    "STYLED",
+    `${PROBE_TOKEN} resolves to EMPTY on :root. The @launchpad-ui token stylesheets are not in the ` +
+      `bundle — the page renders UNSTYLED while the build exits 0. main.tsx must import BOTH ` +
+      `'@launchpad-ui/tokens/index.css' and '@launchpad-ui/tokens/themes.css'.`,
+  );
+}
+const TRANSPARENT = new Set(["", "transparent", "rgba(0, 0, 0, 0)"]);
+if (TRANSPARENT.has(styled.bodyBg)) {
+  fail(
+    "STYLED",
+    `<body> computed background-color is "${styled.bodyBg}" — no token-driven colour resolved. ` +
+      `A var() that names an undefined custom property falls back to nothing and paints transparent.`,
+  );
+}
+
+// --- check 4: ICONS ----------------------------------------------------------------------------
+// The sprite is spliced as `<svg aria-hidden="true" style="display:none">` (scripts/inline-sprite).
+// That has a consequence the obvious check gets WRONG:
+//
+//   >>> You CANNOT measure the <symbol>. <<<
+// A <symbol> inside a display:none subtree has a 0x0 getBoundingClientRect() WHETHER OR NOT the icon
+// works, and getBBox() on a non-rendered element is unreliable. A zero-check there can never pass.
+//
+// The discriminator is `getBBox()` on the `<use>` ELEMENT. `<use>` clones the referenced symbol into
+// a shadow tree; when `#lp-icon-...` does not resolve, that tree is EMPTY and getBBox() is 0x0.
+//
+// ALL FOUR CANDIDATES MEASURED in real Chrome 150, healthy sprite vs. 337 symbols emptied of their
+// geometry (ids left intact). Only the last one discriminates:
+//
+//   probe                                 healthy          corrupt      discriminates?
+//   symbol.getBBox()                      0 x 0            0 x 0        NO  (display:none)
+//   symbol.getBoundingClientRect()        0 x 0            0 x 0        NO  (display:none)
+//   outerSvg.getBoundingClientRect()      16 x 16          16 x 16      NO  (the layout box)
+//   use.getBBox()                         7.866 x 10.533   0 x 0        YES
+//
+// The layout box is 16x16 here, not the 20x20 the RFC quotes — these Icons are `size="small"`. It is
+// constant across both states either way, which is the point: it cannot see a blank icon.
+//
+// This is the ONE check that catches something `assert:fe` cannot. VERIFIED: with the 337 symbols
+// emptied but their ids intact, `bun run assert:fe dist` exits 0 (its grep only looks for
+// `id="lp-icon-`) while this check exits 1. Do NOT weaken it back into an existence grep.
+type Icons = { symbols: number; uses: number; href: string | null; w: number; h: number; err: string | null };
+const icons = await evaluate<Icons>(`(() => {
+  const symbols = document.querySelectorAll('symbol[id^="lp-icon-"]').length;
+  const uses = document.querySelectorAll('use').length;
+  const use = document.querySelector('use');
+  if (!use) return { symbols, uses, href: null, w: 0, h: 0, err: "no <use> element in the document" };
+  const href = use.getAttribute("href") || use.getAttribute("xlink:href");
+  try {
+    const b = use.getBBox();
+    return { symbols, uses, href, w: b.width, h: b.height, err: null };
+  } catch (e) {
+    return { symbols, uses, href, w: 0, h: 0, err: String(e) };
+  }
+})()`);
+if (icons.symbols === 0) {
+  fail(
+    "ICONS",
+    `no <symbol id="lp-icon-..."> in the LIVE DOM (found ${icons.uses} <use> element(s) referencing nothing). ` +
+      `Every icon renders BLANK while keeping its layout box (measured 16x16 for size="small"). ` +
+      `Run scripts/inline-sprite.`,
+  );
+} else if (icons.uses === 0) {
+  fail("ICONS", `the sprite is present (${icons.symbols} symbols) but NO <use> element references it — no icon rendered.`);
+} else if (icons.err) {
+  fail("ICONS", `use.getBBox() threw: ${icons.err} (href=${icons.href}, ${icons.symbols} symbols present).`);
+} else if (icons.w === 0 || icons.h === 0) {
+  fail(
+    "ICONS",
+    `<use href="${icons.href}"> resolves to a ZERO-SIZE symbol (getBBox() = ${icons.w} x ${icons.h}), ` +
+      `though ${icons.symbols} <symbol> element(s) are present. The icon renders BLANK inside an ` +
+      `unchanged layout box, so no size or layout assertion — and no grep in assert:fe — can see it.`,
+  );
+}
+
+// --- check 5: DARK MODE ------------------------------------------------------------------------
+// @launchpad-ui/tokens' themes.css redefines the tokens under `[data-theme=dark]`, so flipping the
+// attribute on <html> must CHANGE a computed colour with no other wiring. If it does not, the theme
+// sheet is missing (index.css alone defines the names but not the dark VALUES) and dark mode is dead
+// while every byte-level gate stays green.
+//
+// MEASURED: light "rgb(255, 255, 255)" -> dark "rgb(24, 26, 31)" on document.body's background-color.
+// VERIFIED RED: stripping the four `[data-theme=dark]{…}` blocks from the built CSS pins the flip at
+// "rgb(255, 255, 255)" and this check fails — while `assert:fe` still exits 0, because its token
+// COUNT is unchanged (every name is still defined under :root; only the dark VALUES are gone).
+// We RESTORE the original attribute afterwards so the console check is not judging a mutated page.
+type Dark = { before: string; after: string; restored: string };
+const dark = await evaluate<Dark>(`(() => {
+  const html = document.documentElement;
+  const original = html.dataset.theme;
+  const before = getComputedStyle(document.body).backgroundColor;
+  html.dataset.theme = "dark";
+  const after = getComputedStyle(document.body).backgroundColor;
+  html.dataset.theme = original;
+  return { before, after, restored: getComputedStyle(document.body).backgroundColor };
+})()`);
+if (dark.before === dark.after) {
+  fail(
+    "DARK_MODE",
+    `flipping [data-theme=dark] on <html> changed NOTHING — <body> background-color stayed "${dark.before}". ` +
+      `'@launchpad-ui/tokens/themes.css' is where the dark VALUES live; index.css alone is not enough.`,
+  );
+}
+
+// --- check 2: CONSOLE (judged LAST, reported FIRST) --------------------------------------------
+// Judged last so that a mount failure's real cause — the exception — is already collected.
+//
+// >>> NEVER FILTER AN ERROR CATEGORY TO REACH GREEN. <<<
+// There is no `if (isNetworkError) continue` here and there must never be one: that would disarm the
+// single check this whole script exists to provide. When something benign reddens this, the fix is to
+// make the FIXTURE serve what is legitimately requested (see /favicon.ico above), not to suppress the
+// symptom. VERIFY_RENDER_DUMP=1 prints every entry at every level; on current main that list contains
+// exactly ZERO error-level entries, so the exemption list is empty ON THE MERITS.
+const errors = entries.filter((e) => e.level === "error");
+if (errors.length) {
+  const lines = errors.map((e) => `      [${e.source}/${e.level}] ${e.text}${e.url ? `  (${e.url})` : ""}`);
+  fail(
+    "CONSOLE",
+    `${errors.length} error(s) during boot — the page may look fine and still be broken:\n${lines.join("\n")}`,
+  );
+}
+if (unmatchedApi.length) {
+  // Not itself a failure (the 404 already reddened CONSOLE); it names the CAUSE.
+  process.stderr.write(
+    `RENDER: note — the app requested /api endpoints the fixture does not stub: ` +
+      `${[...new Set(unmatchedApi)].join(", ")}\n  Add them to the fixture in scripts/verify-render.\n`,
+  );
+}
+
+// --- check 6: MODAL ----------------------------------------------------------------------------
+// SKIPPED, deliberately, and this is reported rather than hidden.
+//
+// GROUNDED, not assumed: the fixture serves `GET /api/projects` -> `[]`, so the Projects overview
+// renders its empty state. Every modal in the tree hangs off a project/repo/task row that an empty
+// workspace does not have. Reaching one would mean seeding a fixture project, adding a route, or
+// adding a test-only hook to the app — i.e. contorting the app to satisfy the check. The brief and
+// the operator both forbid that, so it is skipped and SAID SO. Reinstate it if a modal ever becomes
+// reachable from the empty overview.
+const MODAL_SKIP = "MODAL: skipped — no modal is reachable from the empty-projects overview without seeding fixture data";
+
+/** `<use>` bboxes are glyph geometry, not integers (7.866400241851807 x 10.532800674438477 for the
+ *  pause icon). Round for HUMAN output only — every comparison above uses the raw value. */
+const bbox = `${icons.w.toFixed(2)}x${icons.h.toFixed(2)}`;
+
+// ---- report -----------------------------------------------------------------------------------
+if (DUMP) {
+  process.stderr.write(`\n--- VERIFY_RENDER_DUMP: ${entries.length} collected entries (ALL levels) ---\n`);
+  if (!entries.length) process.stderr.write("  (none)\n");
+  for (const e of entries) process.stderr.write(`  [${e.source}/${e.level}] ${e.text}${e.url ? `  (${e.url})` : ""}\n`);
+  process.stderr.write(
+    `--- measurements ---\n` +
+      `  MOUNT      #root children=${mount.children} text=${mount.text}\n` +
+      `  STYLED     ${PROBE_TOKEN}="${styled.token}"  body.backgroundColor="${styled.bodyBg}"\n` +
+      `  ICONS      symbols=${icons.symbols} uses=${icons.uses} href=${icons.href} getBBox=${icons.w}x${icons.h}\n` +
+      `  DARK_MODE  light="${dark.before}" dark="${dark.after}" restored="${dark.restored}"\n` +
+      `  SERVER     ${ORIGIN}  chrome=${BROWSER}\n\n`,
+  );
+}
+
+if (failures.length) {
+  cleanup();
+  process.stderr.write("\n" + failures.join("\n\n") + "\n\n");
+  process.stderr.write(`RENDER: ${failures.length} check(s) FAILED against ${DIST}/ — the built dashboard is broken.\n`);
+  process.exit(1);
+}
+
+cleanup();
+console.log(
+  `RENDER: ok — #root mounted (${mount.children} children, ${mount.text} chars), 0 console errors, ` +
+    `${PROBE_TOKEN} resolved, ${icons.symbols} sprite symbols with a ${bbox} <use> bbox, ` +
+    `dark mode flips ${dark.before} -> ${dark.after}. ${MODAL_SKIP}.`,
+);
+process.exit(0);

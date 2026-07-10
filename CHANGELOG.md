@@ -17,6 +17,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bun run verify:fe [dist-dir]` — real headless-Chrome RENDER VERIFICATION of the built `dist/`.**
+  The LaunchPad Phase-4 exit gate that was specified and never built. Every gate we owned reads
+  BYTES; this one reads PIXELS. `bun build`, both `tsc --noEmit` passes, `bun run assert:fe` and 1545
+  component tests all exit 0 on a dashboard that boots BLANK — React throwing on mount, a token
+  resolving to nothing, an `/api` call exploding, or a sprite that is spliced but unreferenced. The
+  new `scripts/verify-render` boots the real built artifact in headless Chrome over HTTP and asserts,
+  each as a separately-named check with its own diagnostic: **MOUNT** (`#root` has real content),
+  **CONSOLE** (no uncaught exceptions and no console/log errors during boot), **STYLED** (a
+  LaunchPad-token-driven property resolves to a real colour, not transparent), **ICONS** (the inlined
+  `<symbol id="lp-icon-…">` sprite is in the live DOM *and* a `<use>` resolves to a non-zero-size
+  rendered symbol), and **DARK MODE** (flipping `[data-theme=dark]` changes a computed colour). A
+  Modal check is deliberately skipped and says so: no modal is reachable from the empty-projects
+  overview without seeding fixture data, and contorting the app to satisfy a check is worse than the
+  gap. It is NOT yet wired into `scripts/ci` — that is a follow-up.
+
+  The ICONS check is the one that catches what `assert:fe` structurally cannot: with the sprite's 337
+  `<symbol>` elements emptied of geometry but their ids left intact, `assert:fe` exits 0 (it greps for
+  `id="lp-icon-`) while every icon on the page renders blank. Measured in Chrome 150, the only probe
+  that discriminates is `getBBox()` on the `<use>` element (`7.866 x 10.533` healthy vs `0 x 0`
+  corrupt); the `<symbol>`'s own box and the outer `<svg>`'s layout box are identical in both states,
+  because the sprite is spliced `display:none`.
+
+  Driven over the DevTools Protocol with bun's built-in `WebSocket` and **zero new dependencies** —
+  no `puppeteer`, no `playwright`, and nothing that downloads its own Chromium. `--dump-dom` is not
+  used: Chrome 150 defaults to new headless, where it returns empty. Chrome is resolved as `$CHROME`,
+  then `google-chrome`, `chromium`, `chrome`; if none is found, or if `$CHROME` names a
+  non-executable path, the script prints a loud multi-line warning naming the case and exits 0 — it
+  NEVER passes silently. Exit 1 is a failed check, exit 2 is reserved for a bad `dist-dir`. Every wait
+  is bounded and the whole run is capped (`HARD_CAP_MS = 25000`; a green run measures 1.33s). Chrome
+  is spawned into its own process group and the group is signalled on every exit path — `finally`,
+  `SIGINT`/`SIGTERM`, and unhandled throws — because SIGKILL-ing only the browser process orphans its
+  zygote and renderer children, which pin the temp profile open (measured: 8 leaked profiles and 2
+  stray Chrome processes across 9 runs before the fix; 0 and 0 after).
+
 ## [0.9.293] - 2026-07-10
 
 ### Added

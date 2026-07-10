@@ -10,6 +10,7 @@
   "scripts": {
     "build:fe": "rm -rf dist && bun build public/index.html --outdir dist --production --sourcemap=linked --public-path=/ && scripts/inline-sprite dist/index.html",
     "assert:fe": "scripts/assert-fe-artifact",
+    "verify:fe": "scripts/verify-render",
     "dev:fe": "bun build public/index.html --outdir dist --watch --public-path=/",
     "dev:sprite": "scripts/inline-sprite --watch dist/index.html",
     "start": "bun run build:fe && bun run src/index.ts",
