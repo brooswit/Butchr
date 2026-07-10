@@ -7,27 +7,74 @@
   src: url("./fonts/InterVariable.woff2") format("woff2");
 }
 
+/* ── UPSTREAM-BUG WORKAROUND ──────────────────────────────────────────────────────────────────
+   `@launchpad-ui/components@0.21.0`'s stylesheet contains
+
+       color: var(--lp-color-text-ui-secondary-base);
+       color: var(--lp-color-text-ui-tertiary);
+
+   and `@launchpad-ui/tokens@0.16.0` defines NEITHER name — not in index.css, not in themes.css,
+   nowhere in the package. Both declarations are therefore invalid at computed-value time, and
+   because `color` is an INHERITED property those elements silently take their parent's colour
+   instead of the intended muted/tertiary text colour. Nothing errors, the build exits 0, and no
+   layout or size assertion can see it; a computed-style read in a real browser resolves both names
+   to the empty string.
+
+   This block defines them LOCALLY and ADDITIVELY. style.css is imported last (main.tsx:21), after
+   tokens' index.css and themes.css, so a definition here cannot shadow anything upstream — it only
+   fills two holes. Both values alias the gray RAMP tokens, never a literal hex, so a future palette
+   bump follows automatically.
+
+   The selector mirrors upstream's own `:root, [data-theme]` rather than a bare `:root`, so the
+   aliases re-resolve inside a scoped `[data-theme]` subtree too — themes.css keys off that
+   attribute on an ANCESTOR, which today is always <html> but need not be.
+
+   `-secondary-base` is upstream's own `-base` suffix convention applied to `secondary` (compare
+   `-primary-base`, which IS defined). ONE declaration tracks BOTH themes: var() substitutes at
+   computed-value time against the element's own `--lp-color-text-ui-secondary`, and
+   `[data-theme='dark']` redefines that on the very same element (gray-600 -> gray-400).
+
+   `-tertiary` has no defined sibling, so it is derived: one step MORE muted than secondary. The
+   gray ramp is ABSOLUTE — `[data-theme='dark']` redefines no gray at all — and each theme steps
+   toward its OWN background: light goes 900 -> 600 -> 500 (lightening), dark goes 0 -> 400 -> 500
+   (darkening). Both converge on gray-500, so this needs only one declaration as well.
+
+   Verified in headless Chrome against the built bundle: secondary-base #545a62 / #898e94 and
+   tertiary #6c727a, light / dark respectively.
+
+   DELETE THIS BLOCK once a `@launchpad-ui/tokens` bump defines the two names upstream. */
+:root,
+[data-theme] {
+  --lp-color-text-ui-secondary-base: var(--lp-color-text-ui-secondary);
+  --lp-color-text-ui-tertiary: var(--lp-color-gray-500);
+}
+
 :root {
   /* THE ALIAS BLOCK (RFC §7.4). These seven values used to be hand-transcribed hex copies of
      LaunchPad's palette, with a header comment claiming as much. They are now the REAL tokens: the
      names stay butchr's, and 413 `var(--…)` usage sites stay untouched, but a drifting copy has
      become a live reference. `@launchpad-ui/tokens/themes.css` (imported by main.tsx) defines each
      `--lp-*` below under BOTH `:root,[data-theme]` and `[data-theme='dark']`, so the dark-theme
-     block further down no longer needs to restate them — but it still does, and it still WINS:
-     `html[data-theme="dark"]` (0,1,1) out-specifies `[data-theme='dark']` (0,1,0). That is
-     deliberate (RFC §7.5 #3) and is what lets this block be re-based token by token.
+     block further down no longer needs to restate them — but it still does (all but `--muted`, see
+     below), and it still WINS: `html[data-theme="dark"]` (0,1,1) out-specifies `[data-theme='dark']`
+     (0,1,0). That is deliberate (RFC §7.5 #3) and is what lets this block be re-based token by token.
 
-     `--muted` is the exception and it must STAY LITERAL. Its natural target,
-     `--lp-color-text-ui-secondary-base`, is one of two tokens that `@launchpad-ui/components@0.21.0`
-     references but `@launchpad-ui/tokens@0.16.0` never defines — verified again against the
-     installed themes.css, which has ZERO definitions of it. Aliasing to it would make every muted
-     label in the app inherit its parent's colour. Upstream bug; see RFC §5.4. */
+     `--muted` used to be the exception, held literal because its natural target,
+     `--lp-color-text-ui-secondary-base`, is one of two names that `@launchpad-ui/components@0.21.0`
+     references but `@launchpad-ui/tokens@0.16.0` never defines. That token is now SHIMMED, in the
+     UPSTREAM-BUG WORKAROUND block directly above, so the alias is live. It resolves — measured in
+     headless Chrome against the built bundle, not inferred — to #545a62 in light and #898e94 in
+     dark: byte for byte the two literals this line and the dark block used to carry. The re-alias is
+     therefore a provably ZERO-pixel change across all 86 `var(--muted)` sites, and it completes the
+     block. The dark restatement of `--muted` is gone with it, since the alias tracks the theme on
+     its own. Deleting the shim without upstream defining the token would put every muted label in
+     the app back to inheriting its parent's colour. */
   --bg: var(--lp-color-bg-ui-primary);
   --panel: var(--lp-color-bg-ui-secondary);
   --panel-2: var(--lp-color-bg-ui-tertiary);
   --border: var(--lp-color-border-ui-primary);
   --text: var(--lp-color-text-ui-primary-base);
-  --muted: #545a62;    /* NOT --lp-color-text-ui-secondary-base: undefined upstream (RFC §5.4) */
+  --muted: var(--lp-color-text-ui-secondary-base);  /* shimmed above; tracks the theme by itself */
   --accent: var(--lp-color-bg-interactive-primary-base);   /* #425eff */
   --accent-2: var(--lp-color-bg-interactive-primary-hover);
 
@@ -130,7 +177,8 @@ html[data-theme="dark"] {
   --panel-2: #2d3239;  /* gray-800 */
   --border: #3f454c;   /* gray-700 */
   --text: #f7f9fb;     /* gray-0 */
-  --muted: #898e94;    /* gray-400 */
+  /* no `--muted` here: it aliases --lp-color-text-ui-secondary-base, which re-resolves against this
+     same element's --lp-color-text-ui-secondary (gray-400 under [data-theme='dark']). #898e94. */
   --accent: #425eff;   /* blue-500 */
   --accent-2: #7084ff; /* blue-400 (interactive text, dark) */
 

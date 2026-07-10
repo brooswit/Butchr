@@ -17,6 +17,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two LaunchPad tokens were used but defined nowhere, silently mis-colouring text.**
+  `@launchpad-ui/components@0.21.0` styles two rules with `color: var(--lp-color-text-ui-secondary-base)`
+  and `color: var(--lp-color-text-ui-tertiary)`, but `@launchpad-ui/tokens@0.16.0` defines neither name
+  anywhere in the package. Both declarations were invalid at computed-value time, and because `color` is
+  an inherited property those elements silently took their parent's colour instead of the intended
+  muted/tertiary text colour. Nothing errored, the build exited 0, and no layout or size assertion could
+  see it — a computed-style read in a real browser resolved both names to the empty string.
+
+  `public/style.css` now defines both locally, in a clearly-marked `UPSTREAM-BUG WORKAROUND` block to be
+  deleted when a `@launchpad-ui/tokens` bump defines them upstream. The shim is purely additive
+  (`style.css` is imported last, after tokens' `index.css` and `themes.css`) and aliases the gray *ramp*
+  tokens rather than literal hex, so a future palette bump follows automatically.
+  `--lp-color-text-ui-secondary-base` aliases `--lp-color-text-ui-secondary` and tracks the theme with a
+  single declaration, because `var()` substitutes against the element's own value and `[data-theme='dark']`
+  redefines it on that same element. `--lp-color-text-ui-tertiary` resolves to `--lp-color-gray-500` in
+  both themes: the gray ramp is absolute (the dark block redefines no gray), and each theme steps toward
+  its own background — light `900 -> 600 -> 500`, dark `0 -> 400 -> 500` — so both converge on `gray-500`.
+
+- **`--muted` is a live token reference again, completing the alias block (RFC §7.4).** It had been pinned
+  to a literal `#545a62`/`#898e94` precisely *because* `--lp-color-text-ui-secondary-base` was undefined
+  upstream; that reasoning is now obsolete and the comment saying so has been retired. Verified in headless
+  Chrome against the built bundle: the alias resolves to `#545a62` in light and `#898e94` in dark, byte for
+  byte the two literals it previously carried, so this is a zero-pixel change across all 86 `var(--muted)`
+  sites. The redundant dark-theme restatement of `--muted` is gone with it.
+
 ## [0.9.291] - 2026-07-10
 
 ### Fixed
