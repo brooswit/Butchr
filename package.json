@@ -11,9 +11,10 @@
     "build:fe": "rm -rf dist && bun build public/index.html --outdir dist --production --sourcemap=linked --public-path=/ && scripts/inline-sprite dist/index.html",
     "assert:fe": "scripts/assert-fe-artifact",
     "dev:fe": "bun build public/index.html --outdir dist --watch --public-path=/",
+    "dev:sprite": "scripts/inline-sprite --watch dist/index.html",
     "start": "bun run build:fe && bun run src/index.ts",
     "start:supervised": "bash scripts/supervise.sh",
-    "dev": "bun run build:fe && (bun run dev:fe & bun --watch run src/index.ts)"
+    "dev": "bun run build:fe && (bun run dev:fe & bun run dev:sprite & bun --watch run src/index.ts)"
   },
   "engines": {
     "bun": ">=1.1.0"

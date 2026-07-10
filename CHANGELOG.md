@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`bun run dev` no longer serves an icon-less dashboard.** `dev:fe` is `bun build --watch`, which
+  rewrites `dist/index.html` from `public/index.html` on every rebuild and so DISCARDS the icon
+  sprite that `build:fe` splices in post-build. The dev server then renders every icon as a blank
+  20x20 box — silent-failure mode 2, exactly the one `scripts/assert-fe-artifact` exists to catch,
+  and `assert:fe` does not run in dev. `dev` now also runs `dev:sprite`
+  (`scripts/inline-sprite --watch dist/index.html`), which re-splices the sprite after each rebuild.
+  `inline-sprite` is idempotent, so its own write does not re-trigger itself. Verified end-to-end,
+  including the two-watchers-one-file race; see `docs/design/phase5-open-questions.md` item 1.
+
 ## [0.9.290] - 2026-07-10
 
 ### Fixed
