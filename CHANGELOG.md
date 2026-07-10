@@ -25,8 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   20x20 box — silent-failure mode 2, exactly the one `scripts/assert-fe-artifact` exists to catch,
   and `assert:fe` does not run in dev. `dev` now also runs `dev:sprite`
   (`scripts/inline-sprite --watch dist/index.html`), which re-splices the sprite after each rebuild.
-  `inline-sprite` is idempotent, so its own write does not re-trigger itself. Verified end-to-end,
-  including the two-watchers-one-file race; see `docs/design/phase5-open-questions.md` item 1.
+
+- **`scripts/inline-sprite --watch` actually watches the file now.** It watched the *directory*, and
+  while `bun build --watch` is the writer bun's directory watcher reports the newly content-hashed
+  `.js`/`.css` siblings and never reports `index.html`. So `--watch` logged `watching …` and
+  re-spliced nothing: the `dev:sprite` wiring above was inert on its own. It now watches the file
+  (re-arming off the directory watch, since a file watch is bound to an inode), serializes its
+  read-then-write so a burst of rebuilds cannot interleave into a lost update, and refuses to splice
+  into a document that has no `</html>` yet — a truncated read that would otherwise be written back
+  as a half-document that still boots. Measured end-to-end, including the two-watchers-one-file
+  race; see `docs/design/phase5-open-questions.md` item 1.
 
 ## [0.9.290] - 2026-07-10
 

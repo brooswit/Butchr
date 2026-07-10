@@ -32,9 +32,15 @@ function spritePath(): string {
   return Bun.fileURLToPath(import.meta.resolve("@launchpad-ui/icons/sprite.svg"));
 }
 
-async function inline(htmlPath: string): Promise<"inlined" | "already-present"> {
+async function inline(htmlPath: string, requireComplete = false): Promise<"inlined" | "already-present" | "incomplete"> {
   const html = await Bun.file(htmlPath).text();
   if (html.includes(MARKER)) return "already-present";
+
+  // In --watch mode we are reading a file another process is actively rewriting, so we can observe
+  // a TRUNCATED document. Splicing into one and writing it back would clobber the real build with a
+  // half-document that still parses and still boots. `</html>` is the last thing bun emits; if it
+  // is absent the write is still in flight, and the change event for its completion is still coming.
+  if (requireComplete && !html.includes("</html>")) return "incomplete";
 
   let sprite = (await Bun.file(spritePath()).text()).trim();
   // Drop the generator's leading XML comment; keep everything else verbatim.
@@ -76,10 +82,48 @@ if (!watchMode) {
 // --watch: `bun build --watch` rewrites index.html on every rebuild, which DROPS the sprite.
 // Re-splice whenever the file changes and lacks it. `inline()` is idempotent, so the write we
 // make here does not feed back into an infinite loop.
-await inline(htmlPath).catch(() => {}); // dist/index.html may not exist for the first few ms
-watch(dirname(htmlPath), (_e, name) => {
-  if (name && resolve(dirname(htmlPath), name) === htmlPath) {
-    inline(htmlPath).catch((e) => console.error(`inline-sprite: ${e.message}`));
+//
+// WATCH THE FILE, NOT THE DIRECTORY. A directory watch looks like the safer choice — it survives
+// the file being replaced, and it works when you `mv` or `>>` the file from a shell. It does NOT
+// work here, and this was measured, not assumed: while `bun build --watch` is the writer, bun's
+// `fs.watch(dist/)` reports the newly content-hashed `.js` and `.css` siblings and NEVER reports
+// `index.html`. A directory watcher therefore sits there logging "watching" and re-splices nothing,
+// which is the silent failure this script exists to prevent, reintroduced one layer up. A watch on
+// the file itself fires on every rebuild. See docs/design/phase5-open-questions.md item 1.
+//
+// A file watch is bound to an inode, so it must be RE-ARMED if the file is ever replaced rather
+// than overwritten in place (bun overwrites today; `mv` does not). The directory watch is kept for
+// exactly that: it is what tells us the path was recreated, and it also covers dist/index.html not
+// existing yet when this starts.
+const dir = dirname(htmlPath);
+
+// Serialize. `inline()` is read-then-write and rebuilds arrive in bursts, so two overlapping runs
+// can interleave as read(A) read(B) write(B) write(A) — and A's write, made from the older bytes,
+// wins. Chaining every request onto one promise makes the read and the write atomic with respect
+// to each other. The trailing re-check collapses a burst into at most one extra pass.
+let chain: Promise<unknown> = Promise.resolve();
+const resplice = () => {
+  chain = chain
+    .then(() => inline(htmlPath, true))
+    .catch((e) => console.error(`inline-sprite: ${e.message}`));
+};
+
+let fileWatcher: ReturnType<typeof watch> | null = null;
+function armFileWatch() {
+  fileWatcher?.close();
+  try {
+    fileWatcher = watch(htmlPath, () => resplice());
+  } catch {
+    fileWatcher = null; // not there yet; the directory watch will re-arm us when it appears
+  }
+}
+
+watch(dir, (_e, name) => {
+  if (name && resolve(dir, name) === htmlPath) {
+    armFileWatch(); // the path may be a new inode now
+    resplice();
   }
 });
+armFileWatch();
+resplice(); // dist/index.html may already be sprite-less, or may not exist for the first few ms
 console.log(`inline-sprite: watching ${target}`);
