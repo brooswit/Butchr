@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.297] - 2026-07-19
+
 ### Removed
 
 - **The `/health` watchdog timer is gone** — deleted `deploy/butchr-health.service`,
