@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install butchr's systemd USER units (butchr + herdr server + health watchdog).
+# Install butchr's systemd USER units (butchr + herdr server).
 #
-# Idempotent: re-running regenerates the units from deploy/*.{service,timer},
+# Idempotent: re-running regenerates the units from deploy/*.service,
 # overwrites the installed copies, and reloads systemd. It deliberately does NOT
 # enable or start anything — enabling a service is a privileged operator action,
 # so this script just prints the exact commands for you to run. See CONTRIBUTING.md
@@ -36,11 +36,6 @@ install_unit() {
 
 install_unit butchr.service
 install_unit herdr.service
-install_unit butchr-health.service
-install_unit butchr-health.timer
-
-chmod +x "$PROJECT_DIR/scripts/health-watchdog.sh"
-
 systemctl --user daemon-reload
 echo "daemon-reload complete"
 
@@ -67,9 +62,7 @@ fi
 if command -v systemd-analyze >/dev/null 2>&1; then
   if systemd-analyze --user verify \
        "$UNIT_DIR/butchr.service" \
-       "$UNIT_DIR/herdr.service" \
-       "$UNIT_DIR/butchr-health.service" \
-       "$UNIT_DIR/butchr-health.timer"; then
+       "$UNIT_DIR/herdr.service"; then
     echo "systemd-analyze verify: OK"
   else
     echo "systemd-analyze verify reported warnings (review above; usually harmless)"
@@ -81,14 +74,11 @@ cat <<EOF
 Units installed to: $UNIT_DIR
   butchr.service         butchr server (Bun) — Restart=always
   herdr.service          herdr server (PTY/session manager) — Restart=always
-  butchr-health.service  one-shot health probe (restarts butchr if /health is bad)
-  butchr-health.timer    runs the probe every ~30s
 
 Nothing has been started. To enable + start now (run these yourself):
 
   systemctl --user enable --now herdr.service
   systemctl --user enable --now butchr.service
-  systemctl --user enable --now butchr-health.timer
 
 So the services keep running after you log out — and auto-start on boot:
 

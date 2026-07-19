@@ -17,6 +17,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The `/health` watchdog timer is gone** — deleted `deploy/butchr-health.service`,
+  `deploy/butchr-health.timer`, and `scripts/health-watchdog.sh`, and dropped them
+  from `scripts/install-service.sh` and the CONTRIBUTING install/ops runbook. The
+  installer now renders and verifies exactly two units: `butchr.service` and
+  `herdr.service`.
+
+  **Why: it caused a real restart loop on the maintainer's host (2026-07-07)** —
+  ~7 butchr boots in 3 minutes, a flapping API, and dropped MCP connections, all
+  while systemd reported `NRestarts=0` so the host *looked* healthy. The loop was
+  self-feeding: a wedged story-leader agent made the dispatcher tick go stale, the
+  watchdog read "stale" as "butchr is down" and issued `systemctl --user restart`,
+  and each restart SIGTERMed the in-flight build agents — wedging more leaders and
+  re-triggering the probe. A watchdog over an endpoint that goes stale *under load*
+  restarts hardest exactly when the system is busiest, which is precisely backwards.
+  The repo has since been pushed to GitHub for a server deploy, so anyone following
+  the documented install reproduced this on a fresh box.
+
+  `Restart=always` on `butchr.service` is retained and is the whole supervision
+  story: it relaunches the process on genuine death (crash, OOM, power loss), which
+  is what a watchdog is actually for. `scripts/supervise.sh` is unchanged — it
+  restarts on *process exit*, not on a stale endpoint, so it is not this footgun.
+
+  **Deliberately deferred:** no replacement liveness supervision is added here.
+  Detecting a *wedged* (not dead) butchr may still be worth doing, but it needs a
+  signal that does not degrade under load and a response that does not kill running
+  agents — that is a follow-up story, not a like-for-like swap.
+
 ## [0.9.296] - 2026-07-10
 
 ### Added

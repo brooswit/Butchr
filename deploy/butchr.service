@@ -16,8 +16,8 @@ Documentation=file://@REPO_DIR@/CONTRIBUTING.md
 # NOT a hard Requires that would drag butchr down whenever herdr blips.
 Wants=network-online.target herdr.service
 After=network-online.target herdr.service
-# Crash-loop backstop: if it dies >10 times in 60s, stop trying (the health
-# timer / a manual `systemctl --user restart` resets this and revives it).
+# Crash-loop backstop: if it dies >10 times in 60s, stop trying (a manual
+# `systemctl --user restart` resets this and revives it).
 StartLimitIntervalSec=60
 StartLimitBurst=10
 

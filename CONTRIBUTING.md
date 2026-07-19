@@ -231,19 +231,16 @@ re-adopts its state on boot (see "Startup self-heal").
 
 The production answer to "butchr died on power loss and had to be hand-restarted."
 It runs butchr **and** herdr under the systemd **user** manager with
-`Restart=always`, so they relaunch on any crash and start on boot. A health
-watchdog timer probes `/health` every ~30s and restarts butchr if the endpoint is
-unreachable or the dispatcher tick has gone stale. Everything lives in `deploy/`
-(unit templates) and `scripts/` (installer + watchdog) — plain shell + systemd,
-no extra dependencies, no `src/` changes.
+`Restart=always`, so they relaunch on any crash and start on boot. That is the
+whole supervision story: systemd restarts a process that actually dies. Everything
+lives in `deploy/` (unit templates) and `scripts/` (installer) — plain shell +
+systemd, no extra dependencies, no `src/` changes.
 
 | File | Role |
 |------|------|
 | `deploy/butchr.service` | butchr server (`bun run src/index.ts`), `Restart=always`, journald logging |
 | `deploy/herdr.service` | `herdr server` (PTY/session manager butchr dispatches into), `Restart=always` |
-| `deploy/butchr-health.service` + `.timer` | watchdog: curls `/health`, restarts butchr if down/stale |
 | `scripts/install-service.sh` | renders the templates with real paths, installs them, `daemon-reload`, prints the enable commands |
-| `scripts/health-watchdog.sh` | the probe the timer runs (dependency-free curl + bash) |
 
 The `deploy/*` files are **templates** — `@REPO_DIR@`/`@BUN@`/`@HERDR@` are
 substituted with absolute paths at install time. Don't point systemd at `deploy/`
@@ -260,7 +257,6 @@ commands. Enable + start them yourself:
 ```sh
 systemctl --user enable --now herdr.service
 systemctl --user enable --now butchr.service
-systemctl --user enable --now butchr-health.timer
 loginctl enable-linger "$USER"            # survive logout / start on boot
 ```
 
@@ -271,7 +267,6 @@ so starting butchr pulls herdr in. Status / logs / health:
 ```sh
 systemctl --user status butchr.service herdr.service
 journalctl --user -u butchr.service -f          # follow butchr logs
-journalctl --user -u butchr-health.service      # watchdog probe results / restarts
 curl -s http://127.0.0.1:47800/health | jq
 ```
 
@@ -279,8 +274,7 @@ Disable / stop with the matching `systemctl --user disable --now …` (and
 `loginctl disable-linger "$USER"`). A `systemctl --user stop` is a **manual** stop —
 `Restart=always` doesn't override it, so a deliberately stopped service stays
 down. **Tuning:** the units cap restarts at 10/60s (`StartLimitIntervalSec`/
-`StartLimitBurst`); a non-default `BUTCHR_PORT` needs a matching
-`BUTCHR_HEALTH_URL` for the watchdog; drop `BUTCHR_*` overrides in
+`StartLimitBurst`); drop `BUTCHR_*` overrides in
 `~/.config/butchr/butchr.env` (read via `EnvironmentFile=-`). Use the systemd
 units **or** `scripts/supervise.sh` — not both.
 
