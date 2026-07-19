@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`README.md` at the repo root** — the repo had none, so the GitHub landing page was a bare file
+  list. It is both the front door and a fresh-box deploy guide: what butchr is, prerequisites,
+  quickstart (clone → `bun install` → `bun run build:fe` → `bun start`) and the systemd path, a
+  config table generated from the real defaults in `src/config.ts`, the headless-server caveat, the
+  production gotchas, and a repo layout. It stays short and links into `CONTRIBUTING.md` rather than
+  duplicating it.
+
+  Deliberately blunt about two things an operator gets wrong: butchr has **no authentication** (and
+  `BUTCHR_ALLOWED_ORIGINS` is a browser origin check, *not* auth), so a non-loopback bind exposes an
+  API that spawns agents running `--dangerously-skip-permissions` as your user — use an SSH tunnel;
+  and `scripts/ci`'s headless-Chrome render gate **exits 0 when no browser is installed**, so on a
+  fresh server it is silently off until Chrome/Chromium is present.
+
+  Quickstart verified against a throwaway clone (`bun install`, `bun run build:fe` → `dist/` with a
+  217 KB `index.html` after sprite inlining), with `BUTCHR_DB` pinned off the live database.
+
 ## [0.9.297] - 2026-07-19
 
 ### Removed
