@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.298] - 2026-07-19
+
 ### Added
 
 - **`README.md` at the repo root** — the repo had none, so the GitHub landing page was a bare file
