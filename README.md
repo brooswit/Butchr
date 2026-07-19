@@ -132,10 +132,13 @@ ssh -N -L 47800:127.0.0.1:47800 user@server   # then open http://127.0.0.1:47800
 **The pipeline is fully headless.** Stories, leaders, build agents, the dashboard, review, and merge
 all work with no graphical session.
 
-The one exception: the **"Open CTO/CEO/Leader terminal"** buttons spawn a *real GUI terminal window*
-(`src/terminal.ts` tries kitty, konsole, alacritty, xterm, gnome-terminal). butchr self-discovers the
-graphical session's `DISPLAY`/`WAYLAND_DISPLAY` at runtime, but with no display present those
-buttons simply do nothing useful. Nothing else is affected.
+The one exception: the **"Open CTO/CEO/Leader terminal"** buttons spawn a *real GUI terminal window*.
+`src/terminal.ts` walks a list of known emulators in preference order — kitty and konsole first,
+since they reliably spawn a standalone window from a background service, and gnome-terminal
+deprioritized because when started from a daemon it hands off to `gnome-terminal-server` and often
+fails to map a window. butchr self-discovers the graphical session's `DISPLAY`/`WAYLAND_DISPLAY` at
+runtime, but with no display present those buttons simply do nothing useful. Nothing else is
+affected.
 
 ---
 
