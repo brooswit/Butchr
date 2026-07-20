@@ -122,7 +122,14 @@ export function ProjectsView() {
                 <div className="pc-head">
                   <div className="title">{projectTitle(p)}</div>
                 </div>
-                <div className="path">{p.workspace_id}</div>
+                {/* NO `.path` LINE. It used to render `p.workspace_id`, which is a directory ROW ID,
+                    not a path — the class name promised something it never delivered. Once projects
+                    SELF-HOST their anchor it got actively misleading: a new project would show the
+                    internal `ceo-dir-<id>` synthetic id while a LEGACY project kept showing its old
+                    member-repo directory id — two different shapes, neither meaningful to an
+                    operator. Resolving it to the real path is no better here: for a self-hosted
+                    project that is `<dataDir>/projects/<id>`, an internal agent home, not a repo
+                    checkout. The project's identity on this card is its title + brief. */}
                 {/* the repos rollup is a later subtask's concern; the initiative rollup is filled */}
                 <div className="pc-placeholder muted">repos —</div>
                 <ProjectInitiativesLine inits={initsByProject.get(p.id)} />
@@ -553,7 +560,7 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
       <div className="page-head">
         <div className="ph-text">
           <h1>{projectTitle(project)}</h1>
-          {project.workspace_id ? <div className="path">{project.workspace_id}</div> : null}
+          {/* The anchor row id is NOT shown here either — same reason as the overview card. */}
           {project.brief ? <div className="sub">{project.brief}</div> : null}
         </div>
         {project.status ? (

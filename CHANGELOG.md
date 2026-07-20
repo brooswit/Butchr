@@ -17,6 +17,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The New-project modal's "anchor workspace" field is GONE, closing the fresh-install deadlock
+  end to end.** 0.9.299 made the *server* self-host a project's home directory, but the dashboard
+  still required an anchor: the modal fetched `GET /api/workspaces`, refused to submit without a
+  pick, and greyed out its own button with "no workspaces registered" when the registry was empty.
+  On a new server that left exactly one way to get started — a raw `POST /api/workspaces` curl. The
+  select, its "Pick an anchor workspace first" validation, the disabled-submit state and the whole
+  workspace fetch are deleted; the modal now issues **no request on open** and posts `{ brief }`
+  alone. Its label ("the project's home directory — the CEO agent's launch cwd") was false as well
+  as blocking: that cwd has come from `ceoHomeDirectoryId`, not this field, since 0.9.220.
+- **The project card's and detail head's `.path` line.** It rendered `project.workspace_id`, which
+  is a directory *row id*, never a path. Once projects self-host it turned actively misleading — a
+  new project would show the internal `ceo-dir-<id>` synthetic id while a legacy project kept
+  showing its old member-repo directory id, two different shapes and neither one the "path" the
+  class name promised. Resolving it to a real path was rejected rather than overlooked: for a
+  self-hosted project that path is `<dataDir>/projects/<id>`, an internal agent home. The project's
+  identity on both surfaces is its title and brief. (`repoDisplay({id: c.workspace_id})` on the
+  initiative rows was checked against a real self-hosted project + initiative and is **correct** —
+  those children are anchored to real member repos, which `listWorkspaces` does return.)
+
+### Added
+
+- **`scripts/verify-render` check 6 (MODAL) is armed — it was a documented skip.** The skip note
+  said "reinstate it if a modal ever becomes reachable from the empty overview"; the New-project
+  modal now is, because it opens straight off the empty projects view, fetches nothing, and submits
+  against zero workspaces. In real headless Chrome against the built `dist/`, the check clicks
+  "+ New project", asserts the dialog carries no `<select>` and an enabled submit, types a brief,
+  submits, and asserts the request the bundle actually put on the wire carries `brief` and **not**
+  the removed `workspace` key — the server ignores that key silently, so nothing else in the gate
+  could ever catch its return. It is judged *before* the CONSOLE check so a throw provoked by
+  driving the modal still reddens the run. `/api/workspaces` is deliberately left unstubbed: a
+  resurrected fetch 404s and reddens CONSOLE.
+- **`test/new-project-modal-zero-workspaces.test.ts`** — the same guarantees at the component
+  layer, with `fetch` (not `api`) stubbed so the real wrapper's serialization is what gets
+  asserted. Verified by disarming: all 5 tests go red against the pre-fix modal.
+
 ## [0.9.299] - 2026-07-20
 
 ### Changed

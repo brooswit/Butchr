@@ -106,46 +106,43 @@ function ModalForm({ onSubmit, children }: { onSubmit: () => void; children: Rea
 // ---------- create project ----------
 
 /**
- * Anchor-workspace dropdown from `GET /api/workspaces`; brief textarea. Submit →
- * `POST /api/projects { workspace, brief }`. On success the returned project's id is remembered in
- * localStorage as a fallback and a refresh lists it from the server.
+ * A brief textarea, and nothing else. Submit → `POST /api/projects { brief }`. On success the
+ * returned project's id is remembered in localStorage as a fallback and a refresh lists it from the
+ * server.
+ *
+ * THE ANCHOR-WORKSPACE DROPDOWN IS GONE, AND WITH IT THE FRESH-INSTALL DEADLOCK. It offered
+ * `GET /api/workspaces`, required a pick, and disabled submit with "no workspaces registered" when
+ * the registry was empty — so on a NEW server the dashboard could never create a project, and the
+ * only UI path to REGISTER a workspace lives inside a project detail view. The documented escape was
+ * a raw `POST /api/workspaces` curl. A project now SELF-HOSTS: `createProject` provisions its own
+ * synthetic home (`ceo-dir-<id>` under `config.dataDir`, story st-307edc78) and `POST /api/projects`
+ * takes `{ brief }` only, so this form must submit against ZERO workspaces. The old label — "the
+ * project's home directory (the CEO agent's launch cwd)" — was false as well as blocking: that cwd
+ * has come from `ceoHomeDirectoryId` since 0.9.220, never from this select.
+ *
+ * This modal now issues NO fetch on open. `scripts/verify-render`'s MODAL check depends on that: its
+ * fixture 404s any unstubbed `/api/*` path, so a re-introduced workspace fetch would redden the run.
  *
  * The brief no longer carries a `data-restore-key`. That attribute existed so app.js's
  * `restoreUiState()` could re-apply typed text after `mount()` destroyed the DOM on an SSE event.
  * Nothing destroys it now (RFC §1.4), and the whole harness is deleted.
  */
 export function NewProjectModal({ isOpen, onOpenChange }: { isOpen: boolean; onOpenChange: (o: boolean) => void }) {
-  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
-  const [anchor, setAnchor] = useState("");
   const [brief, setBrief] = useState("");
   const [error, setError] = useState("");
 
-  // Populate the anchor dropdown on open. On failure or an empty registry, disable submit with an
-  // honest message rather than letting the create 404 later.
+  // Clear a previous open's error. There is nothing to fetch.
   useEffect(() => {
-    if (!isOpen) return;
-    setError("");
-    setWorkspaces(null);
-    api<Workspace[]>("GET", "/workspaces").then(
-      (ws) => {
-        setWorkspaces(ws);
-        setAnchor(ws[0]?.id ?? "");
-        if (!ws.length) setError("Register a workspace first — a project anchors to an existing directory.");
-      },
-      (e: Error) => {
-        setWorkspaces([]);
-        setError(e.message);
-      },
-    );
+    if (isOpen) setError("");
   }, [isOpen]);
 
   const { run, pending } = useAction(
     async () => {
       let created: { id?: string };
       try {
-        created = await api<{ id?: string }>("POST", "/projects", { workspace: anchor, brief: brief.trim() });
+        created = await api<{ id?: string }>("POST", "/projects", { brief: brief.trim() });
       } catch (e) {
-        setError((e as Error).message); // 404 missing workspace — inline, not just a toast
+        setError((e as Error).message); // server 4xx/5xx — inline, not just a toast
         throw e; // let useAction toast + re-enable the button
       }
       rememberCreatedProject(created?.id);
@@ -162,49 +159,29 @@ export function NewProjectModal({ isOpen, onOpenChange }: { isOpen: boolean; onO
   );
 
   const submit = () => {
-    if (!anchor) return setError("Pick an anchor workspace first.");
     if (!brief.trim()) return setError("Describe the project first.");
     setError("");
     void run();
   };
 
-  const noWorkspaces = !!workspaces && workspaces.length === 0;
-
   return (
     <ModalShell isOpen={isOpen} onOpenChange={onOpenChange} title="New project">
       <ModalForm onSubmit={submit}>
         <div className="m-body">
-          <label className="field">
-            <span className="lbl">
-              anchor workspace — the project&rsquo;s home directory (the CEO agent&rsquo;s launch cwd)
-            </span>
-            <select value={anchor} onChange={(e) => setAnchor(e.target.value)} disabled={!workspaces || noWorkspaces}>
-              {!workspaces ? (
-                <option value="">loading workspaces…</option>
-              ) : noWorkspaces ? (
-                <option value="">no workspaces registered</option>
-              ) : (
-                workspaces.map((w) => (
-                  <option value={w.id} key={w.id}>
-                    {w.label || w.path}
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
           <TextField className="field tight" value={brief} onChange={setBrief} autoFocus>
             <Label className="lbl">brief — what this project should deliver across its repos</Label>
             <TextArea className="lp-ta" placeholder="Describe the project in a sentence or two…" />
           </TextField>
           <small className="hint muted">
-            A project registers repos and coordinates cross-repo initiatives via a CEO agent.
+            A project registers repos and coordinates cross-repo initiatives via a CEO agent. It provisions its own home
+            directory — register repos into it once it exists.
           </small>
         </div>
         <ModalFoot
           error={error}
           onCancel={() => onOpenChange(false)}
           submitLabel="Create project"
-          isDisabled={!workspaces || noWorkspaces || pending}
+          isDisabled={pending}
         />
       </ModalForm>
     </ModalShell>

@@ -220,8 +220,14 @@ if (!BROWSER) process.exit(0); // LOUD skip already printed. Never a silent pass
 //   GET /api/health      App.tsx useHealth  (api("GET","/health") prefixes "/api")
 //   GET /api/events      App.tsx `new EventSource("/api/events")`
 //   GET /api/projects    ProjectsView, via route "/" -> <Navigate to="/projects">
+//   POST /api/projects   NOT boot — check 6 DRIVES it by submitting the New-project modal.
 // NOT reached: /api/projects/:id/initiatives (per-project; the list is empty) and /api/workspaces
 // (ProjectDetailView, route /projects/:id).
+//
+// >>> /api/workspaces STAYING UNSTUBBED IS LOAD-BEARING. <<< The New-project modal used to fetch it
+// on open, and that fetch is the fresh-install deadlock's root. Leaving it to the 404 branch means a
+// resurrected fetch REDDENS the CONSOLE check and gets named in the unmatched-endpoint note. Do not
+// "helpfully" stub it — that would silently re-arm the bug this gate now guards.
 //
 // Payload shapes come from the real handlers, and where a shape is uncertain we serve what the real
 // server returns for an EMPTY workspace. `state-meta` is served from public/core/state-meta.ts's
@@ -231,6 +237,8 @@ if (!BROWSER) process.exit(0); // LOUD skip already printed. Never a silent pass
 // UNMATCHED /api/* -> 404, NEVER a blanket 200. A catch-all 200 would silently green-light a future
 // boot-path endpoint; a 404 makes api() throw, which reddens the CONSOLE check and prints the path.
 const unmatchedApi: string[] = [];
+/** Bodies of every `POST /api/projects` the page made — check 6's evidence. */
+const createdProjects: Array<Record<string, unknown> | null> = [];
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -248,7 +256,16 @@ server = Bun.serve({
     if (pathname === "/api/health")
       return json({ paused: false, needsAttention: { total: 0, in_review: 0, spec_review: 0, needs_info: 0 } });
 
-    if (pathname === "/api/projects") return json([]);
+    // GET: the empty overview. POST: the create the MODAL check drives. The posted body is KEPT —
+    // check 6 asserts on it, so the anchor param's absence is proven from what the built bundle
+    // actually put on the wire, not from what the source appears to send.
+    if (pathname === "/api/projects") {
+      if (req.method === "POST") {
+        createdProjects.push((await req.json().catch(() => null)) as Record<string, unknown> | null);
+        return json({ id: "pj-fixture", work_kind: "project", status: "merged" });
+      }
+      return json([]);
+    }
 
     // A REAL SSE response, held open. A 404 here (or a stream that closes) makes EventSource fire
     // `onerror`, which Chrome logs as a network error — reddening the CONSOLE check for a reason
@@ -630,6 +647,161 @@ if (dark.before === dark.after) {
   );
 }
 
+// --- check 6: MODAL ----------------------------------------------------------------------------
+// NO LONGER SKIPPED. It used to be, with this reason: "no modal is reachable from the empty-projects
+// overview without seeding fixture data" — every modal hung off a project/repo/task row an empty
+// workspace does not have, and reaching one would have meant contorting the app.
+//
+// THE NEW-PROJECT MODAL IS NOW EXACTLY THAT MODAL. It opens straight off the empty overview's
+// "+ New project" button, fetches NOTHING on open, and — since a project self-hosts its own home
+// directory — submits against a registry with ZERO workspaces. So it is reachable AND completable
+// with the fixture already serving `GET /api/projects -> []`. No seed, no test-only hook, no
+// app change. The skip note said "reinstate it if a modal ever becomes reachable"; it has.
+//
+// WHAT THIS CATCHES THAT NOTHING ELSE CAN. test/new-project-modal-zero-workspaces.test.ts renders the
+// same component in happy-dom and asserts the same things — but it imports the SOURCE. This drives
+// the BUILT bundle in real Chrome: it would catch the modal failing to open because the RAC overlay
+// CSS did not ship, a submit button that is visually there but not clickable, or a create path that
+// throws only once bundled. A green suite has previously coexisted with a dashboard that boots blank.
+//
+// JUDGED BEFORE THE CONSOLE CHECK, DELIBERATELY. Driving the app can provoke a throw (a bad reducer,
+// a missing icon in the dialog) and those entries must be counted. Placed after check 5, the CONSOLE
+// check would already have been judged and would report ZERO errors while the modal blew up.
+//
+// The brief is typed via the NATIVE value setter + an `input` event. Assigning `.value` directly is
+// invisible to React (it tracks the last value it set and skips the change as a no-op), so the state
+// would stay empty, the submit would refuse with "Describe the project first", and this check would
+// fail for a reason that has nothing to do with the artifact.
+type ModalProbe = {
+  step: string;
+  dialogs: number;
+  textboxes: number;
+  selects: number;
+  submitDisabled: boolean;
+  text: string;
+};
+const OPEN_WAIT_MS = 3_000;
+const CLOSE_WAIT_MS = 5_000;
+
+/** Snapshot whatever dialog is currently open. `step` names where the drive got to. */
+const probeExpr = (step: string) => `(() => {
+  const dlg = document.querySelector('[role="dialog"]');
+  if (!dlg) return { step: ${JSON.stringify(step)}, dialogs: 0, textboxes: 0, selects: 0, submitDisabled: false, text: "" };
+  const btns = [...dlg.querySelectorAll("button")];
+  const submit = btns.find((b) => /create project/i.test(b.textContent || ""));
+  return {
+    step: ${JSON.stringify(step)},
+    dialogs: 1,
+    textboxes: dlg.querySelectorAll("textarea, input[type=text], input:not([type])").length,
+    selects: dlg.querySelectorAll("select").length,
+    submitDisabled: !submit || submit.disabled || submit.getAttribute("aria-disabled") === "true",
+    text: (dlg.textContent || "").trim().slice(0, 400),
+  };
+})()`;
+
+let modalNote = "";
+{
+  // 1. Open it from the empty overview.
+  const opened = await evaluate<boolean>(`(() => {
+    const btn = [...document.querySelectorAll("button")].find((b) => /new project/i.test(b.textContent || ""));
+    if (!btn) return false;
+    btn.click();
+    return true;
+  })()`);
+
+  if (!opened) {
+    fail(
+      "MODAL",
+      `no "+ New project" button on the projects overview — the ONLY entry point to creating a project ` +
+        `is missing from the built dashboard, so a fresh install has no way in.`,
+    );
+  } else {
+    // 2. Wait for the dialog, bounded.
+    let probe: ModalProbe = await evaluate<ModalProbe>(probeExpr("open"));
+    {
+      const deadline = Date.now() + OPEN_WAIT_MS;
+      while (!probe.dialogs && Date.now() < deadline) {
+        await sleep(50);
+        probe = await evaluate<ModalProbe>(probeExpr("open"));
+      }
+    }
+
+    if (!probe.dialogs) {
+      fail("MODAL", `"+ New project" was clicked but no [role=dialog] appeared within ${OPEN_WAIT_MS}ms.`);
+    } else if (probe.selects > 0) {
+      // The fresh-install deadlock, caught in the BUILT artifact.
+      fail(
+        "MODAL",
+        `the New-project modal still renders ${probe.selects} <select> — the anchor-workspace picker is ` +
+          `back. On a fresh install with zero workspaces that select is empty and blocks the only path ` +
+          `to creating a project. Dialog text: ${JSON.stringify(probe.text)}`,
+      );
+    } else if (!probe.textboxes) {
+      fail("MODAL", `the New-project modal opened with NO text field to type a brief into.`);
+    } else if (probe.submitDisabled) {
+      fail(
+        "MODAL",
+        `"Create project" is DISABLED on a fixture serving ZERO workspaces — the fresh-install deadlock ` +
+          `is back. Dialog text: ${JSON.stringify(probe.text)}`,
+      );
+    } else {
+      // 3. Type a brief and submit for real.
+      const typed = await evaluate<boolean>(`(() => {
+        const dlg = document.querySelector('[role="dialog"]');
+        const ta = dlg && dlg.querySelector("textarea");
+        if (!ta) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+        setter.call(ta, "render-check project");
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      })()`);
+      if (!typed) {
+        fail("MODAL", `the New-project modal has no <textarea> for the brief.`);
+      } else {
+        await sleep(50); // let React commit the controlled value
+        await evaluate<boolean>(`(() => {
+          const dlg = document.querySelector('[role="dialog"]');
+          const btn = [...dlg.querySelectorAll("button")].find((b) => /create project/i.test(b.textContent || ""));
+          btn.click();
+          return true;
+        })()`);
+
+        // 4. Success = the dialog closes AND the server saw the create.
+        let closed = false;
+        const deadline = Date.now() + CLOSE_WAIT_MS;
+        while (Date.now() < deadline) {
+          const p = await evaluate<ModalProbe>(probeExpr("submitted"));
+          if (!p.dialogs) {
+            closed = true;
+            break;
+          }
+          await sleep(50);
+        }
+        const body = createdProjects[0];
+        if (!createdProjects.length) {
+          fail(
+            "MODAL",
+            `"Create project" was clicked with a brief filled in, but the page never sent ` +
+              `POST /api/projects within ${CLOSE_WAIT_MS}ms — the form does not submit.`,
+          );
+        } else if (!body || typeof body.brief !== "string" || !body.brief) {
+          fail("MODAL", `POST /api/projects carried no brief: ${JSON.stringify(body)}`);
+        } else if ("workspace" in body) {
+          fail(
+            "MODAL",
+            `POST /api/projects still carries the REMOVED anchor param: ${JSON.stringify(body)}. ` +
+              `The server ignores it silently, so nothing else in the gate would ever catch this.`,
+          );
+        } else if (!closed) {
+          fail("MODAL", `the create succeeded but the modal never closed within ${CLOSE_WAIT_MS}ms.`);
+        } else {
+          modalNote = `new-project modal opens, submits ${JSON.stringify(body)} with 0 workspaces, and closes`;
+        }
+      }
+    }
+  }
+}
+
 // --- check 2: CONSOLE (judged LAST, reported FIRST) --------------------------------------------
 // Judged last so that a mount failure's real cause — the exception — is already collected.
 //
@@ -654,17 +826,6 @@ if (unmatchedApi.length) {
       `${[...new Set(unmatchedApi)].join(", ")}\n  Add them to the fixture in scripts/verify-render.\n`,
   );
 }
-
-// --- check 6: MODAL ----------------------------------------------------------------------------
-// SKIPPED, deliberately, and this is reported rather than hidden.
-//
-// GROUNDED, not assumed: the fixture serves `GET /api/projects` -> `[]`, so the Projects overview
-// renders its empty state. Every modal in the tree hangs off a project/repo/task row that an empty
-// workspace does not have. Reaching one would mean seeding a fixture project, adding a route, or
-// adding a test-only hook to the app — i.e. contorting the app to satisfy the check. The brief and
-// the operator both forbid that, so it is skipped and SAID SO. Reinstate it if a modal ever becomes
-// reachable from the empty overview.
-const MODAL_SKIP = "MODAL: skipped — no modal is reachable from the empty-projects overview without seeding fixture data";
 
 /** `<use>` bboxes are glyph geometry, not integers (7.866400241851807 x 10.532800674438477 for the
  *  pause icon). Round for HUMAN output only — every comparison above uses the raw value. */
@@ -696,6 +857,6 @@ cleanup();
 console.log(
   `RENDER: ok — #root mounted (${mount.children} children, ${mount.text} chars), 0 console errors, ` +
     `${PROBE_TOKEN} resolved, ${icons.symbols} sprite symbols with a ${bbox} <use> bbox, ` +
-    `dark mode flips ${dark.before} -> ${dark.after}. ${MODAL_SKIP}.`,
+    `dark mode flips ${dark.before} -> ${dark.after}, ${modalNote}.`,
 );
 process.exit(0);
