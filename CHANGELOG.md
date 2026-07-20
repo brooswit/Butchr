@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.299] - 2026-07-20
+
 ### Changed
 
 - **A PROJECT now SELF-HOSTS its own home directory instead of borrowing a member workspace.**
