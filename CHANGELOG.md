@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.300] - 2026-07-20
+
 ### Removed
 
 - **The New-project modal's "anchor workspace" field is GONE, closing the fresh-install deadlock
