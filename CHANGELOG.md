@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A PROJECT now SELF-HOSTS its own home directory instead of borrowing a member workspace.**
+  `createProject` no longer takes an `anchorWorkspaceId`: it mints the project id first, then
+  provisions its own synthetic home via the existing `ensureCeoHomeDirectory` pair
+  (`<dataDir>/projects/<id>` plus a `ceo-dir-<id>` row) and anchors `tasks.workspace_id` there.
+  This unblocks a **fresh install**: with zero workspaces the dashboard could never create a
+  project — the New-project modal required an anchor workspace, and the only UI path to add a
+  workspace lives inside a project detail view, a hard deadlock on a new server. The anchor had
+  been vestigial since 0.9.220 anyway (story st-307edc78 gave the CEO agent its own home, which is
+  its real launch cwd), serving only to satisfy the `tasks.workspace_id NOT NULL` constraint.
+  Reusing the CEO-home pair rather than a new `proj-dir-` prefix means the existing `ceo-dir-%`
+  exclusion in `listWorkspaces` already keeps the synthetic row off the dashboard.
+- **`POST /api/projects` drops the `workspace` param** — the body is now `{ brief }` only. Pre-1.0,
+  so the dead parameter is removed rather than kept; a stale caller that still sends it is ignored
+  silently. The New-project modal field is removed in a follow-up (`public/components/project-modals.tsx`
+  is deliberately untouched here).
+- **Non-destructive for existing projects.** Rows already carrying a real member-repo anchor are
+  left exactly as they are — there is no backfill or rewrite. Both shapes resolve identically
+  through `listProjects` / `getProject` / the CEO panel / repo-membership, and only new projects
+  self-host. `deleteProject` now drops the project row before its home-dir row, since a self-hosted
+  project is anchored to that row and `tasks.workspace_id` is `ON DELETE CASCADE`; the previous
+  order reached the same end state via the cascade, so this is defensive clarity rather than a
+  behavior change.
+
 ## [0.9.298] - 2026-07-19
 
 ### Added

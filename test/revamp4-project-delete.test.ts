@@ -69,7 +69,7 @@ describe("REVAMP-4 — deleteProject", () => {
   });
 
   test("(a) an EMPTY project deletes cleanly (row gone afterward; getProject → null)", async () => {
-    const proj = workspacesMod.createProject(DIRR).id;
+    const proj = workspacesMod.createProject().id;
     expect(workspacesMod.getProject(proj)).not.toBeNull();
 
     const returned = await workspacesMod.deleteProject(proj);
@@ -80,7 +80,7 @@ describe("REVAMP-4 — deleteProject", () => {
   });
 
   test("(b) a project WITH a registered repo → 409 (repos message)", async () => {
-    const proj = workspacesMod.createProject(DIRR).id;
+    const proj = workspacesMod.createProject().id;
     workspacesMod.registerRepoUnderProject(proj, DIRR);
 
     const err = await errOf(() => workspacesMod.deleteProject(proj));
@@ -98,7 +98,7 @@ describe("REVAMP-4 — deleteProject", () => {
   });
 
   test("(c) a project WITH an active initiative → 409, checked initiatives-FIRST (initiatives message)", async () => {
-    const proj = workspacesMod.createProject(DIRR).id;
+    const proj = workspacesMod.createProject().id;
     workspacesMod.registerRepoUnderProject(proj, DIRR);
     // B1: an initiative = a CEO DIRECTIVE landed under the member repo (directive.parent_id = repo,
     // repo.parent_id = project). It lands `directive` → non-terminal → an ACTIVE initiative (pending
@@ -123,7 +123,7 @@ describe("REVAMP-4 — deleteProject", () => {
   });
 
   test("(e) a CEO-enabled empty project tears down its ws-ceo-<id> row on delete", async () => {
-    const proj = workspacesMod.createProject(DIRR).id;
+    const proj = workspacesMod.createProject().id;
     await workspacesMod.setWorkspaceCeoEnabled(proj, true); // materializes the ws-ceo-<id> row
     const wsId = `ws-ceo-${proj}`;
     expect(dbMod.getWorkspaceAgentRow(wsId)).not.toBeNull();

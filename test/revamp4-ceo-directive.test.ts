@@ -95,8 +95,8 @@ beforeAll(async () => {
 
   // Two project nodes (the real P3c surface). Anchored to a real directory (createProject requires
   // one). parent_id NULL — top of the tree.
-  PROJ = workspacesMod.createProject(DIRA).id;
-  PROJ2 = workspacesMod.createProject(DIRB).id;
+  PROJ = workspacesMod.createProject().id;
+  PROJ2 = workspacesMod.createProject().id;
 });
 
 afterAll(() => {

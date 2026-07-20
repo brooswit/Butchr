@@ -70,7 +70,7 @@ beforeAll(async () => {
 
   // A project node above the repo, then register the repo under it — so a directive/story bubbles
   // repo → {cto} → project → {ceo} → {user}.
-  PROJ = workspacesMod.createProject(DIRA).id;
+  PROJ = workspacesMod.createProject().id;
   workspacesMod.registerRepoUnderProject(PROJ, DIRA);
 });
 

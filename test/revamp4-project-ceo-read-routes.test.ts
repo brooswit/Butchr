@@ -120,6 +120,7 @@ afterAll(() => {
 });
 
 test("GET /api/projects lists a created project node (newest-first, global)", async () => {
+  // `workspace` is the REMOVED anchor param — a stale caller sending it is ignored silently.
   const project = await apiSend("POST", "/api/projects", { workspace: WS, brief: "read-routes proj" });
   expect(project.work_kind).toBe("project");
 
@@ -129,7 +130,9 @@ test("GET /api/projects lists a created project node (newest-first, global)", as
   const found = list.body.find((p: any) => p.id === project.id);
   expect(found).toBeTruthy();
   // The accessor's projected columns are present.
-  expect(found.workspace_id).toBe(WS);
+  // Self-hosted anchor — NOT the ignored `workspace` the caller passed.
+  expect(found.workspace_id).toBe(`ceo-dir-${project.id}`);
+  expect(found.workspace_id).not.toBe(WS);
   expect(found.brief).toBe("read-routes proj");
   expect(found.status).toBe("merged"); // the inert project-node anchor
   expect(found.ceo_enabled).toBeNull(); // no override yet

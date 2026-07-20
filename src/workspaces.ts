@@ -495,28 +495,40 @@ function uniqueProjectId(): string {
  * does NOT itself enable the CEO (a separate step — setWorkspaceCeoEnabled — mirroring
  * register-then-enable for a repo's CTO).
  *
- * ANCHORED to an existing directory (`anchorWorkspaceId`): tasks.workspace_id is NOT NULL
- * FK→directory, so a project node MUST reference a real directory. That anchor is also the CEO
- * agent's launch cwd + BUTCHR_CHANNEL_WORKSPACE scope (cross-repo spanning is P3e). The node is
- * maximally INERT so prod stays byte-identical:
+ * SELF-HOSTED anchor: tasks.workspace_id is NOT NULL FK→directory, so a project node MUST
+ * reference a real directory row — but it no longer BORROWS a member repo's. It mints its id
+ * FIRST, then provisions its OWN synthetic home via ensureCeoHomeDirectory (the CEO's dedicated
+ * `<config.dataDir>/projects/<id>` dir + a `ceo-dir-<id>` row, story st-307edc78) and anchors to
+ * THAT. This unblocks a FRESH INSTALL: a project can now be created on a DB with ZERO workspaces,
+ * where previously the caller had to supply an existing member workspace it did not have.
+ * Reusing the CEO-home pair (rather than a new `proj-dir-` prefix) means the dir, the row, the
+ * idempotency and the `ceo-dir-%` dashboard exclusion in listWorkspaces all already hold — the
+ * synthetic anchor never surfaces as a phantom workspace card.
+ *
+ * NOT a migration: EXISTING projects keep whatever member-repo anchor they were created with, and
+ * both shapes resolve identically through listProjects/getProject/repo-membership (nothing reads
+ * project.workspace_id to launch the CEO — that cwd has come from ceoHomeDirectoryId since 0.9.220).
+ *
+ * The node is maximally INERT so prod stays byte-identical:
  *   - status='merged' — the SAME stable terminal anchor a repo/story node carries
  *     (migrateMaterializeRepoNodes), so no lifecycle loop acts on it; combined with
  *     work_kind='project' it is invisible to every leaf-only loop (`work_kind='leaf'`) and the
  *     boot merged-sweep (recoverMergedTasks looks only at `status='in_review' AND leaf`).
  *   - parent_id NULL — a project is the top of the tree (no tier above it).
- * 404 if the anchor directory is gone. Returns the new project node row.
+ * Takes no anchor — it provisions its own. Returns the new project node row.
  */
-export function createProject(anchorWorkspaceId: string, brief?: unknown): TaskRow {
-  if (!getWorkspace(anchorWorkspaceId)) {
-    throw new HttpError(404, `workspace not found: ${anchorWorkspaceId}`);
-  }
+export function createProject(brief?: unknown): TaskRow {
   const briefText = typeof brief === "string" && brief.trim() ? brief.trim() : null;
   const id = uniqueProjectId();
+  // Mint the id FIRST — the home dir/row are DERIVED from it (ceo-dir-<id>), so the anchor cannot
+  // exist before the id does. ensureCeoHomeDirectory is idempotent, so the later CEO-enable path
+  // (setWorkspaceCeoEnabled) re-runs it as a no-op and lands on this SAME row.
+  const homeWorkspaceId = ensureCeoHomeDirectory(id);
   const created = nowIso();
   db.query(
     `INSERT INTO tasks (id, workspace_id, status, created_at, work_kind, brief)
      VALUES (?, ?, 'merged', ?, 'project', ?)`,
-  ).run(id, anchorWorkspaceId, created, briefText);
+  ).run(id, homeWorkspaceId, created, briefText);
   return getProject(id)!;
 }
 
@@ -535,8 +547,9 @@ export function createProject(anchorWorkspaceId: string, brief?: unknown): TaskR
  * then delete that workspace agent row if present (mirrors setWorkspaceCeoEnabled's ws-ceo-<id> row
  * lifecycle; the row's directory_id anchor OUTLIVES this delete, so it will NOT cascade — we drop it
  * explicitly); (b) DELETE the work_kind='project' `tasks` row (which also drops its ceo_enabled state,
- * stored on that row). Returns the deleted project row (captured before the DELETE). Async because
- * the CEO teardown is awaited.
+ * stored on that row); (c) drop the CEO home-dir row LAST — a self-hosted project is anchored to that
+ * very row, so dropping it first would CASCADE (b) away instead of running it. Returns the deleted
+ * project row (captured before the DELETE). Async because the CEO teardown is awaited.
  */
 export async function deleteProject(projectId: string): Promise<TaskRow> {
   const project = getProject(projectId);
@@ -581,9 +594,18 @@ export async function deleteProject(projectId: string): Promise<TaskRow> {
   const wsId = `ws-ceo-${projectId}`;
   await stopWorkspaceAgent(wsId);
   if (getWorkspaceAgentRow(wsId)) deleteWorkspaceAgentRow(wsId);
-  deleteCeoHomeDirectory(projectId);
 
+  // ORDER: project row FIRST, home dir SECOND. A SELF-HOSTED project (createProject) anchors
+  // tasks.workspace_id at its OWN `ceo-dir-<id>` row, and tasks.workspace_id is ON DELETE CASCADE
+  // (db.ts) — so the reverse order would cascade the project row away and make the DELETE below a
+  // silent no-op. TRACED: that path is in fact still CORRECT end-to-end (the return row is captured
+  // above, the guards have already proven the project EMPTY, and the cascade removes exactly the one
+  // row the explicit DELETE would have), so this ordering is DEFENSIVE CLARITY, not a bugfix — the
+  // suite cannot distinguish the two orders because their end states are identical. It is written
+  // this way so the delete stays explicit and survives a future non-empty project. Behavior is
+  // unchanged for LEGACY projects still anchored to a member repo's directory.
   db.query(`DELETE FROM tasks WHERE id=? AND work_kind='project'`).run(projectId);
+  deleteCeoHomeDirectory(projectId);
   return project;
 }
 
@@ -1175,6 +1197,9 @@ export async function unregisterWorkspace(id: string): Promise<void> {
   // directory_id=id enumeration above. Gracefully stop it BY NAME and drop its home-dir row (which
   // CASCADES the CEO agent row away) so removing a project's anchor directory leaves no orphan CEO
   // pane / stray directory row. Best-effort; never block unregister.
+  // A SELF-HOSTED project (createProject) is anchored to its OWN `ceo-dir-` row, which listWorkspaces
+  // EXCLUDES — so it is never reachable through the dashboard's unregister. Unregistering it by exact
+  // id cascades the project away, which is the correct reading: a project's home IS the project.
   const anchoredProjects = db
     .query<{ id: string }, [string]>(
       `SELECT id FROM tasks WHERE workspace_id=? AND work_kind='project'`,

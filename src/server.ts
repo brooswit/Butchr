@@ -769,13 +769,15 @@ route("DELETE", "/api/workspaces/:id", async (_req, p) => {
 // (P3c): no cross-repo (P3e) and no CEO directive/creation surface (P3d) — a booted CEO stands
 // by. See workspaces.createProject / setWorkspaceCeoEnabled.
 
-// Create a project node ANCHORED to an existing directory (`workspace`) — tasks.workspace_id is
-// NOT NULL FK→directory, so a project must reference a real directory (also the CEO's cwd +
-// channel-workspace scope). Optional `brief`. Returns the new project node. Does NOT enable the
-// CEO (a separate PATCH below). 404 if the anchor workspace is gone.
+// Create a project node. It SELF-HOSTS its anchor: createProject provisions its own synthetic home
+// directory (`ceo-dir-<id>` under config.dataDir) to satisfy the NOT NULL workspace_id FK, so this
+// works on a FRESH INSTALL with ZERO workspaces — which previously DEADLOCKED (the only UI path to
+// add a workspace lives inside a project detail view). Body: `{ brief }` only; the former `workspace`
+// anchor param is REMOVED (pre-1.0, no back-compat) and silently ignored if a stale caller sends it.
+// Returns the new project node. Does NOT enable the CEO (a separate PATCH below).
 route("POST", "/api/projects", async (req) => {
   const body = await readJson(req);
-  return json(createProject(body.workspace, body.brief));
+  return json(createProject(body.brief));
 });
 // ALL project nodes, newest-first (a global list — projects are tree-tops). The read surface the
 // Projects UI lists from (REVAMP-4 P3c). Pure-additive; this route previously 404'd.

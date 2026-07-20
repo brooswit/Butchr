@@ -70,7 +70,7 @@ beforeAll(async () => {
   dbMod.migrateMaterializeRepoNodes();
 
   // A project above the repo so a directive bubbles repo → {cto} → project → {ceo} → {user}.
-  PROJ = workspacesMod.createProject(DIRD).id;
+  PROJ = workspacesMod.createProject().id;
   workspacesMod.registerRepoUnderProject(PROJ, DIRD);
 });
 

@@ -106,7 +106,7 @@ beforeAll(async () => {
   }
   dbMod.migrateMaterializeRepoNodes();
 
-  PROJ = workspacesMod.createProject(DIRA).id;
+  PROJ = workspacesMod.createProject().id;
   workspacesMod.registerRepoUnderProject(PROJ, DIRA);
   workspacesMod.registerRepoUnderProject(PROJ, DIRB);
 });

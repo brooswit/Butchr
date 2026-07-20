@@ -43,7 +43,7 @@ const projCount = () => db.query("SELECT COUNT(*) AS n FROM tasks WHERE work_kin
 const result = {};
 
 // --- GUARD (b): a pre-existing USER project blocks the default (run first, before any proj-default).
-const userProj = wsm.createProject("dir-3").id;
+const userProj = wsm.createProject().id;
 wsm.registerRepoUnderProject(userProj, "dir-3");
 m.migrateAdoptLooseReposUnderDefaultProject();
 result.guardB = {
@@ -222,7 +222,7 @@ describe("registerWorkspaceUnderProject + POST /api/projects/:id/workspaces", ()
         .run(dir, join(DATA_DIR, dir), dir, dbMod.nowIso());
     }
     dbMod.migrateMaterializeRepoNodes();
-    PROJ = workspacesMod.createProject(M1).id;
+    PROJ = workspacesMod.createProject().id;
 
     server = serverMod.startServer();
     BASE = `http://127.0.0.1:${server.port}`;

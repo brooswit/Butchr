@@ -118,7 +118,7 @@ beforeAll(async () => {
   dbMod.migrateMaterializeRepoNodes();
 
   // A project anchored to DIRA; register DIRA + DIRB under it (DIRC stays a non-member).
-  PROJ = workspacesMod.createProject(DIRA).id;
+  PROJ = workspacesMod.createProject().id;
   workspacesMod.registerRepoUnderProject(PROJ, DIRA);
   workspacesMod.registerRepoUnderProject(PROJ, DIRB);
 });

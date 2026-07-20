@@ -2129,29 +2129,27 @@ describe("SUPERVISOR_KINDS capability table (S0c)", () => {
 // launches/reconciles/tears it down — no ceo-specific branch. DEFAULT OFF ⇒ prod byte-identical.
 // Uses the injected WorkspaceLauncher mock (no real agent spawned).
 describe("CEO lifecycle (REVAMP-4 P3c)", () => {
-  test("createProject materializes a maximally-inert project NODE (work_kind='project', status='merged', parent_id NULL, anchored to a directory)", () => {
-    const proj = dirsMod.createProject(DIR, "ship the moon");
+  test("createProject materializes a maximally-inert project NODE (work_kind='project', status='merged', parent_id NULL, anchored to its OWN home)", () => {
+    const proj = dirsMod.createProject("ship the moon");
     expect(proj.id.startsWith("pj-")).toBe(true);
     expect(proj.work_kind).toBe("project");
     expect(proj.status).toBe("merged"); // the inert terminal anchor (like a repo/story node)
     expect(proj.parent_id).toBeNull(); // top of the tree — no tier above a project
-    expect(proj.workspace_id).toBe(DIR); // anchored to an existing directory (FK + CEO cwd)
+    // SELF-HOSTED: it provisions its own synthetic home rather than borrowing a member repo's dir.
+    expect(proj.workspace_id).toBe(dirsMod.ceoHomeDirectoryId(proj.id));
     expect(proj.brief).toBe("ship the moon");
     expect(proj.ceo_enabled).toBeNull(); // created DISABLED — enabling is a separate step
     // getProject round-trips it; a non-project id (a plain leaf) is NOT a project.
     expect(dirsMod.getProject(proj.id)!.id).toBe(proj.id);
     insertTask("leaf-not-project");
     expect(dirsMod.getProject("leaf-not-project")).toBeNull();
-    // 404 when the anchor directory is gone.
-    expect(() => dirsMod.createProject("dir-does-not-exist")).toThrow();
   });
 
   test("a status='merged' project node is EXCLUDED from a directory's leaf-only counts (S0a exclusion)", () => {
-    const ADIR = "dir-ceo-inert";
-    insertDir(ADIR);
-    const proj = dirsMod.createProject(ADIR);
-    // counts filter work_kind='leaf', so the project node inflates NO status bucket.
-    const detail = dirsMod.workspaceDetail(ADIR);
+    const proj = dirsMod.createProject();
+    // counts filter work_kind='leaf', so the project node inflates NO status bucket — checked on its
+    // OWN anchor dir, the one directory it is actually attached to since it self-hosts.
+    const detail = dirsMod.workspaceDetail(proj.workspace_id!);
     expect(detail.counts.merged).toBe(0);
     // And it is invisible to the leaf-only membership query the loops use.
     const leafHit = dbMod.db
@@ -2161,7 +2159,7 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
   });
 
   test("isCeoEnabled is a tri-state: missing→false, NULL→config default, 1→on, 0→off", async () => {
-    const proj = dirsMod.createProject(DIR);
+    const proj = dirsMod.createProject();
     const saved = cfgMod.config.ceoAgentEnabled;
     try {
       // missing / non-project id → never enabled.
@@ -2192,7 +2190,7 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     const { runner, launcher, calls } = makeFake();
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
-    const proj = dirsMod.createProject(DIR);
+    const proj = dirsMod.createProject();
     const wsId = `ws-ceo-${proj.id}`;
 
     // ENABLE → tasks.ceo_enabled=1 + a desired-up ceo workspace row bound to the project node,
@@ -2228,33 +2226,42 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
     const { runner, launcher, calls } = makeFake();
     harnessMod.setRunner(runner);
     wa.setLauncherForTest(launcher);
-    const proj = dirsMod.createProject(ADIR);
+    const proj = dirsMod.createProject();
     await dirsMod.setWorkspaceCeoEnabled(proj.id, true);
     const wsId = `ws-ceo-${proj.id}`;
     const ceoName = wa.workspaceAgentName(dbMod.getWorkspaceAgentRow(wsId)!);
     // Make it live so a graceful stop has a pane to tear down.
     dbMod.saveWorkspaceAgentRow(wsId, { has_agent: 1 });
 
-    await dirsMod.unregisterWorkspace(ADIR);
+    // A project now SELF-HOSTS: its anchor IS its `ceo-dir-` home, so that home is the directory
+    // whose removal cascade-deletes the project node. (Unregistering an unrelated member repo like
+    // ADIR no longer touches the project at all — asserted at the bottom.)
+    const home = proj.workspace_id!;
+    expect(home).toBe(`ceo-dir-${proj.id}`);
+    await dirsMod.unregisterWorkspace(home);
 
-    // Since story st-307edc78 the CEO lives in its OWN home dir (directory_id = ceo-dir-<proj>), NOT
-    // ADIR — but unregistering the project's ANCHOR directory cascade-deletes the project node, so
-    // the CEO must still go. unregisterWorkspace GRACEFULLY stops the CEO BY NAME (via the anchored-
-    // project enumeration) and drops its home-dir row, which cascades the CEO agent row away.
+    // unregisterWorkspace GRACEFULLY stops the CEO BY NAME (via the anchored-project enumeration)
+    // and drops its home-dir row, which cascades the CEO agent row away.
     expect(calls.teardown).toContain(ceoName);
     // No stranded ceo row survives (its home dir was deleted → the agent row cascaded).
     expect(dbMod.getWorkspaceAgentRow(wsId)).toBeNull();
     expect(
-      dbMod.db.query(`SELECT COUNT(*) AS n FROM directory WHERE id=?`).get(`ceo-dir-${proj.id}`),
+      dbMod.db.query(`SELECT COUNT(*) AS n FROM directory WHERE id=?`).get(home),
     ).toMatchObject({ n: 0 });
-    // And no workspace row remains anchored to the removed repo directory either.
+    // The project node cascaded off its own anchor — no orphan project row.
+    expect(dirsMod.getProject(proj.id)).toBeNull();
+
+    // A SELF-HOSTED project is INDEPENDENT of member repos: unregistering ADIR strands nothing.
+    const proj2 = dirsMod.createProject();
+    await dirsMod.unregisterWorkspace(ADIR);
+    expect(dirsMod.getProject(proj2.id)).toBeTruthy();
     expect(
       dbMod.db.query(`SELECT COUNT(*) AS n FROM workspace WHERE directory_id=?`).get(ADIR),
     ).toMatchObject({ n: 0 });
   });
 
   test("HARDENING #2 — an enabled but WORK-LESS CEO stands by SILENTLY (no idle escalation)", () => {
-    const proj = dirsMod.createProject(DIR);
+    const proj = dirsMod.createProject();
     // A live, desired-up, genuinely-idle CEO workspace row (no actionable work — P3d not landed).
     dbMod.saveWorkspaceAgentRow(`ws-ceo-${proj.id}`, {
       kind: "ceo", directory_id: DIR, work_id: proj.id, desired: 1, has_agent: 1,
@@ -2283,7 +2290,7 @@ describe("CEO lifecycle (REVAMP-4 P3c)", () => {
   });
 
   test("the CEO brief is a full OPERATING MODEL mirroring the CTO brief one tier up (Phase C2)", () => {
-    const proj = dirsMod.createProject(DIR);
+    const proj = dirsMod.createProject();
     const brief = wa.buildWorkspaceBrief(
       mkRow({ id: `ws-ceo-${proj.id}`, kind: "ceo", work_id: proj.id, directory_id: DIR }),
     );

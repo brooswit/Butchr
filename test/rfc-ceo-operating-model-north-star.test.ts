@@ -142,7 +142,7 @@ beforeAll(async () => {
     .query(`INSERT OR IGNORE INTO directory (id, path, label, created_at) VALUES (?, ?, ?, ?)`)
     .run(SOURCE, join(DATA_DIR, "source"), SOURCE, dbMod.nowIso());
   dbMod.migrateMaterializeRepoNodes();
-  PROJ = workspacesMod.createProject(SOURCE).id;
+  PROJ = workspacesMod.createProject().id;
   workspacesMod.registerRepoUnderProject(PROJ, SOURCE);
 
   server = serverMod.startServer();
